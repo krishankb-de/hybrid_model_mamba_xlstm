@@ -28,11 +28,32 @@ import torch
 from datasets import load_dataset
 from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
+import torch as torch_module
 
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
 from hybrid_xmamba.training.lightning_module import HybridLightningModule
 from hybrid_xmamba.utils.registry import ModelRegistry
+
+
+def collate_fn(batch):
+    """Custom collate function for handling tokenized data.
+    
+    Converts lists of token IDs to tensors and stacks them.
+    """
+    if isinstance(batch[0], dict):
+        # If batch items are already dicts (from return_tensors="pt")
+        result = {}
+        for key in batch[0].keys():
+            # Stack tensors for this key
+            if isinstance(batch[0][key], torch_module.Tensor):
+                result[key] = torch_module.stack([item[key] for item in batch])
+            else:
+                result[key] = torch_module.tensor([item[key] for item in batch])
+        return result
+    else:
+        # Fallback for other formats
+        return torch_module.utils.data._utils.default_collate(batch)
 
 
 def prepare_dataloader(cfg: DictConfig, split: str, tokenizer):
@@ -94,6 +115,7 @@ def prepare_dataloader(cfg: DictConfig, split: str, tokenizer):
         shuffle=(split == "train"),
         num_workers=cfg.dataset.num_workers,
         pin_memory=cfg.dataset.pin_memory,
+        collate_fn=collate_fn,
     )
     
     return dataloader
