@@ -1,0 +1,31 @@
+# C4 (Colossal Clean Crawled Corpus) dataset configuration
+
+dataset_name: "c4"
+dataset_version: "en"
+
+# Data loading
+batch_size: 8
+eval_batch_size: 16
+num_workers: 4
+pin_memory: true
+
+# Tokenization
+tokenizer: "gpt2"
+max_length: 2048
+stride: 512
+
+# Data preprocessing
+cache_dir: "${data_dir}/cache"
+preprocessing_num_workers: 8
+
+# Training data split
+train_split: "train"
+val_split: "validation"
+test_split: "validation"  # C4 doesn't have separate test split
+
+# Streaming (recommended for C4 due to size)
+streaming: true
+
+# Subset for faster iteration (set to null for full dataset)
+max_train_samples: null
+max_eval_samples: 5000

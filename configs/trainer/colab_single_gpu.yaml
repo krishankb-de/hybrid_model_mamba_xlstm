@@ -1,0 +1,44 @@
+# Colab Single GPU Trainer Configuration
+# Optimized for Google Colab T4/V100/A100 GPUs
+
+# Hardware configuration
+accelerator: "auto"  # Auto-detect GPU
+devices: "auto"  # Use available GPU
+precision: "16-mixed"  # Mixed precision for speed (use "bf16-mixed" for A100)
+
+# Training duration
+max_epochs: 5
+max_steps: -1  # -1 means use max_epochs
+
+# Validation and logging
+val_check_interval: 1.0  # Validate every epoch
+log_every_n_steps: 50
+num_sanity_val_steps: 2
+
+# Gradient accumulation (for effective larger batch sizes)
+accumulate_grad_batches: 2  # Effective batch = batch_size * 2
+
+# Checkpointing
+enable_checkpointing: true
+enable_progress_bar: true
+enable_model_summary: true
+
+# Directories
+default_root_dir: "/content/outputs"
+
+# Performance optimization
+strategy: "auto"  # DDP for multi-GPU, auto for single GPU
+# Use "ddp" for multi-GPU: strategy: "ddp"
+
+# Profiling (set to "simple" or "advanced" for profiling)
+profiler: null
+
+# Colab-specific settings
+# These prevent session timeouts and optimize for Colab environment
+detect_anomaly: false
+track_grad_norm: -1  # Disable gradient norm tracking for speed
+
+# Memory optimization
+limit_train_batches: 1.0  # Use all training data
+limit_val_batches: 1.0    # Use all validation data
+limit_test_batches: 1.0   # Use all test data

@@ -1,0 +1,30 @@
+# Default callbacks configuration
+
+# Model checkpointing
+checkpoint:
+  monitor: "val/loss"
+  mode: "min"
+  save_top_k: 3
+  save_last: true
+  filename: "checkpoint-{epoch:02d}-{val_loss:.4f}"
+  auto_insert_metric_name: false
+  every_n_epochs: null
+  every_n_train_steps: 5000
+
+# Early stopping
+early_stopping:
+  enabled: false
+  monitor: "val/loss"
+  patience: 10
+  mode: "min"
+  min_delta: 0.001
+
+# Learning rate monitoring
+lr_monitor:
+  enabled: true
+  logging_interval: "step"
+
+# Model summary
+model_summary:
+  enabled: true
+  max_depth: 2

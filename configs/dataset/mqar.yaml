@@ -1,0 +1,31 @@
+# MQAR (Multi-Query Associative Recall) dataset configuration
+# Synthetic benchmark for testing long-range memory
+
+dataset_name: "mqar"
+
+# Data loading
+batch_size: 16
+eval_batch_size: 32
+num_workers: 4
+pin_memory: true
+
+# MQAR task parameters
+vocab_size: 8192  # Size of vocabulary for MQAR
+num_kv_pairs: 4  # Number of key-value pairs to memorize
+num_queries: 4  # Number of queries to test recall
+power_a: 0.01  # Zipf distribution parameter
+context_length: 2048  # Total sequence length
+
+# Generation parameters
+num_train_samples: 100000
+num_val_samples: 5000
+num_test_samples: 5000
+
+# Random seed for data generation
+data_seed: 42
+
+# Cache
+cache_dir: "${data_dir}/mqar_cache"
+
+# This is a synthetic dataset, so no streaming
+streaming: false

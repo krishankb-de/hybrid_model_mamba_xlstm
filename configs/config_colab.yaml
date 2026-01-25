@@ -1,0 +1,37 @@
+# Google Colab Training Configuration
+# Optimized for T4 GPU (16GB, Free Tier)
+
+defaults:
+  - model: hybrid_350m
+  - dataset: wikitext
+  - trainer: colab_single_gpu
+  - callbacks: default
+  - _self_
+
+# Global settings
+seed: 42
+debug: false
+project_name: "hybrid-xmamba-colab"
+experiment_name: "colab_run_${now:%Y%m%d_%H%M%S}"
+
+# Weights & Biases logging (set to false if not using)
+wandb:
+  enabled: false  # Set to true and configure your API key
+  entity: null  # Your W&B username
+  project: ${project_name}
+  name: ${experiment_name}
+  tags: ["colab", "t4"]
+
+# Colab-optimized paths
+data_dir: "/content/data"
+output_dir: "/content/outputs/${experiment_name}"
+checkpoint_dir: "${output_dir}/checkpoints"
+log_dir: "${output_dir}/logs"
+
+# For persistent storage (requires Drive mount)
+# data_dir: "/content/drive/MyDrive/hybrid_xmamba/data"
+# output_dir: "/content/drive/MyDrive/hybrid_xmamba/outputs/${experiment_name}"
+
+# Reproducibility
+deterministic: false
+benchmark: true  # Enable cudnn benchmarking for speed

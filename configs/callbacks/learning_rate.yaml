@@ -1,0 +1,18 @@
+# Learning rate schedule configurations
+
+# Cosine annealing with warmup
+cosine:
+  scheduler_name: "cosine"
+  warmup_steps: 2000
+  min_lr_ratio: 0.1  # Minimum LR as fraction of initial LR
+
+# Linear decay with warmup
+linear:
+  scheduler_name: "linear"
+  warmup_steps: 2000
+  end_lr_ratio: 0.1
+
+# Constant learning rate with warmup
+constant:
+  scheduler_name: "constant"
+  warmup_steps: 1000

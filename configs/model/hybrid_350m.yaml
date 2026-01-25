@@ -1,0 +1,49 @@
+# 350M parameter hybrid model configuration
+# Suitable for debugging and small-scale experiments
+
+model_type: "hybrid_lm"
+
+# Architecture
+vocab_size: 50257
+dim: 1024
+num_layers: 24
+layer_pattern: ["mamba", "mamba", "mlstm"]
+
+# Mamba parameters
+state_size: 16
+conv_size: 4
+expand_factor: 2
+dt_rank: null  # Auto: 1024 / 16 = 64
+use_fast_path: true
+
+# mLSTM parameters
+head_dim: 64
+num_heads: 16  # 1024 / 64 = 16
+use_tfla: true
+proj_factor: 2
+
+# sLSTM parameters
+slstm_hidden_dim: 1024
+slstm_num_heads: 4
+use_exponential_gate: true
+
+# Shared parameters
+norm_type: "rms"
+use_mlp: true
+mlp_ratio: 4.0
+
+# Training parameters
+max_position_embeddings: 2048
+dropout: 0.1
+initializer_range: 0.02
+
+# Generation parameters
+use_cache: true
+tie_word_embeddings: false
+
+# Optimization
+learning_rate: 6.0e-4
+weight_decay: 0.1
+warmup_steps: 1000
+max_steps: 50000
+gradient_clip_val: 1.0

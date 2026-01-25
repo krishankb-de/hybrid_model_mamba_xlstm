@@ -1,0 +1,54 @@
+# Fully Sharded Data Parallel (FSDP) configuration
+# For large model training with memory efficiency
+
+# Trainer settings
+accelerator: "gpu"
+devices: -1  # Use all available GPUs
+precision: "bf16-mixed"
+strategy: "fsdp"  # Fully Sharded Data Parallel
+
+# FSDP specific configuration
+fsdp_config:
+  # Sharding strategy
+  sharding_strategy: "FULL_SHARD"  # Options: FULL_SHARD, SHARD_GRAD_OP, NO_SHARD, HYBRID_SHARD
+  
+  # CPU offload (for very large models)
+  cpu_offload: false
+  
+  # Mixed precision policy
+  mixed_precision_policy:
+    param_dtype: "bfloat16"
+    reduce_dtype: "float32"
+    buffer_dtype: "float32"
+  
+  # Backward prefetch
+  backward_prefetch: "BACKWARD_PRE"
+  
+  # Auto wrap policy (automatically shard layers)
+  auto_wrap_policy: true
+  min_num_params: 1e8  # Only wrap layers with >100M params
+
+# Training loop
+max_epochs: null
+max_steps: 100000
+val_check_interval: 5000
+check_val_every_n_epoch: null
+log_every_n_steps: 100
+
+# Gradient accumulation
+accumulate_grad_batches: 1  # FSDP handles large batches efficiently
+
+# Checkpointing
+enable_checkpointing: true
+default_root_dir: "${output_dir}"
+
+# Logging
+enable_progress_bar: true
+enable_model_summary: true
+
+# Performance
+num_sanity_val_steps: 2
+detect_anomaly: false
+
+# Profiling
+profiler: null

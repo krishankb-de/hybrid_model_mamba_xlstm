@@ -1,0 +1,46 @@
+# Colab-Optimized Requirements
+# Faster installation on Google Colab (no compilation required)
+
+# Core Deep Learning
+torch>=2.1.0
+torchvision>=0.16.0
+pytorch-lightning>=2.1.0,<3.0.0
+transformers>=4.35.0,<5.0.0
+
+# Kernel Development
+triton>=2.1.0
+einops>=0.7.0
+# ninja is pre-installed on Colab
+
+# Configuration Management
+hydra-core>=1.3.0
+omegaconf>=2.3.0
+
+# Data Processing
+datasets>=2.14.0
+tokenizers>=0.15.0
+sentencepiece>=0.1.99
+
+# Utilities
+wandb>=0.15.0
+tensorboard>=2.14.0
+tqdm>=4.65.0
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Development & Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Profiling
+py-spy>=0.3.14
+torch-tb-profiler>=0.4.0
+
+# Colab-specific optimizations
+ipywidgets  # For better notebook integration
+google-colab  # Official Colab utilities
+
+# Note: The following are EXCLUDED for faster installation:
+# - apex (requires compilation, install separately if needed)
+# - flash-attn (requires compilation, install separately if needed)
+# - black, flake8, mypy, pre-commit (development tools, not needed for training)

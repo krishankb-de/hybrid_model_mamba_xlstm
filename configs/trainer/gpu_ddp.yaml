@@ -1,0 +1,37 @@
+# Distributed Data Parallel (DDP) configuration
+# For multi-GPU training on a single node
+
+# Trainer settings
+accelerator: "gpu"
+devices: -1  # Use all available GPUs
+precision: "bf16-mixed"
+strategy: "ddp"  # Distributed Data Parallel
+
+# DDP specific
+sync_batchnorm: true
+find_unused_parameters: false
+
+# Training loop
+max_epochs: null
+max_steps: 100000
+val_check_interval: 5000
+check_val_every_n_epoch: null
+log_every_n_steps: 100
+
+# Gradient accumulation
+accumulate_grad_batches: 2
+
+# Checkpointing
+enable_checkpointing: true
+default_root_dir: "${output_dir}"
+
+# Logging
+enable_progress_bar: true
+enable_model_summary: true
+
+# Performance
+num_sanity_val_steps: 2
+detect_anomaly: false
+
+# Profiling
+profiler: null

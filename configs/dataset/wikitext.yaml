@@ -1,0 +1,27 @@
+# WikiText-103 dataset configuration
+
+dataset_name: "wikitext"
+dataset_version: "wikitext-103-v1"
+
+# Data loading
+batch_size: 8
+eval_batch_size: 16
+num_workers: 4
+pin_memory: true
+
+# Tokenization
+tokenizer: "gpt2"  # Use GPT-2 tokenizer
+max_length: 2048
+stride: 512  # For sliding window
+
+# Data preprocessing
+cache_dir: "${data_dir}/cache"
+preprocessing_num_workers: 8
+
+# Training data split
+train_split: "train"
+val_split: "validation"
+test_split: "test"
+
+# Streaming (for large datasets)
+streaming: false

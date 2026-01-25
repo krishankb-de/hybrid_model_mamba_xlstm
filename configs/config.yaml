@@ -1,0 +1,33 @@
+# Main configuration file - Hydra entry point
+# Override with: python train.py model=hybrid_7b dataset=c4
+
+defaults:
+  - model: hybrid_350m
+  - dataset: wikitext
+  - trainer: single_gpu
+  - callbacks: default
+  - _self_
+
+# Global settings
+seed: 42
+debug: false
+project_name: "hybrid-xmamba"
+experiment_name: "default"
+
+# Weights & Biases logging
+wandb:
+  enabled: true
+  entity: null  # Set your W&B entity
+  project: ${project_name}
+  name: ${experiment_name}
+  tags: []
+
+# Paths
+data_dir: "./data"
+output_dir: "./outputs/${experiment_name}"
+checkpoint_dir: "${output_dir}/checkpoints"
+log_dir: "${output_dir}/logs"
+
+# Reproducibility
+deterministic: false
+benchmark: true
