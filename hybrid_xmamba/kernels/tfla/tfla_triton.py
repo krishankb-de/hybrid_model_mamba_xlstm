@@ -267,7 +267,8 @@ def tfla_forward_triton(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    gates: torch.Tensor,
+    i_gate: torch.Tensor,
+    f_gate: torch.Tensor,
 ) -> torch.Tensor:
     """
     Triton-accelerated TFLA forward pass with chunking strategy.
@@ -280,14 +281,15 @@ def tfla_forward_triton(
         q: Queries [B, H, L, D] - query vectors for attention
         k: Keys [B, H, L, D] - key vectors for attention
         v: Values [B, H, L, D] - value vectors to aggregate
-        gates: Log-space exponential gates [B, H, L] - control forgetting and input
+        i_gate: Input gates [B, H, L, D] - control input gating
+        f_gate: Forget gates [B, H, L, D] - control forgetting
         
     Returns:
         Output tensor [B, H, L, D] - attention output
     """
     batch, num_heads, seq_len, head_dim = q.shape
     assert k.shape == v.shape == q.shape, "Q, K, V must have same shape"
-    assert gates.shape == (batch, num_heads, seq_len), "Gates shape mismatch"
+    assert i_gate.shape == f_gate.shape == q.shape, "Gates shape mismatch"
     
     # Allocate output tensor
     output = torch.empty_like(q)
