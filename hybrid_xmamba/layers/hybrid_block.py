@@ -55,13 +55,35 @@ class HybridBlock(nn.Module):
         else:
             self.norm1 = nn.LayerNorm(dim)
         
-        # Instantiate the appropriate mixer
+        # Filter layer_kwargs based on layer type
+        filtered_kwargs = {}
+        
         if self.layer_type == "mamba":
-            self.mixer = MambaBlock(dim, **layer_kwargs)
+            # MambaBlock parameters
+            mamba_params = {"state_size", "conv_size", "expand_factor", "dt_rank", "use_fast_path"}
+            filtered_kwargs = {k: v for k, v in layer_kwargs.items() if k in mamba_params}
+            self.mixer = MambaBlock(dim, **filtered_kwargs)
         elif self.layer_type == "mlstm":
-            self.mixer = mLSTMBlock(dim, **layer_kwargs)
+            # mLSTMBlock parameters
+            mlstm_params = {"head_dim", "num_heads", "use_tfla", "proj_factor"}
+            filtered_kwargs = {k: v for k, v in layer_kwargs.items() if k in mlstm_params}
+            self.mixer = mLSTMBlock(dim, **filtered_kwargs)
         elif self.layer_type == "slstm":
-            self.mixer = sLSTMBlock(dim, **layer_kwargs)
+            # sLSTMBlock parameters (uses slstm_* prefix in config)
+            slstm_params = {"num_heads", "use_exponential_gate"}
+            # Map slstm_* config keys to actual parameter names
+            filtered_kwargs = {}
+            for k, v in layer_kwargs.items():
+                if k.startswith("slstm_"):
+                    # Map slstm_hidden_dim -> hidden_dim, slstm_num_heads -> num_heads
+                    param_name = k.replace("slstm_", "")
+                    if param_name == "hidden_dim":
+                        filtered_kwargs["hidden_dim"] = v
+                    elif param_name in slstm_params:
+                        filtered_kwargs[param_name] = v
+                elif k in slstm_params:
+                    filtered_kwargs[k] = v
+            self.mixer = sLSTMBlock(dim, **filtered_kwargs)
         else:
             raise ValueError(f"Unknown layer type: {layer_type}")
         
