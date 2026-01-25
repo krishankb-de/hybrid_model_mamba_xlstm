@@ -310,7 +310,7 @@ pip install -e ".[dev]"
 1. **Install dependencies**: `pip install -e .`
 2. **Run tests**: `pytest` (verify setup)
 3. **Start small**: Train hybrid_350m on WikiText
-4. **Profile**: `python scripts/profile.py model=hybrid_350m`
+4. **Profile**: `python scripts/performance_profile.py model=hybrid_350m`
 5. **Scale up**: Try larger models with FSDP
 6. **Experiment**: Modify layer patterns
 7. **Contribute**: Add custom layers or optimizations

@@ -468,7 +468,7 @@ drive.mount('/content/drive')
 
 ### For Inference/Demo:
 1. Load pretrained checkpoint
-2. Run `scripts/evaluate.py` or `scripts/profile.py`
+2. Run `scripts/evaluate.py` or `scripts/performance_profile.py`
 3. Use smaller batch sizes (1-4)
 4. Generate text samples
 

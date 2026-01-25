@@ -95,7 +95,7 @@ python scripts/evaluate.py \
 
 ```bash
 # Profile model performance
-python scripts/profile.py \
+python scripts/performance_profile.py \
     model=hybrid_350m \
     batch_size=4 \
     seq_length=2048
