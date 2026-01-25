@@ -37,7 +37,8 @@ ENV/
 
 # Jupyter Notebook
 .ipynb_checkpoints
-*.ipynb
+# *.ipynb  # Allow tracking of important Colab setup notebooks
+!Colab_Setup.ipynb  # Keep setup notebook tracked
 
 # PyTorch
 *.pth
