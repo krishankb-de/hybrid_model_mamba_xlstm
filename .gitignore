@@ -77,3 +77,6 @@ multirun/
 # Compiled CUDA
 *.o
 *.cu.o
+
+# Documentation
+*.md
