@@ -294,6 +294,10 @@ def tfla_forward_triton(
     # Allocate output tensor
     output = torch.empty_like(q)
     
+    # Apply input gate to values: v_new = v * i_gate
+    # i_gate is in log-space, so we use exp() to get the gate value (0-1)
+    v = v * torch.exp(i_gate)
+
     # Chunking configuration for memory efficiency
     # Larger chunks = less overhead but more memory per chunk
     # Smaller chunks = more overhead but better memory efficiency
@@ -318,6 +322,10 @@ def tfla_forward_triton(
     # This allows us to break the sequential dependency across chunks
     grid_state = (batch, num_heads, num_chunks)
     
+    # Combine gates for the kernel. The kernel expects 'gates' for decay calculation.
+    # We use the log-space forget gate which controls the exponential decay.
+    gates = f_gate
+
     update_recurrent_state_kernel[grid_state](
         k, v, gates, recurrent_state,
         batch, num_heads, seq_len, head_dim,

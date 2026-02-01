@@ -190,7 +190,7 @@ class mLSTMBlock(nn.Module):
             try:
                 # Use optimized TFLA kernel
                 # The kernel handles: C_t = f_t * C_{t-1} + i_t * v_t * k_t^T
-                h_tilde = tfla_forward_triton(q, k, v, log_f_gate)
+                h_tilde = tfla_forward_triton(q, k, v, log_i_gate, log_f_gate)
             except Exception as e:
                 # Fallback to PyTorch if kernel fails
                 print(f"Warning: TFLA kernel failed ({e}), using PyTorch fallback")

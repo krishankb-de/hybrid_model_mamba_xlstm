@@ -11,9 +11,9 @@ from typing import Optional
 
 def init_mamba_weights(module: nn.Module, initializer_range: float = 0.02):
     """Initialize weights for Mamba blocks.
-    
-    Uses specialized initialization for SSM parameters as described in the Mamba paper.
-    
+
+    Initializes the standard layers (Linear, Conv1d, Embedding) within a Mamba block.
+    Specialized SSM parameters (A, dt) are handled separately.
     Args:
         module: Module to initialize
         initializer_range: Standard deviation for normal initialization
