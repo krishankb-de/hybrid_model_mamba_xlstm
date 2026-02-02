@@ -45,4 +45,3 @@ python scripts/train.py model=hybrid_7b dataset=c4 trainer=gpu_fsdp
 
 ## Citation
 
-If you use this code, please cite the relevant papers for Mamba and xLSTM architectures.
