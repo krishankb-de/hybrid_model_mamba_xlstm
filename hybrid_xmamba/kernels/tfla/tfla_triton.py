@@ -44,6 +44,7 @@ def tfla_chunk_forward_kernel(
     CHUNK_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
 ):
     """
     Tiled Flash Linear Attention forward kernel with chunking strategy.
@@ -75,7 +76,7 @@ def tfla_chunk_forward_kernel(
     offs_m = pid_block_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_m_global = chunk_start + offs_m
     offs_n = tl.arange(0, BLOCK_N)
-    offs_d = tl.arange(0, head_dim)
+    offs_d = tl.arange(0, HEAD_DIM)
     
     # Boundary masks
     mask_m = (offs_m < chunk_len) & (offs_m_global < seq_len)
@@ -89,7 +90,7 @@ def tfla_chunk_forward_kernel(
     
     # Load Q tile into SRAM
     q_ptrs = q_base + offs_m_global[:, None] * stride_ql + offs_d[None, :] * stride_qd
-    q_tile = tl.load(q_ptrs, mask=mask_m[:, None] & (offs_d[None, :] < head_dim), other=0.0)
+    q_tile = tl.load(q_ptrs, mask=mask_m[:, None] & (offs_d[None, :] < HEAD_DIM), other=0.0)
     
     # Load gates for this Q block (in log-space for numerical stability)
     g_ptrs = g_base + offs_m_global * stride_gl
@@ -116,8 +117,8 @@ def tfla_chunk_forward_kernel(
         # Load K and V tiles into SRAM
         k_ptrs = k_base + offs_n_global[:, None] * stride_kl + offs_d[None, :] * stride_kd
         v_ptrs = v_base + offs_n_global[:, None] * stride_vl + offs_d[None, :] * stride_vd
-        k_tile = tl.load(k_ptrs, mask=mask_n[:, None] & (offs_d[None, :] < head_dim), other=0.0)
-        v_tile = tl.load(v_ptrs, mask=mask_n[:, None] & (offs_d[None, :] < head_dim), other=0.0)
+        k_tile = tl.load(k_ptrs, mask=mask_n[:, None] & (offs_d[None, :] < HEAD_DIM), other=0.0)
+        v_tile = tl.load(v_ptrs, mask=mask_n[:, None] & (offs_d[None, :] < HEAD_DIM), other=0.0)
         
         # Load gates for K positions
         g_n_ptrs = g_base + offs_n_global * stride_gl
@@ -126,7 +127,7 @@ def tfla_chunk_forward_kernel(
         # 1. Compute intra-chunk attention scores: Q @ K^T
         # This is computed block-by-block in SRAM, never materialized to HBM
         scores = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        for d in range(head_dim):
+        for d in range(HEAD_DIM):
             scores += q_tile[:, d, None] * k_tile[None, :, d]
         
         # 2. Apply exponential decay gates for linear attention
@@ -140,7 +141,7 @@ def tfla_chunk_forward_kernel(
         
         # 4. Compute output contribution: Scores @ V
         # This accumulates the attention-weighted values
-        for d in range(head_dim):
+        for d in range(HEAD_DIM):
             acc[:, d] += tl.sum(scores * v_tile[None, :, d], axis=1)
     
     # ============================================================
@@ -155,14 +156,14 @@ def tfla_chunk_forward_kernel(
         
         # Compute Q @ prev_state to get recurrent contribution
         # We do this in tiles to fit in SRAM
-        for d_out in range(0, head_dim, BLOCK_N):
+        for d_out in range(0, HEAD_DIM, BLOCK_N):
             offs_d_out = d_out + tl.arange(0, BLOCK_N)
-            mask_d_out = offs_d_out < head_dim
+            mask_d_out = offs_d_out < HEAD_DIM
             
             recurrent_contrib_tile = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             
             # Compute q_tile @ prev_state[:, offs_d_out]
-            for d_in in range(head_dim):
+            for d_in in range(HEAD_DIM):
                 state_ptrs = state_base + d_in * stride_sd1 + offs_d_out * stride_sd2
                 state_col = tl.load(state_ptrs, mask=mask_d_out, other=0.0)
                 recurrent_contrib_tile += q_tile[:, d_in, None] * state_col[None, :]
@@ -174,12 +175,12 @@ def tfla_chunk_forward_kernel(
             decay_from_prev = tl.exp(gates_m - chunk_start_gate)
             
             # Add to accumulator with decay
-            for i in range(min(BLOCK_N, head_dim - d_out)):
+            for i in range(min(BLOCK_N, HEAD_DIM - d_out)):
                 acc[:, d_out + i] += recurrent_contrib_tile[:, i] * decay_from_prev
     
     # Store final output to HBM
     o_ptrs = o_base + offs_m_global[:, None] * stride_ol + offs_d[None, :] * stride_od
-    tl.store(o_ptrs, acc, mask=mask_m[:, None] & (offs_d[None, :] < head_dim))
+    tl.store(o_ptrs, acc, mask=mask_m[:, None] & (offs_d[None, :] < HEAD_DIM))
 
 
 @triton.jit
@@ -200,6 +201,7 @@ def update_recurrent_state_kernel(
     stride_sb, stride_sh, stride_sc, stride_sd1, stride_sd2,
     # Block configuration
     CHUNK_SIZE: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
 ):
     """
     Materialize recurrent states at chunk boundaries.
@@ -221,8 +223,8 @@ def update_recurrent_state_kernel(
         return
     
     # Dimension offsets
-    offs_d = tl.arange(0, head_dim)
-    mask_d = offs_d < head_dim
+    offs_d = tl.arange(0, HEAD_DIM)
+    mask_d = offs_d < HEAD_DIM
     
     # Base pointers
     k_base = K + pid_batch * stride_kb + pid_head * stride_kh
@@ -232,7 +234,7 @@ def update_recurrent_state_kernel(
     
     # Initialize state accumulator [D, D]
     # This will accumulate the outer products weighted by exponential gates
-    state_acc = tl.zeros([head_dim, head_dim], dtype=tl.float32)
+    state_acc = tl.zeros([HEAD_DIM, HEAD_DIM], dtype=tl.float32)
     
     # Accumulate contributions from all positions in this chunk
     for t in range(chunk_start, chunk_end):
@@ -251,14 +253,14 @@ def update_recurrent_state_kernel(
         
         # Compute outer product: k_t[:, None] * v_t[None, :]
         # We do this element-wise to avoid materializing the full D x D matrix at once
-        for i in range(head_dim):
-            for j in range(head_dim):
+        for i in range(HEAD_DIM):
+            for j in range(HEAD_DIM):
                 state_acc[i, j] += weight * k_t[i] * v_t[j]
     
     # Store accumulated state for this chunk
     # This state will be used by the forward kernel to add inter-chunk contributions
-    for i in range(head_dim):
-        for j in range(head_dim):
+    for i in range(HEAD_DIM):
+        for j in range(HEAD_DIM):
             state_ptr = state_base + i * stride_sd1 + j * stride_sd2
             tl.store(state_ptr, state_acc[i, j])
 
@@ -335,6 +337,7 @@ def tfla_forward_triton(
         recurrent_state.stride(0), recurrent_state.stride(1),
         recurrent_state.stride(2), recurrent_state.stride(3), recurrent_state.stride(4),
         CHUNK_SIZE=CHUNK_SIZE,
+        HEAD_DIM=head_dim,
     )
     
     # Step 2: Compute TFLA with intra-chunk tiling and inter-chunk recurrence
@@ -362,6 +365,7 @@ def tfla_forward_triton(
         CHUNK_SIZE=CHUNK_SIZE,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
+        HEAD_DIM=head_dim,
     )
     
     return output
