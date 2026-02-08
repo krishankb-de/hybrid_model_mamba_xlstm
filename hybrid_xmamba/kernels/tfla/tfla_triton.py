@@ -237,25 +237,32 @@ def update_recurrent_state_kernel(
     state_acc = tl.zeros([HEAD_DIM, HEAD_DIM], dtype=tl.float32)
     
     # Accumulate contributions from all positions in this chunk
-    for t in range(chunk_start, chunk_end):
-        # Load k_t, v_t, gate_t for position t
-        k_ptrs = k_base + t * stride_kl + offs_d * stride_kd
-        v_ptrs = v_base + t * stride_vl + offs_d * stride_vd
-        g_ptr = g_base + t * stride_gl
+    # Use tl.arange with maximum chunk size to avoid Triton tensor indexing issues
+    # Guard each iteration with bounds checking
+    chunk_len = chunk_end - chunk_start
+    for t_offset in tl.arange(0, CHUNK_SIZE):
+        t = chunk_start + t_offset
         
-        k_t = tl.load(k_ptrs, mask=mask_d, other=0.0)
-        v_t = tl.load(v_ptrs, mask=mask_d, other=0.0)
-        gate_t = tl.load(g_ptr)
-        
-        # Compute weighted outer product: exp(gate_t) * (k_t @ v_t^T)
-        # This represents the contribution of position t to the recurrent state
-        weight = tl.exp(gate_t)
-        
-        # Compute outer product: k_t[:, None] * v_t[None, :]
-        # We do this element-wise to avoid materializing the full D x D matrix at once
-        for i in range(HEAD_DIM):
-            for j in range(HEAD_DIM):
-                state_acc[i, j] += weight * k_t[i] * v_t[j]
+        # Skip if this position is outside the chunk or sequence
+        if t_offset < chunk_len:
+            # Load k_t, v_t, gate_t for position t
+            k_ptrs = k_base + t * stride_kl + offs_d * stride_kd
+            v_ptrs = v_base + t * stride_vl + offs_d * stride_vd
+            g_ptr = g_base + t * stride_gl
+            
+            k_t = tl.load(k_ptrs, mask=mask_d, other=0.0)
+            v_t = tl.load(v_ptrs, mask=mask_d, other=0.0)
+            gate_t = tl.load(g_ptr)
+            
+            # Compute weighted outer product: exp(gate_t) * (k_t @ v_t^T)
+            # This represents the contribution of position t to the recurrent state
+            weight = tl.exp(gate_t)
+            
+            # Compute outer product: k_t[:, None] * v_t[None, :]
+            # We do this element-wise to avoid materializing the full D x D matrix at once
+            for i in range(HEAD_DIM):
+                for j in range(HEAD_DIM):
+                    state_acc[i, j] += weight * k_t[i] * v_t[j]
     
     # Store accumulated state for this chunk
     # This state will be used by the forward kernel to add inter-chunk contributions
