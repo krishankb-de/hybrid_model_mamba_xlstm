@@ -43,10 +43,9 @@ class TFLAFunction(torch.autograd.Function):
         # Save for backward
         ctx.save_for_backward(q, k, v, i_gate, f_gate)
         
-        # Use Triton kernel if available, otherwise fallback
-        if TRITON_AVAILABLE and q.is_cuda:
-            return tfla_forward_triton(q, k, v, i_gate, f_gate)
-            
+        # Use PyTorch fallback implementation for stability
+        # Triton kernel has complex tensor indexing patterns that are difficult to optimize
+        # The PyTorch implementation provides the same results with acceptable performance
         return tfla_forward_pytorch(q, k, v, i_gate, f_gate)
     
     @staticmethod
