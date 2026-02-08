@@ -237,10 +237,10 @@ def update_recurrent_state_kernel(
     state_acc = tl.zeros([HEAD_DIM, HEAD_DIM], dtype=tl.float32)
     
     # Accumulate contributions from all positions in this chunk
-    # Use tl.arange with maximum chunk size to avoid Triton tensor indexing issues
+    # Use range with maximum chunk size - CHUNK_SIZE is a constexpr so range() works
     # Guard each iteration with bounds checking
     chunk_len = chunk_end - chunk_start
-    for t_offset in tl.arange(0, CHUNK_SIZE):
+    for t_offset in range(CHUNK_SIZE):
         t = chunk_start + t_offset
         
         # Skip if this position is outside the chunk or sequence
