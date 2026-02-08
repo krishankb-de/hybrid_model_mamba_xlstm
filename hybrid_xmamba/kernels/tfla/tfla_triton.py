@@ -100,7 +100,7 @@ def tfla_chunk_forward_kernel(
     # PART 1: Intra-Chunk Attention (Flash Attention-like tiling)
     # ============================================================
     # Initialize output accumulator in register/SRAM
-    acc = tl.zeros([BLOCK_M, head_dim], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
     
     # Loop over K/V blocks within the current chunk
     # This is the "Flash" part - we never materialize the full attention matrix
