@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 
 # Import TFLA kernel interface
 try:
-    from hybrid_xmamba.kernels.tfla.tfla_interface import TFLA
+    from hybrid_xmamba.kernels.tfla.tfla_interface import apply_tfla
     from hybrid_xmamba.kernels.tfla.tfla_triton import tfla_forward_triton
     TFLA_AVAILABLE = True
 except ImportError:

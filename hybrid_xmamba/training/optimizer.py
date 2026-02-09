@@ -85,7 +85,7 @@ def configure_optimizer(
     betas: tuple = (0.9, 0.999),
     eps: float = 1e-8,
     momentum: float = 0.9,
-    fused: bool = False,
+    fused: bool = True,
     **kwargs
 ) -> Optimizer:
     """Configure optimizer with proper parameter grouping.
@@ -98,7 +98,7 @@ def configure_optimizer(
         betas: Beta parameters for Adam-based optimizers
         eps: Epsilon for numerical stability
         momentum: Momentum for SGD
-        fused: Use fused optimizer implementation if available
+        fused: Use fused optimizer implementation if available (faster on CUDA)
         **kwargs: Additional optimizer arguments
         
     Returns:

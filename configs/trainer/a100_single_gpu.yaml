@@ -1,0 +1,46 @@
+# A100 single-GPU trainer configuration
+# Optimized for NVIDIA A100 80GB with bf16 mixed precision.
+#
+# Key optimizations vs default single_gpu.yaml:
+# - bf16-mixed precision (4-5x faster matmuls on A100 Tensor Cores)
+# - Larger batch sizes (A100 has 80GB VRAM)
+# - More frequent validation for better tracking
+# - Gradient accumulation for effective batch of 64
+
+# Hardware
+accelerator: "gpu"
+devices: 1
+precision: "bf16-mixed"     # Critical: enables A100 Tensor Core bf16
+strategy: "auto"
+
+# Training loop
+max_epochs: null             # Train by steps, not epochs
+max_steps: 10000             # ~6 hours on A100 for 150M model
+val_check_interval: 500      # Validate every 500 optimizer steps
+check_val_every_n_epoch: null
+log_every_n_steps: 25
+
+# Batching — larger than T4 config since A100 has 80GB
+# effective_batch = batch_size × accumulate_grad_batches = 32 × 2 = 64
+accumulate_grad_batches: 2
+
+# Checkpointing
+enable_checkpointing: true
+default_root_dir: "${output_dir}"
+
+# Logging
+enable_progress_bar: true
+enable_model_summary: true
+
+# Performance
+num_sanity_val_steps: 2
+detect_anomaly: false
+track_grad_norm: -1
+
+# Profiling (disable for production training)
+profiler: null
+
+# Limits (set to 1.0 for full training)
+limit_train_batches: 1.0
+limit_val_batches: 1.0
+limit_test_batches: 1.0

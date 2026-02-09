@@ -101,33 +101,43 @@ class sLSTMBlock(nn.Module):
         o_gate = torch.sigmoid(o_gate)
         c_tilde = torch.tanh(c_tilde)
         
-        # Initialize or load cache
-        if cache is not None and 'h' in cache and 'c' in cache:
-            h = cache['h']  # (B, H, D)
-            c = cache['c']  # (B, H, D)
-        else:
-            h = torch.zeros(batch, self.num_heads, self.head_dim // 4,
-                          device=x.device, dtype=x.dtype)
-            c = torch.zeros(batch, self.num_heads, self.head_dim // 4,
-                          device=x.device, dtype=x.dtype)
+        # ============================================================
+        # PARALLEL SCAN: Compute cell states for all timesteps at once
+        # using cumulative forget gate products and weighted input sums.
+        #
+        # Cell recurrence: c[t] = f[t]*c[t-1] + i[t]*c_tilde[t]
+        # This is a first-order linear recurrence solvable via parallel scan.
+        # ============================================================
         
-        # Process sequence
-        outputs = []
+        # Compute cumulative forget gate products in log-space
+        # log_f_cum[t] = sum(log(f[0..t]))  -> f_cum[t] = prod(f[0..t])
+        log_f = torch.log(f_gate.clamp(min=1e-6))        # (B, H, L, D)
+        log_f_cum = torch.cumsum(log_f, dim=2)            # (B, H, L, D)
+        f_cum = torch.exp(log_f_cum)                      # (B, H, L, D)
         
-        for t in range(seq_len):
-            # Update cell state
-            c = f_gate[:, :, t, :] * c + i_gate[:, :, t, :] * c_tilde[:, :, t, :]
-            
-            # Normalize cell state
-            c_norm = self.h_norm(c)
-            
-            # Update hidden state
-            h = o_gate[:, :, t, :] * torch.tanh(c_norm)
-            
-            outputs.append(h)
+        # Input contribution weighted by decay to position t:
+        # For position t, contribution from s <= t is:
+        #   prod(f[s+1..t]) * i[s] * c_tilde[s]
+        # = f_cum[t] / f_cum[s] * i[s] * c_tilde[s]
+        # = f_cum[t] * (i[s] * c_tilde[s] / f_cum[s])
+        #
+        # So: c[t] = f_cum[t] * cumsum(i * c_tilde / f_cum, dim=time)
+        # (assuming c[0] = 0, no initial cache)
         
-        # Stack outputs
-        h_out = torch.stack(outputs, dim=2)  # (B, H, L, D)
+        input_contrib = i_gate * c_tilde  # (B, H, L, D)
+        weighted_input = input_contrib / f_cum.clamp(min=1e-8)
+        weighted_cumsum = torch.cumsum(weighted_input, dim=2)  # (B, H, L, D)
+        c_all = f_cum * weighted_cumsum  # (B, H, L, D)
+        
+        # Handle optional cache for inference
+        if cache is not None and 'c' in cache:
+            # Add initial state contribution: c_init * f_cum
+            c_init = cache['c'].unsqueeze(2)  # (B, H, 1, D)
+            c_all = c_all + f_cum * c_init
+        
+        # Normalize and compute hidden states for all positions
+        c_norm = self.h_norm(c_all)  # (B, H, L, D) -- RMSNorm on last dim
+        h_out = o_gate * torch.tanh(c_norm)  # (B, H, L, D)
         
         # Reshape back
         h_out = rearrange(h_out, 'b h l d -> b l (h d)')
@@ -137,8 +147,8 @@ class sLSTMBlock(nn.Module):
         
         # Update cache if provided
         if cache is not None:
-            cache['h'] = h
-            cache['c'] = c
+            cache['h'] = h_out[:, :, -1, :] if h_out.dim() == 4 else None
+            cache['c'] = c_all[:, :, -1, :]
         
         return output
     
@@ -154,8 +164,8 @@ class sLSTMBlock(nn.Module):
             Dictionary containing initialized hidden and cell states
         """
         return {
-            'h': torch.zeros(batch_size, self.num_heads, self.head_dim // 4,
+            'h': torch.zeros(batch_size, self.num_heads, self.head_dim,
                            device=device, dtype=dtype),
-            'c': torch.zeros(batch_size, self.num_heads, self.head_dim // 4,
+            'c': torch.zeros(batch_size, self.num_heads, self.head_dim,
                            device=device, dtype=dtype),
         }

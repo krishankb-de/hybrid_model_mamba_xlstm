@@ -35,6 +35,12 @@ from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
 from hybrid_xmamba.training.lightning_module import HybridLightningModule
 from hybrid_xmamba.utils.registry import ModelRegistry
 
+# ============================================================
+# PERFORMANCE: Enable Tensor Core utilization on A100/H100
+# This trades off a tiny bit of float32 precision for ~2x matmul speed
+# ============================================================
+torch.set_float32_matmul_precision('high')
+
 
 def collate_fn(batch):
     """Custom collate function for handling tokenized data.
@@ -88,21 +94,45 @@ def prepare_dataloader(cfg: DictConfig, split: str, tokenizer):
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
     
-    # Tokenization function
+    # Tokenization function - use text packing (concatenate + chunk)
+    # instead of padding every sample to max_length (wastes compute on padding tokens)
     def tokenize_function(examples):
-        return tokenizer(
+        # Tokenize without padding - we'll pack sequences next
+        tokenized = tokenizer(
             examples["text"],
-            truncation=True,
-            max_length=cfg.dataset.max_length,
-            return_tensors="pt",
-            padding="max_length",
+            truncation=False,
+            return_attention_mask=False,
         )
+        return tokenized
+    
+    # Group texts into chunks of max_length for efficient training
+    # This eliminates wasted compute on padding tokens
+    def group_texts(examples):
+        # Concatenate all texts
+        concatenated = {k: sum(examples[k], []) for k in examples.keys()}
+        total_length = len(concatenated["input_ids"])
+        # Drop the remainder that doesn't fill a complete chunk
+        max_length = cfg.dataset.max_length
+        total_length = (total_length // max_length) * max_length
+        # Split into chunks of max_length
+        result = {
+            k: [t[i : i + max_length] for i in range(0, total_length, max_length)]
+            for k, t in concatenated.items()
+        }
+        return result
     
     # Tokenize dataset
     tokenized_dataset = dataset.map(
         tokenize_function,
         batched=True,
         remove_columns=dataset.column_names,
+        num_proc=cfg.dataset.get("preprocessing_num_workers", 4),
+    )
+    
+    # Pack sequences into fixed-length chunks (no padding waste)
+    tokenized_dataset = tokenized_dataset.map(
+        group_texts,
+        batched=True,
         num_proc=cfg.dataset.get("preprocessing_num_workers", 4),
     )
     
@@ -116,6 +146,9 @@ def prepare_dataloader(cfg: DictConfig, split: str, tokenizer):
         num_workers=cfg.dataset.num_workers,
         pin_memory=cfg.dataset.pin_memory,
         collate_fn=collate_fn,
+        persistent_workers=True if cfg.dataset.num_workers > 0 else False,
+        prefetch_factor=2 if cfg.dataset.num_workers > 0 else None,
+        drop_last=(split == "train"),  # Avoid small trailing batches
     )
     
     return dataloader
@@ -184,7 +217,16 @@ def main(cfg: DictConfig):
     print(f"Model parameters: {num_params:,} ({num_params/1e6:.1f}M)")
     print(f"Layer pattern: {model.get_layer_types()}")
     
-    # Create Lightning module
+    # Determine precision for logging
+    precision = cfg.trainer.precision
+    if 'bf16' in str(precision) or '16' in str(precision):
+        print(f"Using {precision} Automatic Mixed Precision (AMP)")
+    
+    # Create Lightning module with torch.compile enabled for speed
+    use_compile = torch.cuda.is_available() and hasattr(torch, 'compile')
+    if use_compile:
+        print("Enabling torch.compile for optimized GPU kernels...")
+    
     lightning_module = HybridLightningModule(
         model=model,
         learning_rate=cfg.model.learning_rate,
@@ -192,6 +234,7 @@ def main(cfg: DictConfig):
         warmup_steps=cfg.model.warmup_steps,
         max_steps=cfg.model.max_steps,
         gradient_clip_val=cfg.model.gradient_clip_val,
+        compile_model=use_compile,
     )
     
     # Setup callbacks

@@ -204,12 +204,16 @@ class HybridLightningModule(pl.LightningModule):
         }
     
     def on_before_optimizer_step(self, optimizer):
-        """Hook called before optimizer step (for gradient clipping)."""
+        """Hook called before optimizer step (for gradient norm logging only).
+        
+        Note: Actual gradient clipping is handled by Lightning Trainer's
+        gradient_clip_val parameter. We only log the norm here.
+        """
+        # Log gradient norm for monitoring (without clipping again)
         if self.gradient_clip_val > 0:
-            # Compute gradient norm for logging
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.parameters(), 
-                self.gradient_clip_val
+                max_norm=float('inf'),  # Don't clip, just compute norm
             )
             self.log('train/grad_norm', grad_norm, on_step=True)
 

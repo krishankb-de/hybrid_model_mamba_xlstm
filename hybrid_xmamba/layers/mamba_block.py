@@ -140,7 +140,11 @@ class MambaBlock(nn.Module):
         B: torch.Tensor,
         C: torch.Tensor,
     ) -> torch.Tensor:
-        """Slow reference implementation (for debugging/testing).
+        """Parallel reference implementation using chunk-wise scan.
+        
+        Replaces the sequential for-loop with a chunk-parallel approach.
+        Divides sequence into chunks and uses cumulative sums within chunks,
+        only iterating across chunks (~L/chunk_size steps).
         
         Args:
             x: Input (B, L, D)
@@ -154,23 +158,64 @@ class MambaBlock(nn.Module):
         """
         batch, seq_len, dim = x.shape
         _, _, state_size = B.shape
+        chunk_size = min(64, seq_len)
         
-        # Initialize state
+        # Pad to multiple of chunk_size
+        pad_len = (chunk_size - seq_len % chunk_size) % chunk_size
+        if pad_len > 0:
+            x = F.pad(x, (0, 0, 0, pad_len))
+            dt = F.pad(dt, (0, 0, 0, pad_len))
+            B = F.pad(B, (0, 0, 0, pad_len))
+            C = F.pad(C, (0, 0, 0, pad_len))
+        
+        L = x.shape[1]
+        num_chunks = L // chunk_size
+        
+        # Reshape into chunks
+        x_c = x.reshape(batch, num_chunks, chunk_size, dim)
+        dt_c = dt.reshape(batch, num_chunks, chunk_size, dim)
+        B_c = B.reshape(batch, num_chunks, chunk_size, state_size)
+        C_c = C.reshape(batch, num_chunks, chunk_size, state_size)
+        
+        # Discretize: dA = dt * A -> A_disc = exp(dA)
+        dA = dt_c.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        A_disc = torch.exp(dA)  # (B, nc, cs, D, N)
+        
+        # Input contribution: Bx = dt * x * B
+        Bx = dt_c.unsqueeze(-1) * x_c.unsqueeze(-1) * B_c.unsqueeze(-2)
+        
+        # Cumulative A within chunk (log-space)
+        log_A_cum = torch.cumsum(dA, dim=2)
+        A_cum = torch.exp(log_A_cum)
+        
         h = torch.zeros(batch, dim, state_size, device=x.device, dtype=x.dtype)
+        all_outputs = []
         
-        outputs = []
-        for t in range(seq_len):
-            # Discretization
-            dt_t = dt[:, t, :]  # (B, D)
-            A_discrete = torch.exp(A * dt_t.unsqueeze(-1))  # (B, D, N)
-            B_t = B[:, t, :].unsqueeze(1)  # (B, 1, N)
+        for ci in range(num_chunks):
+            A_cum_ci = A_cum[:, ci]  # (B, cs, D, N)
+            Bx_ci = Bx[:, ci]       # (B, cs, D, N)
+            C_ci = C_c[:, ci]       # (B, cs, N)
+            x_ci = x_c[:, ci]      # (B, cs, D)
             
-            # State update
-            h = A_discrete * h + (dt_t.unsqueeze(-1) * x[:, t, :].unsqueeze(-1)) * B_t
+            # Previous state contribution
+            h_prev = A_cum_ci * h.unsqueeze(1)  # (B, cs, D, N)
             
-            # Output
-            y_t = torch.sum(h * C[:, t, :].unsqueeze(1), dim=-1)  # (B, D)
-            y_t = y_t + self.D * x[:, t, :]
-            outputs.append(y_t)
+            # Intra-chunk via cumulative sum
+            A_cum_safe = A_cum_ci.clamp(min=1e-8)
+            Bx_weighted = Bx_ci / A_cum_safe
+            Bx_cum = torch.cumsum(Bx_weighted, dim=1)
+            h_intra = A_cum_ci * Bx_cum
+            
+            h_chunk = h_prev + h_intra  # (B, cs, D, N)
+            
+            # Output: y = C @ h + D * x
+            y_ci = torch.einsum('btdn, btn -> btd', h_chunk, C_ci)
+            y_ci = y_ci + self.D.unsqueeze(0).unsqueeze(0) * x_ci
+            all_outputs.append(y_ci)
+            
+            h = h_chunk[:, -1, :, :]
         
-        return torch.stack(outputs, dim=1)
+        output = torch.cat(all_outputs, dim=1)
+        if pad_len > 0:
+            output = output[:, :seq_len, :]
+        return output

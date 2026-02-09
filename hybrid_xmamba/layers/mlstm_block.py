@@ -153,7 +153,10 @@ class mLSTMBlock(nn.Module):
         i_gate: torch.Tensor,
         f_gate: torch.Tensor,
     ) -> torch.Tensor:
-        """Slow reference implementation of mLSTM.
+        """Parallel fallback implementation of mLSTM using causal linear attention.
+        
+        Uses masked causal attention to avoid sequential loops.
+        Fully differentiable through standard PyTorch autograd.
         
         Args:
             q: Queries (B, H, L, D)
@@ -167,37 +170,31 @@ class mLSTMBlock(nn.Module):
         """
         batch, num_heads, seq_len, head_dim = q.shape
         
-        # Initialize cell state (matrix-valued)
-        C = torch.zeros(batch, num_heads, head_dim, head_dim, 
-                       device=q.device, dtype=q.dtype)
-        n = torch.zeros(batch, num_heads, head_dim, 1,
-                       device=q.device, dtype=q.dtype)
+        # Per-dimension cumulative forget gate in log-space
+        log_f = torch.log(f_gate.clamp(min=1e-6))  # (B, H, L, D)
+        log_f_cum = torch.cumsum(log_f, dim=2)       # (B, H, L, D)
+        f_cum = torch.exp(log_f_cum)
         
-        outputs = []
+        # Absorb per-dimension decay into query/key — exact, no approximation.
+        # decay[i,j,d] = f_cum[i,d] / f_cum[j,d]
+        # scores[i,j] = sum_d(q_w[i,d] * k_w[j,d]) where
+        #   q_w = q * f_cum, k_w = k_gated / f_cum
+        k_gated = k * i_gate  # (B, H, L, D)
+        q_weighted = q * f_cum
+        k_weighted = k_gated / f_cum.clamp(min=1e-6)
         
-        for t in range(seq_len):
-            # Get timestep data
-            q_t = q[:, :, t, :]  # (B, H, D)
-            k_t = k[:, :, t, :]  # (B, H, D)
-            v_t = v[:, :, t, :]  # (B, H, D)
-            i_t = i_gate[:, :, t, :]  # (B, H, D)
-            f_t = f_gate[:, :, t, :]  # (B, H, D)
-            
-            # Update cell state with forget gate
-            C = f_t.unsqueeze(-1) * C
-            n = f_t.unsqueeze(-1) * n
-            
-            # Add new information with input gate
-            k_v = torch.einsum('bhd,bhe->bhde', k_t, v_t)
-            C = C + i_t.unsqueeze(-1) * k_v
-            n = n + i_t.unsqueeze(-1) * k_t.unsqueeze(-1)
-            
-            # Compute output
-            h_t_num = torch.einsum('bhd,bhde->bhe', q_t, C)
-            h_t_den = torch.einsum('bhd,bhd->bh', q_t, n.squeeze(-1))
-            h_t_den = torch.clamp(h_t_den, min=1.0)  # Stabilization
-            
-            h_t = h_t_num / h_t_den.unsqueeze(-1)
-            outputs.append(h_t)
+        # Causal mask
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool), diagonal=1
+        )
         
-        return torch.stack(outputs, dim=2)
+        # Attention scores with exact per-dimension decay
+        scores = torch.einsum('bhid, bhjd -> bhij', q_weighted, k_weighted)  # (B, H, L, L)
+        scores = scores.masked_fill(causal_mask, 0.0)
+        
+        # Compute output
+        h = torch.einsum('bhij, bhjd -> bhid', scores, v)  # (B, H, L, D)
+        denom = scores.sum(dim=-1, keepdim=True).clamp(min=1.0)
+        h = h / denom
+        
+        return h

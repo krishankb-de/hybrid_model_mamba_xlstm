@@ -1,0 +1,50 @@
+# xLSTM-only (mLSTM) 150M baseline configuration
+# For controlled comparison with the Hybrid model at same dim and depth.
+# Only the layer_pattern differs — all layers are mLSTM (no Mamba).
+
+model_type: "hybrid_lm"
+
+# Architecture — SAME dim and depth as hybrid_150m for fair comparison
+vocab_size: 50257
+dim: 768
+num_layers: 12
+layer_pattern: ["mlstm"]   # ← Pure mLSTM, no Mamba layers
+
+# Mamba parameters (not used, but required by config schema)
+state_size: 16
+conv_size: 4
+expand_factor: 2
+dt_rank: null
+use_fast_path: true
+
+# mLSTM parameters (identical to hybrid_150m)
+head_dim: 64
+num_heads: 12     # 768 / 64 = 12
+use_tfla: true
+proj_factor: 2
+
+# sLSTM parameters (not used)
+slstm_hidden_dim: 768
+slstm_num_heads: 4
+use_exponential_gate: true
+
+# Shared parameters (identical to hybrid_150m)
+norm_type: "rms"
+use_mlp: true
+mlp_ratio: 4.0
+
+# Training parameters (identical to hybrid_150m)
+max_position_embeddings: 2048
+dropout: 0.1
+initializer_range: 0.02
+
+# Generation
+use_cache: true
+tie_word_embeddings: false
+
+# Optimization (identical to hybrid_150m for fair comparison)
+learning_rate: 6.0e-4
+weight_decay: 0.1
+warmup_steps: 1000
+max_steps: 50000
+gradient_clip_val: 1.0
