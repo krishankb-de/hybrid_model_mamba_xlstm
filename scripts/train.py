@@ -105,18 +105,22 @@ def prepare_dataloader(cfg: DictConfig, split: str, tokenizer):
         )
         return tokenized
     
-    # Group texts into chunks of max_length for efficient training
+    # Group texts into chunks for efficient training (text packing)
     # This eliminates wasted compute on padding tokens
+    # Respect max_seq_length override (e.g. +dataset.max_seq_length=128)
+    # falling back to max_length from the dataset config
+    seq_length = cfg.dataset.get("max_seq_length", cfg.dataset.max_length)
+    print(f"Using sequence length: {seq_length} (max_length={cfg.dataset.max_length})")
+    
     def group_texts(examples):
         # Concatenate all texts
         concatenated = {k: sum(examples[k], []) for k in examples.keys()}
         total_length = len(concatenated["input_ids"])
         # Drop the remainder that doesn't fill a complete chunk
-        max_length = cfg.dataset.max_length
-        total_length = (total_length // max_length) * max_length
-        # Split into chunks of max_length
+        total_length = (total_length // seq_length) * seq_length
+        # Split into chunks of seq_length
         result = {
-            k: [t[i : i + max_length] for i in range(0, total_length, max_length)]
+            k: [t[i : i + seq_length] for i in range(0, total_length, seq_length)]
             for k, t in concatenated.items()
         }
         return result
@@ -179,6 +183,13 @@ def main(cfg: DictConfig):
     tokenizer = AutoTokenizer.from_pretrained(cfg.dataset.tokenizer)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    # Override tokenizer's default model_max_length (GPT-2 = 1024) to match
+    # our actual model capacity. This suppresses the spurious warning:
+    #   "Token indices sequence length is longer than the specified maximum
+    #    sequence length for this model (N > 1024)"
+    # We tokenize with truncation=False for text packing, so this limit
+    # only controls the warning threshold, not actual truncation.
+    tokenizer.model_max_length = cfg.model.max_position_embeddings
     
     # Create model configuration
     model_config = HybridConfig(
@@ -222,10 +233,25 @@ def main(cfg: DictConfig):
     if 'bf16' in str(precision) or '16' in str(precision):
         print(f"Using {precision} Automatic Mixed Precision (AMP)")
     
-    # Create Lightning module with torch.compile enabled for speed
-    use_compile = torch.cuda.is_available() and hasattr(torch, 'compile')
+    # Create Lightning module with torch.compile — only on A100+ (sm_80+)
+    # torch.compile on T4/V100 (sm_75) causes 10-30 min compilation on first step
+    # and max_autotune_gemm fails due to insufficient SMs
+    use_compile = False
+    if torch.cuda.is_available() and hasattr(torch, 'compile'):
+        # Check config flag first (allows explicit override)
+        compile_flag = cfg.trainer.get("compile_model", None)
+        if compile_flag is not None:
+            use_compile = bool(compile_flag)
+        else:
+            # Auto-detect: only enable on Ampere+ GPUs (sm_80+)
+            capability = torch.cuda.get_device_capability()
+            use_compile = capability[0] >= 8  # A100=8.0, H100=9.0, T4=7.5
+            if not use_compile:
+                gpu_name = torch.cuda.get_device_name()
+                print(f"Skipping torch.compile — {gpu_name} (sm_{capability[0]}{capability[1]}) "
+                      f"is below sm_80. Use trainer.compile_model=true to force.")
     if use_compile:
-        print("Enabling torch.compile for optimized GPU kernels...")
+        print("Enabling torch.compile for optimized GPU kernels (Ampere+ detected)...")
     
     lightning_module = HybridLightningModule(
         model=model,
@@ -309,6 +335,8 @@ def main(cfg: DictConfig):
         enable_progress_bar=cfg.trainer.enable_progress_bar,
         enable_model_summary=cfg.trainer.enable_model_summary,
         num_sanity_val_steps=cfg.trainer.num_sanity_val_steps,
+        limit_train_batches=cfg.trainer.get("limit_train_batches", 1.0),
+        limit_val_batches=cfg.trainer.get("limit_val_batches", 1.0),
         deterministic=cfg.deterministic,
         benchmark=cfg.benchmark,
         default_root_dir=cfg.trainer.default_root_dir,
