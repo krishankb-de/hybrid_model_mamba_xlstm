@@ -125,7 +125,12 @@ def main():
         "--model",
         type=str,
         default="hybrid_350m",
-        choices=["hybrid_350m", "hybrid_7b", "mamba_baseline", "xlstm_baseline"],
+        choices=[
+            "hybrid_70m", "hybrid_350m", "hybrid_7b",
+            "mamba_baseline", "xlstm_baseline",
+            "mamba_70m_baseline", "xlstm_70m_baseline",
+            "mamba_150m_baseline", "xlstm_150m_baseline",
+        ],
         help="Model configuration to profile",
     )
     parser.add_argument(

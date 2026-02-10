@@ -1,0 +1,37 @@
+# 70M model configuration file — Hydra entry point
+# Override with: python scripts/train.py --config-name=config_70m
+#
+# This config is pre-set for training the 70M hybrid model on WikiText-103
+# with A100 GPU optimizations. Can also be used on smaller GPUs by
+# reducing batch size and adjusting trainer settings.
+
+defaults:
+  - model: hybrid_70m
+  - dataset: wikitext
+  - trainer: a100_single_gpu
+  - callbacks: default
+  - _self_
+
+# Global settings
+seed: 42
+debug: false
+project_name: "hybrid-xmamba-70m"
+experiment_name: "hybrid_70m_wikitext"
+
+# Weights & Biases logging
+wandb:
+  enabled: false   # Set to true or use wandb.enabled=true on CLI
+  entity: null     # Set your W&B entity
+  project: ${project_name}
+  name: ${experiment_name}
+  tags: ["70m", "hybrid", "wikitext"]
+
+# Paths
+data_dir: "./data"
+output_dir: "./outputs/${experiment_name}"
+checkpoint_dir: "${output_dir}/checkpoints"
+log_dir: "${output_dir}/logs"
+
+# Reproducibility
+deterministic: false
+benchmark: true
