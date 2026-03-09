@@ -7,16 +7,16 @@ Computes:
   4. Optional: text generation samples
 
 Usage:
-    python scripts/evaluate_lm.py \\
-        --checkpoint outputs/hybrid_150m_wikitext/checkpoints/last.ckpt \\
-        --model-config hybrid_150m \\
-        --dataset wikitext \\
+    python scripts/evaluate_lm.py \
+        --checkpoint outputs/hybrid_150m_wikitext/checkpoints/last.ckpt \
+        --model-config hybrid_150m \
+        --dataset wikitext \
         --split test
 
     # Compare all three models
-    python scripts/evaluate_lm.py \\
-        --checkpoint outputs/hybrid_150m_wikitext/checkpoints/last.ckpt \\
-        --model-config hybrid_150m \\
+    python scripts/evaluate_lm.py \
+        --checkpoint outputs/hybrid_150m_wikitext/checkpoints/last.ckpt \
+        --model-config hybrid_150m \
         --generate
 """
 
@@ -27,6 +27,7 @@ import time
 import math
 import argparse
 from pathlib import Path
+from datetime import datetime
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -46,7 +47,6 @@ from hybrid_xmamba.training.lightning_module import HybridLightningModule
 # Enable TF32 for A100
 torch.set_float32_matmul_precision('high')
 
-
 def collate_fn(batch):
     """Collate function for tokenized data."""
     result = {}
@@ -56,7 +56,6 @@ def collate_fn(batch):
         else:
             result[key] = torch.tensor([item[key] for item in batch])
     return result
-
 
 def prepare_test_data(dataset_name, tokenizer, max_length=2048, batch_size=16,
                       split="test", num_workers=4):
@@ -85,7 +84,6 @@ def prepare_test_data(dataset_name, tokenizer, max_length=2048, batch_size=16,
     loader = DataLoader(tokenized, batch_size=batch_size, shuffle=False,
                         num_workers=num_workers, pin_memory=True, collate_fn=collate_fn)
     return loader, len(tokenized)
-
 
 @torch.no_grad()
 def evaluate_perplexity(model, dataloader, device, max_batches=None):
@@ -131,7 +129,6 @@ def evaluate_perplexity(model, dataloader, device, max_batches=None):
         "num_tokens": total_tokens,
     }
 
-
 @torch.no_grad()
 def measure_throughput(model, device, seq_lengths=[128, 256, 512, 1024, 2048],
                        batch_size=8, warmup=3, trials=10):
@@ -170,7 +167,6 @@ def measure_throughput(model, device, seq_lengths=[128, 256, 512, 1024, 2048],
 
     return results
 
-
 @torch.no_grad()
 def generate_samples(model, tokenizer, device, prompts=None, max_new_tokens=100):
     """Generate text samples for qualitative evaluation."""
@@ -195,7 +191,6 @@ def generate_samples(model, tokenizer, device, prompts=None, max_new_tokens=100)
         print(f"  Generated: {generated_text[:200]}...")
 
     return results
-
 
 def load_model_from_checkpoint(checkpoint_path, device="cuda"):
     """Load a trained model from a Lightning checkpoint."""
@@ -243,7 +238,6 @@ def load_model_from_checkpoint(checkpoint_path, device="cuda"):
 
     return model, num_params
 
-
 def main():
     parser = argparse.ArgumentParser(description="Evaluate hybrid language model")
     parser.add_argument("--checkpoint", type=str, required=True,
@@ -272,7 +266,7 @@ def main():
     print(f"Device: {device}")
     if device.type == "cuda":
         print(f"GPU: {torch.cuda.get_device_name()}")
-        print(f"VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+        print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
     # Load model
     model, num_params = load_model_from_checkpoint(args.checkpoint, device)
@@ -283,7 +277,8 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     # ---- Perplexity evaluation ----
-    print(f"\n{'='*60}")
+    print(f"
+{'='*60}")
     print(f"  PERPLEXITY EVALUATION ({args.split} set)")
     print(f"{'='*60}")
 
@@ -304,7 +299,8 @@ def main():
     # ---- Throughput measurement ----
     throughput_results = {}
     if args.throughput:
-        print(f"\n{'='*60}")
+        print(f"
+{'='*60}")
         print(f"  THROUGHPUT MEASUREMENT")
         print(f"{'='*60}")
         throughput_results = measure_throughput(model, device, batch_size=args.batch_size)
@@ -319,7 +315,8 @@ def main():
     # ---- Text generation ----
     gen_results = []
     if args.generate:
-        print(f"\n{'='*60}")
+        print(f"
+{'='*60}")
         print(f"  TEXT GENERATION SAMPLES")
         print(f"{'='*60}")
         gen_results = generate_samples(model, tokenizer, device)
@@ -338,7 +335,7 @@ def main():
         "peak_gpu_memory_gb": peak_mem,
         "throughput": throughput_results,
         "generation_samples": gen_results,
-        "timestamp": datetime.now().isoformat() if 'datetime' in dir() else "N/A",
+        "timestamp": datetime.now().isoformat(),
     }
 
     # Add tokens/sec at seq_len=2048 for the comparison table
@@ -356,5 +353,4 @@ def main():
 
 
 if __name__ == "__main__":
-    from datetime import datetime
     main()
