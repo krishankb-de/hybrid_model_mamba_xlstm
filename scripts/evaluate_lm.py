@@ -130,13 +130,15 @@ def evaluate_perplexity(model, dataloader, device, max_batches=None):
     }
 
 @torch.no_grad()
-def measure_throughput(model, device, seq_lengths=[128, 256, 512, 1024, 2048],
-                       batch_size=8, warmup=3, trials=10):
+def measure_throughput(model, device, seq_lengths=None, batch_size=8, warmup=3, trials=10):
     """Measure inference throughput at different sequence lengths.
 
     Returns:
         dict mapping seq_len -> tokens_per_second
     """
+    if seq_lengths is None:
+        seq_lengths = [128, 256, 512, 1024, 2048]
+
     model.eval()
     results = {}
 
@@ -162,8 +164,8 @@ def measure_throughput(model, device, seq_lengths=[128, 256, 512, 1024, 2048],
             "ms_per_token": (elapsed / total_tokens) * 1000,
             "ms_per_batch": (elapsed / trials) * 1000,
         }
-        print(f"  seq_len={seq_len:>5}: {tokens_per_sec:>12,.0f} tok/s  "
-              f"({results[seq_len]['ms_per_batch']:.1f} ms/batch)")
+        print(f"  seq_len={{seq_len:>5}}: {{tokens_per_sec:>12,.0f}} tok/s  \
+              ({{results[seq_len]['ms_per_batch']:.1f}} ms/batch)")
 
     return results
 
@@ -187,14 +189,13 @@ def generate_samples(model, tokenizer, device, prompts=None, max_new_tokens=100)
         )
         generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
         results.append({"prompt": prompt, "generated": generated_text})
-        print(f"\n  Prompt: {prompt}")
-        print(f"  Generated: {generated_text[:200]}...")
+        print(f"\n  Prompt: {{prompt}}")
+        print(f"  Generated: {{generated_text[:200]}}...")
 
     return results
 
-def load_model_from_checkpoint(checkpoint_path, device="cuda"):
-    """Load a trained model from a Lightning checkpoint."""
-    print(f"Loading checkpoint from {checkpoint_path}...")
+def load_model_from_checkpoint(checkpoint_path, device="cuda"):  # Load a trained model from a Lightning checkpoint.
+    print(f"Loading checkpoint from {{checkpoint_path}}...")
 
     # Load the Lightning module
     ckpt = torch.load(checkpoint_path, map_location="cpu")
@@ -212,7 +213,7 @@ def load_model_from_checkpoint(checkpoint_path, device="cuda"):
         )
         model = lightning_module.model
     except Exception as e:
-        print(f"  Warning: Could not load Lightning module ({e})")
+        print(f"  Warning: Could not load Lightning module ({{e}})")
         print(f"  Trying to extract model state dict directly...")
 
         # Fallback: extract state dict and build model manually
@@ -234,7 +235,7 @@ def load_model_from_checkpoint(checkpoint_path, device="cuda"):
     model.eval()
 
     num_params = sum(p.numel() for p in model.parameters())
-    print(f"  Model loaded: {num_params:,} parameters ({num_params/1e6:.1f}M)")
+    print(f"  Model loaded: {{num_params:,}} parameters ({{num_params/1e6:.1f}}M)")
 
     return model, num_params
 
@@ -263,10 +264,10 @@ def main():
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    print(f"Device: {{device}}")
     if device.type == "cuda":
-        print(f"GPU: {torch.cuda.get_device_name()}")
-        print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        print(f"GPU: {{torch.cuda.get_device_name()}}")
+        print(f"VRAM: {{torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}} GB")
 
     # Load model
     model, num_params = load_model_from_checkpoint(args.checkpoint, device)
@@ -277,48 +278,46 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     # ---- Perplexity evaluation ----
-    print(f"
-{'='*60}")
-    print(f"  PERPLEXITY EVALUATION ({args.split} set)")
-    print(f"{'='*60}")
+    sep = "=" * 60
+    print(f"\n{{sep}}")
+    print(f"  PERPLEXITY EVALUATION ({{args.split}} set)")
+    print(sep)
 
     dataloader, num_samples = prepare_test_data(
         args.dataset, tokenizer, max_length=2048,
         batch_size=args.batch_size, split=args.split
     )
-    print(f"  Samples: {num_samples}  |  Batches: {len(dataloader)}")
+    print(f"  Samples: {{num_samples}}  |  Batches: {{len(dataloader)}}")
 
     ppl_results = evaluate_perplexity(model, dataloader, device, args.max_batches)
-    print(f"\n  ┌─────────────────────────────────┐")
-    print(f"  │  Perplexity : {ppl_results['perplexity']:>14.2f}  │")
-    print(f"  │  Loss       : {ppl_results['loss']:>14.4f}  │")
-    print(f"  │  BPB        : {ppl_results['bits_per_byte']:>14.4f}  │")
-    print(f"  │  Tokens     : {ppl_results['num_tokens']:>14,}  │")
-    print(f"  └─────────────────────────────────┘")
+    print(f"\n  +---------------------------------+")
+    print(f"  |  Perplexity : {{ppl_results['perplexity']:>14.2f}}  |")
+    print(f"  |  Loss       : {{ppl_results['loss']:>14.4f}}  |")
+    print(f"  |  BPB        : {{ppl_results['bits_per_byte']:>14.4f}}  |")
+    print(f"  |  Tokens     : {{ppl_results['num_tokens']:>14,}}  |")
+    print(f"  +---------------------------------+")
 
     # ---- Throughput measurement ----
     throughput_results = {}
     if args.throughput:
-        print(f"
-{'='*60}")
+        print(f"\n{{sep}}")
         print(f"  THROUGHPUT MEASUREMENT")
-        print(f"{'='*60}")
+        print(sep)
         throughput_results = measure_throughput(model, device, batch_size=args.batch_size)
 
     # ---- Peak memory ----
     if device.type == "cuda":
         peak_mem = torch.cuda.max_memory_allocated() / 1e9
-        print(f"\n  Peak GPU memory: {peak_mem:.2f} GB")
+        print(f"\n  Peak GPU memory: {{peak_mem:.2f}} GB")
     else:
         peak_mem = 0
 
     # ---- Text generation ----
     gen_results = []
     if args.generate:
-        print(f"
-{'='*60}")
+        print(f"\n{{sep}}")
         print(f"  TEXT GENERATION SAMPLES")
-        print(f"{'='*60}")
+        print(sep)
         gen_results = generate_samples(model, tokenizer, device)
 
     # ---- Save results ----
@@ -347,10 +346,9 @@ def main():
         output_path = Path(args.output_dir) / "results.json"
         with open(output_path, "w") as f:
             json.dump(all_results, f, indent=2, default=str)
-        print(f"\n  Results saved to {output_path}")
+        print(f"\n  Results saved to {{output_path}}")
 
     return all_results
-
 
 if __name__ == "__main__":
     main()
