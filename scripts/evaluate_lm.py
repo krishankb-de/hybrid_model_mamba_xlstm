@@ -8,16 +8,10 @@ Computes:
 
 Usage:
     python scripts/evaluate_lm.py \
-        --checkpoint outputs/hybrid_150m_wikitext/checkpoints/last.ckpt \
-        --model-config hybrid_150m \
+        --checkpoint outputs/hybrid_70m_wikitext_a100_mig20g/checkpoints/last.ckpt \
+        --model-config hybrid_70m \
         --dataset wikitext \
         --split test
-
-    # Compare all three models
-    python scripts/evaluate_lm.py \
-        --checkpoint outputs/hybrid_150m_wikitext/checkpoints/last.ckpt \
-        --model-config hybrid_150m \
-        --generate
 """
 
 import os
@@ -42,7 +36,6 @@ from tqdm import tqdm
 
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
-from hybrid_xmamba.training.lightning_module import HybridLightningModule
 
 # Enable TF32 for A100
 torch.set_float32_matmul_precision('high')
@@ -56,8 +49,8 @@ def collate_fn(batch):
             result[key] = torch.tensor([item[key] for item in batch])
     return result
 
-def prepare_test_data(dataset_name, tokenizer, max_length=2048, batch_size=16,
-                      split="test", num_workers=4):
+def prepare_test_data(dataset_name, tokenizer, max_length=1024, batch_size=4,
+                      split="test", num_workers=2):
     if dataset_name == "wikitext":
         dataset = load_dataset("wikitext", "wikitext-103-v1", split=split)
     else:
@@ -101,7 +94,7 @@ def evaluate_perplexity(model, dataloader, device, max_batches=None):
         total_tokens += num_tokens
         pbar.set_postfix({
             "loss": "{:.4f}".format(total_loss / total_tokens),
-            "ppl": "{:.2f}".format(math.exp(total_loss / total_tokens)),
+            "ppl": "{:.2f}".format(math.exp(min(total_loss / total_tokens, 20))),
         })
 
     avg_loss = total_loss / total_tokens
@@ -114,9 +107,9 @@ def evaluate_perplexity(model, dataloader, device, max_batches=None):
     }
 
 @torch.no_grad()
-def measure_throughput(model, device, seq_lengths=None, batch_size=8, warmup=3, trials=10):
+def measure_throughput(model, device, seq_lengths=None, batch_size=4, warmup=3, trials=10):
     if seq_lengths is None:
-        seq_lengths = [128, 256, 512, 1024, 2048]
+        seq_lengths = [128, 256, 512, 1024]
     model.eval()
     results = {}
     for seq_len in seq_lengths:
@@ -162,34 +155,114 @@ def generate_samples(model, tokenizer, device, prompts=None, max_new_tokens=100)
     return results
 
 def load_model_from_checkpoint(checkpoint_path, device="cuda"):
+    """Load model from a PyTorch Lightning checkpoint.
+
+    Reconstructs HybridConfig from the checkpoint's saved cfg dict,
+    then loads the state dict so the correct trained weights are used.
+    """
     print("Loading checkpoint from " + str(checkpoint_path) + "...")
     ckpt = torch.load(checkpoint_path, map_location="cpu")
-    if "hyper_parameters" in ckpt:
-        hp = ckpt["hyper_parameters"]
-    else:
-        hp = {}
-    try:
-        lightning_module = HybridLightningModule.load_from_checkpoint(
-            checkpoint_path, map_location=device
-        )
-        model = lightning_module.model
-    except Exception as e:
-        print("  Warning: Could not load Lightning module (" + str(e) + ")")
-        print("  Trying to extract model state dict directly...")
+
+    # ----------------------------------------------------------------
+    # Step 1: reconstruct HybridConfig from what was saved in the ckpt
+    # ----------------------------------------------------------------
+    cfg_kwargs = {}
+
+    # The training script saves the Hydra cfg under 'cfg' in hyper_parameters
+    hp = ckpt.get("hyper_parameters", {})
+    saved_cfg = hp.get("cfg", None)
+
+    if saved_cfg is not None:
+        # Extract model sub-config (OmegaConf DictConfig or plain dict)
+        try:
+            from omegaconf import OmegaConf
+            model_cfg = OmegaConf.to_container(saved_cfg.get("model", {}), resolve=True)
+        except Exception:
+            model_cfg = dict(saved_cfg.get("model", {}))
+
+        # Map known fields to HybridConfig kwargs
+        field_map = {
+            "vocab_size": "vocab_size",
+            "dim": "dim",
+            "num_layers": "num_layers",
+            "layer_pattern": "layer_pattern",
+            "state_size": "state_size",
+            "conv_size": "conv_size",
+            "expand_factor": "expand_factor",
+            "dt_rank": "dt_rank",
+            "use_fast_path": "use_fast_path",
+            "head_dim": "head_dim",
+            "num_heads": "num_heads",
+            "use_tfla": "use_tfla",
+            "proj_factor": "proj_factor",
+            "slstm_hidden_dim": "slstm_hidden_dim",
+            "slstm_num_heads": "slstm_num_heads",
+            "use_exponential_gate": "use_exponential_gate",
+            "norm_type": "norm_type",
+            "use_mlp": "use_mlp",
+            "mlp_ratio": "mlp_ratio",
+            "max_position_embeddings": "max_position_embeddings",
+            "dropout": "dropout",
+            "initializer_range": "initializer_range",
+            "use_cache": "use_cache",
+            "tie_word_embeddings": "tie_word_embeddings",
+        }
+        for src_key, dst_key in field_map.items():
+            if src_key in model_cfg and model_cfg[src_key] is not None:
+                cfg_kwargs[dst_key] = model_cfg[src_key]
+
+    if not cfg_kwargs:
+        # Fallback: try to infer from state dict shape
+        print("  Warning: could not read config from checkpoint hyper_parameters.")
+        print("  Inferring architecture from state_dict shapes...")
         state_dict = ckpt.get("state_dict", ckpt)
-        cleaned_state_dict = {}
+        # Count layers by finding the deepest layer index
+        layer_indices = set()
+        for k in state_dict.keys():
+            parts = k.split(".")
+            # keys look like: model.layers.0.mamba.in_proj.weight
+            if len(parts) >= 3 and parts[0] == "model" and parts[1] == "layers":
+                try:
+                    layer_indices.add(int(parts[2]))
+                except ValueError:
+                    pass
+        if layer_indices:
+            cfg_kwargs["num_layers"] = max(layer_indices) + 1
+        # Try to get dim from embedding weight
         for k, v in state_dict.items():
-            if k.startswith("model."): 
-                cleaned_state_dict[k[6:]] = v
-            else:
-                cleaned_state_dict[k] = v
-        config = HybridConfig()
-        model = HybridLanguageModel(config)
-        model.load_state_dict(cleaned_state_dict, strict=False)
+            if "token_embedding.weight" in k:
+                cfg_kwargs["vocab_size"] = v.shape[0]
+                cfg_kwargs["dim"] = v.shape[1]
+                break
+
+    # Build config and model
+    config = HybridConfig(**cfg_kwargs)
+    model = HybridLanguageModel(config)
+
+    # ----------------------------------------------------------------
+    # Step 2: load state dict (strip "model." prefix added by Lightning)
+    # ----------------------------------------------------------------
+    state_dict = ckpt.get("state_dict", ckpt)
+    cleaned = {}
+    for k, v in state_dict.items():
+        # Lightning wraps everything under self.model, so keys are "model.xxx"
+        if k.startswith("model."):
+            cleaned[k[6:]] = v
+        else:
+            cleaned[k] = v
+
+    missing, unexpected = model.load_state_dict(cleaned, strict=False)
+    if missing:
+        print("  Missing keys ({}): {}...".format(len(missing), missing[:3]))
+    if unexpected:
+        print("  Unexpected keys ({}): {}...".format(len(unexpected), unexpected[:3]))
 
     model = model.to(device)
     model.eval()
+
     num_params = sum(p.numel() for p in model.parameters())
+    print("  Config used: dim={}, num_layers={}, layer_pattern={}".format(
+        config.dim, config.num_layers, config.layer_pattern))
     print("  Model loaded: {:,} parameters ({:.1f}M)".format(num_params, num_params / 1e6))
     return model, num_params
 
@@ -199,8 +272,10 @@ def main():
     parser.add_argument("--model-config", type=str, default="hybrid_70m")
     parser.add_argument("--dataset", type=str, default="wikitext")
     parser.add_argument("--split", type=str, default="test")
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--max-batches", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--throughput", action="store_true")
     parser.add_argument("--generate", action="store_true")
@@ -225,8 +300,11 @@ def main():
     print(sep)
 
     dataloader, num_samples = prepare_test_data(
-        args.dataset, tokenizer, max_length=2048,
-        batch_size=args.batch_size, split=args.split
+        args.dataset, tokenizer,
+        max_length=args.max_length,
+        batch_size=args.batch_size,
+        split=args.split,
+        num_workers=args.num_workers,
     )
     print("  Samples: {}  |  Batches: {}".format(num_samples, len(dataloader)))
 
@@ -274,8 +352,8 @@ def main():
         "timestamp": datetime.now().isoformat(),
     }
 
-    if 2048 in throughput_results:
-        all_results["tokens_per_second"] = throughput_results[2048]["tokens_per_second"]
+    if 1024 in throughput_results:
+        all_results["tokens_per_second"] = throughput_results[1024]["tokens_per_second"]
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
