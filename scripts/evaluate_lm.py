@@ -331,7 +331,7 @@ def load_model_from_checkpoint(checkpoint_path, device="cuda",
     model.eval()
 
     num_params = sum(p.numel() for p in model.parameters())
-    print("  Model loaded: {:,{}} parameters ({:.1f}M)".format(num_params, num_params / 1e6))
+    print("  Model loaded: {:,} parameters ({:.1f}M)".format(num_params, num_params / 1e6))
     return model, num_params
 
 # ---------------------------------------------------------------------------
@@ -345,10 +345,10 @@ def main():
                         help="Label for results JSON (hybrid_70m / mamba_baseline / xlstm_baseline)")
     parser.add_argument("--layer-pattern", type=str, default=None,
                         help="Comma-separated layer types, e.g. "
-                             'mamba,mamba,mlstm,mamba,mamba,mlstm,mamba,mamba' for hybrid, "
-                             'mamba,mamba,mamba,mamba,mamba,mamba,mamba,mamba' for mamba-only, "
-                             'mlstm,mlstm,mlstm,mlstm,mlstm,mlstm,mlstm,mlstm' for xlstm-only. "
-                             If omitted, inferred from checkpoint state dict.")
+                             "mamba,mamba,mlstm,mamba,mamba,mlstm,mamba,mamba for hybrid, "
+                             "mamba,mamba,mamba,mamba,mamba,mamba,mamba,mamba for mamba-only, "
+                             "mlstm,mlstm,mlstm,mlstm,mlstm,mlstm,mlstm,mlstm for xlstm-only. "
+                             "If omitted, inferred from checkpoint state dict.")
     parser.add_argument("--dataset", type=str, default="wikitext")
     parser.add_argument("--split", type=str, default="test")
     parser.add_argument("--batch-size", type=int, default=4)
