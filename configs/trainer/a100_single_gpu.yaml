@@ -14,8 +14,8 @@ precision: "bf16-mixed"     # Critical: enables A100 Tensor Core bf16
 strategy: "auto"
 
 # Training loop
-max_epochs: null             # Train by steps, not epochs
-max_steps: 10000             # ~6 hours on A100 for 150M model
+max_epochs: 1                # Default to 1 epoch (override with max_epochs=4 or 5)
+max_steps: 10000             # ~6 hours on A100 for 150M model (set to -1 to use epochs)
 val_check_interval: 500      # Validate every 500 optimizer steps
 check_val_every_n_epoch: null
 log_every_n_steps: 25

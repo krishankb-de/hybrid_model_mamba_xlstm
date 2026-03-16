@@ -91,15 +91,56 @@ def prepare_dataloader(cfg: DictConfig, split: str, tokenizer):
             streaming=cfg.dataset.streaming,
             cache_dir=cfg.dataset.cache_dir,
         )
+    elif dataset_name == "fineweb":
+        # Load FineWeb dataset
+        dataset = load_dataset(
+            "HuggingFaceFW/fineweb",
+            name=cfg.dataset.dataset_version,
+            split=cfg.dataset.get(f"{split}_split", split),
+            streaming=cfg.dataset.streaming,
+            cache_dir=cfg.dataset.cache_dir,
+        )
+        
+        # For FineWeb, create train/val split if needed
+        if split == "validation":
+            # Use a small slice of training data for validation
+            val_size = cfg.dataset.get("val_size", 0.01)
+            val_max_samples = cfg.dataset.get("val_max_samples", 1000)
+            
+            # Take first N samples for validation
+            if hasattr(dataset, 'take'):
+                dataset = dataset.take(val_max_samples)
+            else:
+                dataset = dataset.select(range(min(val_max_samples, len(dataset))))
+        elif split == "train":
+            # Calculate how many samples we need for target tokens
+            target_tokens = cfg.dataset.get("target_tokens", None)
+            if target_tokens:
+                seq_length = cfg.dataset.get("max_seq_length", cfg.dataset.max_length)
+                # Estimate: assume average document is ~500 tokens
+                # We'll pack them into seq_length chunks
+                estimated_samples_needed = int(target_tokens / 500 * 1.2)  # 20% buffer
+                print(f"Limiting dataset to ~{estimated_samples_needed:,} samples for {target_tokens:,} tokens")
+                
+                if hasattr(dataset, 'take'):
+                    dataset = dataset.take(estimated_samples_needed)
+                elif len(dataset) > estimated_samples_needed:
+                    dataset = dataset.select(range(estimated_samples_needed))
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
     
     # Tokenization function - use text packing (concatenate + chunk)
     # instead of padding every sample to max_length (wastes compute on padding tokens)
     def tokenize_function(examples):
+        # Handle different text field names across datasets
+        text_field = "text"
+        if dataset_name == "fineweb" and "text" not in examples:
+            # FineWeb might use different field names
+            text_field = next(k for k in examples.keys() if isinstance(examples[k][0], str))
+        
         # Tokenize without padding - we'll pack sequences next
         tokenized = tokenizer(
-            examples["text"],
+            examples[text_field],
             truncation=False,
             return_attention_mask=False,
         )
@@ -126,19 +167,22 @@ def prepare_dataloader(cfg: DictConfig, split: str, tokenizer):
         return result
     
     # Tokenize dataset
-    tokenized_dataset = dataset.map(
-        tokenize_function,
-        batched=True,
-        remove_columns=dataset.column_names,
-        num_proc=cfg.dataset.get("preprocessing_num_workers", 4),
-    )
+    # For streaming datasets, don't use num_proc
+    map_kwargs = {
+        "batched": True,
+        "remove_columns": dataset.column_names if hasattr(dataset, 'column_names') else None,
+    }
+    if not cfg.dataset.streaming:
+        map_kwargs["num_proc"] = cfg.dataset.get("preprocessing_num_workers", 4)
+    
+    tokenized_dataset = dataset.map(tokenize_function, **map_kwargs)
     
     # Pack sequences into fixed-length chunks (no padding waste)
-    tokenized_dataset = tokenized_dataset.map(
-        group_texts,
-        batched=True,
-        num_proc=cfg.dataset.get("preprocessing_num_workers", 4),
-    )
+    pack_kwargs = {"batched": True}
+    if not cfg.dataset.streaming:
+        pack_kwargs["num_proc"] = cfg.dataset.get("preprocessing_num_workers", 4)
+    
+    tokenized_dataset = tokenized_dataset.map(group_texts, **pack_kwargs)
     
     # Create dataloader
     batch_size = cfg.dataset.batch_size if split == "train" else cfg.dataset.eval_batch_size
@@ -318,13 +362,18 @@ def main(cfg: DictConfig):
     loggers.append(tb_logger)
     
     # Create trainer
+    # Handle max_steps=-1 to mean "use max_epochs instead"
+    max_steps = cfg.trainer.max_steps
+    if max_steps == -1:
+        max_steps = None  # Let Lightning use max_epochs
+    
     trainer = pl.Trainer(
         accelerator=cfg.trainer.accelerator,
         devices=cfg.trainer.devices,
         precision=cfg.trainer.precision,
         strategy=cfg.trainer.strategy,
         max_epochs=cfg.trainer.max_epochs,
-        max_steps=cfg.trainer.max_steps,
+        max_steps=max_steps,
         val_check_interval=cfg.trainer.val_check_interval,
         log_every_n_steps=cfg.trainer.log_every_n_steps,
         accumulate_grad_batches=cfg.trainer.accumulate_grad_batches,
@@ -347,6 +396,35 @@ def main(cfg: DictConfig):
     print("Preparing data...")
     train_dataloader = prepare_dataloader(cfg, "train", tokenizer)
     val_dataloader = prepare_dataloader(cfg, "validation", tokenizer)
+    
+    # Print training info
+    print("\n" + "="*80)
+    print("TRAINING CONFIGURATION")
+    print("="*80)
+    print(f"Dataset: {cfg.dataset.dataset_name}")
+    if cfg.dataset.dataset_name == "fineweb":
+        target_tokens = cfg.dataset.get("target_tokens", "N/A")
+        print(f"Target tokens: {target_tokens:,}" if isinstance(target_tokens, int) else f"Target tokens: {target_tokens}")
+    print(f"Batch size: {cfg.dataset.batch_size}")
+    print(f"Gradient accumulation: {cfg.trainer.accumulate_grad_batches}")
+    print(f"Effective batch size: {cfg.dataset.batch_size * cfg.trainer.accumulate_grad_batches}")
+    print(f"Sequence length: {cfg.dataset.max_length}")
+    print(f"Tokens per batch: {cfg.dataset.batch_size * cfg.trainer.accumulate_grad_batches * cfg.dataset.max_length:,}")
+    
+    if cfg.trainer.max_epochs and cfg.trainer.max_epochs > 0:
+        print(f"Max epochs: {cfg.trainer.max_epochs}")
+        try:
+            num_batches = len(train_dataloader)
+            total_steps = num_batches * cfg.trainer.max_epochs
+            print(f"Steps per epoch: {num_batches:,}")
+            print(f"Total training steps: {total_steps:,}")
+            total_tokens = total_steps * cfg.dataset.batch_size * cfg.trainer.accumulate_grad_batches * cfg.dataset.max_length
+            print(f"Total tokens (all epochs): {total_tokens:,} ({total_tokens/1e9:.2f}B)")
+        except:
+            print("Steps per epoch: (calculated at runtime)")
+    elif cfg.trainer.max_steps and cfg.trainer.max_steps > 0:
+        print(f"Max steps: {cfg.trainer.max_steps:,}")
+    print("="*80 + "\n")
     
     # Train
     print("Starting training...")
