@@ -13,6 +13,16 @@ echo "=== JOB START (hybrid70m with FineWeb 1.5B tokens, 4 epochs) ==="
 date
 echo "Host: $(hostname)"
 echo "Submit dir: ${SLURM_SUBMIT_DIR}"
+echo ""
+echo "Configuration:"
+echo "  - Dataset: FineWeb sample-10BT"
+echo "  - Target tokens: 1.5B per epoch"
+echo "  - Epochs: 4 (total 6B tokens)"
+echo "  - Batch size: 8"
+echo "  - Gradient accumulation: 4"
+echo "  - Effective batch: 32"
+echo "  - RAM: 40GB"
+echo ""
 
 cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm"
 

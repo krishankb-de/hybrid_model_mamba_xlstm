@@ -362,18 +362,15 @@ def main(cfg: DictConfig):
     loggers.append(tb_logger)
     
     # Create trainer
-    # Handle max_steps=-1 to mean "use max_epochs instead"
-    max_steps = cfg.trainer.max_steps
-    if max_steps == -1:
-        max_steps = None  # Let Lightning use max_epochs
-    
+    # PyTorch Lightning expects max_steps to be -1 (unlimited) or a positive integer
+    # When max_steps=-1, training is controlled by max_epochs
     trainer = pl.Trainer(
         accelerator=cfg.trainer.accelerator,
         devices=cfg.trainer.devices,
         precision=cfg.trainer.precision,
         strategy=cfg.trainer.strategy,
         max_epochs=cfg.trainer.max_epochs,
-        max_steps=max_steps,
+        max_steps=cfg.trainer.max_steps,
         val_check_interval=cfg.trainer.val_check_interval,
         log_every_n_steps=cfg.trainer.log_every_n_steps,
         accumulate_grad_batches=cfg.trainer.accumulate_grad_batches,
@@ -411,7 +408,14 @@ def main(cfg: DictConfig):
     print(f"Sequence length: {cfg.dataset.max_length}")
     print(f"Tokens per batch: {cfg.dataset.batch_size * cfg.trainer.accumulate_grad_batches * cfg.dataset.max_length:,}")
     
-    if cfg.trainer.max_epochs and cfg.trainer.max_epochs > 0:
+    # Determine training mode
+    if cfg.trainer.max_steps > 0:
+        print(f"Training mode: Step-based")
+        print(f"Max steps: {cfg.trainer.max_steps:,}")
+        total_tokens = cfg.trainer.max_steps * cfg.dataset.batch_size * cfg.trainer.accumulate_grad_batches * cfg.dataset.max_length
+        print(f"Total tokens: {total_tokens:,} ({total_tokens/1e9:.2f}B)")
+    elif cfg.trainer.max_epochs > 0:
+        print(f"Training mode: Epoch-based")
         print(f"Max epochs: {cfg.trainer.max_epochs}")
         try:
             num_batches = len(train_dataloader)
@@ -422,8 +426,6 @@ def main(cfg: DictConfig):
             print(f"Total tokens (all epochs): {total_tokens:,} ({total_tokens/1e9:.2f}B)")
         except:
             print("Steps per epoch: (calculated at runtime)")
-    elif cfg.trainer.max_steps and cfg.trainer.max_steps > 0:
-        print(f"Max steps: {cfg.trainer.max_steps:,}")
     print("="*80 + "\n")
     
     # Train
