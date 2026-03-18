@@ -11,13 +11,13 @@ validation_split: "train"  # FineWeb doesn't have separate val split, we'll use 
 
 # Tokenization
 tokenizer: "gpt2"
-max_length: 2048
-max_seq_length: 2048  # Override for shorter sequences if needed
+max_length: 1024  # Reduced from 2048 for memory efficiency
+max_seq_length: 1024  # Override for shorter sequences if needed
 
-# Data loading (optimized for 40GB RAM)
-batch_size: 32
-eval_batch_size: 32
-num_workers: 8  # Increased from 4 for 40GB RAM
+# Data loading (optimized for 20GB MIG GPU)
+batch_size: 4  # Reduced from 32 for MIG GPU
+eval_batch_size: 4
+num_workers: 4  # Reduced to avoid worker overhead
 pin_memory: true
 
 # Streaming and caching
@@ -27,12 +27,14 @@ cache_dir: "./data/fineweb_cache"
 # Text packing (efficient training without padding waste)
 pack_sequences: true
 
-# Preprocessing (optimized for 40GB RAM)
-preprocessing_num_workers: 12  # Increased from 8 for faster preprocessing
+# Preprocessing (optimized for memory efficiency)
+preprocessing_num_workers: 8  # Reduced to avoid memory pressure
 
 # Token limit for 1.5B tokens
-# With batch_size=32, seq_len=2048: tokens_per_batch = 32 * 2048 = 65,536
-# For 1.5B tokens: 1,500,000,000 / 65,536 ≈ 22,888 batches per epoch
+# With batch_size=4, accumulate=8, seq_len=1024: 
+# effective_batch = 4 * 8 = 32
+# tokens_per_batch = 32 * 1024 = 32,768
+# For 1.5B tokens: 1,500,000,000 / 32,768 ≈ 45,776 batches per epoch
 max_train_samples: null  # We'll calculate this dynamically
 target_tokens: 1_500_000_000  # 1.5 billion tokens
 

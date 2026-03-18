@@ -18,10 +18,11 @@ echo "Configuration:"
 echo "  - Dataset: FineWeb sample-10BT"
 echo "  - Target tokens: 1.5B per epoch"
 echo "  - Epochs: 4 (total 6B tokens)"
-echo "  - Batch size: 8"
-echo "  - Gradient accumulation: 4"
+echo "  - Batch size: 4 (reduced for 20GB MIG GPU)"
+echo "  - Gradient accumulation: 8"
 echo "  - Effective batch: 32"
 echo "  - RAM: 40GB"
+echo "  - Sequence length: 1024 (reduced from 2048)"
 echo ""
 
 cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm"
@@ -29,7 +30,9 @@ cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm"
 export HF_HOME="$PWD/.hf"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export TORCHINDUCTOR_CACHE_DIR="$PWD/.torchinductor"
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+# Memory optimization flags
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128"
+export CUDA_LAUNCH_BLOCKING=0
 
 # Create virtual environment if it doesn't exist
 if [ ! -d ".venv" ]; then
@@ -44,11 +47,11 @@ pip install -e .
 nvidia-smi
 
 # Calculate training steps for 1.5B tokens over 4 epochs
-# With 40GB RAM, we can use larger batch size and more workers
-# batch_size=8, accumulate=4 -> effective_batch=32
-# seq_len=2048 -> tokens_per_batch = 32 * 2048 = 65,536
-# steps_per_epoch = 1,500,000,000 / 65,536 ≈ 22,888
-# total_steps = 22,888 * 4 ≈ 91,552 steps
+# MIG GPU has only ~20GB VRAM, so we need smaller batches
+# batch_size=4, accumulate=8 -> effective_batch=32
+# seq_len=1024 -> tokens_per_batch = 32 * 1024 = 32,768
+# steps_per_epoch = 1,500,000,000 / 32,768 ≈ 45,776
+# total_steps = 45,776 * 4 ≈ 183,104 steps
 
 python scripts/train.py \
   model=hybrid_70m \
@@ -56,10 +59,11 @@ python scripts/train.py \
   trainer=a100_single_gpu \
   trainer.max_epochs=4 \
   trainer.max_steps=-1 \
-  dataset.batch_size=8 \
-  dataset.eval_batch_size=8 \
-  dataset.max_length=2048 \
-  trainer.accumulate_grad_batches=4 \
+  dataset.batch_size=4 \
+  dataset.eval_batch_size=4 \
+  dataset.max_length=1024 \
+  dataset.max_seq_length=1024 \
+  trainer.accumulate_grad_batches=8 \
   trainer.val_check_interval=2000 \
   trainer.log_every_n_steps=100 \
   callbacks.checkpoint.every_n_train_steps=5000 \
@@ -67,8 +71,9 @@ python scripts/train.py \
   experiment_name=hybrid_70m_fineweb_1.5B_4epochs \
   wandb.enabled=false \
   model.gradient_clip_val=1.0 \
-  dataset.num_workers=8 \
-  dataset.preprocessing_num_workers=12
+  dataset.num_workers=4 \
+  dataset.preprocessing_num_workers=8 \
+  trainer.compile_model=false
 
 echo "=== JOB END (hybrid70m with FineWeb) ==="
 date
