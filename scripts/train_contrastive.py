@@ -77,7 +77,13 @@ class TextOnlyDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        text = item.get("text") or item.get("abstract") or ""
+        # Handle different field names across datasets
+        text = (
+            item.get("text") or 
+            item.get("abstract") or 
+            item.get("article") or
+            ""
+        )
         enc = self.tokenizer(
             text,
             max_length=self.max_length,
@@ -157,14 +163,27 @@ class ImageTextDataset(Dataset):
 
 def load_pubmed(cfg, split: str, tokenizer):
     """Load PubMed abstracts from HuggingFace."""
-    # "pubmed" on HF is available via the "ncbi/pubmed" dataset ID
-    ds = load_dataset(
-        "ncbi/pubmed",
-        split="train",
-        streaming=cfg.dataset.streaming,
-        cache_dir=cfg.dataset.cache_dir,
-        trust_remote_code=True,
-    )
+    # Use the pubmed_qa dataset which is in Parquet format (no loading script)
+    # Or use a text-based approach with streaming
+    try:
+        # Try the newer pubmed dataset format first
+        ds = load_dataset(
+            "pubmed",
+            split="train",
+            streaming=cfg.dataset.streaming,
+            cache_dir=cfg.dataset.cache_dir,
+        )
+    except Exception as e:
+        print(f"Could not load 'pubmed' dataset: {e}")
+        print("Falling back to 'ccdv/pubmed-summarization' dataset...")
+        # Fallback to pubmed summarization dataset
+        ds = load_dataset(
+            "ccdv/pubmed-summarization",
+            split="train" if split == "train" else "validation",
+            streaming=cfg.dataset.streaming,
+            cache_dir=cfg.dataset.cache_dir,
+        )
+    
     # Carve out validation from the tail of the training stream
     val_n = cfg.dataset.get("val_max_samples", 2000)
     if split == "validation":
