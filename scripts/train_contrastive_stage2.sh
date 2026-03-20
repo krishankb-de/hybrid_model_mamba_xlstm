@@ -73,6 +73,7 @@ python scripts/train_contrastive.py \
   --config-name config_70m \
   dataset=indiana_cxr \
   trainer=a100_single_gpu \
+  trainer.accelerator=cuda \
   contrastive_mode=clip \
   lm_checkpoint="$STAGE1_CHECKPOINT" \
   trainer.max_steps=5000 \

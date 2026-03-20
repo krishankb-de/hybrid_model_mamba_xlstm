@@ -85,6 +85,7 @@ python scripts/train_contrastive.py \
   --config-name config_70m \
   dataset=pubmed \
   trainer=a100_single_gpu \
+  trainer.accelerator=cuda \
   contrastive_mode=simcse \
   trainer.max_steps=10000 \
   dataset.batch_size=32 \
