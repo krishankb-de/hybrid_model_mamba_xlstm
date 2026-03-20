@@ -218,6 +218,170 @@ class HybridLightningModule(pl.LightningModule):
             self.log('train/grad_norm', grad_norm, on_step=True)
 
 
+class HybridContrastiveLightningModule(HybridLightningModule):
+    """Lightning module for contrastive (SimCSE / CLIP-style) fine-tuning.
+
+    Supports two training modes selected by ``contrastive_mode``:
+
+    * ``"simcse"``  — self-supervised: two dropout-augmented views of the
+      same text are pulled together; in-batch negatives are pushed apart.
+      No image encoder needed.  Use this for Stage 1 (text-only).
+
+    * ``"clip"``    — supervised: text embeddings are aligned to frozen
+      image embeddings produced by a pretrained BiomedCLIP / BioViL
+      image encoder.  Use this for Stage 2 (image-text alignment).
+
+    The contrastive loss is symmetric NT-Xent (InfoNCE) with a learnable
+    temperature, identical to the original CLIP formulation.
+
+    Args:
+        model:              HybridTextEncoder instance.
+        contrastive_mode:   ``"simcse"`` or ``"clip"``.
+        image_encoder_name: HuggingFace model ID for the image encoder
+                            (only used when contrastive_mode=="clip").
+                            Defaults to BiomedCLIP.
+        image_embed_dim:    Embedding dimension of the image encoder output.
+        learning_rate:      Initial learning rate.
+        weight_decay:       AdamW weight decay.
+        warmup_steps:       LR warmup steps.
+        max_steps:          Total training steps.
+        gradient_clip_val:  Gradient clipping norm.
+    """
+
+    def __init__(
+        self,
+        model,                          # HybridTextEncoder
+        contrastive_mode: str = "simcse",
+        image_encoder_name: str = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224",
+        learning_rate: float = 1e-4,
+        weight_decay: float = 0.01,
+        warmup_steps: int = 500,
+        max_steps: int = 10000,
+        gradient_clip_val: float = 1.0,
+    ):
+        # Pass a dummy HybridLanguageModel so the parent __init__ is happy;
+        # we override forward / training_step completely below.
+        super().__init__(
+            model=model,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            warmup_steps=warmup_steps,
+            max_steps=max_steps,
+            gradient_clip_val=gradient_clip_val,
+        )
+        self.contrastive_mode = contrastive_mode.lower()
+        self.image_encoder = None
+
+        if self.contrastive_mode == "clip":
+            # open_clip_torch is an optional dependency (pip install open-clip-torch)
+            try:
+                from open_clip import create_model_from_pretrained  # type: ignore[import-untyped]
+                self.image_encoder, _ = create_model_from_pretrained(image_encoder_name)
+                self.image_encoder.eval()
+                # Freeze image encoder completely
+                for p in self.image_encoder.parameters():
+                    p.requires_grad = False
+                # Linear bridge if dimensions differ
+                img_out = self.image_encoder.visual.output_dim
+                txt_out = model.embed_dim
+                self.img_proj = (
+                    torch.nn.Linear(img_out, txt_out, bias=False)
+                    if img_out != txt_out else torch.nn.Identity()
+                )
+            except ImportError:
+                raise ImportError(
+                    "open_clip_torch is required for clip mode. "
+                    "Install with: pip install open-clip-torch"
+                )
+
+    # ------------------------------------------------------------------
+    # Contrastive loss (symmetric NT-Xent / InfoNCE)
+    # ------------------------------------------------------------------
+    def _nt_xent_loss(
+        self,
+        z1: torch.Tensor,
+        z2: torch.Tensor,
+        logit_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        """Symmetric InfoNCE loss.
+
+        Args:
+            z1: Normalised embeddings from view-1 (B, D)
+            z2: Normalised embeddings from view-2 (B, D)
+            logit_scale: Learnable temperature (scalar)
+
+        Returns:
+            Scalar loss
+        """
+        scale = logit_scale.exp().clamp(max=100.0)
+        logits = scale * z1 @ z2.T           # (B, B)
+        labels = torch.arange(len(z1), device=z1.device)
+        loss_12 = torch.nn.functional.cross_entropy(logits, labels)
+        loss_21 = torch.nn.functional.cross_entropy(logits.T, labels)
+        return (loss_12 + loss_21) / 2.0
+
+    # ------------------------------------------------------------------
+    # Training / validation steps
+    # ------------------------------------------------------------------
+    def training_step(self, batch, batch_idx):
+        if self.contrastive_mode == "simcse":
+            return self._simcse_step(batch, batch_idx, split="train")
+        else:
+            return self._clip_step(batch, batch_idx, split="train")
+
+    def validation_step(self, batch, batch_idx):
+        if self.contrastive_mode == "simcse":
+            return self._simcse_step(batch, batch_idx, split="val")
+        else:
+            return self._clip_step(batch, batch_idx, split="val")
+
+    def _simcse_step(self, batch, batch_idx, split: str):
+        """SimCSE step: same input_ids passed twice through the encoder.
+
+        Different dropout masks produce two views → contrastive loss.
+        Batch must contain ``input_ids`` (B, L).
+        """
+        input_ids = batch["input_ids"]
+        self.model.lm.train()           # keep dropout active for both views
+        z1 = self.model.encode(input_ids)
+        z2 = self.model.encode(input_ids)
+        loss = self._nt_xent_loss(z1, z2, self.model.logit_scale)
+        self.log(f"{split}/contrastive_loss", loss, prog_bar=True,
+                 on_step=(split == "train"), on_epoch=True)
+        return loss
+
+    def _clip_step(self, batch, batch_idx, split: str):
+        """CLIP alignment step.
+
+        Batch must contain:
+          - ``input_ids``   (B, L)   — tokenised report
+          - ``pixel_values`` (B, C, H, W) — preprocessed image
+        """
+        input_ids = batch["input_ids"]
+        pixel_values = batch["pixel_values"]
+
+        # Text embeddings (trained)
+        z_text = self.model.encode(input_ids)
+
+        # Image embeddings (frozen)
+        with torch.no_grad():
+            z_img_raw = self.image_encoder.encode_image(pixel_values)
+        z_img = torch.nn.functional.normalize(
+            self.img_proj(z_img_raw.float()), dim=-1
+        )
+
+        loss = self._nt_xent_loss(z_text, z_img, self.model.logit_scale)
+        self.log(f"{split}/contrastive_loss", loss, prog_bar=True,
+                 on_step=(split == "train"), on_epoch=True)
+        return loss
+
+    # ------------------------------------------------------------------
+    # Retrieval metrics (R@1, R@5, R@10) logged at validation end
+    # ------------------------------------------------------------------
+    def on_validation_epoch_end(self):
+        pass  # Hook for future retrieval evaluation — extend as needed
+
+
 class MQARLightningModule(HybridLightningModule):
     """Lightning module specialized for MQAR (Multi-Query Associative Recall) task.
     

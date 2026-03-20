@@ -42,3 +42,7 @@ pre-commit>=3.3.0
 # Profiling
 py-spy>=0.3.14
 torch-tb-profiler>=0.4.0
+
+# Contrastive / medical CLIP (Stage 2)
+open-clip-torch>=2.24.0   # BiomedCLIP image encoder (frozen, used in clip mode)
+Pillow>=10.0.0            # Image loading for ImageTextDataset

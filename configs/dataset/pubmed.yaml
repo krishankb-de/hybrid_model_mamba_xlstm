@@ -1,0 +1,38 @@
+# PubMed abstracts dataset configuration
+# Used for Stage 1: biomedical domain pretraining of the text encoder.
+# Dataset: "pubmed_central" subset from HuggingFace (open access, no credentials needed)
+# ~500M tokens from 4M+ biomedical abstracts.
+
+dataset_name: "pubmed"
+dataset_version: "pubmed23n"   # NLM PubMed 2023 snapshot via HuggingFace
+
+# Splits — PubMed on HF has only a train split; we carve out validation below
+train_split: "train"
+validation_split: "train"
+
+# Tokenization — keep GPT-2 tokenizer for consistency with pretraining
+tokenizer: "gpt2"
+max_length: 512          # Abstracts are short; 512 covers 99%+ of them
+max_seq_length: 512
+
+# Data loading — A100 40GB can handle larger batches at seq_len=512
+batch_size: 32
+eval_batch_size: 32
+num_workers: 8
+pin_memory: true
+
+# Streaming: set to true to avoid downloading the full corpus upfront
+# Set to false once cached on the server for faster iteration
+streaming: false
+cache_dir: "/scratch/krishun/pubmed_cache"
+
+# Text packing — concatenate short abstracts into 512-token chunks
+pack_sequences: true
+preprocessing_num_workers: 8
+
+# Limit training to ~500M tokens (enough for domain adaptation)
+target_tokens: 500_000_000
+
+# Validation: carve out 2000 samples from the training set
+val_size: 0.001
+val_max_samples: 2000

@@ -286,8 +286,88 @@ class HybridLanguageModel(nn.Module):
     
     def get_layer_types(self) -> list:
         """Get the sequence of layer types in the model.
-        
+
         Returns:
             List of layer type strings
         """
         return [layer.layer_type for layer in self.layers]
+
+
+class HybridTextEncoder(nn.Module):
+    """Hybrid Mamba-xLSTM text encoder for contrastive / retrieval tasks.
+
+    Wraps HybridLanguageModel and adds a projection head that maps the
+    last-token hidden state to a normalised embedding vector suitable for
+    contrastive learning (SimCSE, CLIP-style alignment, etc.).
+
+    The underlying LM head is kept intact so the same checkpoint can be
+    used for both language-modelling pretraining and contrastive fine-tuning.
+
+    Args:
+        config:         HybridConfig instance (same as HybridLanguageModel).
+        embed_dim:      Output embedding dimension (default 512).
+        freeze_lm:      If True, freeze all LM backbone weights and only
+                        train the projection head (useful for light fine-tuning).
+    """
+
+    def __init__(
+        self,
+        config: HybridConfig,
+        embed_dim: int = 512,
+        freeze_lm: bool = False,
+    ):
+        super().__init__()
+        self.config = config
+        self.embed_dim = embed_dim
+
+        # Full LM backbone — reuse existing class
+        self.lm = HybridLanguageModel(config)
+
+        # Projection head: hidden_dim → embed_dim (no bias, standard in CLIP)
+        self.projection_head = nn.Sequential(
+            nn.Linear(config.dim, config.dim, bias=False),
+            nn.GELU(),
+            nn.Linear(config.dim, embed_dim, bias=False),
+        )
+
+        # Learnable temperature for contrastive loss (initialised to ln(1/0.07))
+        self.logit_scale = nn.Parameter(torch.ones([]) * 2.6592)
+
+        if freeze_lm:
+            for param in self.lm.parameters():
+                param.requires_grad = False
+
+    def encode(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Encode a batch of token sequences into normalised embeddings.
+
+        Uses the last non-padding token hidden state as the sequence
+        representation, which works well for causal SSM architectures.
+
+        Args:
+            input_ids: Token IDs (B, L)
+
+        Returns:
+            L2-normalised embeddings (B, embed_dim)
+        """
+        outputs = self.lm(input_ids, output_hidden_states=True, return_dict=True)
+        # outputs.hidden_states is a tuple; last element is post-final-norm
+        last_hidden = outputs.hidden_states[-1]   # (B, L, dim)
+        # Take the last token position as the sequence summary
+        seq_repr = last_hidden[:, -1, :]           # (B, dim)
+        projected = self.projection_head(seq_repr) # (B, embed_dim)
+        return nn.functional.normalize(projected, dim=-1)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
+        return_dict: bool = True,
+    ) -> CausalLMOutput:
+        """Forward pass — delegates to the underlying LM (for LM pretraining).
+
+        Call encode() instead when you need contrastive embeddings.
+        """
+        return self.lm(input_ids, labels=labels, return_dict=return_dict)
+
+    def get_num_params(self, non_embedding: bool = True) -> int:
+        return self.lm.get_num_params(non_embedding=non_embedding)

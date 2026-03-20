@@ -1,0 +1,50 @@
+# Indiana University Chest X-ray dataset configuration
+# Used for Stage 2: contrastive image-text alignment fine-tuning.
+#
+# Dataset: Indiana University CXR Collection
+#   - 7,470 radiology reports paired with frontal/lateral CXR images
+#   - Fully open access — no credentials required
+#   - HuggingFace ID: "Corran/IU-Xray" (community mirror)
+#   - Original: https://openi.nlm.nih.gov/
+#
+# Image encoder: microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224
+#   - Frozen during training (only text encoder is trained)
+#   - Outputs 512-dim L2-normalised image embeddings
+
+dataset_name: "indiana_cxr"
+dataset_version: null   # single config on HF
+
+# Splits
+train_split: "train"
+validation_split: "validation"
+test_split: "test"
+
+# Tokenization — match pubmed pretraining tokenizer
+tokenizer: "gpt2"
+max_length: 256         # Radiology reports: Findings + Impression fit in 256 tokens
+max_seq_length: 256
+
+# Data loading
+batch_size: 64          # Small dataset; large batch helps contrastive learning
+eval_batch_size: 64
+num_workers: 4
+pin_memory: true
+
+# No streaming — dataset is small enough to cache fully
+streaming: false
+cache_dir: "/scratch/krishun/indiana_cxr_cache"
+
+# Image preprocessing (for BiomedCLIP ViT-B/16)
+image_size: 224
+image_mean: [0.48145466, 0.4578275, 0.40821073]   # CLIP normalisation
+image_std:  [0.26862954, 0.26130258, 0.27577711]
+
+# Contrastive training settings
+contrastive_mode: "clip"
+image_encoder_name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+
+# Text fields in the dataset
+findings_field: "findings"
+impression_field: "impression"
+# If both fields present, concatenate: "Findings: <findings> Impression: <impression>"
+concatenate_sections: true
