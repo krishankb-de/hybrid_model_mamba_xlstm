@@ -89,7 +89,7 @@ python scripts/train_contrastive.py \
   experiment_name=stage2_indiana_clip \
   output_dir=./outputs/stage2_indiana_clip \
   wandb.enabled=false \
-  model.gradient_clip_val=1.0
+  model.gradient_clip_val=0.0
 
 echo ""
 echo "=== JOB END (Stage 2: CLIP) ==="

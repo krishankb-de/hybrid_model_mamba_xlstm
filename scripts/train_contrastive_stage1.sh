@@ -103,7 +103,7 @@ python scripts/train_contrastive.py \
   experiment_name=stage1_pubmed_simcse \
   output_dir=./outputs/stage1_pubmed_simcse \
   wandb.enabled=false \
-  model.gradient_clip_val=1.0
+  model.gradient_clip_val=0.0
 
 echo ""
 echo "=== JOB END (Stage 1: SimCSE) ==="
