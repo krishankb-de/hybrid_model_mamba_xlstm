@@ -30,11 +30,30 @@ export TORCHINDUCTOR_CACHE_DIR="$PWD/.torchinductor"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128"
 export CUDA_LAUNCH_BLOCKING=0
 
+# Ensure CUDA is visible to PyTorch
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+
+# Print CUDA info for debugging
+echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+python -c "import torch; print(f'PyTorch CUDA available: {torch.cuda.is_available()}'); print(f'CUDA device count: {torch.cuda.device_count()}'); print(f'CUDA device name: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\"}')" 2>/dev/null || echo "Could not check CUDA (will check after venv activation)"
+
 # Activate virtual environment
 source .venv/bin/activate
 
 # Install contrastive learning dependencies if needed
 pip install open-clip-torch Pillow
+
+# Verify CUDA is available
+echo ""
+echo "Verifying CUDA availability:"
+python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA device count: {torch.cuda.device_count()}'); print(f'Current device: {torch.cuda.current_device() if torch.cuda.is_available() else \"N/A\"}'); print(f'Device name: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\"}')"
+echo ""
+
+if ! python -c "import torch; exit(0 if torch.cuda.is_available() else 1)"; then
+    echo "ERROR: CUDA is not available to PyTorch!"
+    echo "This job requires GPU access."
+    exit 1
+fi
 
 # IMPORTANT: Update this path to your Stage 1 checkpoint
 STAGE1_CHECKPOINT="./outputs/stage1_pubmed_simcse/checkpoints/last.ckpt"
