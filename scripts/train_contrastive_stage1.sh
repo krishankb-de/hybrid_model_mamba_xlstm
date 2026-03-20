@@ -33,10 +33,7 @@ export CUDA_LAUNCH_BLOCKING=0
 
 # Ensure CUDA is visible to PyTorch
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
-
-# Print CUDA info for debugging
 echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
-python -c "import torch; print(f'PyTorch CUDA available: {torch.cuda.is_available()}'); print(f'CUDA device count: {torch.cuda.device_count()}'); print(f'CUDA device name: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\"}')"
 
 # Create virtual environment if it doesn't exist
 if [ ! -d ".venv" ]; then
