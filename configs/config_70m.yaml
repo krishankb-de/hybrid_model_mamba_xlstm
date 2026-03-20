@@ -35,3 +35,7 @@ log_dir: "${output_dir}/logs"
 # Reproducibility
 deterministic: false
 benchmark: true
+
+# Contrastive learning settings (optional, used by train_contrastive.py)
+contrastive_mode: null  # Options: "simcse" or "clip"
+lm_checkpoint: null     # Path to pretrained LM checkpoint for Stage 2

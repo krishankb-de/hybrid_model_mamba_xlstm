@@ -57,9 +57,9 @@ python scripts/train_contrastive.py \
   --config-name config_70m \
   dataset=indiana_cxr \
   trainer=a100_single_gpu \
-  trainer.max_steps=5000 \
   contrastive_mode=clip \
   lm_checkpoint="$STAGE1_CHECKPOINT" \
+  trainer.max_steps=5000 \
   dataset.batch_size=64 \
   dataset.eval_batch_size=64 \
   dataset.num_workers=4 \

@@ -50,8 +50,8 @@ python scripts/train_contrastive.py \
   --config-name config_70m \
   dataset=pubmed \
   trainer=a100_single_gpu \
-  trainer.max_steps=10000 \
   contrastive_mode=simcse \
+  trainer.max_steps=10000 \
   dataset.batch_size=32 \
   dataset.eval_batch_size=32 \
   dataset.num_workers=4 \
