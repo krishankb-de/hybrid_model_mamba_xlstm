@@ -30,9 +30,9 @@ export TORCHINDUCTOR_CACHE_DIR="$PWD/.torchinductor"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128"
 export CUDA_LAUNCH_BLOCKING=0
 
-# Ensure CUDA is visible to PyTorch
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
-echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+# Note: CUDA_VISIBLE_DEVICES is set by SLURM automatically for MIG devices
+# Don't override it manually
+echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-not set}"
 
 # Activate virtual environment
 source .venv/bin/activate

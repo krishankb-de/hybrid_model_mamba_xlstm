@@ -31,9 +31,9 @@ export TORCHINDUCTOR_CACHE_DIR="$PWD/.torchinductor"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128"
 export CUDA_LAUNCH_BLOCKING=0
 
-# Ensure CUDA is visible to PyTorch
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
-echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+# Note: CUDA_VISIBLE_DEVICES is set by SLURM automatically for MIG devices
+# Don't override it manually
+echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-not set}"
 
 # Create virtual environment if it doesn't exist
 if [ ! -d ".venv" ]; then
@@ -51,13 +51,32 @@ pip install open-clip-torch Pillow
 # Verify CUDA is available
 echo ""
 echo "Verifying CUDA availability:"
-python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA device count: {torch.cuda.device_count()}'); print(f'Current device: {torch.cuda.current_device() if torch.cuda.is_available() else \"N/A\"}'); print(f'Device name: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\"}')"
+python -c "
+import torch
+print(f'PyTorch version: {torch.__version__}')
+print(f'CUDA available: {torch.cuda.is_available()}')
+print(f'CUDA device count: {torch.cuda.device_count()}')
+if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+    print(f'Current device: {torch.cuda.current_device()}')
+    print(f'Device name: {torch.cuda.get_device_name(0)}')
+else:
+    print('Current device: N/A')
+    print('Device name: N/A')
+"
 echo ""
 
 if ! python -c "import torch; exit(0 if torch.cuda.is_available() else 1)"; then
     echo "ERROR: CUDA is not available to PyTorch!"
     echo "This job requires GPU access."
     exit 1
+fi
+
+# Check if device count is 0 despite CUDA being available
+DEVICE_COUNT=$(python -c "import torch; print(torch.cuda.device_count())")
+if [ "$DEVICE_COUNT" = "0" ]; then
+    echo "WARNING: CUDA is available but device count is 0"
+    echo "This may be a CUDA_VISIBLE_DEVICES issue with MIG devices"
+    echo "Attempting to continue anyway - PyTorch Lightning may handle this..."
 fi
 
 nvidia-smi
