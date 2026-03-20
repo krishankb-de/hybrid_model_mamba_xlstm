@@ -88,12 +88,14 @@ python scripts/train_contrastive.py \
   trainer.accelerator=cuda \
   contrastive_mode=simcse \
   trainer.max_steps=10000 \
-  dataset.batch_size=8 \
-  dataset.eval_batch_size=8 \
+  dataset.batch_size=4 \
+  dataset.eval_batch_size=4 \
+  dataset.max_length=256 \
+  dataset.max_seq_length=256 \
   dataset.num_workers=2 \
   dataset.preprocessing_num_workers=4 \
   dataset.pin_memory=false \
-  trainer.accumulate_grad_batches=8 \
+  trainer.accumulate_grad_batches=16 \
   trainer.val_check_interval=500 \
   trainer.log_every_n_steps=25 \
   callbacks.checkpoint.every_n_train_steps=1000 \

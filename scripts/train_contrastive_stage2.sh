@@ -77,11 +77,11 @@ python scripts/train_contrastive.py \
   contrastive_mode=clip \
   lm_checkpoint="$STAGE1_CHECKPOINT" \
   trainer.max_steps=5000 \
-  dataset.batch_size=16 \
-  dataset.eval_batch_size=16 \
+  dataset.batch_size=8 \
+  dataset.eval_batch_size=8 \
   dataset.num_workers=2 \
   dataset.pin_memory=false \
-  trainer.accumulate_grad_batches=4 \
+  trainer.accumulate_grad_batches=8 \
   trainer.val_check_interval=250 \
   trainer.log_every_n_steps=25 \
   callbacks.checkpoint.every_n_train_steps=500 \
