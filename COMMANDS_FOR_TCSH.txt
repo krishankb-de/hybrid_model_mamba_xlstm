@@ -1,0 +1,21 @@
+# Commands for tcsh Shell Users
+
+# Step 1: Setup (already done ✓)
+bash setup_contrastive_env.sh
+
+# Step 2: Activate virtual environment (use .csh version for tcsh)
+source .venv/bin/activate.csh
+
+# Step 3: Run verification tests
+python test_contrastive_fixes.py
+
+# Step 4: Submit training job (no venv activation needed)
+sbatch scripts/train_contrastive_stage1.sh
+
+# Step 5: Monitor training
+tail -f logs/simcse_stage1_*.log
+
+# Note: The error "Badly placed ()'s" happens when you use:
+#   source .venv/bin/activate  (bash syntax - doesn't work in tcsh)
+# Instead use:
+#   source .venv/bin/activate.csh  (tcsh syntax - works!)

@@ -91,8 +91,9 @@ python scripts/train_contrastive.py \
   dataset=pubmed \
   trainer=a100_single_gpu \
   trainer.accelerator=cuda \
-  contrastive_mode=simcse \
+  trainer.max_epochs=-1 \
   trainer.max_steps=10000 \
+  contrastive_mode=simcse \
   dataset.batch_size=4 \
   dataset.eval_batch_size=4 \
   dataset.max_length=256 \
@@ -105,6 +106,10 @@ python scripts/train_contrastive.py \
   trainer.log_every_n_steps=25 \
   callbacks.checkpoint.every_n_train_steps=1000 \
   callbacks.checkpoint.save_top_k=3 \
+  callbacks.early_stopping.enabled=true \
+  callbacks.early_stopping.monitor=val/contrastive_loss \
+  callbacks.early_stopping.patience=5 \
+  callbacks.early_stopping.min_delta=0.01 \
   experiment_name=stage1_pubmed_simcse \
   output_dir=./outputs/stage1_pubmed_simcse \
   wandb.enabled=false \
