@@ -18,11 +18,13 @@ echo "Configuration:"
 echo "  - Dataset: PubMed abstracts (ccdv/pubmed-summarization)"
 echo "  - Target tokens: 500M"
 echo "  - Mode: SimCSE (text-only contrastive)"
-echo "  - Batch size: 4 (effective: 64 with grad accum)"
+echo "  - Batch size: 8 (effective: 64 with grad accum)"
 echo "  - Sequence length: 256"
-echo "  - Learning rate: 0.0003 (reduced for stability)"
+echo "  - Learning rate: 0.0001 (reduced for stability)"
+echo "  - Warmup steps: 500"
 echo "  - Max steps: 10,000"
-echo "  - Expected runtime: 12-14 hours"
+echo "  - Early stopping: enabled (monitors train loss)"
+echo "  - Expected runtime: 3-5 hours"
 echo ""
 
 cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm"
@@ -94,26 +96,27 @@ python scripts/train_contrastive.py \
   trainer.max_epochs=-1 \
   trainer.max_steps=10000 \
   contrastive_mode=simcse \
-  dataset.batch_size=4 \
-  dataset.eval_batch_size=4 \
+  dataset.batch_size=8 \
+  dataset.eval_batch_size=8 \
   dataset.max_length=256 \
   dataset.max_seq_length=256 \
   dataset.num_workers=2 \
   dataset.preprocessing_num_workers=4 \
   dataset.pin_memory=false \
-  trainer.accumulate_grad_batches=16 \
+  trainer.accumulate_grad_batches=8 \
   trainer.val_check_interval=500 \
   trainer.log_every_n_steps=25 \
   callbacks.checkpoint.every_n_train_steps=1000 \
   callbacks.checkpoint.save_top_k=3 \
   callbacks.early_stopping.enabled=true \
-  callbacks.early_stopping.monitor=val/contrastive_loss \
-  callbacks.early_stopping.patience=5 \
-  callbacks.early_stopping.min_delta=0.01 \
+  callbacks.early_stopping.monitor=train/contrastive_loss_epoch \
+  callbacks.early_stopping.patience=3 \
+  callbacks.early_stopping.min_delta=0.05 \
   experiment_name=stage1_pubmed_simcse \
   output_dir=./outputs/stage1_pubmed_simcse \
   wandb.enabled=false \
-  model.learning_rate=0.0003 \
+  model.learning_rate=0.0001 \
+  model.warmup_steps=500 \
   model.gradient_clip_val=0.0
 
 echo ""

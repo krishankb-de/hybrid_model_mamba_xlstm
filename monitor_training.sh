@@ -34,12 +34,28 @@ check_health() {
     
     # Check for collapse
     if [ -n "$LAST_VAL_LOSS" ]; then
-        if (( $(echo "$LAST_VAL_LOSS < 0.5" | bc -l) )); then
-            echo "🚨 WARNING: Validation loss < 0.5 - Model may be collapsing!"
+        if (( $(echo "$LAST_VAL_LOSS < 0.3" | bc -l) )); then
+            echo "💀 CRITICAL: Validation loss < 0.3 - COMPLETE COLLAPSE!"
+            echo "    ACTION: Stop job immediately with: scancel <job_id>"
+        elif (( $(echo "$LAST_VAL_LOSS < 0.5" | bc -l) )); then
+            echo "🚨 WARNING: Validation loss < 0.5 - Model is collapsing!"
+            echo "    ACTION: Monitor closely, consider stopping"
         elif (( $(echo "$LAST_VAL_LOSS < 1.0" | bc -l) )); then
             echo "⚠️  CAUTION: Validation loss < 1.0 - Monitor closely"
         else
             echo "✅ Validation loss looks healthy (> 1.0)"
+        fi
+    fi
+    
+    # Check training loss for collapse
+    LAST_TRAIN_LOSS=$(echo "$RECENT_LOSSES" | tail -1)
+    if [ -n "$LAST_TRAIN_LOSS" ]; then
+        if (( $(echo "$LAST_TRAIN_LOSS < 0.1" | bc -l) )); then
+            echo "💀 CRITICAL: Training loss < 0.1 - COLLAPSE DETECTED!"
+            echo "    ACTION: Stop job NOW with: scancel <job_id>"
+        elif (( $(echo "$LAST_TRAIN_LOSS < 0.5" | bc -l) )); then
+            echo "🚨 WARNING: Training loss < 0.5 - Collapse starting!"
+            echo "    ACTION: Consider stopping job"
         fi
     fi
     

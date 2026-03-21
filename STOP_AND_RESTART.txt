@@ -1,0 +1,69 @@
+═══════════════════════════════════════════════════════════════
+  IMMEDIATE ACTIONS - Job 281 Has Collapsed
+═══════════════════════════════════════════════════════════════
+
+PROBLEM: Your training has collapsed again (loss ~10^-5, step 17,033)
+
+═══════════════════════════════════════════════════════════════
+
+STEP 1: STOP THE JOB
+═══════════════════════════════════════════════════════════════
+
+scancel 281
+
+═══════════════════════════════════════════════════════════════
+
+STEP 2: CLEAN UP FAILED CHECKPOINTS
+═══════════════════════════════════════════════════════════════
+
+rm -rf outputs/stage1_pubmed_simcse/checkpoints/*
+
+═══════════════════════════════════════════════════════════════
+
+STEP 3: RESTART WITH FIXED SETTINGS
+═══════════════════════════════════════════════════════════════
+
+sbatch scripts/train_contrastive_stage1.sh
+
+═══════════════════════════════════════════════════════════════
+
+WHAT WAS FIXED:
+═══════════════════════════════════════════════════════════════
+
+1. Learning rate: 0.0003 → 0.0001 (67% reduction)
+2. Batch size: 4 → 8 (more stable gradients)
+3. Accumulation: 16 → 8 (larger physical batches)
+4. Warmup: 1000 → 500 steps
+5. Early stopping: monitors train loss (catches collapse)
+
+═══════════════════════════════════════════════════════════════
+
+MONITORING:
+═══════════════════════════════════════════════════════════════
+
+# Check every 30 minutes
+tail -20 logs/simcse_stage1_*.log | grep contrastive_loss
+
+# STOP IMMEDIATELY if you see:
+# - Training loss < 0.5
+# - Step count > 11,000
+# - Loss drops by 50% in 500 steps
+
+═══════════════════════════════════════════════════════════════
+
+EXPECTED BEHAVIOR:
+═══════════════════════════════════════════════════════════════
+
+Step 500:  loss ~4-5
+Step 1000: loss ~3-4
+Step 2000: loss ~2.5-3.5
+Step 5000: loss ~1.5-2.5
+Step 10000: loss ~1.0-2.0
+
+Duration: 3-5 hours
+
+═══════════════════════════════════════════════════════════════
+
+See FINAL_FIX_COLLAPSE.md for detailed explanation.
+
+═══════════════════════════════════════════════════════════════
