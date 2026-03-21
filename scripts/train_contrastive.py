@@ -162,27 +162,20 @@ class ImageTextDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 def load_pubmed(cfg, split: str, tokenizer):
-    """Load PubMed abstracts from HuggingFace."""
-    # Use the pubmed_qa dataset which is in Parquet format (no loading script)
-    # Or use a text-based approach with streaming
-    try:
-        # Try the newer pubmed dataset format first
-        ds = load_dataset(
-            "pubmed",
-            split="train",
-            streaming=cfg.dataset.streaming,
-            cache_dir=cfg.dataset.cache_dir,
-        )
-    except Exception as e:
-        print(f"Could not load 'pubmed' dataset: {e}")
-        print("Falling back to 'ccdv/pubmed-summarization' dataset...")
-        # Fallback to pubmed summarization dataset
-        ds = load_dataset(
-            "ccdv/pubmed-summarization",
-            split="train" if split == "train" else "validation",
-            streaming=cfg.dataset.streaming,
-            cache_dir=cfg.dataset.cache_dir,
-        )
+    """Load PubMed abstracts from HuggingFace.
+    
+    Uses ccdv/pubmed-summarization which is in Parquet format (no loading script).
+    This dataset contains ~133k PubMed articles with abstracts.
+    """
+    print(f"Loading PubMed dataset for {split} split...")
+    
+    # Use pubmed-summarization dataset (Parquet format, no loading script)
+    ds = load_dataset(
+        "ccdv/pubmed-summarization",
+        split="train" if split == "train" else "validation",
+        streaming=cfg.dataset.streaming,
+        cache_dir=cfg.dataset.cache_dir,
+    )
     
     # Carve out validation from the tail of the training stream
     val_n = cfg.dataset.get("val_max_samples", 2000)
@@ -197,7 +190,8 @@ def load_pubmed(cfg, split: str, tokenizer):
             n = int(target_tokens / 200)   # rough estimate: ~200 tokens/abstract
             if len(ds) > n:
                 ds = ds.select(range(val_n, val_n + n))
-
+    
+    print(f"Dataset loaded: {len(ds) if hasattr(ds, '__len__') else 'streaming'} samples")
     return TextOnlyDataset(ds, tokenizer, cfg.dataset.max_length)
 
 

@@ -2,7 +2,7 @@
 #SBATCH --partition=students
 #SBATCH --gres=gpu:student:1
 #SBATCH --mem=20G
-#SBATCH --time=12:00:00
+#SBATCH --time=16:00:00
 #SBATCH --job-name=simcse_stage1
 #SBATCH --output=logs/%x_%j.log
 #SBATCH --error=logs/%x_%j.log
@@ -15,12 +15,14 @@ echo "Host: $(hostname)"
 echo "Submit dir: ${SLURM_SUBMIT_DIR}"
 echo ""
 echo "Configuration:"
-echo "  - Dataset: PubMed abstracts"
+echo "  - Dataset: PubMed abstracts (ccdv/pubmed-summarization)"
 echo "  - Target tokens: 500M"
 echo "  - Mode: SimCSE (text-only contrastive)"
-echo "  - Batch size: 32"
+echo "  - Batch size: 4 (effective: 64 with grad accum)"
+echo "  - Sequence length: 256"
+echo "  - Learning rate: 0.0003 (reduced for stability)"
 echo "  - Max steps: 10,000"
-echo "  - Expected runtime: 8-10 hours"
+echo "  - Expected runtime: 12-14 hours"
 echo ""
 
 cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm"
@@ -35,18 +37,21 @@ export CUDA_LAUNCH_BLOCKING=0
 # Don't override it manually
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-not set}"
 
-# Create virtual environment if it doesn't exist
+# Activate virtual environment (must already exist)
 if [ ! -d ".venv" ]; then
-    python -m venv .venv
+    echo "ERROR: Virtual environment .venv not found!"
+    echo "Please create it first with: python -m venv .venv"
+    exit 1
 fi
 
 source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-pip install -e .
 
-# Install contrastive learning dependencies
-pip install open-clip-torch Pillow
+# Verify Python and torch are available
+if ! python -c "import torch" 2>/dev/null; then
+    echo "ERROR: PyTorch not found in virtual environment!"
+    echo "Please install requirements: pip install -r requirements.txt"
+    exit 1
+fi
 
 # Verify CUDA is available
 echo ""
@@ -103,6 +108,7 @@ python scripts/train_contrastive.py \
   experiment_name=stage1_pubmed_simcse \
   output_dir=./outputs/stage1_pubmed_simcse \
   wandb.enabled=false \
+  model.learning_rate=0.0003 \
   model.gradient_clip_val=0.0
 
 echo ""

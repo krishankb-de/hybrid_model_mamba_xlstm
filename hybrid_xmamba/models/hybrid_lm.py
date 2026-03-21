@@ -355,7 +355,8 @@ class HybridTextEncoder(nn.Module):
         # Take the last token position as the sequence summary
         seq_repr = last_hidden[:, -1, :]           # (B, dim)
         projected = self.projection_head(seq_repr) # (B, embed_dim)
-        return nn.functional.normalize(projected, dim=-1)
+        # Add epsilon for numerical stability
+        return nn.functional.normalize(projected, dim=-1, eps=1e-8)
 
     def forward(
         self,
