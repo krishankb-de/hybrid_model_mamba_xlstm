@@ -354,11 +354,30 @@ class HybridContrastiveLightningModule(HybridLightningModule):
 
         Different dropout masks produce two views → contrastive loss.
         Batch must contain ``input_ids`` (B, L).
+        
+        CRITICAL FIX: Temporarily increases dropout to 0.3 for more diverse views.
+        This prevents representation collapse that occurs with default dropout=0.1.
         """
         input_ids = batch["input_ids"]
+        
+        # Store original dropout rates and increase them temporarily
+        original_dropout_rates = []
+        for module in self.model.lm.modules():
+            if isinstance(module, torch.nn.Dropout):
+                original_dropout_rates.append(module.p)
+                module.p = 0.3  # Increase from 0.1 to 0.3 for SimCSE diversity
+        
         self.model.lm.train()           # keep dropout active for both views
         z1 = self.model.encode(input_ids)
         z2 = self.model.encode(input_ids)
+        
+        # Restore original dropout rates
+        idx = 0
+        for module in self.model.lm.modules():
+            if isinstance(module, torch.nn.Dropout):
+                module.p = original_dropout_rates[idx]
+                idx += 1
+        
         loss = self._nt_xent_loss(z1, z2, self.model.logit_scale)
         self.log(f"{split}/contrastive_loss", loss, prog_bar=True,
                  on_step=(split == "train"), on_epoch=True)
