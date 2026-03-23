@@ -146,12 +146,17 @@ class ImageTextDataset(Dataset):
 
         # --- image ---
         img = item.get("image")
-        if isinstance(img, str):
+        
+        # Handle different image formats
+        if img is None:
+            raise ValueError(f"Image is None for sample (should have been filtered)")
+        elif isinstance(img, str):
             img = Image.open(img).convert("RGB")
         elif not isinstance(img, Image.Image):
             img = Image.fromarray(img).convert("RGB")
         else:
             img = img.convert("RGB")
+            
         pixel_values = self.img_transform(img)
 
         return {"input_ids": input_ids, "pixel_values": pixel_values}
@@ -202,6 +207,12 @@ def load_indiana_cxr(cfg, split: str, tokenizer):
         split=split,
         cache_dir=cfg.dataset.cache_dir,
     )
+    
+    # Filter out samples with None images
+    print(f"Original dataset size: {len(ds)}")
+    ds = ds.filter(lambda x: x.get("image") is not None)
+    print(f"Filtered dataset size (non-None images): {len(ds)}")
+    
     return ImageTextDataset(ds, tokenizer, cfg)
 
 
