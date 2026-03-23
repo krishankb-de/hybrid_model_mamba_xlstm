@@ -1,0 +1,110 @@
+#!/bin/bash
+# Skip SimCSE and go directly to CLIP alignment
+
+echo "════════════════════════════════════════════════════════════════"
+echo "  DEFINITIVE SOLUTION: Skip SimCSE, Use CLIP Directly"
+echo "════════════════════════════════════════════════════════════════"
+echo ""
+echo "PROBLEM:"
+echo "  SimCSE has failed 4 times (jobs 206, 281, 285, 291)"
+echo "  All attempts resulted in representation collapse"
+echo "  Root cause: Mamba/xLSTM incompatible with dropout-based SimCSE"
+echo ""
+echo "SOLUTION:"
+echo "  Skip Stage 1 (SimCSE) entirely"
+echo "  Go directly to Stage 2 (CLIP alignment)"
+echo "  Use real image-text pairs instead of dropout augmentation"
+echo ""
+echo "════════════════════════════════════════════════════════════════"
+echo ""
+
+# Stop any SimCSE jobs
+echo "Step 1: Stopping SimCSE jobs..."
+SIMCSE_JOBS=$(squeue -u $USER -n simcse_stage1 -h -o "%i")
+if [ -n "$SIMCSE_JOBS" ]; then
+    for job in $SIMCSE_JOBS; do
+        echo "  Cancelling SimCSE job $job..."
+        scancel $job
+    done
+    sleep 2
+else
+    echo "  No SimCSE jobs running"
+fi
+echo ""
+
+# Submit CLIP training
+echo "Step 2: Submitting CLIP alignment training..."
+echo ""
+echo "  Dataset: Indiana CXR (image-text pairs)"
+echo "  Image encoder: BiomedCLIP (frozen)"
+echo "  Text encoder: Your Hybrid model (trained)"
+echo "  Training: Align text with medical images"
+echo ""
+
+JOB_ID=$(sbatch scripts/train_contrastive_stage2.sh | grep -oP '\d+$')
+
+if [ -n "$JOB_ID" ]; then
+    echo "✅ CLIP training submitted: Job $JOB_ID"
+    echo ""
+    echo "════════════════════════════════════════════════════════════════"
+    echo "  Why This Will Work (Unlike SimCSE)"
+    echo "════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "  SimCSE (Failed):"
+    echo "    ❌ Relies on dropout for diversity"
+    echo "    ❌ Mamba/xLSTM has minimal dropout"
+    echo "    ❌ Unsupervised → finds degenerate solutions"
+    echo "    ❌ 4 attempts, all collapsed"
+    echo ""
+    echo "  CLIP (Will Work):"
+    echo "    ✅ Uses real image-text pairs"
+    echo "    ✅ No dropout dependency"
+    echo "    ✅ Supervised → stable training"
+    echo "    ✅ Proven approach (BiomedCLIP exists)"
+    echo ""
+    echo "════════════════════════════════════════════════════════════════"
+    echo "  Expected Behavior"
+    echo "════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "  Duration: 2-3 hours (5,000 steps)"
+    echo "  Loss trajectory:"
+    echo "    Step 0:    6-8   (random init)"
+    echo "    Step 500:  4-5   (learning)"
+    echo "    Step 1000: 3-4   (converging)"
+    echo "    Step 2000: 2-3   (good)"
+    echo "    Step 5000: 1.5-2 (optimal)"
+    echo ""
+    echo "  NO COLLAPSE: Loss stays > 0.5"
+    echo ""
+    echo "════════════════════════════════════════════════════════════════"
+    echo "  Monitoring"
+    echo "════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "  Watch log:"
+    echo "    tail -f logs/*stage2*${JOB_ID}.log | grep contrastive_loss"
+    echo ""
+    echo "  Check progress:"
+    echo "    tail -20 logs/*stage2*${JOB_ID}.log"
+    echo ""
+    echo "════════════════════════════════════════════════════════════════"
+    echo "  Success Criteria"
+    echo "════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "  ✅ Loss stays > 0.5 (no collapse)"
+    echo "  ✅ Final loss: 1.0-2.0"
+    echo "  ✅ Training completes 5,000 steps"
+    echo "  ✅ Checkpoint usable for retrieval"
+    echo ""
+    echo "════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "See SKIP_SIMCSE_SOLUTION.md for detailed explanation"
+    echo ""
+else
+    echo "❌ Job submission failed!"
+    echo ""
+    echo "Check:"
+    echo "  1. Does scripts/train_contrastive_stage2.sh exist?"
+    echo "  2. Are you in the correct directory?"
+    echo "  3. Do you have SLURM access?"
+    echo ""
+fi

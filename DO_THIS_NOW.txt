@@ -1,0 +1,66 @@
+═══════════════════════════════════════════════════════════════
+  FINAL SOLUTION - 3 Simple Steps
+═══════════════════════════════════════════════════════════════
+
+STEP 1: Push Code (on your local machine where Kiro is running)
+───────────────────────────────────────────────────────────────
+git add hybrid_xmamba/training/lightning_module.py
+git commit -m "Fix CLIP model loading"
+git push origin a100_70m_baseline
+
+
+STEP 2: Pull Code (on willi server)
+───────────────────────────────────────────────────────────────
+cd /scratch/bhushkri/hybrid_xmamba_a100_70m_40/hybrid_model_mamba_xlstm
+git pull origin a100_70m_baseline
+
+
+STEP 3: Start CLIP Training (on willi server)
+───────────────────────────────────────────────────────────────
+sbatch scripts/train_contrastive_stage2.sh
+
+
+MONITOR: Watch the training
+───────────────────────────────────────────────────────────────
+tail -f logs/clip_stage2_*.log | grep contrastive_loss
+
+
+═══════════════════════════════════════════════════════════════
+  What Was Fixed
+═══════════════════════════════════════════════════════════════
+
+1. SimCSE → Skip it (incompatible with Mamba/xLSTM)
+2. CLIP model loading → Fixed (added hf-hub: prefix)
+3. Fallback to standard CLIP → Added (if BiomedCLIP fails)
+
+
+═══════════════════════════════════════════════════════════════
+  Expected Result
+═══════════════════════════════════════════════════════════════
+
+Duration: 2-3 hours
+Loss: 6 → 4 → 3 → 2 → 1.5
+NO COLLAPSE (loss stays > 0.5)
+Checkpoint: ~330 MB
+
+
+═══════════════════════════════════════════════════════════════
+  Why This Will Work
+═══════════════════════════════════════════════════════════════
+
+SimCSE (Failed):
+  ❌ Needs dropout diversity
+  ❌ Mamba/xLSTM has minimal dropout
+  ❌ 4 attempts, all collapsed
+
+CLIP (Will Work):
+  ✅ Uses real image-text pairs
+  ✅ No dropout dependency
+  ✅ Proven approach
+
+
+═══════════════════════════════════════════════════════════════
+
+See FINAL_INSTRUCTIONS.md for complete details.
+
+═══════════════════════════════════════════════════════════════

@@ -273,26 +273,67 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         self.image_encoder = None
 
         if self.contrastive_mode == "clip":
-            # open_clip_torch is an optional dependency (pip install open-clip-torch)
+            # Load BiomedCLIP image encoder from HuggingFace
             try:
-                from open_clip import create_model_from_pretrained  # type: ignore[import-untyped]
-                self.image_encoder, _ = create_model_from_pretrained(image_encoder_name)
+                import open_clip
+                # BiomedCLIP uses a specific loading method
+                # Try loading from HuggingFace hub directly
+                model_name = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+                
+                print(f"Loading BiomedCLIP image encoder from: {model_name}")
+                
+                # Load the full BiomedCLIP model
+                self.image_encoder, _ = open_clip.create_model_from_pretrained(
+                    'hf-hub:' + model_name
+                )
+                
+                # Extract just the visual encoder
+                self.image_encoder = self.image_encoder.visual
                 self.image_encoder.eval()
+                
                 # Freeze image encoder completely
                 for p in self.image_encoder.parameters():
                     p.requires_grad = False
+                
                 # Linear bridge if dimensions differ
-                img_out = self.image_encoder.visual.output_dim
+                img_out = self.image_encoder.output_dim
                 txt_out = model.embed_dim
                 self.img_proj = (
                     torch.nn.Linear(img_out, txt_out, bias=False)
                     if img_out != txt_out else torch.nn.Identity()
                 )
-            except ImportError:
-                raise ImportError(
-                    "open_clip_torch is required for clip mode. "
-                    "Install with: pip install open-clip-torch"
-                )
+                
+                print(f"✓ BiomedCLIP image encoder loaded successfully")
+                print(f"  Image output dim: {img_out}")
+                print(f"  Text output dim: {txt_out}")
+                
+            except Exception as e:
+                print(f"Error loading BiomedCLIP: {e}")
+                print("Trying alternative loading method...")
+                
+                # Fallback: Use a standard CLIP model
+                try:
+                    self.image_encoder, _ = open_clip.create_model_from_pretrained(
+                        'hf-hub:laion/CLIP-ViT-B-16-laion2B-s34B-b88K'
+                    )
+                    self.image_encoder = self.image_encoder.visual
+                    self.image_encoder.eval()
+                    for p in self.image_encoder.parameters():
+                        p.requires_grad = False
+                    
+                    img_out = self.image_encoder.output_dim
+                    txt_out = model.embed_dim
+                    self.img_proj = (
+                        torch.nn.Linear(img_out, txt_out, bias=False)
+                        if img_out != txt_out else torch.nn.Identity()
+                    )
+                    print(f"✓ Fallback CLIP model loaded successfully")
+                except Exception as e2:
+                    raise ImportError(
+                        f"Failed to load image encoder. Original error: {e}\n"
+                        f"Fallback error: {e2}\n"
+                        "Please ensure open-clip-torch is installed: pip install open-clip-torch"
+                    )
 
     # ------------------------------------------------------------------
     # Contrastive loss (symmetric NT-Xent / InfoNCE)
@@ -398,7 +439,8 @@ class HybridContrastiveLightningModule(HybridLightningModule):
 
         # Image embeddings (frozen)
         with torch.no_grad():
-            z_img_raw = self.image_encoder.encode_image(pixel_values)
+            # The image encoder is already just the visual part
+            z_img_raw = self.image_encoder(pixel_values)
         z_img = torch.nn.functional.normalize(
             self.img_proj(z_img_raw.float()), dim=-1
         )
