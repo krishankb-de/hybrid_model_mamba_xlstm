@@ -40,10 +40,10 @@ source .venv/bin/activate
 # Install contrastive learning dependencies if needed
 pip install open-clip-torch Pillow
 
-# Verify CUDA is available
+# Verify CUDA is available (MIG-compatible check)
 echo ""
 echo "Verifying CUDA availability:"
-python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA device count: {torch.cuda.device_count()}'); print(f'Current device: {torch.cuda.current_device() if torch.cuda.is_available() else \"N/A\"}'); print(f'Device name: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\"}')"
+python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
 echo ""
 
 if ! python -c "import torch; exit(0 if torch.cuda.is_available() else 1)"; then
@@ -52,19 +52,9 @@ if ! python -c "import torch; exit(0 if torch.cuda.is_available() else 1)"; then
     exit 1
 fi
 
-# IMPORTANT: Update this path to your Stage 1 checkpoint
-STAGE1_CHECKPOINT="./outputs/stage1_pubmed_simcse/checkpoints/last.ckpt"
-
-# Check if Stage 1 checkpoint exists
-if [ ! -f "$STAGE1_CHECKPOINT" ]; then
-    echo "ERROR: Stage 1 checkpoint not found at: $STAGE1_CHECKPOINT"
-    echo "Please run Stage 1 first or update the checkpoint path."
-    echo "Available checkpoints:"
-    ls -lh ./outputs/stage1_pubmed_simcse/checkpoints/ 2>/dev/null || echo "  No checkpoints found"
-    exit 1
-fi
-
-echo "Loading Stage 1 checkpoint from: $STAGE1_CHECKPOINT"
+# NOTE: We're skipping Stage 1 (SimCSE) entirely due to collapse issues
+# Training directly from randomly initialized text encoder
+echo "Training from scratch (no Stage 1 checkpoint - SimCSE skipped)"
 echo ""
 
 nvidia-smi
@@ -75,7 +65,6 @@ python scripts/train_contrastive.py \
   trainer=a100_single_gpu \
   trainer.accelerator=cuda \
   contrastive_mode=clip \
-  lm_checkpoint="$STAGE1_CHECKPOINT" \
   trainer.max_steps=5000 \
   dataset.batch_size=8 \
   dataset.eval_batch_size=8 \
