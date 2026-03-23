@@ -198,10 +198,9 @@ def load_pubmed(cfg, split: str, tokenizer):
 def load_indiana_cxr(cfg, split: str, tokenizer):
     """Load Indiana University CXR from HuggingFace."""
     ds = load_dataset(
-        "Corran/IU-Xray",
+        "dz-osamu/IU-Xray",
         split=split,
         cache_dir=cfg.dataset.cache_dir,
-        trust_remote_code=True,
     )
     return ImageTextDataset(ds, tokenizer, cfg)
 
