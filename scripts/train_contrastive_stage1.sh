@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --partition=students
-#SBATCH --gres=gpu:student:1
-#SBATCH --mem=20G
-#SBATCH --time=16:00:00
+#SBATCH --partition=mitarb
+#SBATCH --gres=gpu:mitarb:1
+#SBATCH --mem=64G
+#SBATCH --time=24:00:00
 #SBATCH --job-name=simcse_stage1
 #SBATCH --output=logs/%x_%j.log
 #SBATCH --error=logs/%x_%j.log
@@ -94,16 +94,16 @@ python scripts/train_contrastive.py \
   trainer=a100_single_gpu \
   trainer.accelerator=cuda \
   trainer.max_epochs=-1 \
-  trainer.max_steps=10000 \
+  trainer.max_steps=5000 \
   contrastive_mode=simcse \
-  dataset.batch_size=8 \
+  dataset.batch_size=128 \
   dataset.eval_batch_size=8 \
   dataset.max_length=256 \
   dataset.max_seq_length=256 \
   dataset.num_workers=2 \
   dataset.preprocessing_num_workers=4 \
   dataset.pin_memory=false \
-  trainer.accumulate_grad_batches=8 \
+  trainer.accumulate_grad_batches=4 \
   trainer.val_check_interval=500 \
   trainer.log_every_n_steps=25 \
   callbacks.checkpoint.every_n_train_steps=1000 \
@@ -115,8 +115,8 @@ python scripts/train_contrastive.py \
   experiment_name=stage1_pubmed_simcse \
   output_dir=./outputs/stage1_pubmed_simcse \
   wandb.enabled=false \
-  model.learning_rate=0.0001 \
-  model.warmup_steps=500 \
+  model.learning_rate=0.00005 \
+  model.warmup_steps=200 \
   model.gradient_clip_val=0.0
 
 echo ""
