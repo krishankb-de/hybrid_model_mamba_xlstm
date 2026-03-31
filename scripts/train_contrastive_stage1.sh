@@ -2,7 +2,7 @@
 #SBATCH --partition=mitarb
 #SBATCH --account=mitarb
 #SBATCH --gres=gpu:mitarb:1
-#SBATCH --mem=64G
+#SBATCH --mem=40G
 #SBATCH --time=24:00:00
 #SBATCH --job-name=simcse_stage1
 #SBATCH --output=logs/%x_%j.log
