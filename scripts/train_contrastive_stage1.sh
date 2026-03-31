@@ -19,11 +19,11 @@ echo "Configuration:"
 echo "  - Dataset: PubMed abstracts (ccdv/pubmed-summarization)"
 echo "  - Target tokens: 500M"
 echo "  - Mode: SimCSE (text-only contrastive)"
-echo "  - Batch size: 8 (effective: 64 with grad accum)"
+echo "  - Batch size: 16 (effective: 256 with grad accum 16)"
 echo "  - Sequence length: 256"
-echo "  - Learning rate: 0.0001 (reduced for stability)"
-echo "  - Warmup steps: 500"
-echo "  - Max steps: 10,000"
+echo "  - Learning rate: 0.00005 (reduced for stability)"
+echo "  - Warmup steps: 200"
+echo "  - Max steps: 5,000"
 echo "  - Early stopping: enabled (monitors train loss)"
 echo "  - Expected runtime: 3-5 hours"
 echo ""
@@ -97,14 +97,14 @@ python scripts/train_contrastive.py \
   trainer.max_epochs=-1 \
   trainer.max_steps=5000 \
   contrastive_mode=simcse \
-  dataset.batch_size=128 \
+  dataset.batch_size=16 \
   dataset.eval_batch_size=8 \
   dataset.max_length=256 \
   dataset.max_seq_length=256 \
   dataset.num_workers=2 \
   dataset.preprocessing_num_workers=4 \
   dataset.pin_memory=false \
-  trainer.accumulate_grad_batches=4 \
+  trainer.accumulate_grad_batches=16 \
   trainer.val_check_interval=500 \
   trainer.log_every_n_steps=25 \
   callbacks.checkpoint.every_n_train_steps=1000 \
