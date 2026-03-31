@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --partition=mitarb
+#SBATCH --account=mitarb
 #SBATCH --gres=gpu:mitarb:1
 #SBATCH --mem=64G
 #SBATCH --time=24:00:00
