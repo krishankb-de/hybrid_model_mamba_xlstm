@@ -112,7 +112,7 @@ python scripts/train_contrastive.py \
   model.learning_rate=0.00002 \
   model.warmup_steps=200 \
   model.gradient_clip_val=0.0 \
-  resume_from_checkpoint="$CHECKPOINT"
+  +resume_from_checkpoint="$CHECKPOINT"
 
 echo ""
 echo "=== JOB END (Stage 1: SimCSE Resume) ==="
