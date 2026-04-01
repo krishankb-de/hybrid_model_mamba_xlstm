@@ -109,10 +109,10 @@ python scripts/train_contrastive.py \
   experiment_name=stage1_pubmed_simcse \
   output_dir=./outputs/stage1_pubmed_simcse \
   wandb.enabled=false \
-  model.learning_rate=0.00003 \
+  model.learning_rate=0.00002 \
   model.warmup_steps=200 \
   model.gradient_clip_val=0.0 \
-  lm_checkpoint="$CHECKPOINT"
+  resume_from_checkpoint="$CHECKPOINT"
 
 echo ""
 echo "=== JOB END (Stage 1: SimCSE Resume) ==="

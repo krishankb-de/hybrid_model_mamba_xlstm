@@ -370,9 +370,21 @@ def main(cfg: DictConfig):
     print(f"Contrastive mode : {contrastive_mode}")
     print(f"Dataset          : {cfg.dataset.dataset_name}")
     print(f"Max steps        : {cfg.trainer.max_steps:,}")
+    
+    # Check if we should resume from a checkpoint
+    resume_ckpt = None
+    if cfg.get("resume_from_checkpoint"):
+        resume_ckpt = cfg.resume_from_checkpoint
+        print(f"Resuming training from: {resume_ckpt}")
+    
     print("Starting contrastive training...")
 
-    trainer.fit(lightning_module, train_dataloaders=train_dl, val_dataloaders=val_dl)
+    trainer.fit(
+        lightning_module, 
+        train_dataloaders=train_dl, 
+        val_dataloaders=val_dl,
+        ckpt_path=resume_ckpt
+    )
     print("Done.")
 
 
