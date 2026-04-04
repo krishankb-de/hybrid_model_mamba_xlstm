@@ -1,0 +1,15 @@
+# Requirements for Stage 1 Model Evaluation
+# Install with: pip install -r requirements_eval.txt
+
+# Core dependencies (should already be installed from main requirements.txt)
+torch>=2.0.0
+transformers>=4.30.0
+numpy>=1.24.0
+
+# Evaluation-specific packages
+sentence-transformers>=2.2.0  # For STS evaluation utilities
+scipy>=1.10.0                  # For Spearman correlation computation
+datasets>=2.12.0               # For loading BIOSSES, STS-B, and PubMed datasets
+
+# Optional but recommended
+tqdm>=4.65.0                   # Progress bars (usually included with transformers)
