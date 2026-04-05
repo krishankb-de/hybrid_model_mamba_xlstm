@@ -34,7 +34,8 @@ export CUDA_LAUNCH_BLOCKING=0
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-not set}"
 
 # Configuration
-CHECKPOINT="outputs/stage1_pubmed_simcse/checkpoints/last.ckpt"
+# Using validation checkpoint with loss=0.0110 (excellent!)
+CHECKPOINT="outputs/stage1_pubmed_simcse/checkpoints/contrastive-step=008721-val/contrastive_loss=0.0110.ckpt"
 OUTPUT_DIR="outputs/eval_stage1"
 BATCH_SIZE=32
 NUM_RETRIEVAL_PAIRS=1000
