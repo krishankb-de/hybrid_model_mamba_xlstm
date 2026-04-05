@@ -54,7 +54,7 @@ def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
     # Infer config from checkpoint
     dim = 768  # default for 70M model
     for k, v in state_dict.items():
-        if "lm.embedding.token_embedding.weight" in k:
+        if "token_embedding.weight" in k:
             dim = int(v.shape[1])
             break
     

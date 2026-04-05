@@ -81,11 +81,21 @@ def prepare_test_data(dataset_name, tokenizer, max_length=1024, batch_size=4,
                       split="test", num_workers=2):
     if dataset_name == "wikitext":
         dataset = load_dataset("wikitext", "wikitext-103-v1", split=split)
+        text_column = "text"
+    elif dataset_name == "pubmed":
+        # Load PubMed dataset for perplexity evaluation
+        try:
+            dataset = load_dataset("ccdv/pubmed-summarization", split=split)
+        except:
+            # Fallback to validation if test doesn't exist
+            print(f"  Warning: {split} split not found, using validation split")
+            dataset = load_dataset("ccdv/pubmed-summarization", split="validation")
+        text_column = "article"  # PubMed uses 'article' field
     else:
         raise ValueError("Unsupported dataset: " + dataset_name)
 
     def tokenize_fn(examples):
-        return tokenizer(examples["text"], truncation=False, return_attention_mask=False)
+        return tokenizer(examples[text_column], truncation=False, return_attention_mask=False)
 
     def group_texts(examples):
         concatenated = {k: sum(examples[k], []) for k in examples.keys()}
