@@ -126,21 +126,19 @@ def load_pubmed_pairs(num_pairs=1000, split="validation"):
     print(f"Loading PubMed dataset ({split} split)...")
     
     try:
-        # Load PubMed abstracts
-        dataset = load_dataset("pubmed", split=split, streaming=True)
+        # Use ccdv/pubmed-summarization which is the maintained version
+        dataset = load_dataset("ccdv/pubmed-summarization", split=split)
         
         abstracts = []
         for i, item in enumerate(dataset):
             if i >= num_pairs * 2:  # Need 2x for pairs
                 break
             
-            # Combine title and abstract
-            title = item.get("title", "")
-            abstract = item.get("abstract", "")
+            # This dataset has 'article' and 'abstract' fields
+            article = item.get("article", "")
             
-            if title and abstract:
-                text = f"{title}. {abstract}"
-                abstracts.append(text)
+            if article and len(article) > 50:  # Ensure meaningful text
+                abstracts.append(article)
         
         # Create pairs (consecutive abstracts)
         pairs = []
@@ -153,24 +151,22 @@ def load_pubmed_pairs(num_pairs=1000, split="validation"):
         return pairs
     
     except Exception as e:
-        print(f"  Error loading PubMed: {e}")
-        print("  Falling back to alternative method...")
+        print(f"  Error loading PubMed from ccdv/pubmed-summarization: {e}")
+        print("  Trying train split as fallback...")
         
-        # Alternative: use a different split or cached data
+        # Fallback to train split
         try:
-            dataset = load_dataset("pubmed", split="train", streaming=True)
+            dataset = load_dataset("ccdv/pubmed-summarization", split="train")
             abstracts = []
             
             for i, item in enumerate(dataset):
                 if i >= num_pairs * 2:
                     break
                 
-                title = item.get("title", "")
-                abstract = item.get("abstract", "")
+                article = item.get("article", "")
                 
-                if title and abstract:
-                    text = f"{title}. {abstract}"
-                    abstracts.append(text)
+                if article and len(article) > 50:
+                    abstracts.append(article)
             
             pairs = []
             for i in range(0, len(abstracts) - 1, 2):

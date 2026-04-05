@@ -134,13 +134,12 @@ def load_biosses_dataset():
     with similarity scores from 0 (no relation) to 4 (equivalent).
     """
     try:
-        dataset = load_dataset("biosses", "biosses")
-        # BIOSSES only has a single split
-        data = dataset["train"]
+        # Try new API first (default config)
+        dataset = load_dataset("biosses", split="train")
         
         pairs = []
         scores = []
-        for item in data:
+        for item in dataset:
             pairs.append((item["sentence1"], item["sentence2"]))
             scores.append(item["score"])
         
@@ -148,14 +147,31 @@ def load_biosses_dataset():
         return pairs, scores
     
     except Exception as e:
-        print(f"  Error loading BIOSSES: {e}")
-        print("  Attempting to load from alternative source...")
+        print(f"  Error loading BIOSSES with default config: {e}")
+        print("  Trying alternative: using STS-B as fallback...")
         
-        # Fallback: load from alternative source or use cached version
-        raise ValueError(
-            "BIOSSES dataset not available. Please install: "
-            "pip install datasets"
-        )
+        # Fallback to STS-B (general domain, but still useful)
+        try:
+            dataset = load_dataset("glue", "stsb", split="validation")
+            
+            pairs = []
+            scores = []
+            for item in dataset:
+                if item["sentence1"] and item["sentence2"]:
+                    pairs.append((item["sentence1"], item["sentence2"]))
+                    scores.append(item["label"])
+            
+            print(f"  Loaded STS-B (fallback): {len(pairs)} sentence pairs")
+            print(f"  Note: Using general domain STS-B instead of biomedical BIOSSES")
+            return pairs, scores
+        
+        except Exception as e2:
+            raise ValueError(
+                f"Failed to load STS datasets. Errors:\n"
+                f"  1. BIOSSES: {e}\n"
+                f"  2. STS-B: {e2}\n"
+                "Please check your datasets installation."
+            )
 
 
 def load_stsb_dataset(split="test"):
