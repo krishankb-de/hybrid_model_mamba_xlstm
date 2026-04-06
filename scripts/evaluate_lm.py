@@ -229,6 +229,11 @@ def strip_state_dict_prefixes(state_dict):
             new_k = k[len("model.") :]
         else:
             new_k = k
+        
+        # Skip projection_head and logit_scale (not part of language model)
+        if new_k.startswith("projection_head.") or new_k == "logit_scale":
+            continue
+            
         cleaned[new_k] = v
     return cleaned
 

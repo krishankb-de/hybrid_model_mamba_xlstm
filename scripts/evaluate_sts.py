@@ -55,12 +55,19 @@ def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
     state_dict = {}
     
     for k, v in raw_state_dict.items():
-        # Remove Lightning module prefix
+        # Remove Lightning module prefix first
         if k.startswith("model."):
-            new_k = k[len("model."):]
-        else:
-            new_k = k
-        state_dict[new_k] = v
+            k = k[len("model."):]
+        
+        # Remove lm. prefix for encoder (training uses HybridLanguageModel with lm. prefix)
+        if k.startswith("lm."):
+            k = k[len("lm."):]
+        
+        # Skip projection head and logit_scale (not needed for encoder)
+        if k.startswith("projection_head.") or k == "logit_scale":
+            continue
+            
+        state_dict[k] = v
     
     # Infer config from checkpoint
     dim = 768  # default for 70M model
