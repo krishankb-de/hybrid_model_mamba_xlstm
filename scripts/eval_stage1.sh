@@ -1,10 +1,9 @@
 #!/bin/bash
-#SBATCH --partition=mitarb
-#SBATCH --account=mitarb
-#SBATCH --gres=gpu:mitarb:1
-#SBATCH --mem=32G
-#SBATCH --time=06:00:00
-#SBATCH --job-name=eval_stage1
+#SBATCH --partition=students
+#SBATCH --gres=gpu:student:1
+#SBATCH --mem=20G
+#SBATCH --time=08:00:00
+#SBATCH --job-name=eval_stage1_gpu1
 #SBATCH --output=logs/%x_%j.log
 #SBATCH --error=logs/%x_%j.log
 
