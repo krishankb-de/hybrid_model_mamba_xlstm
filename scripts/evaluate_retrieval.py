@@ -39,10 +39,24 @@ def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
     print(f"Loading checkpoint from {checkpoint_path}...")
     ckpt = torch.load(checkpoint_path, map_location="cpu")
     
-    # Extract state dict and strip prefixes
+    # Extract state dict
     raw_state_dict = ckpt.get("state_dict", ckpt)
-    state_dict = {}
     
+    # Count layers BEFORE stripping prefixes
+    import re
+    num_layers = 0
+    for k in raw_state_dict.keys():
+        m = re.search(r"layers\.(\d+)\.", k)
+        if m:
+            idx = int(m.group(1))
+            if idx + 1 > num_layers:
+                num_layers = idx + 1
+    
+    if num_layers == 0:
+        num_layers = 8  # 70M model has 8 layers, not 12
+    
+    # Now strip prefixes
+    state_dict = {}
     for k, v in raw_state_dict.items():
         # Remove Lightning module prefix first
         if k.startswith("model."):
@@ -59,25 +73,11 @@ def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
         state_dict[k] = v
     
     # Infer config from checkpoint
-    dim = 768  # default for 70M model
+    dim = 512  # 70M model uses 512, not 768
     for k, v in state_dict.items():
         if "token_embedding.weight" in k:
             dim = int(v.shape[1])
             break
-    
-    # Count layers
-    num_layers = 0
-    for k in state_dict.keys():
-        if "lm.layers." in k:
-            import re
-            m = re.search(r"lm\.layers\.(\d+)\.", k)
-            if m:
-                idx = int(m.group(1))
-                if idx + 1 > num_layers:
-                    num_layers = idx + 1
-    
-    if num_layers == 0:
-        num_layers = 12  # default
     
     # Build config
     base = ["mamba", "mamba", "mlstm"]
@@ -126,9 +126,8 @@ def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
 def load_pubmed_pairs(num_pairs=1000, split="validation"):
     """Load PubMed abstract pairs for retrieval evaluation.
     
-    Creates pairs by:
-    1. Taking consecutive abstracts from the same journal/topic
-    2. Using title + abstract as the text
+    Creates pairs by matching title (truncated article) with its abstract.
+    This tests whether the model can match a truncated text to its summary.
     """
     print(f"Loading PubMed dataset ({split} split)...")
     
@@ -136,25 +135,21 @@ def load_pubmed_pairs(num_pairs=1000, split="validation"):
         # Use ccdv/pubmed-summarization which is the maintained version
         dataset = load_dataset("ccdv/pubmed-summarization", split=split)
         
-        abstracts = []
+        pairs = []
         for i, item in enumerate(dataset):
-            if i >= num_pairs * 2:  # Need 2x for pairs
+            if len(pairs) >= num_pairs:
                 break
             
             # This dataset has 'article' and 'abstract' fields
             article = item.get("article", "")
+            abstract = item.get("abstract", "")
             
-            if article and len(article) > 50:  # Ensure meaningful text
-                abstracts.append(article)
+            if article and abstract and len(article) > 50 and len(abstract) > 50:
+                # Correct: pair title with its own abstract
+                # Truncate article to simulate title/beginning
+                pairs.append((article[:200], abstract))
         
-        # Create pairs (consecutive abstracts)
-        pairs = []
-        for i in range(0, len(abstracts) - 1, 2):
-            if len(pairs) >= num_pairs:
-                break
-            pairs.append((abstracts[i], abstracts[i + 1]))
-        
-        print(f"  Created {len(pairs)} abstract pairs")
+        print(f"  Created {len(pairs)} title→abstract pairs")
         return pairs
     
     except Exception as e:
@@ -164,24 +159,20 @@ def load_pubmed_pairs(num_pairs=1000, split="validation"):
         # Fallback to train split
         try:
             dataset = load_dataset("ccdv/pubmed-summarization", split="train")
-            abstracts = []
             
+            pairs = []
             for i, item in enumerate(dataset):
-                if i >= num_pairs * 2:
+                if len(pairs) >= num_pairs:
                     break
                 
                 article = item.get("article", "")
+                abstract = item.get("abstract", "")
                 
-                if article and len(article) > 50:
-                    abstracts.append(article)
+                if article and abstract and len(article) > 50 and len(abstract) > 50:
+                    # Correct: pair title with its own abstract
+                    pairs.append((article[:200], abstract))
             
-            pairs = []
-            for i in range(0, len(abstracts) - 1, 2):
-                if len(pairs) >= num_pairs:
-                    break
-                pairs.append((abstracts[i], abstracts[i + 1]))
-            
-            print(f"  Created {len(pairs)} abstract pairs from train split")
+            print(f"  Created {len(pairs)} title→abstract pairs from train split")
             return pairs
         
         except Exception as e2:
