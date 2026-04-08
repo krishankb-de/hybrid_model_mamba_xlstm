@@ -66,22 +66,26 @@ def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
     if num_layers == 0:
         num_layers = 8  # 70M model has 8 layers, not 12
     
-    # Now strip prefixes
+    # Strip prefixes and detect checkpoint type
     state_dict = {}
+    has_lm_prefix_in_checkpoint = False
+    
     for k, v in raw_state_dict.items():
         # Remove Lightning module prefix first
         if k.startswith("model."):
             k = k[len("model."):]
         
-        # Remove lm. prefix for encoder (training uses HybridLanguageModel with lm. prefix)
+        # Check if checkpoint has lm. prefix
         if k.startswith("lm."):
-            k = k[len("lm."):]
+            has_lm_prefix_in_checkpoint = True
         
-        # Skip projection head and logit_scale (not needed for encoder)
+        # Skip projection head and logit_scale (contrastive training artifacts)
         if k.startswith("projection_head.") or k == "logit_scale":
             continue
             
         state_dict[k] = v
+    
+    print(f"  Checkpoint has 'lm.' prefix: {has_lm_prefix_in_checkpoint}")
     
     # Infer config from checkpoint
     dim = 512  # 70M model uses 512, not 768
@@ -114,8 +118,16 @@ def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
         dropout=0.0,
     )
     
-    # Create model
+    # Create model - HybridTextEncoder wraps the LM with self.lm
     model = HybridTextEncoder(config, embed_dim=512)
+    
+    # If checkpoint doesn't have lm. prefix but model expects it, add the prefix
+    if not has_lm_prefix_in_checkpoint:
+        print(f"  Adding 'lm.' prefix to checkpoint keys to match model structure")
+        state_dict_with_prefix = {}
+        for k, v in state_dict.items():
+            state_dict_with_prefix[f"lm.{k}"] = v
+        state_dict = state_dict_with_prefix
     
     # Load weights
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
