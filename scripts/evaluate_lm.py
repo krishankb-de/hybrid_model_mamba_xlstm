@@ -79,6 +79,7 @@ def collate_fn(batch):
 
 def prepare_test_data(dataset_name, tokenizer, max_length=1024, batch_size=4,
                       split="test", num_workers=2):
+    """BUG FIX 7: Limit dataset size and use num_proc=1 to avoid disk space issues."""
     if dataset_name == "wikitext":
         dataset = load_dataset("wikitext", "wikitext-103-v1", split=split)
         text_column = "text"
@@ -86,10 +87,16 @@ def prepare_test_data(dataset_name, tokenizer, max_length=1024, batch_size=4,
         # Load PubMed dataset for perplexity evaluation
         try:
             dataset = load_dataset("ccdv/pubmed-summarization", split=split)
-        except:
-            # Fallback to validation if test doesn't exist
-            print(f"  Warning: {split} split not found, using validation split")
+        except Exception as e:
+            # BUG FIX 7: Better error handling (not bare except)
+            print(f"  Warning: {split} split not found ({e}), using validation split")
             dataset = load_dataset("ccdv/pubmed-summarization", split="validation")
+        
+        # BUG FIX 7: Limit to 1000 samples to avoid disk space issues
+        if len(dataset) > 1000:
+            print(f"  Limiting PubMed dataset from {len(dataset)} to 1000 samples")
+            dataset = dataset.select(range(1000))
+        
         text_column = "article"  # PubMed uses 'article' field
     else:
         raise ValueError("Unsupported dataset: " + dataset_name)
@@ -106,9 +113,10 @@ def prepare_test_data(dataset_name, tokenizer, max_length=1024, batch_size=4,
             for k, t in concatenated.items()
         }
 
+    # BUG FIX 7: Use num_proc=1 to avoid parallel Arrow cache writes
     tokenized = dataset.map(tokenize_fn, batched=True, remove_columns=dataset.column_names,
-                            num_proc=num_workers)
-    tokenized = tokenized.map(group_texts, batched=True, num_proc=num_workers)
+                            num_proc=1)
+    tokenized = tokenized.map(group_texts, batched=True, num_proc=1)
     loader = DataLoader(tokenized, batch_size=batch_size, shuffle=False,
                         num_workers=num_workers, pin_memory=True, collate_fn=collate_fn)
     return loader, len(tokenized)
@@ -215,6 +223,8 @@ def strip_state_dict_prefixes(state_dict):
       _orig_mod.<original_key>
 
     This function normalises all variants to bare <original_key>.
+    
+    BUG FIX 2: Also strip inner 'lm.' prefix for Stage 1 checkpoints.
     """
     cleaned = {}
     for k, v in state_dict.items():
@@ -233,6 +243,10 @@ def strip_state_dict_prefixes(state_dict):
         # Skip projection_head and logit_scale (not part of language model)
         if new_k.startswith("projection_head.") or new_k == "logit_scale":
             continue
+        
+        # BUG FIX 2: Strip inner 'lm.' prefix for Stage 1 checkpoints
+        if new_k.startswith("lm."):
+            new_k = new_k[len("lm."):]
             
         cleaned[new_k] = v
     return cleaned

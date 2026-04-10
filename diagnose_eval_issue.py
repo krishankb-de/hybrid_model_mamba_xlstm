@@ -46,17 +46,30 @@ def diagnose_checkpoint_loading(checkpoint_path):
     print(f"\n3. Stripping prefixes...")
     state_dict = {}
     stripped_model = 0
-    stripped_lm = 0
+    stripped_orig_mod = 0
     skipped_projection = 0
     skipped_logit = 0
     
     for k, v in raw_state_dict.items():
         original_k = k
         
-        if k.startswith("model."):
+        # Strip model._orig_mod. or _orig_mod.model. or _orig_mod. or model.
+        if k.startswith("model._orig_mod."):
+            k = k[len("model._orig_mod."):]
+            stripped_model += 1
+            stripped_orig_mod += 1
+        elif k.startswith("_orig_mod.model."):
+            k = k[len("_orig_mod.model."):]
+            stripped_model += 1
+            stripped_orig_mod += 1
+        elif k.startswith("_orig_mod."):
+            k = k[len("_orig_mod."):]
+            stripped_orig_mod += 1
+        elif k.startswith("model."):
             k = k[len("model."):]
             stripped_model += 1
         
+        # Skip projection_head and logit_scale
         if k.startswith("projection_head.") or k == "logit_scale":
             if "projection_head" in k:
                 skipped_projection += 1
@@ -64,14 +77,14 @@ def diagnose_checkpoint_loading(checkpoint_path):
                 skipped_logit += 1
             continue
         
-        if k.startswith("lm."):
-            k = k[len("lm."):]
-            stripped_lm += 1
+        # BUG FIX 4: DO NOT strip lm. prefix - HybridTextEncoder expects it!
+        # The model structure is: HybridTextEncoder.lm.embeddings.*
+        # So we need to keep the lm. prefix
             
         state_dict[k] = v
     
     print(f"   Stripped 'model.' prefix: {stripped_model} keys")
-    print(f"   Stripped 'lm.' prefix: {stripped_lm} keys")
+    print(f"   Stripped '_orig_mod.' prefix: {stripped_orig_mod} keys")
     print(f"   Skipped projection_head: {skipped_projection} keys")
     print(f"   Skipped logit_scale: {skipped_logit} keys")
     print(f"   Final state_dict size: {len(state_dict)} keys")
@@ -95,7 +108,7 @@ def diagnose_checkpoint_loading(checkpoint_path):
         num_layers=num_layers,
         layer_pattern=layer_pattern,
         vocab_size=50257,
-        max_position_embeddings=512,
+        max_position_embeddings=1024,  # BUG FIX 6: Match training
         state_size=16,
         conv_size=4,
         expand_factor=2,

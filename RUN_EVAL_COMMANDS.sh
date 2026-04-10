@@ -1,0 +1,75 @@
+#!/bin/bash
+# Quick commands to run Stage 1 evaluation on your trained checkpoint
+# All bug fixes applied, max_length adjusted to 256 to match training
+
+CHECKPOINT="/scratch/bhushkri/hybrid_xmamba_a100_70m_40/hybrid_model_mamba_xlstm/outputs/stage1_pubmed_simcse/checkpoints/last.ckpt"
+
+echo "=========================================="
+echo "Stage 1 Evaluation - Quick Commands"
+echo "=========================================="
+echo ""
+echo "Checkpoint: $CHECKPOINT"
+echo ""
+
+# Step 1: Diagnostic
+echo "Step 1: Run Diagnostic (IMPORTANT - Run this first!)"
+echo "----------------------------------------------"
+echo "python diagnose_eval_issue.py \\"
+echo "    --checkpoint $CHECKPOINT"
+echo ""
+echo "Look for: '✅ SUCCESS: All weights loaded correctly!'"
+echo "Verify: projection_head.0.weight and projection_head.2.weight exist"
+echo ""
+
+# Step 2: STS
+echo "Step 2: STS Evaluation (Semantic Textual Similarity)"
+echo "----------------------------------------------"
+echo "python scripts/evaluate_sts.py \\"
+echo "    --checkpoint $CHECKPOINT \\"
+echo "    --dataset biosses \\"
+echo "    --batch-size 32 \\"
+echo "    --max-length 256 \\"
+echo "    --output-dir outputs/eval_stage1/sts"
+echo ""
+echo "Expected: Spearman correlation > 0.0 (target: > 0.75)"
+echo ""
+
+# Step 3: Retrieval
+echo "Step 3: Retrieval Evaluation"
+echo "----------------------------------------------"
+echo "python scripts/evaluate_retrieval.py \\"
+echo "    --checkpoint $CHECKPOINT \\"
+echo "    --num-pairs 1000 \\"
+echo "    --batch-size 32 \\"
+echo "    --max-length 256 \\"
+echo "    --output-dir outputs/eval_stage1/retrieval"
+echo ""
+echo "Expected: R@1 > 0.001 (target: > 0.6)"
+echo ""
+
+# Step 4: Perplexity (optional)
+echo "Step 4: Perplexity Evaluation (Optional)"
+echo "----------------------------------------------"
+echo "python scripts/evaluate_lm.py \\"
+echo "    --checkpoint $CHECKPOINT \\"
+echo "    --dataset pubmed \\"
+echo "    --split validation \\"
+echo "    --batch-size 4 \\"
+echo "    --max-length 256 \\"
+echo "    --output-dir outputs/eval_stage1/lm"
+echo ""
+echo "Expected: Perplexity < 100"
+echo ""
+
+echo "=========================================="
+echo "Notes:"
+echo "=========================================="
+echo "1. All bug fixes have been applied"
+echo "2. max_length=256 matches your training config"
+echo "3. Run diagnostic first to verify projection_head"
+echo "4. Check for '✅ All weights loaded successfully'"
+echo ""
+echo "For more details, see:"
+echo "  - CHECKPOINT_VERIFIED_READY.md"
+echo "  - FINAL_COMPATIBILITY_REPORT.md"
+echo "  - STAGE1_EVAL_BUGS_FIXED.md"

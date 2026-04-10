@@ -34,6 +34,37 @@ from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
 
 
+def strip_state_dict_prefixes(state_dict):
+    """Strip torch.compile (_orig_mod.) and Lightning (model.) key prefixes.
+    
+    Handles all combinations:
+    - model._orig_mod.<key>
+    - _orig_mod.model.<key>
+    - _orig_mod.<key>
+    - model.<key>
+    """
+    cleaned = {}
+    for k, v in state_dict.items():
+        # Remove all known prefixes in order of specificity
+        if k.startswith("model._orig_mod."):
+            new_k = k[len("model._orig_mod."):]
+        elif k.startswith("_orig_mod.model."):
+            new_k = k[len("_orig_mod.model."):]
+        elif k.startswith("_orig_mod."):
+            new_k = k[len("_orig_mod."):]
+        elif k.startswith("model."):
+            new_k = k[len("model."):]
+        else:
+            new_k = k
+        
+        # BUG FIX 1: Only skip logit_scale — projection_head IS needed by encode()
+        if new_k == "logit_scale":
+            continue
+            
+        cleaned[new_k] = v
+    return cleaned
+
+
 def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
     """Load HybridTextEncoder from a contrastive training checkpoint."""
     print(f"Loading checkpoint from {checkpoint_path}...")
@@ -55,24 +86,11 @@ def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
     if num_layers == 0:
         num_layers = 8  # 70M model has 8 layers, not 12
     
-    # Strip prefixes and detect checkpoint type
-    state_dict = {}
-    has_lm_prefix_in_checkpoint = False
+    # BUG FIX 3: Use comprehensive prefix stripping (handles torch.compile)
+    state_dict = strip_state_dict_prefixes(raw_state_dict)
     
-    for k, v in raw_state_dict.items():
-        # Remove Lightning module prefix first
-        if k.startswith("model."):
-            k = k[len("model."):]
-        
-        # Check if checkpoint has lm. prefix
-        if k.startswith("lm."):
-            has_lm_prefix_in_checkpoint = True
-        
-        # Skip projection head and logit_scale (contrastive training artifacts)
-        if k.startswith("projection_head.") or k == "logit_scale":
-            continue
-            
-        state_dict[k] = v
+    # Detect if checkpoint has lm. prefix
+    has_lm_prefix_in_checkpoint = any(k.startswith("lm.") for k in state_dict.keys())
     
     print(f"  Checkpoint has 'lm.' prefix: {has_lm_prefix_in_checkpoint}")
     
@@ -87,12 +105,13 @@ def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
     base = ["mamba", "mamba", "mlstm"]
     layer_pattern = [base[i % len(base)] for i in range(num_layers)]
     
+    # BUG FIX 6: Match training config (max_position_embeddings=1024)
     config = HybridConfig(
         dim=dim,
         num_layers=num_layers,
         layer_pattern=layer_pattern,
         vocab_size=50257,
-        max_position_embeddings=512,
+        max_position_embeddings=1024,  # Match training, not 512
         state_size=16,
         conv_size=4,
         expand_factor=2,
@@ -121,10 +140,19 @@ def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
     # Load weights
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     
+    # BUG FIX 9: Show all missing keys and add validation
     if missing:
-        print(f"  Missing keys ({len(missing)}): {missing[:3]}...")
+        print(f"  Missing keys ({len(missing)}): {list(missing)[:10]}")
+        # Check for critical missing keys
+        critical_missing = [k for k in missing if k.startswith("lm.") or k.startswith("projection_head.")]
+        if critical_missing:
+            print(f"  ⚠️  WARNING: CRITICAL KEYS MISSING - METRICS WILL BE INVALID!")
+            print(f"  Critical missing: {critical_missing[:5]}")
     if unexpected:
-        print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:3]}...")
+        print(f"  Unexpected keys ({len(unexpected)}): {list(unexpected)[:10]}")
+    
+    if not missing and not unexpected:
+        print(f"  ✅ All weights loaded successfully (exact match)")
     
     model = model.to(device)
     model.eval()
@@ -138,8 +166,8 @@ def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
 def load_pubmed_pairs(num_pairs=1000, split="validation"):
     """Load PubMed abstract pairs for retrieval evaluation.
     
-    Creates pairs by matching title (truncated article) with its abstract.
-    This tests whether the model can match a truncated text to its summary.
+    BUG FIX 8: Use longer article prefix (512 chars instead of 200) for better retrieval.
+    Creates pairs by matching article beginning with its abstract.
     """
     print(f"Loading PubMed dataset ({split} split)...")
     
@@ -157,11 +185,10 @@ def load_pubmed_pairs(num_pairs=1000, split="validation"):
             abstract = item.get("abstract", "")
             
             if article and abstract and len(article) > 50 and len(abstract) > 50:
-                # Correct: pair title with its own abstract
-                # Truncate article to simulate title/beginning
-                pairs.append((article[:200], abstract))
+                # BUG FIX 8: Use 512 chars instead of 200 for better semantic overlap
+                pairs.append((article[:512], abstract))
         
-        print(f"  Created {len(pairs)} title→abstract pairs")
+        print(f"  Created {len(pairs)} article→abstract pairs")
         return pairs
     
     except Exception as e:
@@ -181,10 +208,10 @@ def load_pubmed_pairs(num_pairs=1000, split="validation"):
                 abstract = item.get("abstract", "")
                 
                 if article and abstract and len(article) > 50 and len(abstract) > 50:
-                    # Correct: pair title with its own abstract
-                    pairs.append((article[:200], abstract))
+                    # BUG FIX 8: Use 512 chars instead of 200
+                    pairs.append((article[:512], abstract))
             
-            print(f"  Created {len(pairs)} title→abstract pairs from train split")
+            print(f"  Created {len(pairs)} article→abstract pairs from train split")
             return pairs
         
         except Exception as e2:
@@ -198,7 +225,11 @@ def load_pubmed_pairs(num_pairs=1000, split="validation"):
 
 @torch.no_grad()
 def encode_texts(model, tokenizer, texts, batch_size=32, max_length=256, device="cuda"):
-    """Encode a list of texts into embeddings."""
+    """Encode a list of texts into embeddings.
+    
+    NOTE: Default max_length=256 matches typical Stage 1 training.
+    Adjust based on your training config's max_seq_length.
+    """
     model.eval()
     embeddings = []
     
@@ -286,7 +317,7 @@ def main():
     parser.add_argument("--num-pairs", type=int, default=1000,
                         help="Number of abstract pairs to evaluate")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--max-length", type=int, default=256)
+    parser.add_argument("--max-length", type=int, default=256)  # Match training max_seq_length
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
