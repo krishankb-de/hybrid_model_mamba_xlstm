@@ -23,6 +23,12 @@ echo ""
 # Navigate to project directory
 cd "${SLURM_SUBMIT_DIR}"
 
+# Detect if we're in the parent directory and need to cd into hybrid_model_mamba_xlstm
+if [ -d "hybrid_model_mamba_xlstm" ] && [ ! -d "hybrid_xmamba" ]; then
+    echo "Detected parent directory, changing to hybrid_model_mamba_xlstm/"
+    cd hybrid_model_mamba_xlstm
+fi
+
 # Configuration
 CHECKPOINT="outputs/stage1_pubmed_simcse/checkpoints/contrastive-step=008721-val/contrastive_loss=0.0110.ckpt"
 OUTPUT_DIR="outputs/eval_stage1"
@@ -53,10 +59,31 @@ echo "  - CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-not set}"
 echo ""
 
 # Check if checkpoint exists
+echo "Current working directory: $(pwd)"
+echo "Checking for checkpoint: $CHECKPOINT"
+echo ""
+
 if [ ! -f "$CHECKPOINT" ]; then
     echo "ERROR: Checkpoint not found at $CHECKPOINT"
-    echo "Available checkpoints:"
-    ls -lh outputs/stage1_pubmed_simcse/checkpoints/*.ckpt 2>/dev/null || echo "  No checkpoints found"
+    echo ""
+    echo "Checking checkpoint directory structure..."
+    
+    if [ -d "outputs/stage1_pubmed_simcse/checkpoints" ]; then
+        echo "Checkpoint directory exists. Contents:"
+        ls -lh outputs/stage1_pubmed_simcse/checkpoints/
+        echo ""
+        echo "Subdirectories:"
+        ls -d outputs/stage1_pubmed_simcse/checkpoints/*/ 2>/dev/null || echo "  No subdirectories found"
+        echo ""
+        echo "All .ckpt files:"
+        find outputs/stage1_pubmed_simcse/checkpoints -name "*.ckpt" -type f 2>/dev/null || echo "  No .ckpt files found"
+    else
+        echo "Checkpoint directory does not exist: outputs/stage1_pubmed_simcse/checkpoints"
+        echo ""
+        echo "Available outputs directories:"
+        ls -lh outputs/ 2>/dev/null || echo "  No outputs directory found"
+    fi
+    
     exit 1
 fi
 
