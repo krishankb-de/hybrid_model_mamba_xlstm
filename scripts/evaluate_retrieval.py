@@ -89,10 +89,10 @@ def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
     # BUG FIX 3: Use comprehensive prefix stripping (handles torch.compile)
     state_dict = strip_state_dict_prefixes(raw_state_dict)
     
-    # Detect if checkpoint has lm. prefix
-    has_lm_prefix_in_checkpoint = any(k.startswith("lm.") for k in state_dict.keys())
-    
-    print(f"  Checkpoint has 'lm.' prefix: {has_lm_prefix_in_checkpoint}")
+    # After stripping 'model.' prefix, the state_dict has the correct structure:
+    # - lm.* keys for the language model
+    # - projection_head.* keys for the projection head
+    # This matches HybridTextEncoder's structure exactly, so no further modification needed!
     
     # Infer config from checkpoint
     dim = 512  # 70M model uses 512, not 768
@@ -128,14 +128,6 @@ def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
     
     # Create model - HybridTextEncoder wraps the LM with self.lm
     model = HybridTextEncoder(config, embed_dim=512)
-    
-    # If checkpoint doesn't have lm. prefix but model expects it, add the prefix
-    if not has_lm_prefix_in_checkpoint:
-        print(f"  Adding 'lm.' prefix to checkpoint keys to match model structure")
-        state_dict_with_prefix = {}
-        for k, v in state_dict.items():
-            state_dict_with_prefix[f"lm.{k}"] = v
-        state_dict = state_dict_with_prefix
     
     # Load weights
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
