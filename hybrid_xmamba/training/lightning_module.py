@@ -393,35 +393,23 @@ class HybridContrastiveLightningModule(HybridLightningModule):
     def _simcse_step(self, batch, batch_idx, split: str):
         """SimCSE step: same input_ids passed twice through the encoder.
 
-        Different dropout masks produce two views → contrastive loss.
-        Batch must contain ``input_ids`` (B, L).
-        
-        CRITICAL FIX: Temporarily increases dropout to 0.3 for more diverse views.
-        This prevents representation collapse that occurs with default dropout=0.1.
+        Two dropout masks produce two views → contrastive loss.
+        Batch must contain ``input_ids`` (B, L) and ``attention_mask`` (B, L).
         """
         input_ids = batch["input_ids"]
-        
-        # Store original dropout rates and increase them temporarily
-        original_dropout_rates = []
-        for module in self.model.lm.modules():
-            if isinstance(module, torch.nn.Dropout):
-                original_dropout_rates.append(module.p)
-                module.p = 0.3  # Increase from 0.1 to 0.3 for SimCSE diversity
-        
-        self.model.lm.train()           # keep dropout active for both views
-        z1 = self.model.encode(input_ids)
-        z2 = self.model.encode(input_ids)
-        
-        # Restore original dropout rates
-        idx = 0
-        for module in self.model.lm.modules():
-            if isinstance(module, torch.nn.Dropout):
-                module.p = original_dropout_rates[idx]
-                idx += 1
-        
+        attention_mask = batch.get("attention_mask")
+
+        self.model.lm.train()  # keep dropout active for both views
+        z1 = self.model.encode(input_ids, attention_mask=attention_mask)
+        z2 = self.model.encode(input_ids, attention_mask=attention_mask)
+
         loss = self._nt_xent_loss(z1, z2, self.model.logit_scale)
         self.log(f"{split}/contrastive_loss", loss, prog_bar=True,
                  on_step=(split == "train"), on_epoch=True)
+        if split == "train":
+            pos_cos = (z1 * z2).sum(dim=-1).mean()
+            self.log("train/pos_cosine_mean", pos_cos,
+                     on_step=True, on_epoch=False, prog_bar=False)
         return loss
 
     def _clip_step(self, batch, batch_idx, split: str):
@@ -429,13 +417,15 @@ class HybridContrastiveLightningModule(HybridLightningModule):
 
         Batch must contain:
           - ``input_ids``   (B, L)   — tokenised report
+          - ``attention_mask`` (B, L)
           - ``pixel_values`` (B, C, H, W) — preprocessed image
         """
         input_ids = batch["input_ids"]
+        attention_mask = batch.get("attention_mask")
         pixel_values = batch["pixel_values"]
 
         # Text embeddings (trained)
-        z_text = self.model.encode(input_ids)
+        z_text = self.model.encode(input_ids, attention_mask=attention_mask)
 
         # Image embeddings (frozen)
         with torch.no_grad():

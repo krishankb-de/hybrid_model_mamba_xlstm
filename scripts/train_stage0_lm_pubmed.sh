@@ -4,26 +4,24 @@
 #SBATCH --gres=gpu:mitarb:1
 #SBATCH --mem=40G
 #SBATCH --time=24:00:00
-#SBATCH --job-name=simcse_stage1
+#SBATCH --job-name=lm_stage0_pubmed
 #SBATCH --output=logs/%x_%j.log
 #SBATCH --error=logs/%x_%j.log
 
 set -euo pipefail
 
-echo "=== JOB START (Stage 1: SimCSE on PubMed, LM-pretrained init) ==="
+echo "=== JOB START (Stage 0: LM pretraining on PubMed) ==="
 date
 echo "Host: $(hostname)"
 echo "Submit dir: ${SLURM_SUBMIT_DIR}"
 echo ""
 echo "Configuration:"
-echo "  - Init: outputs/hybrid_70m_lm_pretrain_pubmed/checkpoints/last.ckpt"
-echo "  - Dataset: PubMed abstracts (ccdv/pubmed-summarization)"
-echo "  - Mode: SimCSE (text-only contrastive)"
-echo "  - Batch size: 32 (effective 64 w/ grad accum 2)"
-echo "  - Sequence length: 512 (matches Stage 0)"
-echo "  - Learning rate: 2e-5"
-echo "  - Warmup steps: 500"
-echo "  - Max steps: 10,000"
+echo "  - Dataset: PubMed (ccdv/pubmed-summarization)"
+echo "  - Batch size: 32 (effective 128 w/ grad accum 4)"
+echo "  - Sequence length: 512"
+echo "  - Learning rate: 6e-4"
+echo "  - Warmup steps: 1000"
+echo "  - Max steps: 40,000"
 echo "  - Grad clip: 1.0"
 echo ""
 
@@ -67,24 +65,16 @@ fi
 
 nvidia-smi
 
-LM_CKPT="./outputs/hybrid_70m_lm_pretrain_pubmed/checkpoints/last.ckpt"
-if [ ! -f "$LM_CKPT" ]; then
-    echo "ERROR: LM-pretrained checkpoint not found: $LM_CKPT"
-    echo "Run scripts/train_stage0_lm_pubmed.sh first."
-    exit 1
-fi
-
-python scripts/train_contrastive.py \
+python scripts/train.py \
   --config-name config_70m \
   dataset=pubmed \
   trainer=a100_single_gpu \
   trainer.accelerator=cuda \
   trainer.max_epochs=-1 \
-  trainer.max_steps=10000 \
-  trainer.accumulate_grad_batches=2 \
-  trainer.val_check_interval=500 \
+  trainer.max_steps=40000 \
+  trainer.accumulate_grad_batches=4 \
+  trainer.val_check_interval=1000 \
   trainer.log_every_n_steps=25 \
-  contrastive_mode=simcse \
   dataset.batch_size=32 \
   dataset.eval_batch_size=32 \
   dataset.max_length=512 \
@@ -92,21 +82,16 @@ python scripts/train_contrastive.py \
   dataset.num_workers=4 \
   dataset.preprocessing_num_workers=4 \
   dataset.pin_memory=true \
-  lm_checkpoint="$LM_CKPT" \
-  callbacks.checkpoint.every_n_train_steps=1000 \
+  callbacks.checkpoint.every_n_train_steps=2000 \
   callbacks.checkpoint.save_top_k=3 \
-  callbacks.early_stopping.enabled=true \
-  callbacks.early_stopping.monitor=train/contrastive_loss_epoch \
-  callbacks.early_stopping.patience=3 \
-  callbacks.early_stopping.min_delta=0.01 \
-  experiment_name=stage1_pubmed_simcse \
-  output_dir=./outputs/stage1_pubmed_simcse \
+  experiment_name=hybrid_70m_lm_pretrain_pubmed \
+  output_dir=./outputs/hybrid_70m_lm_pretrain_pubmed \
   wandb.enabled=false \
-  model.learning_rate=2.0e-5 \
-  model.warmup_steps=500 \
+  model.learning_rate=6.0e-4 \
+  model.warmup_steps=1000 \
   model.gradient_clip_val=1.0
 
 echo ""
-echo "=== JOB END (Stage 1: SimCSE) ==="
-echo "Checkpoint saved to: ./outputs/stage1_pubmed_simcse/checkpoints/"
+echo "=== JOB END (Stage 0: LM pretrain) ==="
+echo "Checkpoint saved to: ./outputs/hybrid_70m_lm_pretrain_pubmed/checkpoints/"
 date

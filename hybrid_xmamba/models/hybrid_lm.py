@@ -337,25 +337,33 @@ class HybridTextEncoder(nn.Module):
             for param in self.lm.parameters():
                 param.requires_grad = False
 
-    def encode(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def encode(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Encode a batch of token sequences into normalised embeddings.
 
-        Uses the last non-padding token hidden state as the sequence
-        representation, which works well for causal SSM architectures.
+        Gathers the hidden state at the last non-padding position per row.
 
         Args:
             input_ids: Token IDs (B, L)
+            attention_mask: (B, L) 1 for real tokens, 0 for padding. If None,
+                falls back to the final position.
 
         Returns:
             L2-normalised embeddings (B, embed_dim)
         """
         outputs = self.lm(input_ids, output_hidden_states=True, return_dict=True)
-        # outputs.hidden_states is a tuple; last element is post-final-norm
         last_hidden = outputs.hidden_states[-1]   # (B, L, dim)
-        # Take the last token position as the sequence summary
-        seq_repr = last_hidden[:, -1, :]           # (B, dim)
-        projected = self.projection_head(seq_repr) # (B, embed_dim)
-        # Add epsilon for numerical stability
+        if attention_mask is not None:
+            lengths = attention_mask.sum(dim=1).clamp(min=1).long()
+            idx = lengths - 1
+            B = last_hidden.size(0)
+            seq_repr = last_hidden[torch.arange(B, device=last_hidden.device), idx]
+        else:
+            seq_repr = last_hidden[:, -1, :]
+        projected = self.projection_head(seq_repr)
         return nn.functional.normalize(projected, dim=-1, eps=1e-8)
 
     def forward(

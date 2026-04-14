@@ -126,18 +126,30 @@ def prepare_dataloader(cfg: DictConfig, split: str, tokenizer):
                     dataset = dataset.take(estimated_samples_needed)
                 elif len(dataset) > estimated_samples_needed:
                     dataset = dataset.select(range(estimated_samples_needed))
+    elif dataset_name == "pubmed":
+        hf_split = "train" if split == "train" else "validation"
+        dataset = load_dataset(
+            "ccdv/pubmed-summarization",
+            split=hf_split,
+            cache_dir=cfg.dataset.cache_dir,
+        )
+        if split == "validation":
+            val_max = cfg.dataset.get("val_max_samples", 2000)
+            dataset = dataset.select(range(min(val_max, len(dataset))))
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
-    
+
     # Tokenization function - use text packing (concatenate + chunk)
     # instead of padding every sample to max_length (wastes compute on padding tokens)
     def tokenize_function(examples):
         # Handle different text field names across datasets
-        text_field = "text"
-        if dataset_name == "fineweb" and "text" not in examples:
-            # FineWeb might use different field names
+        if "text" in examples:
+            text_field = "text"
+        elif "article" in examples:
+            text_field = "article"
+        else:
             text_field = next(k for k in examples.keys() if isinstance(examples[k][0], str))
-        
+
         # Tokenize without padding - we'll pack sequences next
         tokenized = tokenizer(
             examples[text_field],

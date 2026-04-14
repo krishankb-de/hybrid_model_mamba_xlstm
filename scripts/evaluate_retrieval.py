@@ -216,19 +216,14 @@ def load_pubmed_pairs(num_pairs=1000, split="validation"):
 
 
 @torch.no_grad()
-def encode_texts(model, tokenizer, texts, batch_size=32, max_length=256, device="cuda"):
-    """Encode a list of texts into embeddings.
-    
-    NOTE: Default max_length=256 matches typical Stage 1 training.
-    Adjust based on your training config's max_seq_length.
-    """
+def encode_texts(model, tokenizer, texts, batch_size=32, max_length=512, device="cuda"):
+    """Encode a list of texts into embeddings."""
     model.eval()
     embeddings = []
-    
+
     for i in tqdm(range(0, len(texts), batch_size), desc="Encoding"):
         batch_texts = texts[i:i + batch_size]
-        
-        # Tokenize
+
         tokens = tokenizer(
             batch_texts,
             padding=True,
@@ -237,11 +232,11 @@ def encode_texts(model, tokenizer, texts, batch_size=32, max_length=256, device=
             return_tensors="pt"
         )
         input_ids = tokens["input_ids"].to(device)
-        
-        # Encode
-        batch_embeddings = model.encode(input_ids)
+        attention_mask = tokens["attention_mask"].to(device)
+
+        batch_embeddings = model.encode(input_ids, attention_mask=attention_mask)
         embeddings.append(batch_embeddings.cpu())
-    
+
     return torch.cat(embeddings, dim=0)
 
 
@@ -279,21 +274,18 @@ def compute_retrieval_metrics(query_embeddings, corpus_embeddings, k_values=[1, 
     return results
 
 
-def evaluate_retrieval(model, tokenizer, pairs, batch_size=32, device="cuda"):
+def evaluate_retrieval(model, tokenizer, pairs, batch_size=32, max_length=512, device="cuda"):
     """Evaluate retrieval performance on abstract pairs."""
-    # Extract queries and corpus
     queries = [pair[0] for pair in pairs]
     corpus = [pair[1] for pair in pairs]
-    
+
     print(f"\nEvaluating retrieval on {len(pairs)} pairs...")
-    
-    # Encode queries
+
     print("Encoding queries...")
-    query_embeddings = encode_texts(model, tokenizer, queries, batch_size, device=device)
-    
-    # Encode corpus
+    query_embeddings = encode_texts(model, tokenizer, queries, batch_size, max_length=max_length, device=device)
+
     print("Encoding corpus...")
-    corpus_embeddings = encode_texts(model, tokenizer, corpus, batch_size, device=device)
+    corpus_embeddings = encode_texts(model, tokenizer, corpus, batch_size, max_length=max_length, device=device)
     
     # Compute metrics
     print("Computing retrieval metrics...")
@@ -309,7 +301,7 @@ def main():
     parser.add_argument("--num-pairs", type=int, default=1000,
                         help="Number of abstract pairs to evaluate")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--max-length", type=int, default=256)  # Match training max_seq_length
+    parser.add_argument("--max-length", type=int, default=512)  # Match PubMed training max_seq_length
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
@@ -336,6 +328,7 @@ def main():
     metrics = evaluate_retrieval(
         model, tokenizer, pairs,
         batch_size=args.batch_size,
+        max_length=args.max_length,
         device=device
     )
     

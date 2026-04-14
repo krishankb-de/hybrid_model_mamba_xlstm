@@ -91,7 +91,10 @@ class TextOnlyDataset(Dataset):
             padding="max_length",
             return_tensors="pt",
         )
-        return {"input_ids": enc["input_ids"].squeeze(0)}
+        return {
+            "input_ids": enc["input_ids"].squeeze(0),
+            "attention_mask": enc["attention_mask"].squeeze(0),
+        }
 
 
 class ImageTextDataset(Dataset):
@@ -143,6 +146,7 @@ class ImageTextDataset(Dataset):
             return_tensors="pt",
         )
         input_ids = enc["input_ids"].squeeze(0)
+        attention_mask = enc["attention_mask"].squeeze(0)
 
         # --- image ---
         img = item.get("image")
@@ -159,7 +163,11 @@ class ImageTextDataset(Dataset):
             
         pixel_values = self.img_transform(img)
 
-        return {"input_ids": input_ids, "pixel_values": pixel_values}
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "pixel_values": pixel_values,
+        }
 
 
 # ---------------------------------------------------------------------------

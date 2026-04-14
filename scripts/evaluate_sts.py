@@ -233,7 +233,7 @@ def load_stsb_dataset(split="test"):
 
 
 @torch.no_grad()
-def encode_sentences(model, tokenizer, sentences, batch_size=32, max_length=256, device="cuda"):
+def encode_sentences(model, tokenizer, sentences, batch_size=32, max_length=512, device="cuda"):
     """Encode a list of sentences into embeddings.
     
     NOTE: Default max_length=256 matches typical Stage 1 training.
@@ -254,9 +254,10 @@ def encode_sentences(model, tokenizer, sentences, batch_size=32, max_length=256,
             return_tensors="pt"
         )
         input_ids = tokens["input_ids"].to(device)
-        
+        attention_mask = tokens["attention_mask"].to(device)
+
         # Encode
-        batch_embeddings = model.encode(input_ids)
+        batch_embeddings = model.encode(input_ids, attention_mask=attention_mask)
         embeddings.append(batch_embeddings.cpu())
     
     return torch.cat(embeddings, dim=0)
@@ -269,16 +270,16 @@ def compute_similarity_scores(embeddings1, embeddings2):
     return similarities.numpy()
 
 
-def evaluate_sts(model, tokenizer, pairs, gold_scores, batch_size=32, device="cuda"):
+def evaluate_sts(model, tokenizer, pairs, gold_scores, batch_size=32, max_length=512, device="cuda"):
     """Evaluate STS performance using Spearman correlation."""
     # Extract sentences
     sentences1 = [pair[0] for pair in pairs]
     sentences2 = [pair[1] for pair in pairs]
-    
+
     # Encode
     print("Encoding sentence pairs...")
-    embeddings1 = encode_sentences(model, tokenizer, sentences1, batch_size, device=device)
-    embeddings2 = encode_sentences(model, tokenizer, sentences2, batch_size, device=device)
+    embeddings1 = encode_sentences(model, tokenizer, sentences1, batch_size, max_length=max_length, device=device)
+    embeddings2 = encode_sentences(model, tokenizer, sentences2, batch_size, max_length=max_length, device=device)
     
     # Compute similarities
     pred_scores = compute_similarity_scores(embeddings1, embeddings2)
@@ -303,7 +304,7 @@ def main():
                         choices=["biosses", "stsb"],
                         help="STS dataset to use")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--max-length", type=int, default=256)  # Match training max_seq_length
+    parser.add_argument("--max-length", type=int, default=512)  # Match PubMed training max_seq_length
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
@@ -334,6 +335,7 @@ def main():
     results = evaluate_sts(
         model, tokenizer, pairs, scores,
         batch_size=args.batch_size,
+        max_length=args.max_length,
         device=device
     )
     
