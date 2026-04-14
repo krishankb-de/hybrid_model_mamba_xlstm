@@ -5,6 +5,7 @@ Provides a Lightning wrapper for easy distributed training with minimal boilerpl
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import pytorch_lightning as pl
 from typing import Optional, Dict, Any
 from torch.optim import Optimizer
@@ -445,6 +446,107 @@ class HybridContrastiveLightningModule(HybridLightningModule):
     # ------------------------------------------------------------------
     def on_validation_epoch_end(self):
         pass  # Hook for future retrieval evaluation — extend as needed
+
+
+class DistillContrastiveLightningModule(HybridContrastiveLightningModule):
+    """HybridContrastiveLightningModule extended with PubMedBERT embedding KD.
+
+    During SimCSE Stage 1, a frozen PubMedBERT teacher provides CLS embeddings.
+    A cosine distillation loss is added alongside the SimCSE InfoNCE loss.
+
+    Loss:
+        L = L_SimCSE + lambda(step) * (1 - cos(student_z1, teacher_cls))
+
+    lambda ramps from 0 to lambda_max over [warmup_steps, warmup_steps + ramp_steps]
+    to prevent early collapse onto the teacher manifold.
+
+    The teacher uses WordPiece tokenization (PubMedBERT) while the student uses
+    GPT-2 BPE — dual tokenization is handled in the dataloader. Both see the same
+    raw text; only pooled CLS vs. pooled student embeddings are compared.
+
+    Args:
+        teacher:            Frozen AutoModel (PubMedBERT encoder).
+        lambda_max:         Maximum distillation weight after ramp-up.
+        distill_warmup:     Steps with lambda=0 (pure SimCSE) before ramp starts.
+        distill_ramp:       Steps over which lambda linearly ramps 0 → lambda_max.
+        **kwargs:           Passed to HybridContrastiveLightningModule.
+    """
+
+    def __init__(
+        self,
+        teacher: torch.nn.Module,
+        lambda_max: float = 0.3,
+        distill_warmup: int = 500,
+        distill_ramp: int = 500,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.teacher = teacher
+        self.lambda_max = lambda_max
+        self.distill_warmup = distill_warmup
+        self.distill_ramp = distill_ramp
+
+    def _get_distill_lambda(self) -> float:
+        """Compute current distillation weight based on global step."""
+        step = self.global_step
+        if step < self.distill_warmup:
+            return 0.0
+        ramp_step = step - self.distill_warmup
+        if ramp_step >= self.distill_ramp:
+            return self.lambda_max
+        return self.lambda_max * (ramp_step / self.distill_ramp)
+
+    def _simcse_step(self, batch, batch_idx, split: str):
+        """SimCSE step with optional PubMedBERT cosine distillation loss."""
+        input_ids = batch["input_ids"]
+        attention_mask = batch.get("attention_mask")
+
+        self.model.lm.train()
+        z1 = self.model.encode(input_ids, attention_mask=attention_mask)
+        z2 = self.model.encode(input_ids, attention_mask=attention_mask)
+
+        simcse_loss = self._nt_xent_loss(z1, z2, self.model.logit_scale)
+
+        # --- Distillation loss (teacher CLS → student z1) ---
+        distill_lambda = self._get_distill_lambda() if split == "train" else 0.0
+        distill_loss = torch.tensor(0.0, device=simcse_loss.device)
+
+        if distill_lambda > 0.0 and "teacher_input_ids" in batch:
+            t_input_ids = batch["teacher_input_ids"]
+            t_attn_mask = batch.get("teacher_attention_mask")
+            with torch.no_grad():
+                teacher_out = self.teacher(
+                    input_ids=t_input_ids,
+                    attention_mask=t_attn_mask,
+                )
+                # CLS token (position 0) — standard for BERT-style encoders
+                teacher_cls = teacher_out.last_hidden_state[:, 0, :]
+                teacher_cls = F.normalize(teacher_cls.float(), dim=-1)
+
+            student_teacher_cos = F.cosine_similarity(
+                z1.float(), teacher_cls, dim=-1
+            )  # (B,)
+            distill_loss = (1.0 - student_teacher_cos).mean()
+
+        total_loss = simcse_loss + distill_lambda * distill_loss
+
+        # --- Logging ---
+        self.log(f"{split}/simcse_loss",   simcse_loss,   prog_bar=True,
+                 on_step=(split == "train"), on_epoch=True)
+        self.log(f"{split}/distill_loss",  distill_loss,  prog_bar=False,
+                 on_step=(split == "train"), on_epoch=True)
+        self.log(f"{split}/total_loss",    total_loss,    prog_bar=True,
+                 on_step=(split == "train"), on_epoch=True)
+        if split == "train":
+            self.log("train/distill_lambda", distill_lambda, on_step=True)
+            pos_cos = (z1 * z2).sum(dim=-1).mean()
+            self.log("train/pos_cosine_mean", pos_cos, on_step=True, prog_bar=False)
+            # Log student↔teacher alignment when distillation is active
+            if distill_lambda > 0.0 and "teacher_input_ids" in batch:
+                self.log("train/student_teacher_cos",
+                         student_teacher_cos.mean().item(), on_step=True)
+
+        return total_loss
 
 
 class MQARLightningModule(HybridLightningModule):

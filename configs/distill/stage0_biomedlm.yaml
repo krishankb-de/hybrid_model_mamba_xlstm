@@ -1,0 +1,32 @@
+# Stage 0 Knowledge Distillation — BioMedLM teacher
+# Used during LM pretraining (causal next-token prediction on PubMed).
+#
+# BioMedLM (stanford-crfm/BioMedLM, 2.7B) shares GPT-2 BPE 50257 with
+# the student — no tokenizer realignment needed. Loss is a weighted sum
+# of student cross-entropy and KL divergence on logits.
+#
+# L = (1 - alpha) * CE(student_logits, targets)
+#   + alpha * T^2 * KL(softmax(student/T) || softmax(teacher/T))
+
+teacher_model: "stanford-crfm/BioMedLM"
+
+# Distillation weight: 0 = pure CE, 1 = pure KD
+alpha: 0.5
+
+# Softmax temperature for logit smoothing (Hinton et al. 2015)
+temperature: 2.0
+
+# Teacher dtype — always bf16 on A100 for memory efficiency
+teacher_dtype: "bfloat16"
+
+# Abort training if teacher perplexity on PubMed exceeds this threshold
+# (sanity guard: if teacher ppl > 50 something is wrong with loading/vocab)
+teacher_ppl_abort_threshold: 50.0
+
+# Log distillation metrics every N steps
+log_every_n_steps: 25
+
+# Memory fallback: if OOM at B=32, reduce batch and increase grad_accum
+# These are not used by default — set them in the trainer config override
+oom_fallback_batch_size: 16
+oom_fallback_grad_accum: 8

@@ -1,0 +1,33 @@
+# 70M Hybrid Model Config for Colab
+# Same architecture as production 70M but with reduced warmup overhead
+
+model_type: "hybrid_lm"
+
+# Architecture
+vocab_size: 50257
+dim: 512
+num_layers: 8
+layer_pattern: ["mamba", "mamba", "mlstm"]
+
+# Mamba parameters
+state_size: 16
+conv_size: 4
+expand_factor: 2
+dt_rank: null
+use_fast_path: false        # Disable fast kernels on Colab (safer)
+
+# mLSTM parameters
+head_dim: 64
+num_heads: 8
+use_tfla: true
+proj_factor: 2
+
+# sLSTM parameters
+slstm_hidden_dim: 512
+slstm_num_heads: 4
+use_exponential_gate: true
+
+# General
+max_position_embeddings: 1024
+dropout: 0.1
+hidden_act: "silu"

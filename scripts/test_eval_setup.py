@@ -116,7 +116,7 @@ def test_model_loading(checkpoint_path):
         # Infer config
         dim = 768
         for k, v in state_dict.items():
-            if "lm.embedding.token_embedding.weight" in k:
+            if "token_embedding.weight" in k:
                 dim = int(v.shape[1])
                 break
         

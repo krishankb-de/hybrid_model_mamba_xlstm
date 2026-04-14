@@ -49,9 +49,13 @@ from transformers import AutoTokenizer
 from PIL import Image
 import torchvision.transforms as T
 
+from transformers import AutoModel
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
-from hybrid_xmamba.training.lightning_module import HybridContrastiveLightningModule
+from hybrid_xmamba.training.lightning_module import (
+    HybridContrastiveLightningModule,
+    DistillContrastiveLightningModule,
+)
 
 torch.set_float32_matmul_precision("high")
 
@@ -94,6 +98,58 @@ class TextOnlyDataset(Dataset):
         return {
             "input_ids": enc["input_ids"].squeeze(0),
             "attention_mask": enc["attention_mask"].squeeze(0),
+        }
+
+
+class TextOnlyDatasetWithTeacher(Dataset):
+    """Like TextOnlyDataset but also emits teacher (PubMedBERT) tokenization.
+
+    Adds ``teacher_input_ids`` and ``teacher_attention_mask`` to each batch.
+    The student and teacher see the same raw text but use different tokenizers
+    (GPT-2 BPE vs. WordPiece). Only pooled embeddings are compared — no
+    token-level alignment needed.
+    """
+
+    def __init__(self, hf_dataset, student_tokenizer, teacher_tokenizer,
+                 max_length: int, teacher_max_length: int = 512):
+        self.data = hf_dataset
+        self.student_tok = student_tokenizer
+        self.teacher_tok = teacher_tokenizer
+        self.max_length = max_length
+        self.teacher_max_length = teacher_max_length
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        text = (
+            item.get("text") or
+            item.get("abstract") or
+            item.get("article") or
+            ""
+        )
+        # Student tokenization (GPT-2 BPE)
+        s_enc = self.student_tok(
+            text,
+            max_length=self.max_length,
+            truncation=True,
+            padding="max_length",
+            return_tensors="pt",
+        )
+        # Teacher tokenization (PubMedBERT WordPiece)
+        t_enc = self.teacher_tok(
+            text,
+            max_length=self.teacher_max_length,
+            truncation=True,
+            padding="max_length",
+            return_tensors="pt",
+        )
+        return {
+            "input_ids": s_enc["input_ids"].squeeze(0),
+            "attention_mask": s_enc["attention_mask"].squeeze(0),
+            "teacher_input_ids": t_enc["input_ids"].squeeze(0),
+            "teacher_attention_mask": t_enc["attention_mask"].squeeze(0),
         }
 
 
@@ -174,14 +230,17 @@ class ImageTextDataset(Dataset):
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_pubmed(cfg, split: str, tokenizer):
+def load_pubmed(cfg, split: str, tokenizer, teacher_tokenizer=None, teacher_max_length: int = 512):
     """Load PubMed abstracts from HuggingFace.
-    
+
     Uses ccdv/pubmed-summarization which is in Parquet format (no loading script).
     This dataset contains ~133k PubMed articles with abstracts.
+
+    If ``teacher_tokenizer`` is provided, returns a TextOnlyDatasetWithTeacher
+    that emits both student and teacher token tensors per sample.
     """
     print(f"Loading PubMed dataset for {split} split...")
-    
+
     # Use pubmed-summarization dataset (Parquet format, no loading script)
     ds = load_dataset(
         "ccdv/pubmed-summarization",
@@ -189,7 +248,7 @@ def load_pubmed(cfg, split: str, tokenizer):
         streaming=cfg.dataset.streaming,
         cache_dir=cfg.dataset.cache_dir,
     )
-    
+
     # Carve out validation from the tail of the training stream
     val_n = cfg.dataset.get("val_max_samples", 2000)
     if split == "validation":
@@ -203,8 +262,15 @@ def load_pubmed(cfg, split: str, tokenizer):
             n = int(target_tokens / 200)   # rough estimate: ~200 tokens/abstract
             if len(ds) > n:
                 ds = ds.select(range(val_n, val_n + n))
-    
+
     print(f"Dataset loaded: {len(ds) if hasattr(ds, '__len__') else 'streaming'} samples")
+
+    if teacher_tokenizer is not None:
+        return TextOnlyDatasetWithTeacher(
+            ds, tokenizer, teacher_tokenizer,
+            max_length=cfg.dataset.max_length,
+            teacher_max_length=teacher_max_length,
+        )
     return TextOnlyDataset(ds, tokenizer, cfg.dataset.max_length)
 
 
@@ -224,10 +290,17 @@ def load_indiana_cxr(cfg, split: str, tokenizer):
     return ImageTextDataset(ds, tokenizer, cfg)
 
 
-def prepare_dataloader(cfg, split: str, tokenizer):
+def prepare_dataloader(cfg, split: str, tokenizer, teacher_tokenizer=None):
     name = cfg.dataset.dataset_name
+    distill_cfg = cfg.get("distill", None)
+    teacher_max_length = int(distill_cfg.get("teacher_max_length", 512)) if distill_cfg else 512
+
     if name == "pubmed":
-        dataset = load_pubmed(cfg, split, tokenizer)
+        dataset = load_pubmed(
+            cfg, split, tokenizer,
+            teacher_tokenizer=teacher_tokenizer,
+            teacher_max_length=teacher_max_length,
+        )
     elif name == "indiana_cxr":
         dataset = load_indiana_cxr(cfg, split, tokenizer)
     else:
@@ -319,26 +392,70 @@ def main(cfg: DictConfig):
         "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224",
     )
 
-    lightning_module = HybridContrastiveLightningModule(
-        model=text_encoder,
-        contrastive_mode=contrastive_mode,
-        image_encoder_name=image_encoder_name,
-        learning_rate=cfg.model.learning_rate,
-        weight_decay=cfg.model.weight_decay,
-        warmup_steps=cfg.model.warmup_steps,
-        max_steps=cfg.trainer.max_steps,
-        gradient_clip_val=cfg.model.gradient_clip_val,
-    )
+    # --- Distillation (Stage 1 PubMedBERT embedding KD) ---
+    distill_cfg = cfg.get("distill", None)
+    teacher_tokenizer = None
+
+    if distill_cfg is not None and contrastive_mode == "simcse":
+        teacher_name = distill_cfg.teacher_model
+        teacher_dtype_str = distill_cfg.get("teacher_dtype", "bfloat16")
+        teacher_dtype = torch.bfloat16 if teacher_dtype_str == "bfloat16" else torch.float16
+
+        print(f"\nLoading Stage 1 teacher: {teacher_name} ({teacher_dtype_str})...")
+        teacher_model = AutoModel.from_pretrained(
+            teacher_name,
+            torch_dtype=teacher_dtype,
+            low_cpu_mem_usage=True,
+        )
+        teacher_model.eval()
+        for p in teacher_model.parameters():
+            p.requires_grad_(False)
+
+        teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_name)
+        t_params = sum(p.numel() for p in teacher_model.parameters())
+        print(f"Teacher params: {t_params:,} ({t_params/1e6:.0f}M), frozen.")
+
+        lightning_module = DistillContrastiveLightningModule(
+            teacher=teacher_model,
+            lambda_max=float(distill_cfg.get("lambda_max", 0.3)),
+            distill_warmup=int(distill_cfg.get("warmup_steps", 500)),
+            distill_ramp=int(distill_cfg.get("ramp_steps", 500)),
+            model=text_encoder,
+            contrastive_mode=contrastive_mode,
+            image_encoder_name=image_encoder_name,
+            learning_rate=cfg.model.learning_rate,
+            weight_decay=cfg.model.weight_decay,
+            warmup_steps=cfg.model.warmup_steps,
+            max_steps=cfg.trainer.max_steps,
+            gradient_clip_val=cfg.model.gradient_clip_val,
+        )
+        print(f"Using DistillContrastiveLightningModule "
+              f"(lambda_max={distill_cfg.get('lambda_max', 0.3)}, "
+              f"warmup={distill_cfg.get('warmup_steps', 500)}, "
+              f"ramp={distill_cfg.get('ramp_steps', 500)})")
+    else:
+        lightning_module = HybridContrastiveLightningModule(
+            model=text_encoder,
+            contrastive_mode=contrastive_mode,
+            image_encoder_name=image_encoder_name,
+            learning_rate=cfg.model.learning_rate,
+            weight_decay=cfg.model.weight_decay,
+            warmup_steps=cfg.model.warmup_steps,
+            max_steps=cfg.trainer.max_steps,
+            gradient_clip_val=cfg.model.gradient_clip_val,
+        )
 
     # Callbacks
+    monitor_metric = "val/total_loss" if distill_cfg else "val/contrastive_loss"
     callbacks = [
         ModelCheckpoint(
             dirpath=cfg.checkpoint_dir,
-            monitor="val/contrastive_loss",
+            monitor=monitor_metric,
             mode="min",
             save_top_k=3,
             save_last=True,
-            filename="contrastive-{step:06d}-{val/contrastive_loss:.4f}",
+            filename="contrastive-{step:06d}-{val/total_loss:.4f}" if distill_cfg
+                     else "contrastive-{step:06d}-{val/contrastive_loss:.4f}",
         ),
         LearningRateMonitor(logging_interval="step"),
     ]
@@ -372,8 +489,8 @@ def main(cfg: DictConfig):
     )
 
     print("Preparing dataloaders...")
-    train_dl = prepare_dataloader(cfg, "train", tokenizer)
-    val_dl   = prepare_dataloader(cfg, "validation", tokenizer)
+    train_dl = prepare_dataloader(cfg, "train", tokenizer, teacher_tokenizer=teacher_tokenizer)
+    val_dl   = prepare_dataloader(cfg, "validation", tokenizer, teacher_tokenizer=teacher_tokenizer)
 
     print(f"Contrastive mode : {contrastive_mode}")
     print(f"Dataset          : {cfg.dataset.dataset_name}")

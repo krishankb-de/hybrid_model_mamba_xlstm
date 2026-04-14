@@ -1,0 +1,34 @@
+# Stage 1 Knowledge Distillation — PubMedBERT teacher
+# Used during SimCSE contrastive training (text-only, Stage 1).
+#
+# PubMedBERT (microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext,
+# 110M) is an encoder trained from scratch on PubMed — best pooled-embedding
+# teacher for biomedical retrieval.
+#
+# Tokenizer mismatch: student uses GPT-2 BPE, teacher uses WordPiece ~30k.
+# Both tokenize the same raw text independently. Only pooled CLS embeddings
+# are compared (no token-level alignment required).
+#
+# L = L_SimCSE + lambda(step) * (1 - cos(student_pooled, teacher_cls))
+#
+# lambda ramps from 0 → lambda_max over [warmup_steps, warmup_steps + ramp_steps]
+
+teacher_model: "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"
+
+# Maximum distillation weight (after ramp-up)
+lambda_max: 0.3
+
+# Steps with lambda=0 (pure SimCSE only) before ramp starts
+warmup_steps: 500
+
+# Steps over which lambda linearly ramps from 0 to lambda_max
+ramp_steps: 500
+
+# Teacher dtype — bf16 on A100
+teacher_dtype: "bfloat16"
+
+# Teacher max sequence length — PubMedBERT supports up to 512
+teacher_max_length: 512
+
+# Log distillation metrics every N steps
+log_every_n_steps: 25

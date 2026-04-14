@@ -1,0 +1,34 @@
+# Colab T4 GPU Trainer Config (Stage 0 - LM Pretraining)
+# For 5k steps: ~1.5 hours
+# Memory: 16GB T4 VRAM
+
+batch_size: 8               # Batch size per GPU
+accumulation_steps: 1       # No gradient accumulation
+num_workers: 2              # Minimal dataloaders for Colab
+
+# Learning
+learning_rate: 6e-4
+lr_schedule: cosine_warmup  # Linear warmup then cosine decay
+warmup_steps: 100           # Short warmup
+weight_decay: 0.1
+grad_clip: 1.0
+
+# Training
+max_steps: 5000             # For Colab test
+eval_steps: 500             # Evaluate every 500 steps
+save_steps: 500             # Save checkpoint every 500 steps
+seed: 42
+
+# Dataset
+max_length: 512
+
+# Mixed precision for memory efficiency
+mixed_precision: true       # fp16 for gradient computation
+use_compile: false          # torch.compile overhead on Colab
+
+# Logging
+enable_progress_bar: true
+num_sanity_val_steps: 0
+
+# Early stopping (disabled)
+enable_early_stopping: false

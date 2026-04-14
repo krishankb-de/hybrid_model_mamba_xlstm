@@ -10,6 +10,7 @@ numpy>=1.24.0
 sentence-transformers>=2.2.0  # For STS evaluation utilities
 scipy>=1.10.0                  # For Spearman correlation computation
 datasets>=2.12.0               # For loading BIOSSES, STS-B, and PubMed datasets
+einops>=0.7.0                  # Required by hybrid_xmamba.layers.mamba_block
 
 # Optional but recommended
 tqdm>=4.65.0                   # Progress bars (usually included with transformers)

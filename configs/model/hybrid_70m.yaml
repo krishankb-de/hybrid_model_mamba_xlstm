@@ -48,3 +48,7 @@ weight_decay: 0.1
 warmup_steps: 1000
 max_steps: 50000
 gradient_clip_val: 1.0
+
+# Distillation (optional — override via distill=stage0_biomedlm or stage1_pubmedbert)
+# Null by default so existing pipeline is unaffected.
+distill: null
