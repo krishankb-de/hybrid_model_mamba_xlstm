@@ -9,7 +9,9 @@ checkpoint:
   filename: "checkpoint-{epoch:02d}-{val_loss:.4f}"
   auto_insert_metric_name: false
   every_n_epochs: null
-  every_n_train_steps: 5000
+  # 500 steps ≈ 17 min at 2s/step on A100-40GB bf16 — bounds worst-case loss
+  # on a 36-48h Willi walltime to ≤1 cadence window.
+  every_n_train_steps: 500
 
 # Early stopping
 early_stopping:

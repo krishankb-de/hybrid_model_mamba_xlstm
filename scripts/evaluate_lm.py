@@ -137,10 +137,19 @@ def evaluate_perplexity(model, dataloader, device, max_batches=None):
         if max_batches and i >= max_batches:
             break
         input_ids = batch["input_ids"].to(device)
+        attention_mask = batch.get("attention_mask")
         labels = input_ids.clone()
+        # If a padding mask is present (padded source), exclude pad positions
+        # from the loss and the token count. Packed data has no mask → unchanged.
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
+            labels[attention_mask == 0] = -100
+            num_tokens = int(attention_mask.sum().item()) - input_ids.shape[0]
+            num_tokens = max(num_tokens, 1)
+        else:
+            num_tokens = input_ids.shape[0] * (input_ids.shape[1] - 1)
         outputs = model(input_ids, labels=labels, return_dict=True)
         loss = outputs.loss
-        num_tokens = input_ids.shape[0] * (input_ids.shape[1] - 1)
         total_loss += loss.item() * num_tokens
         total_tokens += num_tokens
         pbar.set_postfix({
@@ -411,6 +420,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
 
     sep = "=" * 60
     print("\n" + sep)

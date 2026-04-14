@@ -26,7 +26,13 @@ teacher_ppl_abort_threshold: 50.0
 # Log distillation metrics every N steps
 log_every_n_steps: 25
 
-# Memory fallback: if OOM at B=32, reduce batch and increase grad_accum
-# These are not used by default — set them in the trainer config override
-oom_fallback_batch_size: 16
+# A100 40GB default batch sizing: teacher (2.7B bf16) + student peak ≈22–26 GB.
+# The Stage-0 entrypoint (train_stage0_distill.py) reads these and applies them
+# as overrides unless explicitly set on the CLI. Effective batch = 16×4 = 64
+# (same as the 80 GB default of 32×2).
+batch_size: 16
+accumulate_grad_batches: 4
+
+# Further fallback if still OOM (e.g. eval memory spike while teacher loaded)
+oom_fallback_batch_size: 8
 oom_fallback_grad_accum: 8

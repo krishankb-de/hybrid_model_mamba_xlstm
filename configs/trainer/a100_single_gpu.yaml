@@ -1,17 +1,23 @@
 # A100 single-GPU trainer configuration
-# Optimized for NVIDIA A100 80GB with bf16 mixed precision.
+# Tuned for NVIDIA A100 40GB (Willi) with bf16 mixed precision.
+# Also safe on A100 80GB (leaves headroom).
 #
-# Key optimizations vs default single_gpu.yaml:
+# Key settings:
 # - bf16-mixed precision (4-5x faster matmuls on A100 Tensor Cores)
-# - Larger batch sizes (A100 has 80GB VRAM)
-# - More frequent validation for better tracking
-# - Gradient accumulation for effective batch of 64
+# - compile_model=false by default: Stage 0 KD with BioMedLM 2.7B teacher
+#   can graze 40GB under torch.compile memory overhead. Opt in via CLI:
+#     trainer.compile_model=true
+# - Effective batch = 32 × 2 = 64. For Stage 0 (teacher loaded), override
+#   to batch_size=16 accumulate_grad_batches=4 to keep peak under 36GB.
 
 # Hardware
 accelerator: "gpu"
 devices: 1
 precision: "bf16-mixed"     # Critical: enables A100 Tensor Core bf16
 strategy: "auto"
+
+# Compilation — see comment above; default OFF for 40GB safety
+compile_model: false
 
 # Training loop
 max_epochs: 1                # Default to 1 epoch (override with max_epochs=4 or 5)
@@ -20,7 +26,7 @@ val_check_interval: 500      # Validate every 500 optimizer steps
 check_val_every_n_epoch: null
 log_every_n_steps: 25
 
-# Batching — larger than T4 config since A100 has 80GB
+# Batching — sized for 40GB; override down to bs=16 ga=4 for Stage 0 KD
 # effective_batch = batch_size × accumulate_grad_batches = 32 × 2 = 64
 accumulate_grad_batches: 2
 

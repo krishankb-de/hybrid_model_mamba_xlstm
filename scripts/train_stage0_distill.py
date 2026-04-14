@@ -7,11 +7,13 @@ Loss:
     L = (1 - alpha) * CE(student_logits, targets)
       + alpha * T^2 * KL(softmax(student/T) || softmax(teacher/T))
 
-A100 memory budget (bf16, B=32, L=512):
-    Student 70M train : ~0.84 GB (weights + grads + Adam)
-    Teacher 2.7B frozen bf16 : ~5.4 GB weights + ~4-6 GB acts
-    Student activations : ~3 GB
-    Total : ~15-20 GB  (fits 40 GB with headroom)
+A100 40GB memory budget (bf16, B=16, L=512, grad_accum=4, torch.compile off):
+    Student 70M train          : ~1.0 GB  (weights + grads + Adam + acts)
+    Teacher 2.7B frozen bf16   : ~5.4 GB weights + ~10-18 GB activations
+    Total peak                 : ~22-26 GB on A100 40GB (headroom ~14 GB)
+Enable torch.compile only on 80GB; on 40GB the memory overhead can push
+peak past 34 GB when the validation batch coincides with the teacher
+activations. If OOM fires, halve batch_size and double grad_accum.
 
 Example:
     python scripts/train_stage0_distill.py \\
@@ -46,6 +48,8 @@ from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
 from hybrid_xmamba.training.lightning_module import HybridLightningModule
 from hybrid_xmamba.training.metrics import compute_perplexity
+from hybrid_xmamba.training.signal_callbacks import SignalCheckpointCallback
+from hybrid_xmamba.utils.run_metadata import write_run_metadata
 
 torch.set_float32_matmul_precision("high")
 
@@ -251,6 +255,7 @@ def main(cfg: DictConfig):
     os.makedirs(cfg.output_dir, exist_ok=True)
     os.makedirs(cfg.checkpoint_dir, exist_ok=True)
     os.makedirs(cfg.log_dir, exist_ok=True)
+    write_run_metadata(cfg, cfg.output_dir, extra={"entrypoint": "train_stage0_distill.py"})
 
     # Determine device
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -265,6 +270,7 @@ def main(cfg: DictConfig):
     tokenizer = AutoTokenizer.from_pretrained(cfg.dataset.tokenizer)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"  # labels/attention-mask alignment requires right-pad
     tokenizer.model_max_length = cfg.model.max_position_embeddings
     print(f"Tokenizer vocab size: {tokenizer.vocab_size} (should be 50257)")
 
@@ -370,6 +376,7 @@ def main(cfg: DictConfig):
             filename="stage0_kd-{step:06d}-{val/loss:.4f}",
         ),
         LearningRateMonitor(logging_interval="step"),
+        SignalCheckpointCallback(checkpoint_dir=cfg.checkpoint_dir),
     ]
 
     loggers = [TensorBoardLogger(save_dir=cfg.log_dir, name="stage0_kd")]

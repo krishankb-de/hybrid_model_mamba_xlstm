@@ -88,7 +88,18 @@ def load_encoder_from_checkpoint(checkpoint_path, device="cuda"):
     
     # BUG FIX 3: Use comprehensive prefix stripping (handles torch.compile)
     state_dict = strip_state_dict_prefixes(raw_state_dict)
-    
+
+    # Hard guard: if projection_head keys are absent here, encode() will use
+    # randomly-initialised projections and every retrieval number is invalid.
+    # Fail loudly rather than silently reporting garbage metrics.
+    if not any(k.startswith("projection_head.") for k in state_dict):
+        first_keys = list(state_dict.keys())[:20]
+        raise RuntimeError(
+            "Stage 1 checkpoint missing projection_head.* keys after prefix "
+            "stripping — encode() would use random projections. "
+            f"First 20 keys in state_dict: {first_keys}"
+        )
+
     # After stripping 'model.' prefix, the state_dict has the correct structure:
     # - lm.* keys for the language model
     # - projection_head.* keys for the projection head
@@ -316,7 +327,8 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
+    tokenizer.padding_side = "right"  # pooling at last non-pad requires right-pad
+
     # Load data
     pairs = load_pubmed_pairs(num_pairs=args.num_pairs)
     

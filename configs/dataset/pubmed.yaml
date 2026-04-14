@@ -18,7 +18,7 @@ max_seq_length: 512
 # Data loading — A100 40GB can handle larger batches at seq_len=512
 batch_size: 32
 eval_batch_size: 32
-num_workers: 8
+num_workers: 4
 pin_memory: true
 
 # Streaming: set to true to avoid downloading the full corpus upfront
@@ -30,8 +30,10 @@ cache_dir: "/scratch/krishun/pubmed_cache"
 pack_sequences: true
 preprocessing_num_workers: 8
 
-# Limit training to ~500M tokens (enough for domain adaptation)
-target_tokens: 500_000_000
+# Training token budget: 1.5B tokens (~Chinchilla-aligned for 70M params).
+# At bs=16 × seq=512 × grad_accum=4 = 32_768 tokens/step => ~45_800 steps.
+# Fits a single 36–48h Willi walltime at ~2s/step on A100 40GB bf16.
+target_tokens: 1_500_000_000
 
 # Validation: carve out 2000 samples from the training set
 val_size: 0.001

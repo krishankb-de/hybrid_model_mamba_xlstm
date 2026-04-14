@@ -1,9 +1,22 @@
 # Hybrid Mamba-xLSTM 70M: Complete Training, Testing & Evaluation Guide
 
 > **Model:** Hybrid Mamba-xLSTM 70M Parameters (dim=512, 8 layers)  
-> **GPU Target:** NVIDIA A100 80GB (also works on A100 40GB, V100, RTX 3090/4090)  
-> **Dataset:** WikiText-103  
-> **Estimated Time:** ~6-10 hours total for all 3 models (10k steps each on A100)
+> **GPU Target:** NVIDIA A100 40GB (Willi) — also works on A100 80GB, V100, RTX 3090/4090  
+> **Dataset:** WikiText-103 (smoke) · PubMed 1.5B tokens (Stage 0 real run)  
+> **Estimated Time:** Stage 0 ≈ 25–28h on A100-40GB bf16; Stage 1 SimCSE ≈ 6–8h
+
+---
+
+## Willi A100 40GB operational notes
+
+- `configs/trainer/a100_single_gpu.yaml` defaults to 40GB: `compile_model: false`, `batch_size=32`, `grad_accum=2`.
+- **Stage 0 KD** (BioMedLM teacher loaded) automatically drops to `batch_size=16`, `grad_accum=4` via `configs/distill/stage0_biomedlm.yaml`. If you still hit OOM, use `oom_fallback_batch_size=8`, `oom_fallback_grad_accum=8`.
+- **No gradient checkpointing is implemented.** If a config reliably OOMs, halve batch size before attempting to add `torch.utils.checkpoint` (it's not currently supported by any block).
+- **Checkpoint cadence** is 500 steps (≈17 min). Verify with `cfg.callbacks.checkpoint.every_n_train_steps` at job start.
+- **SLURM preemption**: `SignalCheckpointCallback` saves `<ckpt_dir>/interrupt.ckpt` on SIGTERM / SIGUSR1 / uncaught exception. Resume with `ckpt_path=<ckpt_dir>/interrupt.ckpt`. Use `sbatch --requeue --signal=B:SIGUSR1@90` to give the handler 90s before kill.
+- **Reproducibility**: every training entrypoint writes `<output_dir>/run_metadata.json` at step 0 (git SHA, branch, dirty flag, argv, resolved Hydra config).
+- **Mid-epoch resume is NOT supported** by the default IterableDataset path — a requeued job restarts from the epoch boundary and may see data twice. For 1.5B-token Stage 0 (single epoch) this is a non-issue.
+- **First Stage 0 run**: enable `trainer.detect_anomaly=true` for the first 100 steps to surface any NaN in the KD path. Disable for the main run (it's slow).
 
 ---
 

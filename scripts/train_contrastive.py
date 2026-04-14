@@ -56,6 +56,8 @@ from hybrid_xmamba.training.lightning_module import (
     HybridContrastiveLightningModule,
     DistillContrastiveLightningModule,
 )
+from hybrid_xmamba.training.signal_callbacks import SignalCheckpointCallback
+from hybrid_xmamba.utils.run_metadata import write_run_metadata
 
 torch.set_float32_matmul_precision("high")
 
@@ -333,11 +335,29 @@ def main(cfg: DictConfig):
     os.makedirs(cfg.output_dir, exist_ok=True)
     os.makedirs(cfg.checkpoint_dir, exist_ok=True)
     os.makedirs(cfg.log_dir, exist_ok=True)
+    write_run_metadata(cfg, cfg.output_dir, extra={"entrypoint": "train_contrastive.py"})
+
+    # When Stage 1 distillation is active, clamp student max_length to the
+    # teacher's max (PubMedBERT = 512) so both see the same text window and
+    # the cosine-distillation signal is comparing aligned representations.
+    distill_cfg_top = cfg.get("distill", None)
+    if distill_cfg_top is not None and "teacher_max_length" in distill_cfg_top:
+        t_max = int(distill_cfg_top.teacher_max_length)
+        cur_max = int(cfg.dataset.max_length)
+        if cur_max > t_max:
+            print(
+                f"[Stage1 distill] Clamping dataset.max_length {cur_max} -> {t_max} "
+                f"to match teacher_max_length."
+            )
+            cfg.dataset.max_length = t_max
+            if "max_seq_length" in cfg.dataset:
+                cfg.dataset.max_seq_length = t_max
 
     # Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(cfg.dataset.tokenizer)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"  # last-token pooling requires right-pad
     tokenizer.model_max_length = cfg.model.max_position_embeddings
 
     # Model config
@@ -458,6 +478,7 @@ def main(cfg: DictConfig):
                      else "contrastive-{step:06d}-{val/contrastive_loss:.4f}",
         ),
         LearningRateMonitor(logging_interval="step"),
+        SignalCheckpointCallback(checkpoint_dir=cfg.checkpoint_dir),
     ]
 
     # Loggers

@@ -146,22 +146,32 @@ class HybridLanguageModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         output_hidden_states: bool = False,
         return_dict: bool = True,
     ) -> Union[CausalLMOutput, Tuple[torch.Tensor, ...]]:
         """Forward pass for language modeling.
-        
+
         Args:
             input_ids: Token IDs (B, L)
             labels: Target token IDs for loss computation (B, L)
+            attention_mask: (B, L) — 1 for real tokens, 0 for padding. When
+                provided, padded positions are zero-masked at the embedding
+                layer so SSM/mLSTM state does not absorb padding. Mamba and
+                mLSTM blocks are causal; zero-masking the input is sufficient
+                for right-padded sequences (the default).
             output_hidden_states: Whether to return all hidden states
             return_dict: Whether to return CausalLMOutput or tuple
-            
+
         Returns:
             CausalLMOutput or tuple of (loss, logits, hidden_states)
         """
         # Embedding
         hidden_states = self.embeddings(input_ids)
+
+        # Zero out padded positions so recurrent state stays clean
+        if attention_mask is not None:
+            hidden_states = hidden_states * attention_mask.to(hidden_states.dtype).unsqueeze(-1)
         
         # Store all hidden states if requested
         all_hidden_states = () if output_hidden_states else None
@@ -354,7 +364,12 @@ class HybridTextEncoder(nn.Module):
         Returns:
             L2-normalised embeddings (B, embed_dim)
         """
-        outputs = self.lm(input_ids, output_hidden_states=True, return_dict=True)
+        outputs = self.lm(
+            input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            return_dict=True,
+        )
         last_hidden = outputs.hidden_states[-1]   # (B, L, dim)
         if attention_mask is not None:
             lengths = attention_mask.sum(dim=1).clamp(min=1).long()
@@ -370,13 +385,19 @@ class HybridTextEncoder(nn.Module):
         self,
         input_ids: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         return_dict: bool = True,
     ) -> CausalLMOutput:
         """Forward pass — delegates to the underlying LM (for LM pretraining).
 
         Call encode() instead when you need contrastive embeddings.
         """
-        return self.lm(input_ids, labels=labels, return_dict=return_dict)
+        return self.lm(
+            input_ids,
+            labels=labels,
+            attention_mask=attention_mask,
+            return_dict=return_dict,
+        )
 
     def get_num_params(self, non_embedding: bool = True) -> int:
         return self.lm.get_num_params(non_embedding=non_embedding)

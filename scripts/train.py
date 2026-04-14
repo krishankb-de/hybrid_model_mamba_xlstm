@@ -33,7 +33,9 @@ import torch as torch_module
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
 from hybrid_xmamba.training.lightning_module import HybridLightningModule
+from hybrid_xmamba.training.signal_callbacks import SignalCheckpointCallback
 from hybrid_xmamba.utils.registry import ModelRegistry
+from hybrid_xmamba.utils.run_metadata import write_run_metadata
 
 # ============================================================
 # PERFORMANCE: Enable Tensor Core utilization on A100/H100
@@ -234,11 +236,15 @@ def main(cfg: DictConfig):
     os.makedirs(cfg.output_dir, exist_ok=True)
     os.makedirs(cfg.checkpoint_dir, exist_ok=True)
     os.makedirs(cfg.log_dir, exist_ok=True)
+
+    # Reproducibility snapshot (git SHA + resolved cfg + argv)
+    write_run_metadata(cfg, cfg.output_dir, extra={"entrypoint": "train.py"})
     
     # Initialize tokenizer
     tokenizer = AutoTokenizer.from_pretrained(cfg.dataset.tokenizer)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"  # pooling indexes last non-pad via attention_mask
     # Override tokenizer's default model_max_length (GPT-2 = 1024) to match
     # our actual model capacity. This suppresses the spurious warning:
     #   "Token indices sequence length is longer than the specified maximum
@@ -342,6 +348,9 @@ def main(cfg: DictConfig):
         )
         callbacks.append(lr_monitor)
     
+    # SLURM / SIGTERM-safe checkpoint (Willi 36-48h walltime)
+    callbacks.append(SignalCheckpointCallback(checkpoint_dir=cfg.checkpoint_dir))
+
     # Early stopping (if enabled)
     if cfg.callbacks.early_stopping.enabled:
         early_stop = EarlyStopping(
