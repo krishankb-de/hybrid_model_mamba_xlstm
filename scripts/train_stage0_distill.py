@@ -93,14 +93,16 @@ class DistillLightningModule(HybridLightningModule):
         input_ids = batch["input_ids"]
         labels = batch.get("labels", input_ids)
 
+        # --- Teacher forward (no grad, bf16) — MUST run first so its transient
+        #     activations are freed before student allocates backward buffers. ---
+        with torch.no_grad():
+            teacher_logits = self.teacher(input_ids).logits  # (B, L, V)
+        teacher_logits = teacher_logits.detach()  # explicit detach to be safe
+
         # --- Student forward ---
         student_out = self.model(input_ids, labels=labels, return_dict=True)
         ce_loss = student_out.loss
         student_logits = student_out.logits   # (B, L, V)
-
-        # --- Teacher forward (no grad, bf16) ---
-        with torch.no_grad():
-            teacher_logits = self.teacher(input_ids).logits  # (B, L, V)
 
         # --- Sanity: abort if teacher PPL is implausibly high at step 0 ---
         if not self._teacher_ppl_checked and batch_idx == 0:
@@ -328,13 +330,14 @@ def main(cfg: DictConfig):
     print(f"\nLoading teacher: {teacher_name} ({teacher_dtype_str})...")
     teacher = AutoModelForCausalLM.from_pretrained(
         teacher_name,
-        torch_dtype=teacher_dtype,
+        dtype=teacher_dtype,       # 'dtype' is the current HF kwarg (torch_dtype deprecated)
         low_cpu_mem_usage=True,
     )
     teacher.eval()
     for p in teacher.parameters():
         p.requires_grad_(False)
     teacher = teacher.to(device)
+    torch.cuda.empty_cache()       # free CPU→GPU copy residual before student alloc
 
     teacher_params = sum(p.numel() for p in teacher.parameters())
     print(f"Teacher params: {teacher_params:,} ({teacher_params/1e9:.2f}B), frozen.")
