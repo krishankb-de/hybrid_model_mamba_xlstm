@@ -429,7 +429,7 @@ def main(cfg: DictConfig):
     print(f"\nLoading teacher: {teacher_name} ({teacher_dtype_str})...")
     teacher = AutoModelForCausalLM.from_pretrained(
         teacher_name,
-        dtype=teacher_dtype,       # 'dtype' is the current HF kwarg (torch_dtype deprecated)
+        torch_dtype=teacher_dtype,
         low_cpu_mem_usage=True,
     )
     teacher.eval()

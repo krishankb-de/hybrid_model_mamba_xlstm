@@ -354,12 +354,14 @@ class HybridTextEncoder(nn.Module):
     ) -> torch.Tensor:
         """Encode a batch of token sequences into normalised embeddings.
 
-        Gathers the hidden state at the last non-padding position per row.
+        Uses mean pooling over all non-padding token positions, which gives
+        substantially better sentence representations than last-token pooling
+        for similarity and retrieval tasks (BIOSSES, STS-B, etc.).
 
         Args:
             input_ids: Token IDs (B, L)
             attention_mask: (B, L) 1 for real tokens, 0 for padding. If None,
-                falls back to the final position.
+                all positions are treated as real tokens.
 
         Returns:
             L2-normalised embeddings (B, embed_dim)
@@ -371,13 +373,16 @@ class HybridTextEncoder(nn.Module):
             return_dict=True,
         )
         last_hidden = outputs.hidden_states[-1]   # (B, L, dim)
+
+        # Mean pooling over non-padding positions
         if attention_mask is not None:
-            lengths = attention_mask.sum(dim=1).clamp(min=1).long()
-            idx = lengths - 1
-            B = last_hidden.size(0)
-            seq_repr = last_hidden[torch.arange(B, device=last_hidden.device), idx]
+            mask = attention_mask.to(last_hidden.dtype).unsqueeze(-1)  # (B, L, 1)
         else:
-            seq_repr = last_hidden[:, -1, :]
+            mask = torch.ones(
+                last_hidden.shape[:2], dtype=last_hidden.dtype, device=last_hidden.device
+            ).unsqueeze(-1)
+        seq_repr = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)  # (B, dim)
+
         projected = self.projection_head(seq_repr)
         return nn.functional.normalize(projected, dim=-1, eps=1e-8)
 

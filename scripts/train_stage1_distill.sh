@@ -28,7 +28,7 @@ echo "Host: $(hostname)"
 echo "LM checkpoint: ${LM_CHECKPOINT}"
 echo ""
 
-cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm"
+cd "${SLURM_SUBMIT_DIR}"
 
 export HF_HOME="$PWD/.hf"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
