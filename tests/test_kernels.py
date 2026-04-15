@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 # Mark all kernel tests as requiring CUDA
 pytestmark = pytest.mark.skipif(
@@ -63,7 +64,7 @@ class TestSelectiveScanKernel:
         batch_size, seq_len, dim, state_size = 2, 64, 128, 16
         
         x = torch.randn(batch_size, seq_len, dim, device='cuda')
-        dt = torch.randn(batch_size, seq_len, dim, device='cuda').softplus()
+        dt = F.softplus(torch.randn(batch_size, seq_len, dim, device='cuda'))
         A = -torch.randn(dim, state_size, device='cuda').exp()
         B = torch.randn(batch_size, seq_len, state_size, device='cuda')
         C = torch.randn(batch_size, seq_len, state_size, device='cuda')
@@ -82,7 +83,7 @@ class TestSelectiveScanKernel:
         batch_size, seq_len, dim, state_size = 2, 64, 128, 16
         
         x = torch.randn(batch_size, seq_len, dim, device='cuda')
-        dt = torch.randn(batch_size, seq_len, dim, device='cuda').softplus()
+        dt = F.softplus(torch.randn(batch_size, seq_len, dim, device='cuda'))
         A = -torch.randn(dim, state_size, device='cuda').exp()
         B = torch.randn(batch_size, seq_len, state_size, device='cuda')
         C = torch.randn(batch_size, seq_len, state_size, device='cuda')
@@ -100,7 +101,7 @@ class TestKernelCorrectness:
     
     def test_tfla_vs_pytorch(self):
         """Compare TFLA kernel output with PyTorch reference."""
-        from hybrid_xmamba.kernels.tfla.tfla_interface import apply_tfla, tfla_forward_pytorch
+        from hybrid_xmamba.kernels.tfla.tfla_interface import apply_tfla, tfla_forward_parallel
         
         batch_size, num_heads, seq_len, head_dim = 1, 2, 16, 8
         
@@ -114,7 +115,7 @@ class TestKernelCorrectness:
         output_kernel = apply_tfla(q, k, v, i_gate, f_gate)
         
         # PyTorch reference
-        output_pytorch = tfla_forward_pytorch(q, k, v, i_gate, f_gate)
+        output_pytorch = tfla_forward_parallel(q, k, v, i_gate, f_gate)
         
         # Should be close (allowing for numerical differences)
         assert torch.allclose(output_kernel, output_pytorch, rtol=1e-3, atol=1e-3)
