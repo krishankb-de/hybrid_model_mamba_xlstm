@@ -15,10 +15,14 @@
 # Student : hybrid_70m (512 dim, 8 layers, [mamba, mamba, mlstm])
 # Loss    : (1-alpha)*CE + alpha*hidden-state cosine KD, alpha=0.5
 #
-# A100 40GB memory estimate at bs=16, seq=512, compile=off:
-#   Student 70M (grads+Adam) : ~0.84 GB
-#   Teacher 2.7B frozen bf16 : ~5.4 GB weights + ~10 GB acts
-#   Total peak               : ~22-26 GB  (safe on 40 GB)
+# A100 40GB memory at bs=8, seq=512, compile=off (measured):
+#   Student 70M (grads+Adam+scan acts) : ~14 GB
+#     (chunk-parallel selective_scan materializes 8× (B,nc,cs,D_inner,N)
+#      tensors per Mamba layer for autograd; scales linearly in B)
+#   Teacher 2.7B frozen bf16          : ~5.4 GB weights + ~8 GB fwd acts
+#   KD tensors + misc                  : ~1.5 GB
+#   Total peak                         : ~29-31 GB  (safe on 40 GB)
+# bs=16 OOMs (~42 GB peak). Effective batch kept at 64 via grad_accum=8.
 
 set -euo pipefail
 
@@ -85,16 +89,16 @@ python scripts/train_stage0_distill.py \
   trainer=a100_single_gpu \
   distill=stage0_biomedlm \
   trainer.max_steps=46000 \
-  trainer.accumulate_grad_batches=4 \
+  trainer.accumulate_grad_batches=8 \
   trainer.val_check_interval=500 \
   trainer.log_every_n_steps=25 \
   trainer.compile_model=false \
-  dataset.batch_size=16 \
-  dataset.eval_batch_size=16 \
+  dataset.batch_size=8 \
+  dataset.eval_batch_size=8 \
   dataset.max_length=512 \
   dataset.max_seq_length=512 \
-  dataset.num_workers=4 \
-  dataset.preprocessing_num_workers=4 \
+  dataset.num_workers=2 \
+  dataset.preprocessing_num_workers=2 \
   dataset.pin_memory=true \
   dataset.target_tokens=1500000000 \
   dataset.cache_dir=/scratch/bhushkri/hybrid_xmamba_a100_70m_40/pubmed_cache \
