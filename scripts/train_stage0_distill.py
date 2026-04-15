@@ -1,27 +1,33 @@
 """Stage 0: LM pretraining on PubMed with BioMedLM knowledge distillation.
 
-BioMedLM (stanford-crfm/BioMedLM, 2.7B) shares the GPT-2 BPE 50257 vocab
-with the student — logit KD requires zero tokenizer realignment.
+BioMedLM (stanford-crfm/BioMedLM, 2.7B) uses a custom BPE tokenizer with
+vocab_size≈28,895 — different from the student's GPT-2 vocab (50,257).
+Logit-level KD is therefore impossible (vocab and embedding dims differ).
 
-Loss:
+Instead we use **hidden-state KD**:
+  1. Each batch item is tokenized independently by both tokenizers.
+  2. Teacher processes its own token IDs → mean-pool last hidden state (dim=2560).
+  3. Student processes GPT-2 token IDs → mean-pool last hidden state (dim=512).
+  4. A linear projection (512→2560) maps student rep into teacher's space.
+  5. KD loss = 1 − mean cosine-similarity(projected_student, teacher).
+
+Total loss:
     L = (1 - alpha) * CE(student_logits, targets)
-      + alpha * T^2 * KL(softmax(student/T) || softmax(teacher/T))
+      + alpha * (1 - cosine_sim(proj(student_hidden), teacher_hidden))
 
-A100 40GB memory budget (bf16, B=16, L=512, grad_accum=4, torch.compile off):
+A100 40GB memory budget (bf16, B=8, L=512, grad_accum=8, torch.compile off):
     Student 70M train          : ~1.0 GB  (weights + grads + Adam + acts)
-    Teacher 2.7B frozen bf16   : ~5.4 GB weights + ~10-18 GB activations
-    Total peak                 : ~22-26 GB on A100 40GB (headroom ~14 GB)
-Enable torch.compile only on 80GB; on 40GB the memory overhead can push
-peak past 34 GB when the validation batch coincides with the teacher
-activations. If OOM fires, halve batch_size and double grad_accum.
+    Teacher 2.7B frozen bf16   : ~5.4 GB weights + ~6-8 GB activations
+    Total peak                 : ~18-22 GB on A100 40GB
 
 Example:
     python scripts/train_stage0_distill.py \\
-        --config-name config_70m \\
-        dataset=pubmed \\
+        model=hybrid_70m dataset=pubmed \\
         trainer=a100_single_gpu \\
         distill=stage0_biomedlm \\
-        trainer.max_steps=40000 \\
+        trainer.max_steps=46000 \\
+        dataset.batch_size=8 trainer.accumulate_grad_batches=8 \\
+        trainer.compile_model=false \\
         experiment_name=hybrid_70m_stage0_kd_pubmed
 """
 
@@ -59,18 +65,24 @@ torch.set_float32_matmul_precision("high")
 # ---------------------------------------------------------------------------
 
 class DistillLightningModule(HybridLightningModule):
-    """HybridLightningModule extended with logit knowledge distillation.
+    """HybridLightningModule extended with hidden-state knowledge distillation.
 
-    The teacher (BioMedLM) is frozen, eval-mode, bf16. Its logits are used
-    to compute a KL divergence loss alongside the standard cross-entropy.
+    BioMedLM uses its own BPE vocabulary (≈28,895 tokens) — different from the
+    student's GPT-2 vocabulary (50,257). Logit-level KD is therefore impossible.
+
+    Instead we use hidden-state KD:
+      - Each batch carries dual tokenizations: GPT-2 for student, BioMedLM for
+        teacher (keys: teacher_input_ids, teacher_attention_mask).
+      - Teacher's mean-pooled last hidden state (dim=teacher_hidden_dim) is
+        matched to the student's projected hidden state via cosine-similarity loss.
 
     Args:
-        model:          HybridLanguageModel (student)
-        teacher:        Frozen AutoModelForCausalLM (BioMedLM)
-        alpha:          KD loss weight. 0 = pure CE, 1 = pure KD.
-        temperature:    Softmax temperature for logit smoothing.
-        teacher_ppl_abort_threshold: Abort if teacher PPL exceeds this.
-        **kwargs:       Passed to HybridLightningModule.
+        model:              HybridLanguageModel (student)
+        teacher:            Frozen AutoModelForCausalLM (BioMedLM)
+        alpha:              KD loss weight. 0 = pure CE, 1 = pure KD.
+        teacher_hidden_dim: Dimensionality of teacher's last hidden state (2560 for 2.7B).
+        student_dim:        Dimensionality of student's last hidden state (512 for 70M).
+        **kwargs:           Passed to HybridLightningModule.
     """
 
     def __init__(
@@ -78,77 +90,109 @@ class DistillLightningModule(HybridLightningModule):
         model: HybridLanguageModel,
         teacher: torch.nn.Module,
         alpha: float = 0.5,
-        temperature: float = 2.0,
-        teacher_ppl_abort_threshold: float = 50.0,
+        teacher_hidden_dim: int = 2560,
+        student_dim: int = 512,
         **kwargs,
     ):
         super().__init__(model=model, **kwargs)
         self.teacher = teacher
         self.alpha = alpha
-        self.temperature = temperature
-        self.teacher_ppl_abort_threshold = teacher_ppl_abort_threshold
-        self._teacher_ppl_checked = False  # only abort-check once at step 0
+        # Linear projection: student_dim → teacher_hidden_dim (no bias — cosine loss)
+        self.kd_projection = torch.nn.Linear(student_dim, teacher_hidden_dim, bias=False)
+
+    def configure_optimizers(self):
+        """Include kd_projection in the optimizer alongside the student model."""
+        from hybrid_xmamba.training.optimizer import get_parameter_groups
+        from torch.optim import AdamW
+        from torch.optim.lr_scheduler import (
+            CosineAnnealingLR, LinearLR, SequentialLR,
+        )
+
+        # Build param groups from student model (with weight decay splits)
+        param_groups = get_parameter_groups(self.model, weight_decay=self.weight_decay)
+        # kd_projection has only a weight matrix — add to the decay group
+        param_groups[0]["params"] += list(self.kd_projection.parameters())
+
+        optimizer = AdamW(
+            param_groups,
+            lr=self.learning_rate,
+            betas=(0.9, 0.999),
+            eps=1e-8,
+            foreach=torch.cuda.is_available(),
+        )
+
+        # Cosine decay + linear warmup (mirrors parent's default)
+        cosine = CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, self.max_steps - self.warmup_steps),
+            eta_min=self.learning_rate * 0.1,
+        )
+        if self.warmup_steps > 0:
+            warmup = LinearLR(
+                optimizer, start_factor=0.01, end_factor=1.0,
+                total_iters=self.warmup_steps,
+            )
+            scheduler = SequentialLR(
+                optimizer,
+                schedulers=[warmup, cosine],
+                milestones=[self.warmup_steps],
+            )
+        else:
+            scheduler = cosine
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step", "frequency": 1},
+        }
 
     def training_step(self, batch, batch_idx):
         input_ids = batch["input_ids"]
         labels = batch.get("labels", input_ids)
+        teacher_input_ids = batch.get("teacher_input_ids", None)
+        teacher_attn_mask = batch.get("teacher_attention_mask", None)
+        student_attn_mask = batch.get("attention_mask", None)
+
+        has_teacher_tokens = teacher_input_ids is not None
 
         # --- Teacher forward (no grad, bf16) — MUST run first so its transient
         #     activations are freed before student allocates backward buffers. ---
-        with torch.no_grad():
-            teacher_logits = self.teacher(input_ids).logits  # (B, L, V)
-        teacher_logits = teacher_logits.detach()  # explicit detach to be safe
-
-        # --- Student forward ---
-        student_out = self.model(input_ids, labels=labels, return_dict=True)
-        ce_loss = student_out.loss
-        student_logits = student_out.logits   # (B, L, V)
-
-        # --- Sanity: abort if teacher PPL is implausibly high at step 0 ---
-        if not self._teacher_ppl_checked and batch_idx == 0:
-            self._teacher_ppl_checked = True
-            shift_labels = input_ids[:, 1:].contiguous()
-            shift_logits = teacher_logits[:, :-1, :].contiguous()
-            teacher_ce = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-                ignore_index=-100,
-            )
-            teacher_ppl = compute_perplexity(teacher_ce)
-            if teacher_ppl > self.teacher_ppl_abort_threshold:
-                raise RuntimeError(
-                    f"Teacher perplexity ({teacher_ppl:.1f}) exceeds abort threshold "
-                    f"({self.teacher_ppl_abort_threshold}). Check teacher loading and vocab."
+        if has_teacher_tokens:
+            with torch.no_grad():
+                teacher_out = self.teacher(
+                    teacher_input_ids,
+                    attention_mask=teacher_attn_mask,
+                    output_hidden_states=True,
                 )
+                t_hidden = teacher_out.hidden_states[-1]  # (B, L_t, D_teacher)
+                if teacher_attn_mask is not None:
+                    t_mask = teacher_attn_mask.unsqueeze(-1).float()
+                    t_pooled = (t_hidden * t_mask).sum(1) / t_mask.sum(1).clamp(min=1)
+                else:
+                    t_pooled = t_hidden.mean(1)
+                t_pooled = t_pooled.detach()  # (B, D_teacher)
 
-        # --- KD loss: KL on shifted logits (standard LM teacher-student) ---
-        T = self.temperature
-        # Align shapes: student & teacher both (B, L-1, V) for next-token prediction
-        s_shift = student_logits[:, :-1, :].contiguous()   # (B, L-1, V)
-        t_shift = teacher_logits[:, :-1, :].contiguous()   # (B, L-1, V)
+        # --- Student forward (with hidden states for KD) ---
+        student_out = self.model(
+            input_ids, labels=labels, return_dict=True,
+            output_hidden_states=has_teacher_tokens,
+        )
+        ce_loss = student_out.loss
 
-        s_log_prob = F.log_softmax(s_shift / T, dim=-1)
-        t_prob = F.softmax(t_shift / T, dim=-1)
+        # --- Hidden-state KD loss ---
+        if has_teacher_tokens:
+            s_hidden = student_out.hidden_states[-1]  # (B, L_s, D_student)
+            if student_attn_mask is not None:
+                s_mask = student_attn_mask.unsqueeze(-1).float()
+                s_pooled = (s_hidden * s_mask).sum(1) / s_mask.sum(1).clamp(min=1)
+            else:
+                s_pooled = s_hidden.mean(1)
 
-        # Mask out padding positions (label == -100 maps to pad or EOS in most configs)
-        # We use the attention mask to skip pad tokens if present.
-        attention_mask = batch.get("attention_mask")
-        if attention_mask is not None:
-            # Shift mask same as logits: positions 0..L-2 predict tokens 1..L-1
-            mask = attention_mask[:, 1:].contiguous().bool()  # (B, L-1)
-            kd_loss = F.kl_div(
-                s_log_prob[mask],   # (N, V)
-                t_prob[mask],       # (N, V)
-                reduction="batchmean",
-            )
+            s_proj = self.kd_projection(s_pooled)  # (B, D_teacher)
+            kd_loss = 1.0 - F.cosine_similarity(
+                s_proj, t_pooled.to(s_proj.dtype), dim=-1
+            ).mean()
         else:
-            kd_loss = F.kl_div(
-                s_log_prob.view(-1, s_log_prob.size(-1)),
-                t_prob.view(-1, t_prob.size(-1)),
-                reduction="batchmean",
-            )
-
-        kd_loss = kd_loss * (T ** 2)   # scale back (Hinton et al. 2015)
+            kd_loss = torch.tensor(0.0, device=ce_loss.device)
 
         # --- Total loss ---
         total_loss = (1.0 - self.alpha) * ce_loss + self.alpha * kd_loss
@@ -176,12 +220,25 @@ class DistillLightningModule(HybridLightningModule):
 # ---------------------------------------------------------------------------
 
 class PubMedLMDataset(torch.utils.data.Dataset):
-    """PubMed abstracts tokenised for causal LM (next-token prediction)."""
+    """PubMed abstracts tokenised for causal LM with optional dual tokenization.
 
-    def __init__(self, hf_dataset, tokenizer, max_length: int):
+    When teacher_tokenizer is provided, each item also includes
+    teacher_input_ids / teacher_attention_mask for hidden-state KD.
+    """
+
+    def __init__(
+        self,
+        hf_dataset,
+        tokenizer,
+        max_length: int,
+        teacher_tokenizer=None,
+        teacher_max_length: int = 512,
+    ):
         self.data = hf_dataset
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.teacher_tokenizer = teacher_tokenizer
+        self.teacher_max_length = teacher_max_length
 
     def __len__(self):
         return len(self.data)
@@ -189,6 +246,8 @@ class PubMedLMDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
         text = item.get("abstract") or item.get("article") or item.get("text") or ""
+
+        # Student tokenization (GPT-2 vocab)
         enc = self.tokenizer(
             text,
             max_length=self.max_length,
@@ -198,17 +257,31 @@ class PubMedLMDataset(torch.utils.data.Dataset):
         )
         input_ids = enc["input_ids"].squeeze(0)
         attention_mask = enc["attention_mask"].squeeze(0)
-        # For causal LM: labels = input_ids, padding positions masked to -100
         labels = input_ids.clone()
         labels[attention_mask == 0] = -100
-        return {
+
+        result = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": labels,
         }
 
+        # Teacher tokenization (BioMedLM vocab) — only when KD is active
+        if self.teacher_tokenizer is not None:
+            t_enc = self.teacher_tokenizer(
+                text,
+                max_length=self.teacher_max_length,
+                truncation=True,
+                padding="max_length",
+                return_tensors="pt",
+            )
+            result["teacher_input_ids"] = t_enc["input_ids"].squeeze(0)
+            result["teacher_attention_mask"] = t_enc["attention_mask"].squeeze(0)
 
-def build_dataloader(cfg, split: str, tokenizer):
+        return result
+
+
+def build_dataloader(cfg, split: str, tokenizer, teacher_tokenizer=None, teacher_max_length: int = 512):
     print(f"Loading PubMed ({split})...")
     hf_split = "train" if split == "train" else "validation"
     ds = load_dataset(
@@ -221,7 +294,11 @@ def build_dataloader(cfg, split: str, tokenizer):
     if split == "validation" and not cfg.dataset.get("streaming", False):
         ds = ds.select(range(min(val_n, len(ds))))
 
-    dataset = PubMedLMDataset(ds, tokenizer, cfg.dataset.max_length)
+    dataset = PubMedLMDataset(
+        ds, tokenizer, cfg.dataset.max_length,
+        teacher_tokenizer=teacher_tokenizer,
+        teacher_max_length=teacher_max_length,
+    )
     bs = cfg.dataset.batch_size if split == "train" else cfg.dataset.eval_batch_size
     return DataLoader(
         dataset,
@@ -267,14 +344,14 @@ def main(cfg: DictConfig):
         subprocess.run(["nvidia-smi"], check=False)
 
     # ---------------------------------------------------------------------------
-    # Tokenizer (GPT-2 BPE, shared with BioMedLM)
+    # Tokenizer (GPT-2 BPE, for student)
     # ---------------------------------------------------------------------------
     tokenizer = AutoTokenizer.from_pretrained(cfg.dataset.tokenizer)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"  # labels/attention-mask alignment requires right-pad
     tokenizer.model_max_length = cfg.model.max_position_embeddings
-    print(f"Tokenizer vocab size: {tokenizer.vocab_size} (should be 50257)")
+    print(f"Student tokenizer vocab size: {tokenizer.vocab_size}")
 
     # ---------------------------------------------------------------------------
     # Student model
@@ -342,6 +419,25 @@ def main(cfg: DictConfig):
     teacher_params = sum(p.numel() for p in teacher.parameters())
     print(f"Teacher params: {teacher_params:,} ({teacher_params/1e9:.2f}B), frozen.")
 
+    # Teacher hidden dim: GPT-2 style uses n_embd; fallback to hidden_size
+    teacher_hidden_dim = getattr(teacher.config, "n_embd", None) or getattr(teacher.config, "hidden_size", 2560)
+    print(f"Teacher hidden dim: {teacher_hidden_dim}")
+
+    # ---------------------------------------------------------------------------
+    # Teacher tokenizer (BioMedLM has its own BPE vocab ≠ GPT-2)
+    # Teacher max_length capped at teacher's n_positions (usually 1024)
+    # ---------------------------------------------------------------------------
+    teacher_max_length = min(
+        cfg.dataset.max_length,
+        getattr(teacher.config, "n_positions", 1024),
+    )
+    print(f"Loading teacher tokenizer: {teacher_name}")
+    teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_name)
+    if teacher_tokenizer.pad_token is None:
+        teacher_tokenizer.pad_token = teacher_tokenizer.eos_token
+    teacher_tokenizer.padding_side = "right"
+    print(f"Teacher tokenizer vocab size: {teacher_tokenizer.vocab_size}, max_length: {teacher_max_length}")
+
     # ---------------------------------------------------------------------------
     # Lightning module
     # ---------------------------------------------------------------------------
@@ -349,8 +445,8 @@ def main(cfg: DictConfig):
         model=student,
         teacher=teacher,
         alpha=float(distill_cfg.alpha),
-        temperature=float(distill_cfg.temperature),
-        teacher_ppl_abort_threshold=float(distill_cfg.get("teacher_ppl_abort_threshold", 50.0)),
+        teacher_hidden_dim=teacher_hidden_dim,
+        student_dim=cfg.model.dim,
         learning_rate=cfg.model.learning_rate,
         weight_decay=cfg.model.weight_decay,
         warmup_steps=cfg.model.warmup_steps,
@@ -360,10 +456,13 @@ def main(cfg: DictConfig):
     )
 
     # ---------------------------------------------------------------------------
-    # Data
+    # Data (dual tokenization: student=GPT-2, teacher=BioMedLM)
     # ---------------------------------------------------------------------------
-    train_loader = build_dataloader(cfg, "train", tokenizer)
+    train_loader = build_dataloader(cfg, "train", tokenizer,
+                                    teacher_tokenizer=teacher_tokenizer,
+                                    teacher_max_length=teacher_max_length)
     val_loader   = build_dataloader(cfg, "validation", tokenizer)
+    # Val loader has no teacher tokens — KD loss is skipped for validation
 
     # ---------------------------------------------------------------------------
     # Callbacks & Loggers
@@ -407,7 +506,7 @@ def main(cfg: DictConfig):
         enable_progress_bar=True,
     )
 
-    print(f"\nStarting Stage 0 distillation (alpha={distill_cfg.alpha}, T={distill_cfg.temperature})")
+    print(f"\nStarting Stage 0 distillation (alpha={distill_cfg.alpha}, hidden-state KD)")
     print(f"Output: {cfg.output_dir}")
     trainer.fit(lightning_module, train_loader, val_loader)
     print("\nStage 0 distillation complete.")
