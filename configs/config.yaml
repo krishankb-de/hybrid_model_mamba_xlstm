@@ -6,6 +6,7 @@ defaults:
   - dataset: wikitext
   - trainer: single_gpu
   - callbacks: default
+  - distill: null   # optional; override with distill=stage0_biomedlm or distill=stage1_pubmedbert
   - _self_
 
 # Global settings
@@ -16,7 +17,7 @@ experiment_name: "default"
 
 # Weights & Biases logging
 wandb:
-  enabled: true
+  enabled: false
   entity: null  # Set your W&B entity
   project: ${project_name}
   name: ${experiment_name}
