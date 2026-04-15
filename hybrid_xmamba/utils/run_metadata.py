@@ -11,7 +11,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -24,7 +24,7 @@ def _git(args: list[str]) -> str:
         return ""
 
 
-def write_run_metadata(cfg: DictConfig, output_dir: str, extra: Dict[str, Any] | None = None) -> Path:
+def write_run_metadata(cfg: DictConfig, output_dir: str, extra: Optional[Dict[str, Any]] = None) -> Path:
     """Persist a run-metadata snapshot. Returns the path written."""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
