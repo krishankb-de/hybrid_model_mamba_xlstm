@@ -11,12 +11,12 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from omegaconf import DictConfig, OmegaConf
 
 
-def _git(args: list[str]) -> str:
+def _git(args: List[str]) -> str:
     try:
         out = subprocess.check_output(["git", *args], stderr=subprocess.DEVNULL)
         return out.decode().strip()

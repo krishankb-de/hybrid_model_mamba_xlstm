@@ -6,7 +6,7 @@ allowing flexible interleaving and configuration.
 
 import torch
 import torch.nn as nn
-from typing import Optional, Literal
+from typing import List, Optional, Literal
 
 from hybrid_xmamba.layers.mamba_block import MambaBlock
 from hybrid_xmamba.layers.mlstm_block import mLSTMBlock
@@ -150,7 +150,7 @@ class HybridBlock(nn.Module):
 def create_hybrid_blocks(
     dim: int,
     num_layers: int,
-    layer_pattern: list[LayerType],
+    layer_pattern: List[LayerType],
     **kwargs
 ) -> nn.ModuleList:
     """Factory function to create a sequence of hybrid blocks.

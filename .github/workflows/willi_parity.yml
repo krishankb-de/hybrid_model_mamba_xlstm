@@ -1,0 +1,87 @@
+name: Willi Parity Check
+
+# Gates the a100_70m_baseline branch.
+# CPU-only runner validates: syntax, PEP-604/585 compatibility,
+# dependency install, unit tests, Hydra config invariants, and a 2-step dry-run.
+# No GPU required — catches willi-incompatible code before it hits the server.
+
+on:
+  push:
+    branches:
+      - a100_70m_baseline
+  pull_request:
+    branches:
+      - a100_70m_baseline
+
+jobs:
+  willi-parity:
+    name: "Willi Parity (Python 3.9.23 / CPU)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python 3.9.23 ─────────────────────────────────────────────────────
+      - name: Set up Python 3.9.23
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9.23"
+
+      # ── 3. Pip cache ──────────────────────────────────────────────────────────
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: willi-pip-${{ hashFiles('requirements.txt', 'setup.py') }}
+          restore-keys: |
+            willi-pip-
+
+      # ── 4. Install CPU torch first (avoids pulling CUDA build) ───────────────
+      - name: Install CPU PyTorch
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cpu
+
+      # ── 5. Install project and deps ───────────────────────────────────────────
+      - name: Install project dependencies
+        run: |
+          pip install -e .
+          # Install requirements but skip packages that require CUDA compilation
+          grep -v -E "^(triton|flash-attn|apex)" requirements.txt > /tmp/reqs_ci.txt || true
+          pip install -r /tmp/reqs_ci.txt || pip install -r requirements.txt || true
+
+      # ── 6. Static gates: syntax + PEP-604 + PEP-585 ──────────────────────────
+      - name: Static syntax and compatibility check
+        run: bash scripts/validate_for_willi.sh --ci-static-only
+
+      # ── 7. Unit tests (no CUDA, no slow) ─────────────────────────────────────
+      - name: Run CPU unit tests
+        run: |
+          pytest tests/ -m "not cuda and not slow" -v --tb=short
+
+      # ── 8. Willi parity tests ─────────────────────────────────────────────────
+      - name: Run willi parity tests
+        run: |
+          pytest tests/test_willi_parity.py -v --tb=short
+
+      # ── 9. Hydra config dry-resolve (all 70M models) ─────────────────────────
+      - name: Hydra config resolution check
+        run: |
+          pytest tests/test_willi_parity.py::test_hydra_config_resolves_70m_invariants -v
+
+      # ── 10. Dry-run training smoke (2 steps, CPU) ─────────────────────────────
+      - name: Dry-run training (2 steps, CPU, ~2 min)
+        run: |
+          python scripts/train.py \
+            model=hybrid_70m \
+            dataset=wikitext \
+            trainer=colab_single_gpu \
+            trainer.max_steps=2 \
+            trainer.fast_dev_run=true \
+            trainer.accelerator=cpu \
+            trainer.devices=1 \
+            experiment_name=ci_dryrun
+        timeout-minutes: 5
