@@ -5,8 +5,9 @@
 #SBATCH --mem=40G
 #SBATCH --time=24:00:00
 #SBATCH --job-name=stage1_kd_pubmedbert
-#SBATCH --output=logs/%x_%j.log
-#SBATCH --error=logs/%x_%j.log
+#SBATCH --output=/scratch/bhushkri/hybrid_xmamba_a100_70m_40/logs/%x_%j.log
+#SBATCH --error=/scratch/bhushkri/hybrid_xmamba_a100_70m_40/logs/%x_%j.log
+#SBATCH --requeue
 
 # Stage 1: SimCSE contrastive training on PubMed with PubMedBERT embedding KD.
 #
@@ -20,7 +21,7 @@
 
 set -euo pipefail
 
-LM_CHECKPOINT="${LM_CHECKPOINT:-./outputs/hybrid_70m_stage0_kd_biomedlm/checkpoints/last.ckpt}"
+LM_CHECKPOINT="${LM_CHECKPOINT:-./outputs/hybrid_70m_stage0_kd_pubmed/checkpoints/last.ckpt}"
 
 echo "=== JOB START (Stage 1: SimCSE + PubMedBERT KD) ==="
 date
@@ -28,7 +29,8 @@ echo "Host: $(hostname)"
 echo "LM checkpoint: ${LM_CHECKPOINT}"
 echo ""
 
-cd "${SLURM_SUBMIT_DIR}"
+mkdir -p /scratch/bhushkri/hybrid_xmamba_a100_70m_40/logs
+cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm"
 
 export HF_HOME="$PWD/.hf"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
@@ -60,14 +62,15 @@ python scripts/train_contrastive.py \
   distill=stage1_pubmedbert \
   contrastive_mode=simcse \
   trainer.max_steps=10000 \
-  trainer.accumulate_grad_batches=1 \
+  trainer.accumulate_grad_batches=4 \
   trainer.val_check_interval=500 \
   trainer.log_every_n_steps=25 \
-  dataset.batch_size=64 \
-  dataset.eval_batch_size=64 \
+  dataset.batch_size=8 \
+  dataset.eval_batch_size=16 \
   dataset.max_length=512 \
   dataset.num_workers=4 \
   dataset.pin_memory=true \
+  dataset.cache_dir=/scratch/bhushkri/hybrid_xmamba_a100_70m_40/pubmed_cache \
   lm_checkpoint="${LM_CHECKPOINT}" \
   experiment_name=hybrid_70m_stage1_kd_pubmedbert \
   output_dir=./outputs/hybrid_70m_stage1_kd_pubmedbert \
