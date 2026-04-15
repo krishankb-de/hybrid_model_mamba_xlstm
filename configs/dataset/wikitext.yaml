@@ -11,7 +11,7 @@ pin_memory: true
 
 # Tokenization
 tokenizer: "gpt2"  # Use GPT-2 tokenizer
-max_length: 2048
+max_length: 1024   # matches model.max_position_embeddings for hybrid_70m
 stride: 512  # For sliding window
 
 # Data preprocessing
