@@ -95,10 +95,32 @@ class DistillLightningModule(HybridLightningModule):
         **kwargs,
     ):
         super().__init__(model=model, **kwargs)
+        # Exclude teacher from hyper_parameters — it is a large nn.Module and Lightning AI's
+        # environment injects non-picklable forward hooks that break torch.save.
+        self.save_hyperparameters(ignore=['model', 'teacher'])
         self.teacher = teacher
         self.alpha = alpha
         # Linear projection: student_dim → teacher_hidden_dim (no bias — cosine loss)
         self.kd_projection = torch.nn.Linear(student_dim, teacher_hidden_dim, bias=False)
+
+    def on_save_checkpoint(self, checkpoint):
+        """Remove teacher state from checkpoint — teacher is frozen and not needed for resume."""
+        # Also clear any non-picklable forward hooks injected by the environment (Lightning AI)
+        self.teacher._forward_hooks.clear()
+        self.teacher._forward_pre_hooks.clear()
+        # Drop teacher weights from checkpoint to keep file size small
+        checkpoint["state_dict"] = {
+            k: v for k, v in checkpoint["state_dict"].items()
+            if not k.startswith("teacher.")
+        }
+
+    def on_load_checkpoint(self, checkpoint):
+        """Teacher was stripped from checkpoint at save time.
+        Re-inject teacher state from the live (already loaded) teacher module so
+        Lightning's strict state_dict load finds all expected keys.
+        """
+        for key, param in self.teacher.state_dict().items():
+            checkpoint["state_dict"][f"teacher.{key}"] = param
 
     def configure_optimizers(self):
         """Include kd_projection in the optimizer alongside the student model."""
