@@ -396,7 +396,7 @@ def main(cfg: DictConfig):
         devices=cfg.trainer.get("devices", 1),
         precision=cfg.trainer.get("precision", "bf16-mixed"),
         accumulate_grad_batches=cfg.trainer.get("accumulate_grad_batches", 4),
-        gradient_clip_val=cfg.model.gradient_clip_val,
+        # gradient_clip_val omitted: clipping handled in on_before_optimizer_step
         val_check_interval=cfg.trainer.get("val_check_interval", 1000),
         log_every_n_steps=cfg.trainer.get("log_every_n_steps", 25),
         callbacks=callbacks,

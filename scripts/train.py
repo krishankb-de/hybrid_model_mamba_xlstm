@@ -395,7 +395,9 @@ def main(cfg: DictConfig):
         val_check_interval=cfg.trainer.val_check_interval,
         log_every_n_steps=cfg.trainer.log_every_n_steps,
         accumulate_grad_batches=cfg.trainer.accumulate_grad_batches,
-        gradient_clip_val=cfg.model.gradient_clip_val,
+        # gradient_clip_val intentionally omitted: clipping is done in
+        # HybridLightningModule.on_before_optimizer_step to avoid conflict
+        # with foreach AdamW under bf16-mixed AMP.
         callbacks=callbacks,
         logger=loggers,
         enable_checkpointing=cfg.trainer.enable_checkpointing,

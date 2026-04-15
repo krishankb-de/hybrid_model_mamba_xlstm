@@ -85,11 +85,11 @@ def configure_optimizer(
     betas: tuple = (0.9, 0.999),
     eps: float = 1e-8,
     momentum: float = 0.9,
-    fused: bool = True,
+    foreach: bool = True,
     **kwargs
 ) -> Optimizer:
     """Configure optimizer with proper parameter grouping.
-    
+
     Args:
         model: The model to optimize
         optimizer_name: Name of optimizer ('adamw', 'adam', 'sgd')
@@ -98,7 +98,7 @@ def configure_optimizer(
         betas: Beta parameters for Adam-based optimizers
         eps: Epsilon for numerical stability
         momentum: Momentum for SGD
-        fused: Use fused optimizer implementation if available (faster on CUDA)
+        foreach: Use vectorized foreach implementation (faster; compatible with AMP gradient clipping)
         **kwargs: Additional optimizer arguments
         
     Returns:
@@ -122,17 +122,17 @@ def configure_optimizer(
             lr=learning_rate,
             betas=betas,
             eps=eps,
-            fused=fused and torch.cuda.is_available(),
+            foreach=foreach and torch.cuda.is_available(),
             **kwargs
         )
-    
+
     elif optimizer_name == "adam":
         optimizer = Adam(
             param_groups,
             lr=learning_rate,
             betas=betas,
             eps=eps,
-            fused=fused and torch.cuda.is_available(),
+            foreach=foreach and torch.cuda.is_available(),
             **kwargs
         )
     
