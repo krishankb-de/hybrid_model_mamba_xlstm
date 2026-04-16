@@ -219,12 +219,19 @@ class DistillLightningModule(HybridLightningModule):
         # --- Total loss ---
         total_loss = (1.0 - self.alpha) * ce_loss + self.alpha * kd_loss
 
-        # --- Abort on NaN ---
+        # --- NaN guard: skip batch instead of aborting ---
         if torch.isnan(total_loss) or torch.isinf(total_loss):
-            raise RuntimeError(
-                f"NaN/Inf detected: ce_loss={ce_loss.item():.4f}, "
-                f"kd_loss={kd_loss.item():.4f}. Aborting."
+            if not hasattr(self, "_nan_count"):
+                self._nan_count = 0
+            self._nan_count += 1
+            print(
+                f"[WARN] NaN/Inf at step {self.global_step} "
+                f"(ce={ce_loss.item():.4f}, kd={kd_loss.item():.4f}), "
+                f"skipping batch ({self._nan_count} total)"
             )
+            if self._nan_count >= 50:
+                raise RuntimeError(f"NaN/Inf detected {self._nan_count} times. Aborting.")
+            return torch.tensor(0.0, device=ce_loss.device, requires_grad=True)
 
         # --- Logging ---
         ppl = compute_perplexity(ce_loss)
@@ -238,72 +245,19 @@ class DistillLightningModule(HybridLightningModule):
 
 
 # ---------------------------------------------------------------------------
-# Data loading (mirrors train_stage0_lm_pubmed.sh config)
+# Data loading — packed sequences with dual tokenization for KD
 # ---------------------------------------------------------------------------
-
-class PubMedLMDataset(torch.utils.data.Dataset):
-    """PubMed abstracts tokenised for causal LM with optional dual tokenization.
-
-    When teacher_tokenizer is provided, each item also includes
-    teacher_input_ids / teacher_attention_mask for hidden-state KD.
-    """
-
-    def __init__(
-        self,
-        hf_dataset,
-        tokenizer,
-        max_length: int,
-        teacher_tokenizer=None,
-        teacher_max_length: int = 512,
-    ):
-        self.data = hf_dataset
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.teacher_tokenizer = teacher_tokenizer
-        self.teacher_max_length = teacher_max_length
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        item = self.data[idx]
-        text = item.get("abstract") or item.get("article") or item.get("text") or ""
-
-        # Student tokenization (GPT-2 vocab)
-        enc = self.tokenizer(
-            text,
-            max_length=self.max_length,
-            truncation=True,
-            padding="max_length",
-            return_tensors="pt",
-        )
-        input_ids = enc["input_ids"].squeeze(0)
-        attention_mask = enc["attention_mask"].squeeze(0)
-        labels = input_ids.clone()
-        labels[attention_mask == 0] = -100
-
-        result = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels,
-        }
-
-        # Teacher tokenization (BioMedLM vocab) — only when KD is active
-        if self.teacher_tokenizer is not None:
-            t_enc = self.teacher_tokenizer(
-                text,
-                max_length=self.teacher_max_length,
-                truncation=True,
-                padding="max_length",
-                return_tensors="pt",
-            )
-            result["teacher_input_ids"] = t_enc["input_ids"].squeeze(0)
-            result["teacher_attention_mask"] = t_enc["attention_mask"].squeeze(0)
-
-        return result
 
 
 def build_dataloader(cfg, split: str, tokenizer, teacher_tokenizer=None, teacher_max_length: int = 512):
+    """Build packed DataLoader using article text (not just abstracts).
+
+    Student tokens are packed via tokenize → concatenate → chunk (same as
+    train.py).  Teacher tokenization is generated on-the-fly in the collate
+    function by decoding each student chunk back to text and re-tokenizing
+    with the teacher tokenizer.  This keeps student/teacher text aligned
+    without cross-tokenizer packing complexity.
+    """
     print(f"Loading PubMed ({split})...")
     hf_split = "train" if split == "train" else "validation"
     ds = load_dataset(
@@ -316,20 +270,59 @@ def build_dataloader(cfg, split: str, tokenizer, teacher_tokenizer=None, teacher
     if split == "validation" and not cfg.dataset.get("streaming", False):
         ds = ds.select(range(min(val_n, len(ds))))
 
-    dataset = PubMedLMDataset(
-        ds, tokenizer, cfg.dataset.max_length,
-        teacher_tokenizer=teacher_tokenizer,
-        teacher_max_length=teacher_max_length,
-    )
+    seq_length = cfg.dataset.get("max_seq_length", cfg.dataset.max_length)
+    num_proc = cfg.dataset.get("preprocessing_num_workers", 2)
+
+    def tokenize_fn(examples):
+        texts = examples.get("article", examples.get("abstract", examples.get("text", [""])))
+        return tokenizer(texts, truncation=False, return_attention_mask=False)
+
+    ds = ds.map(tokenize_fn, batched=True, remove_columns=ds.column_names, num_proc=num_proc)
+
+    def group_texts(examples):
+        concatenated = {k: sum(examples[k], []) for k in examples.keys()}
+        total_length = (len(concatenated["input_ids"]) // seq_length) * seq_length
+        result = {
+            k: [t[i : i + seq_length] for i in range(0, total_length, seq_length)]
+            for k, t in concatenated.items()
+        }
+        return result
+
+    ds = ds.map(group_texts, batched=True, num_proc=num_proc)
+
+    n_samples = len(ds)
+    tokens_total = n_samples * seq_length
+    print(f"  Packed {split}: {n_samples:,} chunks × {seq_length} = {tokens_total/1e6:.0f}M tokens")
+
+    def collate_fn(batch):
+        input_ids = torch.stack([torch.tensor(item["input_ids"], dtype=torch.long) for item in batch])
+        attention_mask = torch.ones_like(input_ids)
+        labels = input_ids.clone()
+
+        result = {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+        if teacher_tokenizer is not None:
+            texts = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+            t_enc = teacher_tokenizer(
+                texts, max_length=teacher_max_length, truncation=True,
+                padding="max_length", return_tensors="pt",
+            )
+            result["teacher_input_ids"] = t_enc["input_ids"]
+            result["teacher_attention_mask"] = t_enc["attention_mask"]
+
+        return result
+
     bs = cfg.dataset.batch_size if split == "train" else cfg.dataset.eval_batch_size
+    nw = cfg.dataset.get("num_workers", 2)
     return DataLoader(
-        dataset,
+        ds,
         batch_size=bs,
         shuffle=(split == "train"),
-        num_workers=cfg.dataset.get("num_workers", 4),
+        num_workers=nw,
         pin_memory=cfg.dataset.get("pin_memory", True),
         drop_last=(split == "train"),
-        persistent_workers=(cfg.dataset.get("num_workers", 4) > 0),
+        persistent_workers=(nw > 0),
+        collate_fn=collate_fn,
     )
 
 
@@ -516,11 +509,11 @@ def main(cfg: DictConfig):
     # ---------------------------------------------------------------------------
     trainer = pl.Trainer(
         max_steps=cfg.trainer.max_steps,
+        max_epochs=cfg.trainer.get("max_epochs", 3),
         accelerator=cfg.trainer.get("accelerator", "auto"),
         devices=cfg.trainer.get("devices", 1),
         precision=cfg.trainer.get("precision", "bf16-mixed"),
         accumulate_grad_batches=cfg.trainer.get("accumulate_grad_batches", 4),
-        # gradient_clip_val omitted: clipping handled in on_before_optimizer_step
         val_check_interval=cfg.trainer.get("val_check_interval", 1000),
         log_every_n_steps=cfg.trainer.get("log_every_n_steps", 25),
         callbacks=callbacks,
