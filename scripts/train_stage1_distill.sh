@@ -98,10 +98,10 @@ python scripts/train_contrastive.py \
   distill=stage1_pubmedbert \
   contrastive_mode=simcse \
   trainer.max_steps=10000 \
-  trainer.accumulate_grad_batches=4 \
+  trainer.accumulate_grad_batches=1 \
   trainer.val_check_interval=500 \
   trainer.log_every_n_steps=25 \
-  dataset.batch_size=16 \
+  dataset.batch_size=64 \
   dataset.eval_batch_size=32 \
   dataset.max_length=512 \
   dataset.num_workers=4 \
@@ -112,7 +112,7 @@ python scripts/train_contrastive.py \
   experiment_name=hybrid_70m_stage1_kd_pubmedbert \
   output_dir=./outputs/hybrid_70m_stage1_kd_pubmedbert \
   wandb.enabled=false \
-  model.learning_rate=2e-5 \
+  model.learning_rate=3e-5 \
   model.warmup_steps=500 \
   model.gradient_clip_val=1.0
 
