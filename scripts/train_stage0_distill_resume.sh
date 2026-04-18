@@ -81,7 +81,7 @@ import torch
 print('Loading BioMedLM from cache...')
 _ = AutoModelForCausalLM.from_pretrained(
     'stanford-crfm/BioMedLM',
-    dtype=torch.bfloat16,
+    torch_dtype=torch.bfloat16,
     low_cpu_mem_usage=True,
 )
 print('BioMedLM ready.')
