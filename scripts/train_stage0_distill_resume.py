@@ -87,27 +87,20 @@ class DistillLightningModule(HybridLightningModule):
         self.kd_projection = torch.nn.Linear(student_dim, teacher_hidden_dim, bias=False)
 
     def on_save_checkpoint(self, checkpoint):
-        """Remove teacher from checkpoint so weights_only=True loading works.
-
-        Three places PL may serialize the teacher:
-          1. state_dict   — teacher.* weight tensors
-          2. hyper_parameters — constructor kwargs (blocked by save_hyperparameters
-             ignore list, but old checkpoints may still have it)
-          3. callbacks / optimizer_states — not applicable here
-
-        Clearing forward hooks first prevents non-picklable hook objects
-        injected by some cluster environments from causing pickle errors.
-        """
+        """Remove teacher state from checkpoint — teacher is frozen and not needed for resume."""
         self.teacher._forward_hooks.clear()
         self.teacher._forward_pre_hooks.clear()
-        # Strip teacher weights
         checkpoint["state_dict"] = {
             k: v for k, v in checkpoint["state_dict"].items()
             if not k.startswith("teacher.")
         }
-        # Strip teacher from hyper_parameters if present (old checkpoints)
-        if "hyper_parameters" in checkpoint:
-            checkpoint["hyper_parameters"].pop("teacher", None)
+        # Belt-and-suspenders: some PL versions save nn.Module attributes in
+        # hyper_parameters despite save_hyperparameters(ignore=['teacher']).
+        # Explicitly remove it so future checkpoints don't contain the
+        # GPT2LMHeadModel class reference that blocks weights_only=True loading.
+        hp = checkpoint.get("hyper_parameters", {})
+        if "teacher" in hp:
+            del hp["teacher"]
 
     def on_load_checkpoint(self, checkpoint):
         """Teacher was stripped from checkpoint at save time.
@@ -500,29 +493,20 @@ def main(cfg: DictConfig):
     else:
         print("[WARN] No ckpt_path provided — starting from scratch (use +ckpt_path=<path>)")
 
-    # PyTorch 2.6+ defaults weights_only=True in torch.load(). The checkpoint
-    # was saved before on_save_checkpoint fully cleaned hyper_parameters, so it
-    # may contain a pickled class reference to GPT2LMHeadModel. We whitelist the
-    # specific classes that appear in our own trusted checkpoint using the
-    # official PyTorch API (torch.serialization.add_safe_globals), introduced in
-    # PyTorch 2.4. This is scoped and does not affect other torch.load calls.
-    # New checkpoints saved by this run will be fully clean because
-    # on_save_checkpoint now also strips hyper_parameters["teacher"].
+    # PyTorch 2.6+ defaults weights_only=True in torch.load(), but our checkpoint
+    # contains a pickled reference to GPT2LMHeadModel (the teacher). Override to
+    # allow loading our own trusted checkpoint.
+    _original_torch_load = torch.load
+
+    def _torch_load_weights_only_false(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return _original_torch_load(*args, **kwargs)
+
+    torch.load = _torch_load_weights_only_false
     try:
-        from transformers.models.gpt2.modeling_gpt2 import GPT2LMHeadModel
-        from transformers.modeling_utils import PreTrainedModel
-        torch.serialization.add_safe_globals([GPT2LMHeadModel, PreTrainedModel])
-    except (ImportError, AttributeError):
-        # add_safe_globals not available (<2.4) or class path changed — fall back
-        # to the monkey-patch approach which is safe for our own checkpoint.
-        _orig = torch.load
-        torch.load = lambda *a, **kw: _orig(*a, **{**kw, "weights_only": False})
-        try:
-            trainer.fit(lightning_module, train_loader, val_loader, ckpt_path=ckpt_path)
-        finally:
-            torch.load = _orig
-    else:
         trainer.fit(lightning_module, train_loader, val_loader, ckpt_path=ckpt_path)
+    finally:
+        torch.load = _original_torch_load
     print("\nStage 0 distillation complete.")
     print(f"Checkpoint saved to: {cfg.checkpoint_dir}")
 
