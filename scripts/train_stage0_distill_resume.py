@@ -493,22 +493,20 @@ def main(cfg: DictConfig):
     else:
         print("[WARN] No ckpt_path provided — starting from scratch (use +ckpt_path=<path>)")
 
-    # PyTorch 2.6+ defaults weights_only=True in torch.load(), but our checkpoint
-    # contains a pickled reference to GPT2LMHeadModel (the teacher). Override to
-    # allow loading our own trusted checkpoint.
-    _original_torch_load = torch.load
-
-    def _torch_load_weights_only_false(*args, **kwargs):
-        # PL explicitly passes weights_only=True in newer versions; force False
-        # since this checkpoint contains a GPT2LMHeadModel class reference.
+    # PyTorch 2.6+ defaults weights_only=True in torch.load(). PL's cloud_io.py
+    # passes weights_only=weights_only as an explicit kwarg, so setdefault or
+    # dict-merge approaches have no effect. We use a direct-override monkey-patch
+    # that unconditionally sets weights_only=False, scoped to trainer.fit() only.
+    # This is safe: the checkpoint is our own trusted file, not user input.
+    _orig_torch_load = torch.load
+    def _patched_load(*args, **kwargs):
         kwargs["weights_only"] = False
-        return _original_torch_load(*args, **kwargs)
-
-    torch.load = _torch_load_weights_only_false
+        return _orig_torch_load(*args, **kwargs)
+    torch.load = _patched_load
     try:
         trainer.fit(lightning_module, train_loader, val_loader, ckpt_path=ckpt_path)
     finally:
-        torch.load = _original_torch_load
+        torch.load = _orig_torch_load
     print("\nStage 0 distillation complete.")
     print(f"Checkpoint saved to: {cfg.checkpoint_dir}")
 
