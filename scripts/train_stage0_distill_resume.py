@@ -499,7 +499,9 @@ def main(cfg: DictConfig):
     _original_torch_load = torch.load
 
     def _torch_load_weights_only_false(*args, **kwargs):
-        kwargs.setdefault("weights_only", False)
+        # PL explicitly passes weights_only=True in newer versions; force False
+        # since this checkpoint contains a GPT2LMHeadModel class reference.
+        kwargs["weights_only"] = False
         return _original_torch_load(*args, **kwargs)
 
     torch.load = _torch_load_weights_only_false
