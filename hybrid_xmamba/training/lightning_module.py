@@ -489,6 +489,11 @@ class DistillContrastiveLightningModule(HybridContrastiveLightningModule):
         self.lambda_max = lambda_max
         self.distill_warmup = distill_warmup
         self.distill_ramp = distill_ramp
+        # Project student embeddings into teacher's dim before cosine distillation.
+        # student: embed_dim=512 (hybrid_70m), teacher: hidden_size=768 (PubMedBERT)
+        student_dim = self.model.embed_dim
+        teacher_dim = teacher.config.hidden_size
+        self.distill_proj = nn.Linear(student_dim, teacher_dim, bias=False)
 
     def _get_distill_lambda(self) -> float:
         """Compute current distillation weight based on global step."""
@@ -527,8 +532,9 @@ class DistillContrastiveLightningModule(HybridContrastiveLightningModule):
                 teacher_cls = teacher_out.last_hidden_state[:, 0, :]
                 teacher_cls = F.normalize(teacher_cls.float(), dim=-1)
 
+            z1_proj = F.normalize(self.distill_proj(z1.float()), dim=-1)
             student_teacher_cos = F.cosine_similarity(
-                z1.float(), teacher_cls, dim=-1
+                z1_proj, teacher_cls, dim=-1
             )  # (B,)
             distill_loss = (1.0 - student_teacher_cos).mean()
 
