@@ -98,11 +98,11 @@ python scripts/train_contrastive.py \
   +distill=stage1_pubmedbert \
   contrastive_mode=simcse \
   trainer.max_steps=10000 \
-  trainer.accumulate_grad_batches=1 \
+  trainer.accumulate_grad_batches=4 \
   trainer.val_check_interval=500 \
   trainer.log_every_n_steps=25 \
-  dataset.batch_size=64 \
-  dataset.eval_batch_size=32 \
+  dataset.batch_size=16 \
+  dataset.eval_batch_size=16 \
   dataset.max_length=512 \
   dataset.num_workers=4 \
   dataset.pin_memory=true \
