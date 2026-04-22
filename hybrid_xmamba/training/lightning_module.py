@@ -484,7 +484,7 @@ class DistillContrastiveLightningModule(HybridContrastiveLightningModule):
         # Exclude teacher from Lightning's hyperparameter pickle — it is a
         # large frozen nn.Module and some environments inject non-picklable
         # forward hooks that crash torch.save / checkpoint writing.
-        self.save_hyperparameters(ignore=['teacher'])
+        self.save_hyperparameters(ignore=['teacher', 'model'])
         self.teacher = teacher
         self.lambda_max = lambda_max
         self.distill_warmup = distill_warmup
