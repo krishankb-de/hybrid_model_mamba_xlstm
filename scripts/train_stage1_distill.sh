@@ -27,7 +27,7 @@
 
 set -euo pipefail
 
-LM_CHECKPOINT="${LM_CHECKPOINT:-./outputs/hybrid_70m_stage0_kd_pubmed/checkpoints/last.ckpt}"
+LM_CHECKPOINT="${LM_CHECKPOINT:-./outputs/hybrid_70m_stage0_kd_pubmed/checkpoints/stage0_model_only.pt}"
 
 echo "=== JOB START (Stage 1: SimCSE + PubMedBERT KD) ==="
 date
