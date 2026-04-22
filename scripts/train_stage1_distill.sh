@@ -95,7 +95,7 @@ python scripts/train_contrastive.py \
   --config-name config_70m \
   dataset=pubmed \
   trainer=a100_single_gpu \
-  distill=stage1_pubmedbert \
+  +distill=stage1_pubmedbert \
   contrastive_mode=simcse \
   trainer.max_steps=10000 \
   trainer.accumulate_grad_batches=1 \
