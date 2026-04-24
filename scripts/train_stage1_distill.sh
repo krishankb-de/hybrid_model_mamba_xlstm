@@ -106,8 +106,8 @@ python scripts/train_contrastive.py \
   trainer.log_every_n_steps=25 \
   dataset.batch_size=8 \
   dataset.eval_batch_size=8 \
-  dataset.max_length=512 \
-  dataset.num_workers=4 \
+  dataset.max_length=384 \
+  dataset.num_workers=2 \
   dataset.pin_memory=true \
   dataset.streaming=false \
   dataset.cache_dir=/scratch/bhushkri/hybrid_xmamba_a100_70m_40/pubmed_cache \

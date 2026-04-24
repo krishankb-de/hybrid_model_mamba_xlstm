@@ -101,14 +101,14 @@ python scripts/train_contrastive.py \
   trainer=a100_single_gpu \
   +distill=stage1_pubmedbert \
   contrastive_mode=simcse \
-  trainer.max_steps=10000 \
+  trainer.max_steps=20000 \
   trainer.accumulate_grad_batches=8 \
   trainer.val_check_interval=500 \
   trainer.log_every_n_steps=25 \
   dataset.batch_size=8 \
   dataset.eval_batch_size=8 \
-  dataset.max_length=512 \
-  dataset.num_workers=4 \
+  dataset.max_length=384 \
+  dataset.num_workers=2 \
   dataset.pin_memory=true \
   dataset.streaming=false \
   dataset.cache_dir=/scratch/bhushkri/hybrid_xmamba_a100_70m_40/pubmed_cache \
