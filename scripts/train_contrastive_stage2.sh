@@ -56,7 +56,7 @@ echo ""
 
 nvidia-smi
 
-# Verify Stage 1 checkpoint
+# Verify Stage 1 checkpoint exists before starting
 if [ ! -f "${STAGE1_CHECKPOINT}" ]; then
     echo "ERROR: Stage 1 checkpoint not found at: ${STAGE1_CHECKPOINT}"
     echo "Run train_stage1_distill.sh first, or set STAGE1_CHECKPOINT env variable."

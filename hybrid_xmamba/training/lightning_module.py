@@ -355,26 +355,16 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         Returns:
             Scalar loss
         """
-        # Clamp logit_scale to prevent extreme values (exp(2.6592) ≈ 14.3, exp(4.6) ≈ 100)
+        # Clamp logit_scale: exp(2.6592)≈14.3 (CLIP init), cap at 100 to prevent overflow
         scale = logit_scale.exp().clamp(min=1.0, max=100.0)
-        
-        # Compute similarity matrix with numerical stability
-        logits = scale * (z1 @ z2.T)           # (B, B)
-        
-        # Clamp logits to prevent overflow in softmax
-        logits = logits.clamp(min=-100.0, max=100.0)
-        
+
+        # Similarity matrix (B, B); z1 and z2 are already L2-normalised by encode()
+        logits = scale * (z1 @ z2.T)
+
         labels = torch.arange(len(z1), device=z1.device)
         loss_12 = torch.nn.functional.cross_entropy(logits, labels)
         loss_21 = torch.nn.functional.cross_entropy(logits.T, labels)
-        
-        # Check for NaN and return a safe value if detected
-        loss = (loss_12 + loss_21) / 2.0
-        if torch.isnan(loss) or torch.isinf(loss):
-            print(f"WARNING: NaN/Inf detected in loss! logit_scale={logit_scale.item():.4f}")
-            return torch.tensor(0.0, device=loss.device, requires_grad=True)
-        
-        return loss
+        return (loss_12 + loss_21) / 2.0
 
     # ------------------------------------------------------------------
     # Training / validation steps

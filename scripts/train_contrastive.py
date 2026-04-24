@@ -395,7 +395,7 @@ def main(cfg: DictConfig):
     lm_ckpt = cfg.get("lm_checkpoint", None)
     if lm_ckpt:
         print(f"Loading LM backbone weights from: {lm_ckpt}")
-        ckpt = torch.load(lm_ckpt, map_location="cpu")
+        ckpt = torch.load(lm_ckpt, map_location="cpu", weights_only=False)
         state = ckpt.get("state_dict", ckpt)
         # Strip Lightning "model." prefix if present
         state = {k.replace("model.", "", 1): v for k, v in state.items()}

@@ -14,7 +14,7 @@
 # Teacher  : PubMedBERT (110M, WordPiece tokenizer)
 # Student  : hybrid_70m text encoder (512 dim, [mamba, mamba, mlstm])
 # Loss     : L_SimCSE + lambda * (1 - cos(student_pooled, teacher_cls))
-#            lambda ramps 0 → 0.3 over steps 500-1000
+#            lambda ramps 0 → 0.3 over steps 1000-2000
 #
 # Memory estimate at bs=8, seq=512, accum=8, bf16:
 #   SimCSE needs 2x forward (z1,z2) — z1 activations retained until loss
@@ -100,7 +100,7 @@ python scripts/train_contrastive.py \
   trainer=a100_single_gpu \
   +distill=stage1_pubmedbert \
   contrastive_mode=simcse \
-  trainer.max_steps=10000 \
+  trainer.max_steps=20000 \
   trainer.accumulate_grad_batches=8 \
   trainer.val_check_interval=500 \
   trainer.log_every_n_steps=25 \
@@ -115,8 +115,8 @@ python scripts/train_contrastive.py \
   experiment_name=hybrid_70m_stage1_kd_pubmedbert \
   output_dir=./outputs/hybrid_70m_stage1_kd_pubmedbert \
   wandb.enabled=false \
-  model.learning_rate=3e-5 \
-  model.warmup_steps=500 \
+  model.learning_rate=1e-5 \
+  model.warmup_steps=1000 \
   model.gradient_clip_val=1.0
 
 echo ""
