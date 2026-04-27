@@ -83,6 +83,9 @@ class HybridConfig:
     # Generation parameters
     use_cache: bool = True
     tie_word_embeddings: bool = False
+
+    # Memory optimisation
+    use_gradient_checkpointing: bool = False
     
     # Model type identifier
     model_type: str = "hybrid_xmamba"

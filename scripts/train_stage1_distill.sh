@@ -16,14 +16,15 @@
 # Loss     : L_SimCSE (fixed τ=0.05) + lambda * (1 - cos(student_pooled, teacher_cls))
 #            lambda ramps 0 → 0.7 over steps 500-2000 (warmup=500, ramp=1500)
 #
-# Memory estimate at bs=16, seq=512, accum=4, bf16:
-#   SimCSE needs 2x forward (z1,z2) — z1 activations retained until loss
+# Memory estimate at bs=16, seq=512, accum=4, bf16 + gradient checkpointing:
+#   Gradient checkpointing recomputes layer activations during backward,
+#   trading ~30-40% speed for ~60% activation memory reduction.
 #   Student 70M (grads+Adam)        : ~4 GB
 #   PubMedBERT 110M frozen bf16     : ~0.9 GB weights + ~2 GB acts (bs=16)
-#   2x fwd activations @ bs=16      : ~30-35 GB  (Mamba chunk scan dominates)
-#   Total peak                      : ~35-38 GB  (within 40GB budget)
-#   Effective batch = 16 × 4 = 64   (same as prior run; bs raised for more negatives)
-#   If OOM: revert to bs=8, accum=8 (original config before this run)
+#   2x fwd activations @ bs=16 ckpt : ~12-16 GB  (was ~30-35 GB without ckpt)
+#   Total peak (estimate)           : ~20-25 GB  (comfortable within 40GB budget)
+#   Effective batch = 16 × 4 = 64   (same as prior run; bs kept for more negatives)
+#   Fallback if still OOM: bs=8, accum=8 (removes gradient_checkpointing=true)
 #
 # Requires a Stage 0 checkpoint. Default path matches train_stage0_distill.sh output.
 # Override via: LM_CHECKPOINT=/path/to/ckpt sbatch train_stage1_distill.sh
@@ -117,7 +118,8 @@ python scripts/train_contrastive.py \
   wandb.enabled=false \
   model.learning_rate=1e-5 \
   model.warmup_steps=1000 \
-  model.gradient_clip_val=1.0
+  model.gradient_clip_val=1.0 \
+  model.use_gradient_checkpointing=true
 
 echo ""
 echo "=== JOB END (Stage 1: KD complete) ==="

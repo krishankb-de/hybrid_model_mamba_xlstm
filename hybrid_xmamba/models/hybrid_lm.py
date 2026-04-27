@@ -6,6 +6,7 @@ causal language modeling backbone.
 
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint
 from typing import Optional, Tuple, Union
 from dataclasses import dataclass
 
@@ -177,11 +178,17 @@ class HybridLanguageModel(nn.Module):
         all_hidden_states = () if output_hidden_states else None
         
         # Pass through all layers
+        use_ckpt = self.config.use_gradient_checkpointing and self.training
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
-            
-            hidden_states = layer(hidden_states)
+
+            if use_ckpt:
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    layer, hidden_states, use_reentrant=False
+                )
+            else:
+                hidden_states = layer(hidden_states)
         
         # Final normalization
         hidden_states = self.final_norm(hidden_states)

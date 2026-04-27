@@ -390,6 +390,7 @@ def main(cfg: DictConfig):
         initializer_range=cfg.model.initializer_range,
         use_cache=cfg.model.use_cache,
         tie_word_embeddings=cfg.model.tie_word_embeddings,
+        use_gradient_checkpointing=cfg.model.get("use_gradient_checkpointing", False),
     )
 
     # Build text encoder
