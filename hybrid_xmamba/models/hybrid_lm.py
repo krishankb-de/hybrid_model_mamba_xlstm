@@ -333,10 +333,14 @@ class HybridTextEncoder(nn.Module):
         # Full LM backbone — reuse existing class
         self.lm = HybridLanguageModel(config)
 
-        # Projection head: hidden_dim → embed_dim (no bias, standard in CLIP)
+        # Projection head: hidden_dim → embed_dim (no bias, standard in CLIP).
+        # Dropout between layers provides the stochastic augmentation that
+        # SimCSE relies on — without it both forward passes produce identical
+        # vectors and InfoNCE loss collapses to zero immediately.
         self.projection_head = nn.Sequential(
             nn.Linear(config.dim, config.dim, bias=False),
             nn.GELU(),
+            nn.Dropout(p=0.1),
             nn.Linear(config.dim, embed_dim, bias=False),
         )
 
