@@ -81,4 +81,8 @@ multirun/
 *.cu.o
 
 # Documentation
-*.md
+*.md   
+
+
+# Multi-phase plan local state (regenerated from PHASE_PLAN.md checkboxes)
+phase_state.json
