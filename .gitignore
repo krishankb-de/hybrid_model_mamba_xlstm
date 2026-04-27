@@ -60,6 +60,8 @@ logs/
 wandb/
 lightning_logs/
 
+output_willi_server/
+
 # Testing
 .pytest_cache/
 .coverage
