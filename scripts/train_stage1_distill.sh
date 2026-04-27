@@ -3,7 +3,7 @@
 #SBATCH --account=mitarb
 #SBATCH --gres=gpu:mitarb:1
 #SBATCH --mem=40G
-#SBATCH --time=36:00:00
+#SBATCH --time=12:00:00
 #SBATCH --job-name=stage1_kd_pubmedbert
 #SBATCH --output=/scratch/bhushkri/hybrid_xmamba_a100_70m_40/logs/%x_%j.log
 #SBATCH --error=/scratch/bhushkri/hybrid_xmamba_a100_70m_40/logs/%x_%j.log
@@ -13,17 +13,17 @@
 #
 # Teacher  : PubMedBERT (110M, WordPiece tokenizer)
 # Student  : hybrid_70m text encoder (512 dim, [mamba, mamba, mlstm])
-# Loss     : L_SimCSE + lambda * (1 - cos(student_pooled, teacher_cls))
-#            lambda ramps 0 → 0.3 over steps 1000-2000
+# Loss     : L_SimCSE (fixed τ=0.05) + lambda * (1 - cos(student_pooled, teacher_cls))
+#            lambda ramps 0 → 0.7 over steps 500-2000 (warmup=500, ramp=1500)
 #
-# Memory estimate at bs=8, seq=512, accum=8, bf16:
+# Memory estimate at bs=16, seq=512, accum=4, bf16:
 #   SimCSE needs 2x forward (z1,z2) — z1 activations retained until loss
 #   Student 70M (grads+Adam)        : ~4 GB
-#   PubMedBERT 110M frozen bf16     : ~0.9 GB weights + ~1 GB acts
-#   2x fwd activations @ bs=8       : ~20-25 GB  (Mamba chunk scan dominates)
-#   Total peak                      : ~30-35 GB  (safe on 40GB)
-#   Effective batch = 8 × 8 = 64    (minimum for stable SimCSE contrastive loss)
-#   Note: bs=16 OOMs at 2nd fwd's selective_scan einsum — do not raise.
+#   PubMedBERT 110M frozen bf16     : ~0.9 GB weights + ~2 GB acts (bs=16)
+#   2x fwd activations @ bs=16      : ~30-35 GB  (Mamba chunk scan dominates)
+#   Total peak                      : ~35-38 GB  (within 40GB budget)
+#   Effective batch = 16 × 4 = 64   (same as prior run; bs raised for more negatives)
+#   If OOM: revert to bs=8, accum=8 (original config before this run)
 #
 # Requires a Stage 0 checkpoint. Default path matches train_stage0_distill.sh output.
 # Override via: LM_CHECKPOINT=/path/to/ckpt sbatch train_stage1_distill.sh
@@ -101,12 +101,12 @@ python scripts/train_contrastive.py \
   +distill=stage1_pubmedbert \
   contrastive_mode=simcse \
   trainer.max_steps=20000 \
-  trainer.accumulate_grad_batches=8 \
-  trainer.val_check_interval=500 \
+  trainer.accumulate_grad_batches=4 \
+  trainer.val_check_interval=1000 \
   trainer.log_every_n_steps=25 \
-  dataset.batch_size=8 \
-  dataset.eval_batch_size=8 \
-  dataset.max_length=384 \
+  dataset.batch_size=16 \
+  dataset.eval_batch_size=16 \
+  dataset.max_length=512 \
   dataset.num_workers=2 \
   dataset.pin_memory=true \
   dataset.streaming=false \

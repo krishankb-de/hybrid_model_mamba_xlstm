@@ -344,19 +344,25 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         z1: torch.Tensor,
         z2: torch.Tensor,
         logit_scale: torch.Tensor,
+        fixed_scale: Optional[float] = None,
     ) -> torch.Tensor:
         """Symmetric InfoNCE loss with numerical stability.
 
         Args:
             z1: Normalised embeddings from view-1 (B, D)
             z2: Normalised embeddings from view-2 (B, D)
-            logit_scale: Learnable temperature (scalar)
+            logit_scale: Learnable temperature (scalar) — used only when fixed_scale is None
+            fixed_scale: If given, use this constant scale (1/τ) instead of logit_scale.
+                         Set to 20.0 for SimCSE (τ=0.05) to prevent collapse.
 
         Returns:
             Scalar loss
         """
-        # Clamp logit_scale: exp(2.6592)≈14.3 (CLIP init), cap at 100 to prevent overflow
-        scale = logit_scale.exp().clamp(min=1.0, max=100.0)
+        if fixed_scale is not None:
+            scale = torch.tensor(fixed_scale, dtype=z1.dtype, device=z1.device)
+        else:
+            # Clamp logit_scale: exp(2.6592)≈14.3 (CLIP init), cap at 100 to prevent overflow
+            scale = logit_scale.exp().clamp(min=1.0, max=100.0)
 
         # Similarity matrix (B, B); z1 and z2 are already L2-normalised by encode()
         logits = scale * (z1 @ z2.T)
@@ -390,11 +396,15 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         input_ids = batch["input_ids"]
         attention_mask = batch.get("attention_mask")
 
-        self.model.lm.train()  # keep dropout active for both views
+        # Full model must be in train mode — projection_head Dropout(0.1) is the primary
+        # source of view diversity. lm.train() alone leaves projection_head in eval,
+        # which disables dropout and makes z1==z2 (val loss collapses to 0).
+        self.model.train()
         z1 = self.model.encode(input_ids, attention_mask=attention_mask)
         z2 = self.model.encode(input_ids, attention_mask=attention_mask)
 
-        loss = self._nt_xent_loss(z1, z2, self.model.logit_scale)
+        # Fixed τ=0.05 (scale=20) prevents logit_scale from drifting to max and collapsing
+        loss = self._nt_xent_loss(z1, z2, self.model.logit_scale, fixed_scale=20.0)
         self.log(f"{split}/contrastive_loss", loss, prog_bar=True,
                  on_step=(split == "train"), on_epoch=True)
         if split == "train":
@@ -500,11 +510,15 @@ class DistillContrastiveLightningModule(HybridContrastiveLightningModule):
         input_ids = batch["input_ids"]
         attention_mask = batch.get("attention_mask")
 
-        self.model.lm.train()
+        # Same fix as parent: full model.train() required so projection_head dropout
+        # is active, giving z1 != z2. teacher is not a child of self.model so
+        # self.model.train() does not affect the frozen teacher. ✓
+        self.model.train()
         z1 = self.model.encode(input_ids, attention_mask=attention_mask)
         z2 = self.model.encode(input_ids, attention_mask=attention_mask)
 
-        simcse_loss = self._nt_xent_loss(z1, z2, self.model.logit_scale)
+        # Fixed τ=0.05 (scale=20) prevents logit_scale collapse for SimCSE
+        simcse_loss = self._nt_xent_loss(z1, z2, self.model.logit_scale, fixed_scale=20.0)
 
         # --- Distillation loss (teacher CLS → student z1) ---
         distill_lambda = self._get_distill_lambda() if split == "train" else 0.0

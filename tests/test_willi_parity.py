@@ -350,3 +350,158 @@ def test_pooling_respects_attention_mask():
     for i in full_len_idx:
         assert torch.allclose(pooled_correct[i], pooled_naive[i]), \
             f"Full-length sequence {i}: mask-aware and naive pooling should agree but don't."
+
+
+# ── 9. ContrastiveEvalCallback importable + Python 3.9-safe ───────────────
+
+@pytest.mark.willi_parity
+def test_contrastive_eval_callback_importable():
+    """ContrastiveEvalCallback and AnomalyDetectionCallback must import on Python 3.9."""
+    from hybrid_xmamba.training.contrastive_eval_callback import (
+        ContrastiveEvalCallback,
+        AnomalyDetectionCallback,
+        _spearman_rho,
+        _alignment,
+        _uniformity,
+    )
+    # Spearman correctness
+    rho = _spearman_rho([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])
+    assert abs(rho - 1.0) < 1e-5, f"Expected ρ=1.0 for identical lists, got {rho}"
+
+    # Callback instantiates with minimal args
+    class _MockTok:
+        pass
+    cb = ContrastiveEvalCallback(tokenizer=_MockTok(), eval_every_n_steps=500)
+    assert cb.eval_every == 500
+    assert cb.align_unif_every == 1000  # default
+
+    acb = AnomalyDetectionCallback(max_steps=200)
+    assert acb.max_steps == 200
+
+
+# ── 10. NT-Xent fixed_scale path ──────────────────────────────────────────
+
+@pytest.mark.willi_parity
+def test_nt_xent_fixed_scale():
+    """_nt_xent_loss must use fixed_scale=20.0 for SimCSE (τ=0.05) and ignore logit_scale."""
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
+    from hybrid_xmamba.training.lightning_module import HybridContrastiveLightningModule
+    import torch.nn.functional as F
+
+    cfg = HybridConfig(
+        vocab_size=100, dim=64, num_layers=2,
+        layer_pattern=["mamba", "mlstm"],
+        max_position_embeddings=64,
+        use_fast_path=False,
+        use_tfla=False,
+    )
+    enc = HybridTextEncoder(cfg, embed_dim=64)
+    mod = HybridContrastiveLightningModule(
+        model=enc,
+        contrastive_mode="simcse",
+        learning_rate=1e-4,
+        weight_decay=0.01,
+        warmup_steps=10,
+        max_steps=100,
+        gradient_clip_val=1.0,
+    )
+
+    z1 = F.normalize(torch.randn(4, 64), dim=-1)
+    z2 = F.normalize(torch.randn(4, 64), dim=-1)
+
+    loss_fixed = mod._nt_xent_loss(z1, z2, mod.model.logit_scale, fixed_scale=20.0)
+    assert torch.isfinite(loss_fixed), f"fixed_scale loss not finite: {loss_fixed}"
+
+    # Manually verify scale=20 is used
+    logits = 20.0 * (z1 @ z2.T)
+    labels = torch.arange(4)
+    expected = (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2
+    assert abs(loss_fixed.item() - expected.item()) < 1e-5, (
+        f"fixed_scale loss {loss_fixed.item():.6f} != manual {expected.item():.6f}"
+    )
+
+
+# ── 11. Stage 1 distill config values ─────────────────────────────────────
+
+@pytest.mark.willi_parity
+def test_simcse_val_loss_nonzero_with_eval_model():
+    """Val SimCSE loss must be non-zero even when Lightning has called model.eval().
+
+    Root cause of prior bug: self.model.lm.train() left projection_head in eval mode,
+    disabling its Dropout(0.1). With no stochasticity, z1==z2 exactly, making
+    NT-Xent loss collapse to ~0 during every validation step.
+
+    Fix: self.model.train() re-enables dropout in both lm AND projection_head.
+    This test simulates Lightning's eval() call before validation and verifies
+    the val step produces a non-trivial loss.
+    """
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
+    from hybrid_xmamba.training.lightning_module import HybridContrastiveLightningModule
+
+    cfg = HybridConfig(
+        vocab_size=100, dim=64, num_layers=2,
+        layer_pattern=["mamba", "mlstm"],
+        max_position_embeddings=64,
+        use_fast_path=False,
+        use_tfla=False,
+        dropout=0.5,  # high dropout to make view diversity detectable
+    )
+    enc = HybridTextEncoder(cfg, embed_dim=64)
+    mod = HybridContrastiveLightningModule(
+        model=enc,
+        contrastive_mode="simcse",
+        learning_rate=1e-4,
+        weight_decay=0.01,
+        warmup_steps=5,
+        max_steps=50,
+        gradient_clip_val=1.0,
+    )
+
+    # Simulate Lightning calling eval() before validation loop
+    mod.eval()
+    assert not mod.model.projection_head.training, \
+        "Setup check: projection_head should be in eval mode after mod.eval()"
+
+    input_ids = torch.randint(0, 100, (8, 16))
+    attn = torch.ones(8, 16, dtype=torch.long)
+    batch = {"input_ids": input_ids, "attention_mask": attn}
+
+    # Collect 10 val losses — if projection_head stays in eval, all will be ≈0
+    val_losses = []
+    for _ in range(10):
+        with torch.no_grad():
+            loss = mod._simcse_step(batch, batch_idx=0, split="val")
+        val_losses.append(loss.item())
+
+    mean_val_loss = sum(val_losses) / len(val_losses)
+
+    assert mean_val_loss > 0.01, (
+        f"Val SimCSE loss collapsed to {mean_val_loss:.6f} — "
+        "projection_head likely in eval mode (dropout disabled). "
+        "Fix: use self.model.train() not self.model.lm.train() in _simcse_step."
+    )
+
+    # Also verify projection_head is in train mode after the step
+    assert mod.model.projection_head.training, \
+        "projection_head must be in train mode after _simcse_step (dropout needed for views)"
+
+
+@pytest.mark.willi_parity
+def test_stage1_distill_config_values():
+    """stage1_pubmedbert.yaml must have lambda_max=0.7 and ramp_steps=1500."""
+    pytest.importorskip("yaml")
+    import yaml
+
+    cfg_path = REPO_ROOT / "configs" / "distill" / "stage1_pubmedbert.yaml"
+    assert cfg_path.exists(), f"Missing {cfg_path}"
+    with open(cfg_path, "r") as f:
+        cfg = yaml.safe_load(f)
+
+    assert cfg.get("lambda_max") == 0.7, (
+        f"lambda_max should be 0.7, got {cfg.get('lambda_max')} — collapse fix not applied"
+    )
+    assert cfg.get("ramp_steps") == 1500, (
+        f"ramp_steps should be 1500, got {cfg.get('ramp_steps')} — collapse fix not applied"
+    )

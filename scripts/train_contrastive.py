@@ -57,6 +57,10 @@ from hybrid_xmamba.training.lightning_module import (
     DistillContrastiveLightningModule,
 )
 from hybrid_xmamba.training.signal_callbacks import SignalCheckpointCallback
+from hybrid_xmamba.training.contrastive_eval_callback import (
+    ContrastiveEvalCallback,
+    AnomalyDetectionCallback,
+)
 from hybrid_xmamba.utils.run_metadata import write_run_metadata
 
 torch.set_float32_matmul_precision("high")
@@ -480,6 +484,17 @@ def main(cfg: DictConfig):
         LearningRateMonitor(logging_interval="step"),
         SignalCheckpointCallback(checkpoint_dir=cfg.checkpoint_dir),
     ]
+
+    # Stage 1 SimCSE: add in-training biomedical eval + anomaly detection
+    if contrastive_mode == "simcse":
+        callbacks.append(
+            ContrastiveEvalCallback(
+                tokenizer=tokenizer,
+                eval_every_n_steps=500,
+                align_unif_every_n_steps=1000,
+            )
+        )
+        callbacks.append(AnomalyDetectionCallback(max_steps=200))
 
     # Loggers
     loggers = [TensorBoardLogger(save_dir=cfg.log_dir, name="tensorboard")]

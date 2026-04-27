@@ -16,13 +16,15 @@
 teacher_model: "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"
 
 # Maximum distillation weight (after ramp-up)
-lambda_max: 0.3
+# Raised 0.3→0.7: stronger KD anchor prevents representation collapse
+lambda_max: 0.7
 
 # Steps with lambda=0 (pure SimCSE only) before ramp starts
 warmup_steps: 500
 
 # Steps over which lambda linearly ramps from 0 to lambda_max
-ramp_steps: 500
+# Extended 500→1500: slower ramp lets SimCSE loss stabilise before KD fully engages
+ramp_steps: 1500
 
 # Teacher dtype — bf16 on A100
 teacher_dtype: "bfloat16"
