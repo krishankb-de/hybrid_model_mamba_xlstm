@@ -468,7 +468,8 @@ def test_simcse_val_loss_nonzero_with_eval_model():
     attn = torch.ones(8, 16, dtype=torch.long)
     batch = {"input_ids": input_ids, "attention_mask": attn}
 
-    # Collect 10 val losses — if projection_head stays in eval, all will be ≈0
+    # Val step: dropout off → z1==z2 → loss near-zero. This is expected.
+    # Do NOT assert val loss > 0 here; use ContrastiveEvalCallback Spearman instead.
     val_losses = []
     for _ in range(10):
         with torch.no_grad():
@@ -477,15 +478,20 @@ def test_simcse_val_loss_nonzero_with_eval_model():
 
     mean_val_loss = sum(val_losses) / len(val_losses)
 
-    assert mean_val_loss > 0.01, (
-        f"Val SimCSE loss collapsed to {mean_val_loss:.6f} — "
-        "projection_head likely in eval mode (dropout disabled). "
-        "Fix: use self.model.train() not self.model.lm.train() in _simcse_step."
+    assert mean_val_loss < 0.05, (
+        f"Val SimCSE loss should be near-zero (dropout off → z1==z2) but got {mean_val_loss:.6f}"
     )
 
-    # Also verify projection_head is in train mode after the step
+    # projection_head must remain in eval mode after val step — Lightning's eval() context
+    # should not be overridden during validation.
+    assert not mod.model.projection_head.training, \
+        "projection_head must stay in eval mode during val step — do not call model.train() unconditionally"
+
+    # Verify train step restores train mode so dropout fires (view diversity for SimCSE).
+    mod.train()
+    mod._simcse_step(batch, batch_idx=0, split="train")
     assert mod.model.projection_head.training, \
-        "projection_head must be in train mode after _simcse_step (dropout needed for views)"
+        "projection_head must be in train mode after train _simcse_step (dropout needed for z1!=z2)"
 
 
 @pytest.mark.willi_parity
@@ -499,8 +505,8 @@ def test_stage1_distill_config_values():
     with open(cfg_path, "r") as f:
         cfg = yaml.safe_load(f)
 
-    assert cfg.get("lambda_max") == 0.7, (
-        f"lambda_max should be 0.7, got {cfg.get('lambda_max')} — collapse fix not applied"
+    assert cfg.get("lambda_max") == 0.4, (
+        f"lambda_max should be 0.4, got {cfg.get('lambda_max')} — conservative KD weight (>0.5 risks teacher-manifold collapse)"
     )
     assert cfg.get("ramp_steps") == 1500, (
         f"ramp_steps should be 1500, got {cfg.get('ramp_steps')} — collapse fix not applied"

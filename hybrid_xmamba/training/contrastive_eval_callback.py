@@ -244,10 +244,12 @@ class ContrastiveEvalCallback(pl.Callback):
                 attn_mask = attn_mask.to(device)
 
             was_training = pl_module.model.training
-            with torch.no_grad():
-                pl_module.model.eval()
-                z = pl_module.model.encode(input_ids, attention_mask=attn_mask)
-            pl_module.model.train(was_training)
+            pl_module.model.eval()
+            try:
+                with torch.no_grad():
+                    z = pl_module.model.encode(input_ids, attention_mask=attn_mask)
+            finally:
+                pl_module.model.train(was_training)
 
             B = z.size(0)
             if B < 2:
@@ -282,11 +284,13 @@ class ContrastiveEvalCallback(pl.Callback):
                 attn_mask = attn_mask.to(device)
 
             was_training = pl_module.model.training
-            with torch.no_grad():
-                pl_module.model.eval()
-                z1 = pl_module.model.encode(input_ids, attention_mask=attn_mask)
-                z2 = pl_module.model.encode(input_ids, attention_mask=attn_mask)
-            pl_module.model.train(was_training)
+            pl_module.model.eval()
+            try:
+                with torch.no_grad():
+                    z1 = pl_module.model.encode(input_ids, attention_mask=attn_mask)
+                    z2 = pl_module.model.encode(input_ids, attention_mask=attn_mask)
+            finally:
+                pl_module.model.train(was_training)
 
             align = _alignment(z1, z2)
             unif = _uniformity(z1)
