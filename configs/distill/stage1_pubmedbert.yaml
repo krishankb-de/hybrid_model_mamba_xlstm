@@ -15,9 +15,12 @@
 
 teacher_model: "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"
 
-# Maximum distillation weight (after ramp-up)
-# Raised 0.3→0.7: stronger KD anchor prevents representation collapse
-lambda_max: 0.7
+# Maximum distillation weight (after ramp-up).
+# 0.4 balances SimCSE contrastive structure with PubMedBERT semantic anchor.
+# 0.7 over-dominates: at scale=20 the SimCSE loss ~2.0–4.0 while KD loss ~0.3,
+# so 0.7*KD ~ 0.21 vs SimCSE ~3.0 — ratio is fine. But beyond 0.5 the student
+# risks collapsing onto teacher manifold rather than learning contrastive geometry.
+lambda_max: 0.4
 
 # Steps with lambda=0 (pure SimCSE only) before ramp starts
 warmup_steps: 500

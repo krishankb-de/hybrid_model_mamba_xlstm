@@ -396,10 +396,13 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         input_ids = batch["input_ids"]
         attention_mask = batch.get("attention_mask")
 
-        # Full model must be in train mode — projection_head Dropout(0.1) is the primary
-        # source of view diversity. lm.train() alone leaves projection_head in eval,
-        # which disables dropout and makes z1==z2 (val loss collapses to 0).
-        self.model.train()
+        # During training: force full model into train mode so projection_head
+        # Dropout(0.1) is active — this is the source of view diversity (z1 != z2).
+        # During validation: respect Lightning's eval() context; val SimCSE loss will
+        # be near-zero (expected) since dropout is off. Use ContrastiveEvalCallback
+        # Spearman metrics instead for meaningful validation signal.
+        if split == "train":
+            self.model.train()
         z1 = self.model.encode(input_ids, attention_mask=attention_mask)
         z2 = self.model.encode(input_ids, attention_mask=attention_mask)
 
@@ -510,10 +513,12 @@ class DistillContrastiveLightningModule(HybridContrastiveLightningModule):
         input_ids = batch["input_ids"]
         attention_mask = batch.get("attention_mask")
 
-        # Same fix as parent: full model.train() required so projection_head dropout
-        # is active, giving z1 != z2. teacher is not a child of self.model so
-        # self.model.train() does not affect the frozen teacher. ✓
-        self.model.train()
+        # Force train mode during training so projection_head Dropout(0.1) fires,
+        # giving z1 != z2. During validation respect Lightning's eval() context.
+        # teacher is not a child of self.model so self.model.train() does not
+        # affect the frozen teacher.
+        if split == "train":
+            self.model.train()
         z1 = self.model.encode(input_ids, attention_mask=attention_mask)
         z2 = self.model.encode(input_ids, attention_mask=attention_mask)
 

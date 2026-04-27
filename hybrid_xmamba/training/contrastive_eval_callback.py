@@ -163,35 +163,38 @@ class ContrastiveEvalCallback(pl.Callback):
         sents2 = [p[1] for p in pairs]
         scores = [p[2] for p in pairs]
 
+        was_training = pl_module.model.training
         pl_module.model.eval()
         z1_parts: List[torch.Tensor] = []
         z2_parts: List[torch.Tensor] = []
 
-        batch_size = 32
-        for i in range(0, len(sents1), batch_size):
-            enc1 = self.tokenizer(
-                sents1[i : i + batch_size],
-                max_length=max_length,
-                truncation=True,
-                padding="max_length",
-                return_tensors="pt",
-            )
-            enc2 = self.tokenizer(
-                sents2[i : i + batch_size],
-                max_length=max_length,
-                truncation=True,
-                padding="max_length",
-                return_tensors="pt",
-            )
-            ids1 = enc1["input_ids"].to(device)
-            mask1 = enc1["attention_mask"].to(device)
-            ids2 = enc2["input_ids"].to(device)
-            mask2 = enc2["attention_mask"].to(device)
+        try:
+            batch_size = 32
+            for i in range(0, len(sents1), batch_size):
+                enc1 = self.tokenizer(
+                    sents1[i : i + batch_size],
+                    max_length=max_length,
+                    truncation=True,
+                    padding="max_length",
+                    return_tensors="pt",
+                )
+                enc2 = self.tokenizer(
+                    sents2[i : i + batch_size],
+                    max_length=max_length,
+                    truncation=True,
+                    padding="max_length",
+                    return_tensors="pt",
+                )
+                ids1 = enc1["input_ids"].to(device)
+                mask1 = enc1["attention_mask"].to(device)
+                ids2 = enc2["input_ids"].to(device)
+                mask2 = enc2["attention_mask"].to(device)
 
-            z1_parts.append(pl_module.model.encode(ids1, attention_mask=mask1).cpu())
-            z2_parts.append(pl_module.model.encode(ids2, attention_mask=mask2).cpu())
+                z1_parts.append(pl_module.model.encode(ids1, attention_mask=mask1).cpu())
+                z2_parts.append(pl_module.model.encode(ids2, attention_mask=mask2).cpu())
+        finally:
+            pl_module.model.train(was_training)
 
-        pl_module.model.train()
         z1 = torch.cat(z1_parts, dim=0)
         z2 = torch.cat(z2_parts, dim=0)
         return z1, z2, scores
@@ -240,10 +243,11 @@ class ContrastiveEvalCallback(pl.Callback):
             if attn_mask is not None:
                 attn_mask = attn_mask.to(device)
 
+            was_training = pl_module.model.training
             with torch.no_grad():
                 pl_module.model.eval()
                 z = pl_module.model.encode(input_ids, attention_mask=attn_mask)
-                pl_module.model.train()
+            pl_module.model.train(was_training)
 
             B = z.size(0)
             if B < 2:
@@ -277,11 +281,12 @@ class ContrastiveEvalCallback(pl.Callback):
             if attn_mask is not None:
                 attn_mask = attn_mask.to(device)
 
+            was_training = pl_module.model.training
             with torch.no_grad():
                 pl_module.model.eval()
                 z1 = pl_module.model.encode(input_ids, attention_mask=attn_mask)
                 z2 = pl_module.model.encode(input_ids, attention_mask=attn_mask)
-                pl_module.model.train()
+            pl_module.model.train(was_training)
 
             align = _alignment(z1, z2)
             unif = _uniformity(z1)
