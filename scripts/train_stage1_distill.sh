@@ -126,7 +126,7 @@ python scripts/train_contrastive.py \
   model.learning_rate=1e-5 \
   model.warmup_steps=1000 \
   model.gradient_clip_val=1.0 \
-  model.use_gradient_checkpointing=false \
+  model.use_gradient_checkpointing=true \
   model.proj_head_dropout=0.2
 
 echo ""
