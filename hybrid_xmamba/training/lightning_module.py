@@ -407,7 +407,7 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         z2 = self.model.encode(input_ids, attention_mask=attention_mask)
 
         # Fixed τ=0.05 (scale=20) prevents logit_scale from drifting to max and collapsing
-        loss = self._nt_xent_loss(z1, z2, self.model.logit_scale, fixed_scale=20.0)
+        loss = self._nt_xent_loss(z1, z2, self.model.logit_scale, fixed_scale=5.0)
         self.log(f"{split}/contrastive_loss", loss, prog_bar=True,
                  on_step=(split == "train"), on_epoch=True)
         if split == "train":
@@ -523,7 +523,7 @@ class DistillContrastiveLightningModule(HybridContrastiveLightningModule):
         z2 = self.model.encode(input_ids, attention_mask=attention_mask)
 
         # Fixed τ=0.05 (scale=20) prevents logit_scale collapse for SimCSE
-        simcse_loss = self._nt_xent_loss(z1, z2, self.model.logit_scale, fixed_scale=20.0)
+        simcse_loss = self._nt_xent_loss(z1, z2, self.model.logit_scale, fixed_scale=5.0)
 
         # --- Distillation loss (teacher CLS → student z1) ---
         distill_lambda = self._get_distill_lambda() if split == "train" else 0.0

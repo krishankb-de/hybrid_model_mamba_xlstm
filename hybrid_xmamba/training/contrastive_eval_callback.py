@@ -119,6 +119,7 @@ class ContrastiveEvalCallback(pl.Callback):
                 "bigbio/biosses",
                 name="biosses_source",
                 split="train",
+                trust_remote_code=True,
             )
             for row in ds:
                 t1 = str(row.get("text_1") or row.get("sentence1") or "")

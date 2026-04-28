@@ -26,6 +26,11 @@
 #   Effective batch = 16 × 4 = 64   (same as prior run; bs kept for more negatives)
 #   Fallback if still OOM: bs=8, accum=8 (removes gradient_checkpointing=true)
 #
+# SimCSE fixes vs run 1209 (near-zero loss / no learning):
+#   fixed_scale 20→5 (τ: 0.05→0.2): scale=20 kills gradients when backbone already
+#     separates texts well. scale=5 gives loss ~0.3-0.5 even with good embeddings.
+#   proj_head_dropout 0.1→0.3: higher dropout diversifies z1/z2 views.
+#
 # Requires a Stage 0 checkpoint. Default path matches train_stage0_distill.sh output.
 # Override via: LM_CHECKPOINT=/path/to/ckpt sbatch train_stage1_distill.sh
 
@@ -119,7 +124,8 @@ python scripts/train_contrastive.py \
   model.learning_rate=1e-5 \
   model.warmup_steps=1000 \
   model.gradient_clip_val=1.0 \
-  model.use_gradient_checkpointing=true
+  model.use_gradient_checkpointing=true \
+  model.proj_head_dropout=0.3
 
 echo ""
 echo "=== JOB END (Stage 1: KD complete) ==="

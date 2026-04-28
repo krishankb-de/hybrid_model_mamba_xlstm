@@ -344,10 +344,11 @@ class HybridTextEncoder(nn.Module):
         # Dropout between layers provides the stochastic augmentation that
         # SimCSE relies on — without it both forward passes produce identical
         # vectors and InfoNCE loss collapses to zero immediately.
+        proj_dropout = getattr(config, "proj_head_dropout", 0.1)
         self.projection_head = nn.Sequential(
             nn.Linear(config.dim, config.dim, bias=False),
             nn.GELU(),
-            nn.Dropout(p=0.1),
+            nn.Dropout(p=proj_dropout),
             nn.Linear(config.dim, embed_dim, bias=False),
         )
 

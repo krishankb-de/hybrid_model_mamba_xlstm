@@ -391,6 +391,7 @@ def main(cfg: DictConfig):
         use_cache=cfg.model.use_cache,
         tie_word_embeddings=cfg.model.tie_word_embeddings,
         use_gradient_checkpointing=cfg.model.get("use_gradient_checkpointing", False),
+        proj_head_dropout=cfg.model.get("proj_head_dropout", 0.1),
     )
 
     # Build text encoder

@@ -86,6 +86,13 @@ class HybridConfig:
 
     # Memory optimisation
     use_gradient_checkpointing: bool = False
+
+    # Contrastive encoder — projection head dropout.
+    # SimCSE view diversity comes from dropout; 0.3 gives meaningful
+    # positive-pair variance for a pretrained backbone (default 0.1 is too
+    # weak: Stage 0 embeddings are already well-separated, collapsing
+    # NT-Xent loss to ~0 and killing gradients).
+    proj_head_dropout: float = 0.1
     
     # Model type identifier
     model_type: str = "hybrid_xmamba"

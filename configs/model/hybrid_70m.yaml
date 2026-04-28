@@ -45,6 +45,10 @@ tie_word_embeddings: false
 # Memory optimisation — enable for Stage 1 contrastive (OOM guard)
 use_gradient_checkpointing: false
 
+# Projection head dropout — 0.3 recommended for Stage 1 SimCSE on a pretrained
+# backbone (0.1 is too weak: Stage 0 embeddings already well-separated at tau=0.2)
+proj_head_dropout: 0.1
+
 # Optimization
 learning_rate: 6.0e-4
 weight_decay: 0.1

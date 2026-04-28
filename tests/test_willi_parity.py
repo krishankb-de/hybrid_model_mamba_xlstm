@@ -383,7 +383,7 @@ def test_contrastive_eval_callback_importable():
 
 @pytest.mark.willi_parity
 def test_nt_xent_fixed_scale():
-    """_nt_xent_loss must use fixed_scale=20.0 for SimCSE (τ=0.05) and ignore logit_scale."""
+    """_nt_xent_loss must honour the fixed_scale argument and ignore logit_scale."""
     from hybrid_xmamba.models.configuration_hybrid import HybridConfig
     from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
     from hybrid_xmamba.training.lightning_module import HybridContrastiveLightningModule
@@ -478,8 +478,11 @@ def test_simcse_val_loss_nonzero_with_eval_model():
 
     mean_val_loss = sum(val_losses) / len(val_losses)
 
-    assert mean_val_loss < 0.05, (
-        f"Val SimCSE loss should be near-zero (dropout off → z1==z2) but got {mean_val_loss:.6f}"
+    # With scale=5 (τ=0.2) and z1==z2 in eval mode, val loss is low but not near-zero
+    # (positive pair always wins, but the margin is smaller than scale=20).
+    # Threshold: < 0.5 means the positive pair is being classified correctly (exp(-0.5)≈0.6).
+    assert mean_val_loss < 0.5, (
+        f"Val SimCSE loss too high (dropout off → z1==z2 → easy positives): got {mean_val_loss:.6f}"
     )
 
     # projection_head must remain in eval mode after val step — Lightning's eval() context
