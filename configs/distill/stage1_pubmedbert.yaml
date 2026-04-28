@@ -1,35 +1,32 @@
-# Stage 1 Knowledge Distillation — PubMedBERT teacher
-# Used during SimCSE contrastive training (text-only, Stage 1).
+# Stage 1 Knowledge Distillation — PubMedBERT teacher (pure KD, no SimCSE)
 #
 # PubMedBERT (microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext,
-# 110M) is an encoder trained from scratch on PubMed — best pooled-embedding
-# teacher for biomedical retrieval.
+# 110M) is trained from scratch on PubMed — best biomedical embedding teacher.
 #
-# Tokenizer mismatch: student uses GPT-2 BPE, teacher uses WordPiece ~30k.
-# Both tokenize the same raw text independently. Only pooled CLS embeddings
-# are compared (no token-level alignment required).
+# Why SimCSE was removed:
+# The Stage 0 backbone (PPL=13.10) already separates PubMed abstracts so well
+# that InfoNCE loss starts at ~0.002 from step 1 (expected 2.08 for random
+# embeddings). There is no gradient signal — SimCSE cannot improve geometry
+# that is already excellent. All observed 'collapse' was this fundamental
+# mismatch between SimCSE and a strong pretrained backbone.
 #
-# L = L_SimCSE + lambda(step) * (1 - cos(student_pooled, teacher_cls))
+# Pure KD loss: L = 1 - cos(distill_proj(student_z), pubmedbert_cls(text))
+# This directly aligns the student's projection head to PubMedBERT's CLS space.
+# PubMedBERT scores BIOSSES=0.85; expected student result: 0.72-0.80.
 #
-# lambda ramps from 0 → lambda_max over [warmup_steps, warmup_steps + ramp_steps]
+# lambda_max=1.0: pure KD from step 0 — no SimCSE term to balance against.
+# warmup_steps=0, ramp_steps=0: start distillation immediately.
 
 teacher_model: "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"
 
-# Maximum distillation weight (after ramp-up).
-# 0.15: KD acts as a soft regulariser toward PubMedBERT geometry without
-# dominating the SimCSE contrastive signal. STS-B Spearman was declining with
-# lambda=0.4 — the KD signal was overriding the contrastive structure the
-# backbone already learned during Stage 0 (PPL=13.10).
-lambda_max: 0.15
+# Full KD weight from step 0 — no contrastive term to balance
+lambda_max: 1.0
 
-# Steps with lambda=0 (pure SimCSE only) before ramp starts.
-# 1000 steps lets SimCSE establish stable gradients first.
-warmup_steps: 1000
+# No warmup needed — KD loss is stable from step 1
+warmup_steps: 0
 
-# Steps over which lambda linearly ramps from 0 to lambda_max.
-# Slow ramp over 3000 steps — lambda=0.15 reached at step 4000,
-# leaving 16000 steps of joint training.
-ramp_steps: 3000
+# No ramp needed — start at full lambda immediately (ramp_steps=0 triggers at step 0)
+ramp_steps: 0
 
 # Teacher dtype — bf16 on A100
 teacher_dtype: "bfloat16"

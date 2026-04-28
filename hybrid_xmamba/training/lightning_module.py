@@ -506,32 +506,37 @@ class DistillContrastiveLightningModule(HybridContrastiveLightningModule):
         if step < self.distill_warmup:
             return 0.0
         ramp_step = step - self.distill_warmup
-        if ramp_step >= self.distill_ramp:
+        # ramp_steps=0 means start at lambda_max immediately (no division by zero)
+        if self.distill_ramp <= 0 or ramp_step >= self.distill_ramp:
             return self.lambda_max
         return self.lambda_max * (ramp_step / self.distill_ramp)
 
     def _simcse_step(self, batch, batch_idx, split: str):
-        """SimCSE step with optional PubMedBERT cosine distillation loss."""
+        """Pure PubMedBERT cosine distillation step (SimCSE removed).
+
+        Why SimCSE was removed:
+        The Stage 0 backbone (PPL=13.10) already perfectly separates PubMed
+        abstracts in embedding space. InfoNCE loss with bs=8 in-batch negatives
+        starts at ~0.002 from step 1 (expected: 2.08 for random embeddings).
+        The gradient signal is effectively zero — SimCSE cannot improve geometry
+        that is already excellent. All observed 'collapse' was this: the backbone
+        had nothing to learn from SimCSE.
+
+        Pure KD directly aligns the student projection head to PubMedBERT's CLS
+        space (which scores BIOSSES=0.85). Expected student BIOSSES: 0.72-0.80.
+        """
         input_ids = batch["input_ids"]
         attention_mask = batch.get("attention_mask")
 
-        # Force train mode during training so projection_head Dropout(0.1) fires,
-        # giving z1 != z2. During validation respect Lightning's eval() context.
-        # teacher is not a child of self.model so self.model.train() does not
-        # affect the frozen teacher.
         if split == "train":
             self.model.train()
         z1 = self.model.encode(input_ids, attention_mask=attention_mask)
-        z2 = self.model.encode(input_ids, attention_mask=attention_mask)
 
-        # scale=20 (τ=0.05): standard SimCSE temperature — same as parent class.
-        simcse_loss = self._nt_xent_loss(z1, z2, self.model.logit_scale, fixed_scale=20.0)
+        # --- Pure distillation loss: align student to PubMedBERT CLS ---
+        distill_loss = torch.tensor(0.0, device=z1.device)
+        student_teacher_cos = torch.tensor(0.0, device=z1.device)
 
-        # --- Distillation loss (teacher CLS → student z1) ---
-        distill_lambda = self._get_distill_lambda() if split == "train" else 0.0
-        distill_loss = torch.tensor(0.0, device=simcse_loss.device)
-
-        if distill_lambda > 0.0 and "teacher_input_ids" in batch:
+        if "teacher_input_ids" in batch:
             t_input_ids = batch["teacher_input_ids"]
             t_attn_mask = batch.get("teacher_attention_mask")
             with torch.no_grad():
@@ -539,33 +544,23 @@ class DistillContrastiveLightningModule(HybridContrastiveLightningModule):
                     input_ids=t_input_ids,
                     attention_mask=t_attn_mask,
                 )
-                # CLS token (position 0) — standard for BERT-style encoders
                 teacher_cls = teacher_out.last_hidden_state[:, 0, :]
                 teacher_cls = F.normalize(teacher_cls.float(), dim=-1)
 
             z1_proj = F.normalize(self.distill_proj(z1.float()), dim=-1)
-            student_teacher_cos = F.cosine_similarity(
-                z1_proj, teacher_cls, dim=-1
-            )  # (B,)
+            student_teacher_cos = F.cosine_similarity(z1_proj, teacher_cls, dim=-1)
             distill_loss = (1.0 - student_teacher_cos).mean()
 
-        total_loss = simcse_loss + distill_lambda * distill_loss
+        total_loss = distill_loss
 
         # --- Logging ---
-        self.log(f"{split}/simcse_loss",   simcse_loss,   prog_bar=True,
+        self.log(f"{split}/distill_loss", distill_loss, prog_bar=True,
                  on_step=(split == "train"), on_epoch=True)
-        self.log(f"{split}/distill_loss",  distill_loss,  prog_bar=False,
-                 on_step=(split == "train"), on_epoch=True)
-        self.log(f"{split}/total_loss",    total_loss,    prog_bar=True,
+        self.log(f"{split}/total_loss",   total_loss,   prog_bar=True,
                  on_step=(split == "train"), on_epoch=True)
         if split == "train":
-            self.log("train/distill_lambda", distill_lambda, on_step=True)
-            pos_cos = (z1 * z2).sum(dim=-1).mean()
-            self.log("train/pos_cosine_mean", pos_cos, on_step=True, prog_bar=False)
-            # Log student↔teacher alignment when distillation is active
-            if distill_lambda > 0.0 and "teacher_input_ids" in batch:
-                self.log("train/student_teacher_cos",
-                         student_teacher_cos.mean().item(), on_step=True)
+            self.log("train/student_teacher_cos",
+                     student_teacher_cos.mean().item(), on_step=True, prog_bar=True)
 
         return total_loss
 

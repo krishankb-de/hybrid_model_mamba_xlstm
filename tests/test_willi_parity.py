@@ -425,20 +425,21 @@ def test_nt_xent_fixed_scale():
 # ── 11. Stage 1 distill config values ─────────────────────────────────────
 
 @pytest.mark.willi_parity
-def test_simcse_val_loss_nonzero_with_eval_model():
-    """Val SimCSE loss must be non-zero even when Lightning has called model.eval().
+def test_distill_kd_step_produces_finite_loss():
+    """DistillContrastiveLightningModule._simcse_step produces finite KD loss.
 
-    Root cause of prior bug: self.model.lm.train() left projection_head in eval mode,
-    disabling its Dropout(0.1). With no stochasticity, z1==z2 exactly, making
-    NT-Xent loss collapse to ~0 during every validation step.
+    Stage 1 now uses pure PubMedBERT cosine KD (SimCSE removed). This test
+    verifies that the KD distill_loss is finite and in (0, 2) for random
+    embeddings, confirming gradient flow is working.
 
-    Fix: self.model.train() re-enables dropout in both lm AND projection_head.
-    This test simulates Lightning's eval() call before validation and verifies
-    the val step produces a non-trivial loss.
+    SimCSE was removed because the Stage 0 backbone (PPL=13.10) already
+    perfectly separates PubMed abstracts — InfoNCE loss was ~0.002 from
+    step 1, giving near-zero gradients. Pure KD directly aligns the student
+    to PubMedBERT's CLS space which scores BIOSSES=0.85.
     """
     from hybrid_xmamba.models.configuration_hybrid import HybridConfig
     from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
-    from hybrid_xmamba.training.lightning_module import HybridContrastiveLightningModule
+    from hybrid_xmamba.training.lightning_module import DistillContrastiveLightningModule
 
     cfg = HybridConfig(
         vocab_size=100, dim=64, num_layers=2,
@@ -446,10 +447,26 @@ def test_simcse_val_loss_nonzero_with_eval_model():
         max_position_embeddings=64,
         use_fast_path=False,
         use_tfla=False,
-        dropout=0.5,  # high dropout to make view diversity detectable
     )
     enc = HybridTextEncoder(cfg, embed_dim=64)
-    mod = HybridContrastiveLightningModule(
+
+    # Minimal teacher stub: returns last_hidden_state (B, L, 768)
+    class _StubTeacher(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = type("C", (), {"hidden_size": 768})()
+
+        def forward(self, input_ids, attention_mask=None):
+            B, L = input_ids.shape
+            hidden = torch.randn(B, L, 768)
+            return type("O", (), {"last_hidden_state": hidden})()
+
+    teacher = _StubTeacher()
+    mod = DistillContrastiveLightningModule(
+        teacher=teacher,
+        lambda_max=1.0,
+        distill_warmup=0,
+        distill_ramp=1,
         model=enc,
         contrastive_mode="simcse",
         learning_rate=1e-4,
@@ -458,54 +475,40 @@ def test_simcse_val_loss_nonzero_with_eval_model():
         max_steps=50,
         gradient_clip_val=1.0,
     )
+    mod.train()
 
-    # Simulate Lightning calling eval() before validation loop
-    mod.eval()
-    assert not mod.model.projection_head.training, \
-        "Setup check: projection_head should be in eval mode after mod.eval()"
+    input_ids = torch.randint(0, 100, (4, 16))
+    attn = torch.ones(4, 16, dtype=torch.long)
+    # teacher_input_ids triggers KD computation
+    batch = {
+        "input_ids": input_ids,
+        "attention_mask": attn,
+        "teacher_input_ids": input_ids,
+        "teacher_attention_mask": attn,
+    }
 
-    input_ids = torch.randint(0, 100, (8, 16))
-    attn = torch.ones(8, 16, dtype=torch.long)
-    batch = {"input_ids": input_ids, "attention_mask": attn}
-
-    # Val step: dropout off → z1==z2 → loss near-zero. This is expected.
-    # Do NOT assert val loss > 0 here; use ContrastiveEvalCallback Spearman instead.
-    val_losses = []
-    for _ in range(10):
-        with torch.no_grad():
-            loss = mod._simcse_step(batch, batch_idx=0, split="val")
-        val_losses.append(loss.item())
-
-    mean_val_loss = sum(val_losses) / len(val_losses)
-
-    # With scale=20 (τ=0.05) and z1==z2 in eval mode, val loss is near-zero
-    # (positive pair dominates softmax entirely). Threshold 0.5 is loose to keep
-    # the test stable under random init. Real signal during val comes from
-    # ContrastiveEvalCallback (STS-B Spearman), not this loss value.
-    assert mean_val_loss < 0.5, (
-        f"Val SimCSE loss too high (dropout off → z1==z2 → easy positives): got {mean_val_loss:.6f}"
+    loss = mod._simcse_step(batch, batch_idx=0, split="train")
+    assert torch.isfinite(loss), f"KD loss not finite: {loss.item()}"
+    assert 0.0 < loss.item() < 2.0, (
+        f"KD loss {loss.item():.4f} out of expected range (0, 2) for random embeddings"
     )
 
-    # projection_head must remain in eval mode after val step — Lightning's eval() context
-    # should not be overridden during validation.
-    assert not mod.model.projection_head.training, \
-        "projection_head must stay in eval mode during val step — do not call model.train() unconditionally"
-
-    # Verify train step restores train mode so dropout fires (view diversity for SimCSE).
-    mod.train()
-    mod._simcse_step(batch, batch_idx=0, split="train")
-    assert mod.model.projection_head.training, \
-        "projection_head must be in train mode after train _simcse_step (dropout needed for z1!=z2)"
+    # Backward must succeed — confirms gradient flows through distill_proj
+    loss.backward()
+    for name, param in mod.distill_proj.named_parameters():
+        assert param.grad is not None, f"No gradient for distill_proj.{name}"
+        assert torch.isfinite(param.grad).all(), f"Non-finite gradient for distill_proj.{name}"
 
 
 @pytest.mark.willi_parity
 def test_stage1_distill_config_values():
-    """stage1_pubmedbert.yaml KD schedule.
+    """stage1_pubmedbert.yaml KD schedule — pure KD, no SimCSE.
 
-    Run 1209 (lambda_max=0.4, warmup=500, ramp=1500) showed STS-B Spearman
-    declining 0.444 → 0.363 as KD ramped in — KD was overriding contrastive
-    geometry. Lowered to a soft-anchor schedule: lambda_max=0.15 reached at
-    step 4000 (warmup=1000, ramp=3000), leaving 16k steps of joint training.
+    SimCSE was removed because the Stage 0 backbone (PPL=13.10) already
+    perfectly separates PubMed abstracts. InfoNCE loss started at ~0.002
+    from step 1 (expected 2.08 for random embeddings) — no gradient signal.
+    Pure PubMedBERT cosine KD is used instead: L = 1 - cos(student, teacher).
+    lambda_max=1.0 (full KD from step 0), warmup_steps=0, ramp_steps=1.
     """
     pytest.importorskip("yaml")
     import yaml
@@ -515,15 +518,14 @@ def test_stage1_distill_config_values():
     with open(cfg_path, "r") as f:
         cfg = yaml.safe_load(f)
 
-    assert cfg.get("lambda_max") == 0.15, (
-        f"lambda_max should be 0.15, got {cfg.get('lambda_max')} — soft KD anchor "
-        "(higher values destroyed STS-B in run 1209)"
+    assert cfg.get("lambda_max") == 1.0, (
+        f"lambda_max should be 1.0 (pure KD), got {cfg.get('lambda_max')}"
     )
-    assert cfg.get("warmup_steps") == 1000, (
-        f"warmup_steps should be 1000, got {cfg.get('warmup_steps')} — pure SimCSE warmup"
+    assert cfg.get("warmup_steps") == 0, (
+        f"warmup_steps should be 0 (no SimCSE to warm up), got {cfg.get('warmup_steps')}"
     )
-    assert cfg.get("ramp_steps") == 3000, (
-        f"ramp_steps should be 3000, got {cfg.get('ramp_steps')} — slow KD onboarding"
+    assert cfg.get("ramp_steps") == 0, (
+        f"ramp_steps should be 0 (start KD immediately), got {cfg.get('ramp_steps')}"
     )
 
 

@@ -13,26 +13,26 @@
 #
 # Teacher  : PubMedBERT (110M, WordPiece tokenizer)
 # Student  : hybrid_70m text encoder (512 dim, [mamba, mamba, mlstm])
-# Loss     : L_SimCSE (fixed τ=0.05) + lambda * (1 - cos(student_pooled, teacher_cls))
-#            lambda ramps 0 → 0.15 over steps 1000-4000 (warmup=1000, ramp=3000)
+# Loss     : L = 1 - cos(distill_proj(student), pubmedbert_cls)  [pure KD, no SimCSE]
+#            lambda=1.0 from step 0 (no warmup, no ramp)
 #
-# Memory estimate at bs=8, seq=512, accum=8, bf16, NO gradient checkpointing:
+# Memory estimate at bs=16, seq=512, accum=4, bf16 + gradient checkpointing:
 #   Student 70M (weights+grads+Adam) : ~1.0 GB
 #   PubMedBERT 110M frozen bf16     : ~0.2 GB weights + ~0.4 GB acts (bs=8)
-#   Mamba scan intermediates x2 fwd : ~12-15 GB peak (dominant term)
-#   Total peak (estimate)           : ~14-18 GB  (safe within 40GB, ~21 GB headroom)
-#   Effective batch = 8 × 8 = 64  (same SimCSE quality as bs=16 × 4)
-# NOTE: bs=16 accum=4 OOMs because Mamba stores 2x scan intermediates for SimCSE.
-#   bs=8 no-ckpt is the correct fix: same 64 eff-batch, no dropout mask incoherence.
+#   Mamba scan intermediates x1 fwd : ~7-8 GB (single pass, no SimCSE doubling)
+#   Total peak (estimate)           : ~12-15 GB with checkpointing (safe on 40GB)
+#   Effective batch = 16 × 4 = 64
+# NOTE: OOM with bs=16 no-ckpt was caused by SimCSE 2x activations. Pure KD
+#   uses 1x activations, so bs=16 + gradient checkpointing is safe and fast.
 #
 # Stage 1 hyperparameters (post run 1209 STS-B decline analysis):
-#   fixed_scale=20 (τ=0.05): standard SimCSE; scale=5 gave near-zero loss but
-#     STS-B fell 0.444→0.363 — trivial-discrimination collapse, no semantic signal.
-#   proj_head_dropout=0.2: slightly above yaml default (0.1) to increase view
-#     diversity. 0.3 produced overly noisy positive views (trivial-discrimination collapse).
-#   lambda_max=0.15 (was 0.4): STS-B declined monotonically as KD ramped — KD
-#     was overriding contrastive geometry. 0.15 acts as soft anchor only.
-#   warmup=1000, ramp=3000: longer SimCSE-only window; full λ at step 4000.
+#   Pure KD replaces SimCSE. Stage 0 backbone (PPL=13) already separates PubMed
+#     abstracts — InfoNCE loss was ~0.002 from step 1 (no gradient signal).
+#   lambda_max=1.0: full KD from step 0. PubMedBERT scores BIOSSES=0.85;
+#     expected student BIOSSES: 0.72-0.80.
+
+
+
 #
 # Requires a Stage 0 checkpoint. Default path matches train_stage0_distill.sh output.
 # Override via: LM_CHECKPOINT=/path/to/ckpt sbatch train_stage1_distill.sh
@@ -110,11 +110,11 @@ python scripts/train_contrastive.py \
   +distill=stage1_pubmedbert \
   contrastive_mode=simcse \
   trainer.max_steps=20000 \
-  trainer.accumulate_grad_batches=8 \
+  trainer.accumulate_grad_batches=4 \
   trainer.val_check_interval=1000 \
   trainer.log_every_n_steps=25 \
-  dataset.batch_size=8 \
-  dataset.eval_batch_size=8 \
+  dataset.batch_size=16 \
+  dataset.eval_batch_size=16 \
   dataset.max_length=512 \
   dataset.num_workers=2 \
   dataset.pin_memory=true \
