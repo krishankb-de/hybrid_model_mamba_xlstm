@@ -27,8 +27,8 @@
 # Stage 1 hyperparameters (post run 1209 STS-B decline analysis):
 #   fixed_scale=20 (τ=0.05): standard SimCSE; scale=5 gave near-zero loss but
 #     STS-B fell 0.444→0.363 — trivial-discrimination collapse, no semantic signal.
-#   proj_head_dropout=0.1: literature-standard SimCSE dropout; 0.3 produced
-#     overly noisy positive views and contributed to the trivial-discrimination collapse.
+#   proj_head_dropout=0.2: slightly above yaml default (0.1) to increase view
+#     diversity. 0.3 produced overly noisy positive views (trivial-discrimination collapse).
 #   lambda_max=0.15 (was 0.4): STS-B declined monotonically as KD ramped — KD
 #     was overriding contrastive geometry. 0.15 acts as soft anchor only.
 #   warmup=1000, ramp=3000: longer SimCSE-only window; full λ at step 4000.
