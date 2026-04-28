@@ -478,9 +478,10 @@ def test_simcse_val_loss_nonzero_with_eval_model():
 
     mean_val_loss = sum(val_losses) / len(val_losses)
 
-    # With scale=5 (τ=0.2) and z1==z2 in eval mode, val loss is low but not near-zero
-    # (positive pair always wins, but the margin is smaller than scale=20).
-    # Threshold: < 0.5 means the positive pair is being classified correctly (exp(-0.5)≈0.6).
+    # With scale=20 (τ=0.05) and z1==z2 in eval mode, val loss is near-zero
+    # (positive pair dominates softmax entirely). Threshold 0.5 is loose to keep
+    # the test stable under random init. Real signal during val comes from
+    # ContrastiveEvalCallback (STS-B Spearman), not this loss value.
     assert mean_val_loss < 0.5, (
         f"Val SimCSE loss too high (dropout off → z1==z2 → easy positives): got {mean_val_loss:.6f}"
     )
@@ -499,7 +500,13 @@ def test_simcse_val_loss_nonzero_with_eval_model():
 
 @pytest.mark.willi_parity
 def test_stage1_distill_config_values():
-    """stage1_pubmedbert.yaml must have lambda_max=0.7 and ramp_steps=1500."""
+    """stage1_pubmedbert.yaml KD schedule.
+
+    Run 1209 (lambda_max=0.4, warmup=500, ramp=1500) showed STS-B Spearman
+    declining 0.444 → 0.363 as KD ramped in — KD was overriding contrastive
+    geometry. Lowered to a soft-anchor schedule: lambda_max=0.15 reached at
+    step 4000 (warmup=1000, ramp=3000), leaving 16k steps of joint training.
+    """
     pytest.importorskip("yaml")
     import yaml
 
@@ -508,9 +515,32 @@ def test_stage1_distill_config_values():
     with open(cfg_path, "r") as f:
         cfg = yaml.safe_load(f)
 
-    assert cfg.get("lambda_max") == 0.4, (
-        f"lambda_max should be 0.4, got {cfg.get('lambda_max')} — conservative KD weight (>0.5 risks teacher-manifold collapse)"
+    assert cfg.get("lambda_max") == 0.15, (
+        f"lambda_max should be 0.15, got {cfg.get('lambda_max')} — soft KD anchor "
+        "(higher values destroyed STS-B in run 1209)"
     )
-    assert cfg.get("ramp_steps") == 1500, (
-        f"ramp_steps should be 1500, got {cfg.get('ramp_steps')} — collapse fix not applied"
+    assert cfg.get("warmup_steps") == 1000, (
+        f"warmup_steps should be 1000, got {cfg.get('warmup_steps')} — pure SimCSE warmup"
+    )
+    assert cfg.get("ramp_steps") == 3000, (
+        f"ramp_steps should be 3000, got {cfg.get('ramp_steps')} — slow KD onboarding"
+    )
+
+
+@pytest.mark.willi_parity
+def test_stage1_proj_head_dropout_default():
+    """hybrid_70m.yaml must keep proj_head_dropout=0.1 (literature SimCSE default).
+
+    Run 1209 raised it to 0.3 in tandem with scale 20→5 to fight near-zero loss;
+    both reverted after STS-B decline showed the issue was KD weight, not view
+    diversity. 0.3 produces overly noisy positive views.
+    """
+    pytest.importorskip("yaml")
+    import yaml
+
+    cfg_path = REPO_ROOT / "configs" / "model" / "hybrid_70m.yaml"
+    with open(cfg_path, "r") as f:
+        cfg = yaml.safe_load(f)
+    assert cfg.get("proj_head_dropout") == 0.1, (
+        f"proj_head_dropout default should be 0.1, got {cfg.get('proj_head_dropout')}"
     )

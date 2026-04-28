@@ -14,22 +14,24 @@
 # Teacher  : PubMedBERT (110M, WordPiece tokenizer)
 # Student  : hybrid_70m text encoder (512 dim, [mamba, mamba, mlstm])
 # Loss     : L_SimCSE (fixed τ=0.05) + lambda * (1 - cos(student_pooled, teacher_cls))
-#            lambda ramps 0 → 0.7 over steps 500-2000 (warmup=500, ramp=1500)
+#            lambda ramps 0 → 0.15 over steps 1000-4000 (warmup=1000, ramp=3000)
 #
-# Memory estimate at bs=16, seq=512, accum=4, bf16 + gradient checkpointing:
-#   Gradient checkpointing recomputes layer activations during backward,
-#   trading ~30-40% speed for ~60% activation memory reduction.
+# Memory estimate at bs=16, seq=512, accum=4, bf16:
 #   Student 70M (grads+Adam)        : ~4 GB
 #   PubMedBERT 110M frozen bf16     : ~0.9 GB weights + ~2 GB acts (bs=16)
-#   2x fwd activations @ bs=16 ckpt : ~12-16 GB  (was ~30-35 GB without ckpt)
-#   Total peak (estimate)           : ~20-25 GB  (comfortable within 40GB budget)
-#   Effective batch = 16 × 4 = 64   (same as prior run; bs kept for more negatives)
-#   Fallback if still OOM: bs=8, accum=8 (removes gradient_checkpointing=true)
+#   2x fwd activations @ bs=16      : ~30-35 GB without checkpointing
+#   Total peak (estimate)           : ~36 GB  (within 40GB budget)
+#   Effective batch = 16 × 4 = 64
+#   Fallback if OOM: enable model.use_gradient_checkpointing=true (~60% act reduction)
 #
-# SimCSE fixes vs run 1209 (near-zero loss / no learning):
-#   fixed_scale 20→5 (τ: 0.05→0.2): scale=20 kills gradients when backbone already
-#     separates texts well. scale=5 gives loss ~0.3-0.5 even with good embeddings.
-#   proj_head_dropout 0.1→0.3: higher dropout diversifies z1/z2 views.
+# Stage 1 hyperparameters (post run 1209 STS-B decline analysis):
+#   fixed_scale=20 (τ=0.05): standard SimCSE; scale=5 gave near-zero loss but
+#     STS-B fell 0.444→0.363 — trivial-discrimination collapse, no semantic signal.
+#   proj_head_dropout=0.1: literature-standard SimCSE dropout; 0.3 produced
+#     overly noisy positive views and contributed to the trivial-discrimination collapse.
+#   lambda_max=0.15 (was 0.4): STS-B declined monotonically as KD ramped — KD
+#     was overriding contrastive geometry. 0.15 acts as soft anchor only.
+#   warmup=1000, ramp=3000: longer SimCSE-only window; full λ at step 4000.
 #
 # Requires a Stage 0 checkpoint. Default path matches train_stage0_distill.sh output.
 # Override via: LM_CHECKPOINT=/path/to/ckpt sbatch train_stage1_distill.sh
@@ -125,7 +127,7 @@ python scripts/train_contrastive.py \
   model.warmup_steps=1000 \
   model.gradient_clip_val=1.0 \
   model.use_gradient_checkpointing=false \
-  model.proj_head_dropout=0.2
+  model.proj_head_dropout=0.1
 
 echo ""
 echo "=== JOB END (Stage 1: KD complete) ==="
