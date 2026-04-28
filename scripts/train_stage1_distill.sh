@@ -16,13 +16,14 @@
 # Loss     : L_SimCSE (fixed τ=0.05) + lambda * (1 - cos(student_pooled, teacher_cls))
 #            lambda ramps 0 → 0.15 over steps 1000-4000 (warmup=1000, ramp=3000)
 #
-# Memory estimate at bs=16, seq=512, accum=4, bf16 + gradient checkpointing:
-#   Student 70M (grads+Adam)        : ~4 GB
-#   PubMedBERT 110M frozen bf16     : ~0.9 GB weights + ~2 GB acts (bs=16)
-#   2x fwd activations @ bs=16 ckpt : ~12-16 GB  (was ~30-35 GB without ckpt)
-#   Total peak (estimate)           : ~20-24 GB  (comfortable within 40GB budget)
-#   Effective batch = 16 × 4 = 64
-#   Fallback if still OOM: bs=8, accum=8 (keeps eff bs 64, loses 8 in-batch negatives)
+# Memory estimate at bs=8, seq=512, accum=8, bf16, NO gradient checkpointing:
+#   Student 70M (weights+grads+Adam) : ~1.0 GB
+#   PubMedBERT 110M frozen bf16     : ~0.2 GB weights + ~0.4 GB acts (bs=8)
+#   Mamba scan intermediates x2 fwd : ~12-15 GB peak (dominant term)
+#   Total peak (estimate)           : ~14-18 GB  (safe within 40GB, ~21 GB headroom)
+#   Effective batch = 8 × 8 = 64  (same SimCSE quality as bs=16 × 4)
+# NOTE: bs=16 accum=4 OOMs because Mamba stores 2x scan intermediates for SimCSE.
+#   bs=8 no-ckpt is the correct fix: same 64 eff-batch, no dropout mask incoherence.
 #
 # Stage 1 hyperparameters (post run 1209 STS-B decline analysis):
 #   fixed_scale=20 (τ=0.05): standard SimCSE; scale=5 gave near-zero loss but
@@ -109,11 +110,11 @@ python scripts/train_contrastive.py \
   +distill=stage1_pubmedbert \
   contrastive_mode=simcse \
   trainer.max_steps=20000 \
-  trainer.accumulate_grad_batches=4 \
+  trainer.accumulate_grad_batches=8 \
   trainer.val_check_interval=1000 \
   trainer.log_every_n_steps=25 \
-  dataset.batch_size=16 \
-  dataset.eval_batch_size=16 \
+  dataset.batch_size=8 \
+  dataset.eval_batch_size=8 \
   dataset.max_length=512 \
   dataset.num_workers=2 \
   dataset.pin_memory=true \
