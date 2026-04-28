@@ -3,7 +3,7 @@
 #SBATCH --account=mitarb
 #SBATCH --gres=gpu:mitarb:1
 #SBATCH --mem=40G
-#SBATCH --time=12:00:00
+#SBATCH --time=36:00:00
 #SBATCH --job-name=stage1_kd_pubmedbert
 #SBATCH --output=/scratch/bhushkri/hybrid_xmamba_a100_70m_40/logs/%x_%j.log
 #SBATCH --error=/scratch/bhushkri/hybrid_xmamba_a100_70m_40/logs/%x_%j.log
@@ -126,8 +126,8 @@ python scripts/train_contrastive.py \
   model.learning_rate=1e-5 \
   model.warmup_steps=1000 \
   model.gradient_clip_val=1.0 \
-  model.use_gradient_checkpointing=true \
-  model.proj_head_dropout=0.1
+  model.use_gradient_checkpointing=false \
+  model.proj_head_dropout=0.2
 
 echo ""
 echo "=== JOB END (Stage 1: KD complete) ==="
