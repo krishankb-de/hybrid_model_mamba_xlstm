@@ -406,8 +406,10 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         z1 = self.model.encode(input_ids, attention_mask=attention_mask)
         z2 = self.model.encode(input_ids, attention_mask=attention_mask)
 
-        # Fixed τ=0.05 (scale=20) prevents logit_scale from drifting to max and collapsing
-        loss = self._nt_xent_loss(z1, z2, self.model.logit_scale, fixed_scale=5.0)
+        # scale=20 (τ=0.05): standard SimCSE temperature. Lower scale (τ=0.2) makes
+        # the loss trivially small for a pretrained backbone — high scale forces the
+        # model to discriminate fine-grained differences even when embeddings are spread.
+        loss = self._nt_xent_loss(z1, z2, self.model.logit_scale, fixed_scale=20.0)
         self.log(f"{split}/contrastive_loss", loss, prog_bar=True,
                  on_step=(split == "train"), on_epoch=True)
         if split == "train":
@@ -522,8 +524,8 @@ class DistillContrastiveLightningModule(HybridContrastiveLightningModule):
         z1 = self.model.encode(input_ids, attention_mask=attention_mask)
         z2 = self.model.encode(input_ids, attention_mask=attention_mask)
 
-        # Fixed τ=0.05 (scale=20) prevents logit_scale collapse for SimCSE
-        simcse_loss = self._nt_xent_loss(z1, z2, self.model.logit_scale, fixed_scale=5.0)
+        # scale=20 (τ=0.05): standard SimCSE temperature — same as parent class.
+        simcse_loss = self._nt_xent_loss(z1, z2, self.model.logit_scale, fixed_scale=20.0)
 
         # --- Distillation loss (teacher CLS → student z1) ---
         distill_lambda = self._get_distill_lambda() if split == "train" else 0.0

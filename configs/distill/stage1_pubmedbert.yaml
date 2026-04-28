@@ -16,18 +16,20 @@
 teacher_model: "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"
 
 # Maximum distillation weight (after ramp-up).
-# 0.4 balances SimCSE contrastive structure with PubMedBERT semantic anchor.
-# 0.7 over-dominates: at scale=20 the SimCSE loss ~2.0–4.0 while KD loss ~0.3,
-# so 0.7*KD ~ 0.21 vs SimCSE ~3.0 — ratio is fine. But beyond 0.5 the student
-# risks collapsing onto teacher manifold rather than learning contrastive geometry.
-lambda_max: 0.4
+# 0.15: KD acts as a soft regulariser toward PubMedBERT geometry without
+# dominating the SimCSE contrastive signal. STS-B Spearman was declining with
+# lambda=0.4 — the KD signal was overriding the contrastive structure the
+# backbone already learned during Stage 0 (PPL=13.10).
+lambda_max: 0.15
 
-# Steps with lambda=0 (pure SimCSE only) before ramp starts
-warmup_steps: 500
+# Steps with lambda=0 (pure SimCSE only) before ramp starts.
+# 1000 steps lets SimCSE establish stable gradients first.
+warmup_steps: 1000
 
-# Steps over which lambda linearly ramps from 0 to lambda_max
-# Extended 500→1500: slower ramp lets SimCSE loss stabilise before KD fully engages
-ramp_steps: 1500
+# Steps over which lambda linearly ramps from 0 to lambda_max.
+# Slow ramp over 3000 steps — lambda=0.15 reached at step 4000,
+# leaving 16000 steps of joint training.
+ramp_steps: 3000
 
 # Teacher dtype — bf16 on A100
 teacher_dtype: "bfloat16"
