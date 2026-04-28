@@ -113,17 +113,14 @@ class ContrastiveEvalCallback(pl.Callback):
             print("[ContrastiveEvalCallback] 'datasets' not installed — skipping eval.")
             return
 
-        # BIOSSES — ~100 biomedical sentence pairs, scores 0–4
+        # BIOSSES — 100 biomedical sentence pairs, scores 0–4.
+        # Uses mteb/biosses (Parquet, no loading script) — bigbio/biosses requires
+        # a loading script that HuggingFace no longer supports.
         try:
-            ds = _ld(
-                "bigbio/biosses",
-                name="biosses_source",
-                split="train",
-                trust_remote_code=True,
-            )
+            ds = _ld("mteb/biosses", split="test")
             for row in ds:
-                t1 = str(row.get("text_1") or row.get("sentence1") or "")
-                t2 = str(row.get("text_2") or row.get("sentence2") or "")
+                t1 = str(row.get("sentence1") or row.get("text_1") or "")
+                t2 = str(row.get("sentence2") or row.get("text_2") or "")
                 sc = float(row.get("score") or row.get("label") or 0.0)
                 if t1 and t2:
                     self.biosses_pairs.append((t1, t2, sc))
