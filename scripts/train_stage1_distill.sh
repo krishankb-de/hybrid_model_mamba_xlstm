@@ -121,11 +121,12 @@ python scripts/train_contrastive.py \
   dataset.streaming=false \
   dataset.cache_dir=/scratch/bhushkri/hybrid_xmamba_a100_70m_40/pubmed_cache \
   lm_checkpoint="${LM_CHECKPOINT}" \
+  resume_from_checkpoint="./outputs/hybrid_70m_stage1_kd_pubmedbert/checkpoints/last.ckpt" \
   experiment_name=hybrid_70m_stage1_kd_pubmedbert \
   output_dir=./outputs/hybrid_70m_stage1_kd_pubmedbert \
   wandb.enabled=false \
   model.learning_rate=3e-6 \
-  model.warmup_steps=200 \
+  model.warmup_steps=0 \
   model.gradient_clip_val=1.0 \
   model.use_gradient_checkpointing=true \
   model.proj_head_dropout=0.2
