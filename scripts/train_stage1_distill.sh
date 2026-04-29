@@ -109,7 +109,7 @@ python scripts/train_contrastive.py \
   trainer=a100_single_gpu \
   +distill=stage1_pubmedbert \
   contrastive_mode=simcse \
-  trainer.max_steps=20000 \
+  trainer.max_steps=30000 \
   trainer.accumulate_grad_batches=4 \
   trainer.val_check_interval=1000 \
   trainer.log_every_n_steps=25 \
@@ -124,8 +124,8 @@ python scripts/train_contrastive.py \
   experiment_name=hybrid_70m_stage1_kd_pubmedbert \
   output_dir=./outputs/hybrid_70m_stage1_kd_pubmedbert \
   wandb.enabled=false \
-  model.learning_rate=1e-5 \
-  model.warmup_steps=1000 \
+  model.learning_rate=3e-6 \
+  model.warmup_steps=200 \
   model.gradient_clip_val=1.0 \
   model.use_gradient_checkpointing=true \
   model.proj_head_dropout=0.2
