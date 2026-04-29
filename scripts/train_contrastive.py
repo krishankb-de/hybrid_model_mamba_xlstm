@@ -403,8 +403,10 @@ def main(cfg: DictConfig):
         print(f"Loading LM backbone weights from: {lm_ckpt}")
         ckpt = torch.load(lm_ckpt, map_location="cpu", weights_only=False)
         state = ckpt.get("state_dict", ckpt)
-        # Strip Lightning "model." prefix if present
+        # Strip Lightning "model." prefix (e.g. full .ckpt from Stage 1)
         state = {k.replace("model.", "", 1): v for k, v in state.items()}
+        # Strip additional "lm." prefix present when loading Stage 1 .ckpt into text_encoder.lm
+        state = {(k[3:] if k.startswith("lm.") else k): v for k, v in state.items()}
         missing, unexpected = text_encoder.lm.load_state_dict(state, strict=False)
         print(f"  Loaded. Missing keys: {len(missing)}, Unexpected: {len(unexpected)}")
 
