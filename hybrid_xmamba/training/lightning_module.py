@@ -259,6 +259,7 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         warmup_steps: int = 500,
         max_steps: int = 10000,
         gradient_clip_val: float = 1.0,
+        freeze_text_encoder_steps: int = 0,
     ):
         # Pass a dummy HybridLanguageModel so the parent __init__ is happy;
         # we override forward / training_step completely below.
@@ -272,6 +273,16 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         )
         self.contrastive_mode = contrastive_mode.lower()
         self.image_encoder = None
+        # Stage 2 safeguard: freeze the LM backbone for the first N steps so the
+        # newly-initialised image-text projection can stabilise before yanking
+        # the freshly-trained text encoder weights toward image space.
+        # 0 = no freeze (Stage 1 default). Recommended Stage 2 value: 500.
+        self.freeze_text_encoder_steps = int(freeze_text_encoder_steps)
+        self._lm_currently_frozen = False
+        if self.freeze_text_encoder_steps > 0:
+            for p in self.model.lm.parameters():
+                p.requires_grad = False
+            self._lm_currently_frozen = True
 
         if self.contrastive_mode == "clip":
             # Load BiomedCLIP image encoder from HuggingFace
@@ -375,6 +386,20 @@ class HybridContrastiveLightningModule(HybridLightningModule):
     # ------------------------------------------------------------------
     # Training / validation steps
     # ------------------------------------------------------------------
+    def on_train_batch_start(self, batch, batch_idx):
+        # Unfreeze the LM backbone once the warmup window passes.
+        if (
+            self._lm_currently_frozen
+            and self.global_step >= self.freeze_text_encoder_steps
+        ):
+            for p in self.model.lm.parameters():
+                p.requires_grad = True
+            self._lm_currently_frozen = False
+            self.print(
+                f"[freeze_text_encoder_steps={self.freeze_text_encoder_steps}] "
+                f"Unfreezing LM backbone at global_step={self.global_step}"
+            )
+
     def training_step(self, batch, batch_idx):
         if self.contrastive_mode == "simcse":
             return self._simcse_step(batch, batch_idx, split="train")

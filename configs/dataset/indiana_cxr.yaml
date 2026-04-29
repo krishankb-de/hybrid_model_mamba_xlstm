@@ -32,7 +32,7 @@ pin_memory: true
 
 # No streaming — dataset is small enough to cache fully
 streaming: false
-cache_dir: "/scratch/krishun/indiana_cxr_cache"
+cache_dir: "/scratch/bhushkri/indiana_cxr_cache"
 
 # Image preprocessing (for BiomedCLIP ViT-B/16)
 image_size: 224

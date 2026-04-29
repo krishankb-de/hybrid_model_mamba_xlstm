@@ -86,7 +86,8 @@ python scripts/train_contrastive.py \
   wandb.enabled=false \
   model.learning_rate=1e-5 \
   model.warmup_steps=200 \
-  model.gradient_clip_val=1.0
+  model.gradient_clip_val=1.0 \
+  +model.freeze_text_encoder_steps=500
 
 echo ""
 echo "=== JOB END (Stage 2: CLIP complete) ==="

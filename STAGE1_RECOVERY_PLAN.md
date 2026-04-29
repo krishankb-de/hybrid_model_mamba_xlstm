@@ -1,69 +1,77 @@
-# Stage 1 Recovery — Multi-Phase Plan
+# Stage 1 Recovery — Multi-Phase Plan (REVISED v2 per supervisor)
 
 > **Sub-plan of `PHASE_PLAN.md` Phase 2.** Resumable across sessions via this file (committed) + `stage1_recovery_state.json` (gitignored, local-only) at repo root. Full plan-of-record: `/Users/krish/.claude/plans/refer-to-the-codebase-replicated-ripple.md`.
 
-## Context
+## Context (REVISED 2026-04-29 after supervisor review)
 
-Stage 1 has failed twice. Parent PHASE_PLAN.md Phase 2 (SimCSE+KD with `bs=16+accum=4`, fixed τ=0.05, λ_max=0.7, ramp 1500) was never executed — instead commit `ffc294a` removed SimCSE and switched to pure PubMedBERT KD with `λ=1.0, warmup=0, ramp=0`. Run 1217 shows classic Goodhart collapse: `student_teacher_cos` rises 0.40→0.75 while `train/stsb_spearman` peaks at 0.416 (step 2099) then DROPS to 0.286 (step 4098). The proxy improves; the target degrades.
+Stage 1 has failed twice. Run 1217 (pure PubMedBERT KD, λ=1.0, no warmup, no SimCSE) is **currently running** at submission time. Original plan v1 (this file) called for restoring SimCSE+KD hybrid + last-token pooling + 2-layer `distill_proj`. **Supervisor reviewed and reverted three of four changes:**
 
-**Recovery:** restore SimCSE+KD hybrid (pre-`ffc294a`), apply Gemini's accepted improvements (2-layer `distill_proj`, λ warmup/ramp, λ_max=0.3, last-token pooling), keep the existing fixed τ=0.05 SimCSE NT-Xent path.
-
-### Gemini's suggestions — verdict against actual code
-
-| # | Suggestion | Verdict | Notes |
+| Change | Original v1 plan | Supervisor verdict | Resolution |
 |---|---|---|---|
-| A | Last-token non-pad pooling | **Partially correct → adopt as default** | Code already excludes pads (`hybrid_lm.py:390-396`); but mean is suboptimal for *causal* models — last non-pad sees full context |
-| B | 2-layer MLP for `distill_proj` | **CORRECT** | `distill_proj` is single `nn.Linear(512, 768, bias=False)` (`lightning_module.py:501`); `projection_head` is already 2-layer |
-| C | Distill warmup_steps=2000 | **CORRECT only with SimCSE restored** | pure KD has no other loss to warm up against |
-| D | λ_max=0.1 | **Adopted 0.3 (user)** | current 1.0 caused Goodhart collapse; 0.3 splits Gemini's 0.1 and parent plan's 0.7 |
-| E | τ=0.05 fixed | **Already implemented** | `lightning_module.py:412 fixed_scale=20.0` — just unused since SimCSE removed |
+| Restore SimCSE+KD hybrid | Yes | **No** — 6 failed runs is sufficient evidence; backbone is too strong for SimCSE to add gradient signal | **Drop** |
+| Switch pooling to `last_token` | Yes | **No** — mean pooling working in 1217; do not change variables during a working run | **Drop** |
+| Diagnose 1217 as Goodhart collapse (STS-B 0.416→0.286) | Yes | **No** — n=2 STS-B points is premature; `val/distill_loss` 0.561→0.227 is steadily declining; initial dip is normal recovery | **Concede — diagnosis was overconfident** |
+| Upgrade `distill_proj` to 2-layer MLP | Yes | **Yes** | **Keep** |
 
-## Resolved decisions
+**Supervisor's revised path:** let 1217 finish to step 20k → next Stage 1 with `lr=3e-6` (down from `1e-5`) + 2-layer `distill_proj` → Stage 2 CXR.
 
-1. **λ_max = 0.3**
-2. **Pooling = `last_token`** (default; mean kept as fallback for Phase 4 ablation)
-3. **Effective batch = 128** (`batch_size=16 × accumulate_grad_batches=8`)
-4. **`proj_head_dropout` = 0.2** (raise to 0.3 only in Phase 4 if SimCSE collapse recurs)
+**Three safeguards added to that path** (not in supervisor's original phrasing, justified below):
 
-## Critical files
+1. **Step-12k kill gate during 1217.** If at step 12k STS-B < 0.30 AND not rising vs step 8k → kill rather than burn 4h on an unsalvageable run.
+2. **Eval-suite gate between Stage 1 finish and Stage 2 launch.** Stage 2 (CLIP on Indiana CXR) requires a usable text encoder. Without `BIOSSES Spearman ≥ 0.5 AND STS-B ≥ 0.6` (PHASE_PLAN.md targets), CLIP inherits a broken encoder and produces another wasted run.
+3. **`lr=3e-6` scope.** Apply to backbone only; keep `distill_proj` (and `projection_head`) at `1e-5` so the new MLP head can converge fast while the backbone barely moves.
+
+## Critical files (revised)
 
 | File | Purpose | Phase |
 |---|---|---|
 | `STAGE1_RECOVERY_PLAN.md` (this file, repo root) | sub-plan for session resume | 0 |
 | `stage1_recovery_state.json` (repo root, gitignored) | resumable state | 0, every phase |
-| `.gitignore` | append `stage1_recovery_state.json` | 0 |
-| `PHASE_PLAN.md` | one-paragraph pointer to this file under Phase 2 | 0 |
-| `hybrid_xmamba/training/lightning_module.py:456-565` | `DistillContrastiveLightningModule._simcse_step` — restore SimCSE+KD hybrid; upgrade `distill_proj` to 2-layer MLP; defaults `lambda_max=0.3, distill_warmup=2000, distill_ramp=2000` | 1 |
-| `hybrid_xmamba/models/hybrid_lm.py:362-399` | `HybridTextEncoder.encode` — add `pooling_strategy` arg (`mean` \| `last_token` \| `weighted_mean`), default `last_token` | 1 |
-| `hybrid_xmamba/models/configuration_hybrid.py` | add `pooling_strategy: str = "last_token"` to `HybridConfig` | 1 |
-| `configs/distill/stage1_pubmedbert.yaml` | `lambda_max: 1.0 → 0.3`, `warmup_steps: 0 → 2000`, `ramp_steps: 0 → 2000`; rewrite header | 1 |
-| `configs/model/hybrid_70m.yaml` | add `pooling_strategy: "last_token"` | 1 |
-| `scripts/train_stage1_distill.sh` | `accumulate_grad_batches: 4 → 8` (effective bs=128); update header | 1 |
-| `scripts/smoke_test_distill.py` | extend: assert `simcse_loss > 0`, `distill_loss > 0`, lambda(0)=0, lambda(warmup+ramp)=λ_max, last-token pooling shape | 2 |
-| `tests/test_willi_parity.py` | assertions for new config keys + Python 3.9 compat | 1 |
-| `scripts/validate_for_willi.sh` | run after every Phase 1/2 edit (CLAUDE.md mandate) | 1, 2 |
+| `.gitignore` | append `stage1_recovery_state.json` | 0 (BLOCKED — sandbox EPERM, manual append needed) |
+| `PHASE_PLAN.md` | one-paragraph pointer to this file under Phase 2 | 0 (BLOCKED — sandbox EPERM, manual append needed) |
+| `output_willi_server/stage1_kd_pubmedbert_<1217 JOBID>.log` | live monitor for kill-gate | 1 (read-only) |
+| `scripts/eval_stage1_suite.sh` | eval gate before Stage 2 launch | 2 |
+| `hybrid_xmamba/training/lightning_module.py:501` | upgrade `distill_proj` from `nn.Linear` to 2-layer MLP (Linear→GELU→Linear) | 3 |
+| `configs/distill/stage1_pubmedbert.yaml` | keep `lambda_max=1.0`, `warmup=0`, `ramp=0` (unchanged from 1217) | 3 |
+| `scripts/train_stage1_distill.sh` | add per-param-group LR override: backbone `3e-6`, head `1e-5` (mechanism TBD — see Phase 3) | 3 |
+| `scripts/train_contrastive_stage2.sh` | verify chaining via sbatch dependency; address gaps (see "Stage 2 chaining" appendix) | 4 |
 
 ---
 
 ## Phase 0 — Bootstrap (one-shot, no code/config edits)
 
-- [x] Create `STAGE1_RECOVERY_PLAN.md` at repo root (this file).
+- [x] Create `STAGE1_RECOVERY_PLAN.md` at repo root.
 - [x] Create `stage1_recovery_state.json` at repo root.
-- [x] Append `stage1_recovery_state.json` to `.gitignore`.
-- [x] Add 1-paragraph pointer in `PHASE_PLAN.md` (under Phase 2) to this sub-plan.
-- [x] Verify both files exist and JSON parses.
+- [ ] Append `stage1_recovery_state.json` to `.gitignore`. **BLOCKED — sandbox EPERM. User to manually add line `stage1_recovery_state.json` after `phase_state.json` in `.gitignore`.**
+- [ ] Add 1-paragraph pointer in `PHASE_PLAN.md` (under Phase 2) to this sub-plan. **BLOCKED — sandbox EPERM. User to manually add the paragraph quoted in v1 of this plan.**
+- [x] Verify both new files exist and JSON parses.
 
-## Phase 1 — Code fixes (CPU-testable, no SLURM)
+## Phase 1 — Monitor 1217 to completion (kill-gate at step 12k)
 
-After every edit run `bash scripts/validate_for_willi.sh` (Python 3.9 parity gate) — do NOT advance until it exits 0.
+Goal: do not interfere with 1217. Read logs only. Apply step-12k kill gate.
 
-- [ ] **Restore SimCSE+KD hybrid loss** in `lightning_module.py` `_simcse_step` (~514-565):
-  - Re-introduce two-view dropout SimCSE: `z1 = model.encode(x); z2 = model.encode(x)` (dropout in projection head provides the augmentation)
-  - InfoNCE via `_nt_xent_loss(z1, z2, ..., fixed_scale=20.0)` (τ=0.05) — code already exists at line 412
-  - KD: `(1 - cos(distill_proj(z1), pubmedbert_cls)).mean()` — keep current
-  - `total_loss = simcse_loss + lambda(step) * distill_loss`
-  - Log: `train/simcse_loss`, `train/distill_loss`, `train/lambda`, `train/student_teacher_cos`, `val/simcse_loss`, `val/distill_loss`, `val/total_loss`
-- [ ] **Upgrade `distill_proj`** in `DistillContrastiveLightningModule.__init__` (line 501):
+- [ ] Identify 1217 SLURM JOBID from `output_willi_server/` filename.
+- [ ] Every ~1h: tail latest log, extract `train/stsb_spearman` and `val/distill_loss` at the most recent val cycle.
+- [ ] **Kill gate at step 12k**: if `train/stsb_spearman < 0.30` AND not rising vs step 8k → `scancel <JOBID>` and skip directly to Phase 3.
+- [ ] **Else**: let 1217 finish to step 20k.
+- [ ] Update `stage1_recovery_state.json` with final 1217 metrics + final checkpoint path.
+
+## Phase 2 — Stage 1 eval gate
+
+Goal: numeric decision on whether 1217's checkpoint is acceptable for Stage 2.
+
+- [ ] On 1217 finish (or kill at Phase 1): submit `sbatch scripts/eval_stage1_suite.sh STAGE1_CHECKPOINT=./outputs/hybrid_70m_stage1_kd_pubmedbert/checkpoints/last.ckpt`.
+- [ ] Parse `results/stage1_metrics.md`.
+- [ ] **Decision branch:**
+  - **Pass** = BIOSSES Spearman ≥ 0.5 AND STS-B ≥ 0.6 → accept 1217, **skip Phase 3**, jump to Phase 4 (Stage 2 launch).
+  - **Fail** = below either threshold → proceed to Phase 3 (next Stage 1 run with supervisor's lr-only changes).
+- [ ] Record decision + metrics in `stage1_recovery_state.json["decisions"]`.
+
+## Phase 3 — Next Stage 1 run with `lr=3e-6` + 2-layer `distill_proj` (only if Phase 2 fails)
+
+Goal: minimal-variable change from 1217. Slow backbone LR; expand head capacity.
+
+- [ ] **Code change** in `hybrid_xmamba/training/lightning_module.py` line 501: replace `self.distill_proj = nn.Linear(student_dim, teacher_dim, bias=False)` with:
   ```python
   self.distill_proj = nn.Sequential(
       nn.Linear(student_dim, student_dim, bias=False),
@@ -71,92 +79,114 @@ After every edit run `bash scripts/validate_for_willi.sh` (Python 3.9 parity gat
       nn.Linear(student_dim, teacher_dim, bias=False),
   )
   ```
-- [ ] **Add `pooling_strategy` to `HybridTextEncoder.encode`** (`hybrid_lm.py:362-399`):
-  - `"mean"` (current behavior — keep as fallback)
-  - `"last_token"` (NEW default): for right-padded inputs, `idx = mask.sum(1) - 1`; `seq_repr = last_hidden[torch.arange(B), idx]`. If mask is None, take `last_hidden[:, -1, :]`.
-  - `"weighted_mean"` (optional): position-weighted mean
-  - Read default from `config.pooling_strategy`
-- [ ] **Update `HybridConfig`** (`configuration_hybrid.py`): add `pooling_strategy: str = "last_token"`.
-- [ ] **Update `configs/distill/stage1_pubmedbert.yaml`**:
-  - `lambda_max: 1.0 → 0.3`
-  - `warmup_steps: 0 → 2000`
-  - `ramp_steps: 0 → 2000`
-  - Rewrite header: SimCSE+KD restored; warmup lets SimCSE organize embedding space first.
-- [ ] **Update `configs/model/hybrid_70m.yaml`**: add `pooling_strategy: "last_token"`.
-- [ ] **Update `scripts/train_stage1_distill.sh`**: `accumulate_grad_batches: 4 → 8` (effective batch 128 = 127 in-batch negatives, adequate for SimCSE); ensure `contrastive_mode=simcse` retained; rewrite header comment.
-- [ ] **Add tests** in `tests/test_willi_parity.py`:
-  - `pooling_strategy="last_token"` returns correct shape and uses last non-pad index for right-padded inputs
-  - `distill_proj` parameter count = `512*512 + 512*768` = 655,872 (was 393,216)
-  - `_get_distill_lambda(step=0)=0`, `(2000)=0`, `(3000)=0.15`, `(4000)=0.3`, `(10000)=0.3`
-- [ ] **Run** `bash scripts/validate_for_willi.sh` — green required before commit.
-- [ ] Update this file's checkboxes + `stage1_recovery_state.json` (`current_phase: 1 → 2`, append note).
+- [ ] **Per-param-group LR.** Decide mechanism (Phase 3 sub-task):
+  - Option A: extend `configure_optimizers()` in `HybridContrastiveLightningModule` to split params into `backbone` (lr=3e-6) and `head` groups (`distill_proj` + `projection_head` + `logit_scale`, lr=1e-5).
+  - Option B: simpler — global lr=3e-6 (supervisor's literal proposal) and accept slower head convergence.
+  - Default: **Option A** (more correct); fall back to Option B if `configure_optimizers` is too tangled.
+- [ ] **Update `scripts/train_stage1_distill.sh`**: `model.learning_rate=3e-6` (or pass param-group config). Keep all other 1217 settings: `lambda_max=1.0, warmup=0, ramp=0, batch_size=16, accumulate_grad_batches=4, max_length=512`. Use `experiment_name=hybrid_70m_stage1_kd_pubmedbert_v3` to keep checkpoints separate.
+- [ ] **Add unit test** in `tests/test_willi_parity.py`: assert 2-layer `distill_proj` parameter count = `512*512 + 512*768 = 655,872`.
+- [ ] **Run** `bash scripts/validate_for_willi.sh` — green required.
+- [ ] **Submit** `sbatch scripts/train_stage1_distill.sh`.
+- [ ] **Live decision gates** (every 1000 steps):
+  - Step 5000 (`val/distill_loss`): should be ≤ 0.30 (1217 hit 0.301 at step 2099 with lr=1e-5; 3.3x slower lr means 5k step ≈ 2k step on 1217 trajectory).
+  - Step 12000: STS-B ≥ 0.40.
+  - Step 20000: STS-B ≥ 0.55.
+- [ ] On finish, return to **Phase 2** (eval-suite gate). If still failing, escalate to next session — do NOT recurse Phase 3 indefinitely.
 
-## Phase 2 — Smoke / sanity (CPU)
+## Phase 4 — Stage 2 CLIP on Indiana CXR
 
-- [ ] Extend `scripts/smoke_test_distill.py`:
-  - 4-sample batch on CPU; instantiate `DistillContrastiveLightningModule` with PubMedBERT teacher (or tiny mock with `hidden_size=768`)
-  - At `global_step=0` → assert `simcse_loss > 0.5` (random init), `lambda=0`
-  - At `global_step=4000` → assert `distill_loss > 0`, `lambda=0.3`, gradients flow into 2-layer `distill_proj` and into encoder
-  - `validation_step` → no NaN, `val/total_loss` finite
-- [ ] Re-run `bash scripts/validate_for_willi.sh` (must include the new smoke test).
-- [ ] Update plan + state file.
+Triggered only after Phase 2 pass (BIOSSES ≥ 0.5 AND STS-B ≥ 0.6).
 
-## Phase 3 — Stage 1 SLURM re-run on willi
+**Chaining recommendation:** submit Stage 2 with `--dependency=afterok:<stage1_jobid>` to start automatically when Stage 1 succeeds. Eval gate is being skipped per user direction — Stage 2 inherits whatever Stage 1 produces; if encoder is bad, will see it in image↔text R@10. With `afterok`, a failed/killed Stage 1 does NOT auto-launch Stage 2 (clean abort).
 
-Goal: non-collapsed encoder; STS-B ≥ 0.45 at step 5k AND non-decreasing through step 20k.
+- [x] **Fix `cache_dir` user mismatch** — `configs/dataset/indiana_cxr.yaml:35` changed `/scratch/krishun/...` → `/scratch/bhushkri/...`.
+- [x] **Add `freeze_text_encoder_steps` flag** — implemented in `HybridContrastiveLightningModule.__init__` + `on_train_batch_start` (`hybrid_xmamba/training/lightning_module.py`); plumbed through `scripts/train_contrastive.py`; defaulted to `500` in `scripts/train_contrastive_stage2.sh` via `+model.freeze_text_encoder_steps=500`.
+- [ ] Eval gate before Stage 2: **SKIPPED per user direction.**
+- [ ] Submit: `sbatch --dependency=afterok:<stage1_jobid> scripts/train_contrastive_stage2.sh`.
+- [ ] Live monitor: `train/contrastive_loss` should drop from ~3.0 → < 1.5 by step 1000.
+- [ ] On finish, run image↔text retrieval eval on Indiana-CXR test split.
+- [ ] **Decision gate**: image↔text R@10 ≥ 0.4.
+- [ ] Update parent `PHASE_PLAN.md` Phase 2 + Phase 3 + Phase 4 checkboxes.
+- [ ] Mark `stage1_recovery_state.json["completed"]: true`.
 
-- [ ] Verify clean checkpoint dir (or use `experiment_name=hybrid_70m_stage1_kd_pubmedbert_v2`) to avoid stale resume.
-- [ ] `git push` Phase 1+2 commits to `a100_70m_baseline`; confirm GitHub Actions willi-parity green.
-- [ ] On willi: `sbatch scripts/train_stage1_distill.sh`.
-- [ ] **Live decision gates** (every 1000 steps, monitor `output_willi_server/stage1_kd_pubmedbert_<JOBID>.log`):
-  - Step 1000 (pure-SimCSE warmup, λ=0): `train/stsb_spearman ≥ 0.20` AND `val/simcse_loss ∈ [0.5, 4.0]` (NOT collapsed to ~0.006)
-  - Step 3000 (mid-ramp, λ≈0.15): STS-B ≥ 0.40
-  - Step 5000 (full λ=0.3): STS-B ≥ 0.45
-  - Step 10000: STS-B ≥ 0.55 AND non-decreasing vs step 5k
-  - Step 20000: STS-B ≥ 0.60
-- [ ] If any gate fails → kill job, advance to Phase 4.
-- [ ] Update plan + state with run ID and last metrics.
+---
 
-## Phase 4 — Iterate (only if Phase 3 fails)
+## Stage 2 chaining appendix — script audit
 
-Pick ONE change per iteration. Record in `stage1_recovery_state.json["decisions"]`.
+User asked: can Stage 2 be queued via sbatch dependency to start the moment 1217 finishes, with no wasted time? **Yes — with the following caveats.**
 
-- [ ] **If `simcse_loss` collapses to ~0** (run 1159 symptom): increase `proj_head_dropout: 0.2 → 0.3`, increase effective batch via `accumulate_grad_batches: 8 → 16`.
-- [ ] **If STS-B plateaus < 0.40 with full λ**: try `lambda_max: 0.3 → 0.5`; if still flat, try `0.7` (parent PHASE_PLAN.md value).
-- [ ] **If STS-B regresses after λ ramp completes** (Goodhart): reduce `lambda_max: 0.3 → 0.1` and extend `ramp_steps: 2000 → 4000`.
-- [ ] **If pooling A/B unclear**: re-run with `pooling_strategy: "mean"` for direct comparison (single ablation).
-- [ ] After each iteration: update plan + state, re-submit, re-monitor Phase 3 gates.
-- [ ] **Hard cap: 3 iterations.** If none pass, escalate next session — do NOT silently train indefinitely.
+### What works ✅
 
-## Phase 5 — Eval suite + handoff
+1. **Default checkpoint path resolves correctly.** `STAGE1_CHECKPOINT="./outputs/hybrid_70m_stage1_kd_pubmedbert/checkpoints/last.ckpt"` matches 1217's `experiment_name` and `output_dir`. Path will exist when Stage 1 finishes.
+2. **Existence check on line 60-64** gracefully aborts if checkpoint missing.
+3. **Compatible with `--dependency=afterok:<stage1_jobid>`.** SLURM holds Stage 2 until Stage 1 returns exit 0; on failure/timeout, Stage 2 never starts (no compute waste).
+4. **Compatible with `#SBATCH --requeue` on Stage 1.** Requeued jobs keep the same JOBID, so dependency holds across requeue.
+5. **Header settings sane**: `partition=mitarb`, `mem=40G`, `time=12:00:00`, `requeue` set.
 
-- [ ] On Phase 3 gate pass at step 20k: `sbatch scripts/eval_stage1_suite.sh`.
-- [ ] Verify `results/stage1_metrics.md` populated with hybrid vs PubMedBERT comparison (BIOSSES, STS-B, MedSTS, BEIR-NFCorpus, BEIR-TREC-COVID, BioASQ, PubMed retrieval).
-- [ ] Decision gate (matches PHASE_PLAN.md targets): BIOSSES Spearman ≥ 0.5, STS-B ≥ 0.6, PubMed R@10 ≥ 0.6.
-- [ ] Update **parent** `PHASE_PLAN.md` Phase 2 + Phase 3 checkboxes.
-- [ ] Mark `stage1_recovery_state.json["completed"]: true`; append final-metrics note.
-- [ ] Unblock parent Phase 4 (Stage 2 MedicalCLIP).
+### Resolved (this session)
+
+1. ✅ **Text-encoder freeze for first N steps** — implemented. `HybridContrastiveLightningModule` now takes `freeze_text_encoder_steps: int = 0` (Stage 1 default unchanged) and `on_train_batch_start` unfreezes once `global_step >= freeze_text_encoder_steps`. Stage 2 sbatch script passes `+model.freeze_text_encoder_steps=500` via Hydra. Files touched: `hybrid_xmamba/training/lightning_module.py:252-294, 387-401`, `scripts/train_contrastive.py:444-473`, `scripts/train_contrastive_stage2.sh`.
+2. ✅ **`cache_dir` user mismatch** — fixed. `configs/dataset/indiana_cxr.yaml:35` is now `/scratch/bhushkri/indiana_cxr_cache`.
+3. **`bs=8` overrides yaml's `bs=64`.** Justified by BiomedCLIP image encoder + student + activations on 40GB. Effective batch via `accumulate_grad_batches=8` = 64. Kept; monitor.
+4. **`STAGE1_CHECKPOINT=last.ckpt` not best.** With pure-KD `monitor=val/loss`, "best" tracks the proxy. For 1217 trajectory `last.ckpt` ≈ `best.ckpt`. Acceptable.
+
+### Skipped per user direction
+
+5. **No eval gate before Stage 2.** User accepted the risk that Stage 2 inherits whatever Stage 1 produces; quality regression will surface in image↔text R@10 metrics rather than wall-time savings.
+
+### Verdict on user's question
+
+> "if i want to put the process of `scripts/train_contrastive_stage2.sh` through the sbatch so that the stage 2 can be initiated from the checkpoint of stage 1 completion and time is not wasted. is it correct the script and will it run or cause any issues"
+
+**The script will run** when chained via:
+```bash
+# Get current 1217 JOBID first:
+squeue -u $USER  # find stage1 JOBID
+# Then chain:
+sbatch --dependency=afterok:<1217_jobid> scripts/train_contrastive_stage2.sh
+```
+
+**But three issues should be fixed before chaining**:
+- (a) **`indiana_cxr.yaml` `cache_dir`** → change to `bhushkri` user (will fail with permission error otherwise on first run).
+- (b) **No text-encoder freeze** → either add the flag, or accept higher Stage 2 collapse risk.
+- (c) **No eval gate before Stage 2 starts** → if 1217 produces a bad encoder, you waste up to 12h on Stage 2 too. Either run eval manually first, or insert a quick in-script check.
+
+If you accept the risks (a, b, c) for the sake of saving wall time, the chain command above will work as written. **My recommendation**: fix (a) at minimum (it's a 1-line yaml change), accept (b) for now (PHASE_PLAN.md target is image↔text R@10 ≥ 0.4 — if Stage 2 collapses, we'll see it in eval anyway), and instead of (c) eval-gate, set `--dependency=afterany` and add this 4-line guard at the top of the Stage 2 python invocation in the script:
+```bash
+python -c "
+from scripts.evaluate_sts import quick_stsb
+score = quick_stsb('${STAGE1_CHECKPOINT}')
+print(f'Quick STS-B = {score:.3f}')
+import sys; sys.exit(0 if score >= 0.5 else 1)
+" || { echo 'Stage 1 STS-B < 0.5 — aborting Stage 2'; exit 0; }
+```
+(This requires implementing `quick_stsb` helper. Skip if implementation cost > eval-gate manual cost.)
 
 ---
 
 ## Resumability contract (READ FIRST in new sessions)
 
 1. Read `PHASE_PLAN.md` + `STAGE1_RECOVERY_PLAN.md` + `stage1_recovery_state.json` from repo root.
-2. Resume at `stage1_recovery_state.json["current_phase"]`. Checkboxes in this file are ground truth.
-3. After every meaningful state change (edit committed, smoke pass, sbatch submitted, eval done) update:
-   - The matching checkbox here (`[ ]` → `[x]`)
-   - `stage1_recovery_state.json["last_updated"]` (ISO 8601)
-   - Append one-line note to `["notes"]`: `"YYYY-MM-DD: <what changed>"`
-4. If `stage1_recovery_state.json` is missing locally, regenerate from this file's checkbox state — gitignored on purpose.
+2. Resume at `stage1_recovery_state.json["current_phase"]`. Checkboxes here are ground truth.
+3. After every meaningful state change update: matching checkbox + `["last_updated"]` (ISO 8601) + append to `["notes"]`.
+4. If `stage1_recovery_state.json` missing locally, regenerate from this file's checkbox state — gitignored on purpose.
 
 ## Verification
 
-- After Phase 0: both files exist; `python -c "import json; json.load(open('stage1_recovery_state.json'))"` parses.
-- After Phase 1: `validate_for_willi.sh` exits 0; new parity tests pass.
-- After Phase 2: `python scripts/smoke_test_distill.py` passes; gradients verified through both branches.
-- After Phase 3: live log shows `train/stsb_spearman` non-decreasing through gates; no walltime kill.
-- After Phase 5: `results/stage1_metrics.md` shows BIOSSES Spearman ≥ 0.5; parent PHASE_PLAN.md Phase 2 boxes checked.
+- After Phase 0: both files exist; JSON parses.
+- After Phase 1: 1217 reached step 20k OR was killed at step 12k with rationale logged.
+- After Phase 2: `results/stage1_metrics.md` populated; pass/fail decision recorded.
+- After Phase 3 (if triggered): new Stage 1 run finished; loops back to Phase 2.
+- After Phase 4: image↔text R@10 ≥ 0.4 on Indiana-CXR test split; parent PHASE_PLAN.md Phase 2/3/4 closed.
 
-## Unresolved questions
+## Decision log
 
-(none — see Resolved decisions above)
+| Date | Decision | Rationale |
+|---|---|---|
+| 2026-04-29 | Drop SimCSE restore | Supervisor: 6 failed runs of SimCSE is sufficient counter-evidence |
+| 2026-04-29 | Drop pooling change | Supervisor: don't change variables during working run |
+| 2026-04-29 | Concede 1217 collapse diagnosis | n=2 STS-B points is premature; let it finish |
+| 2026-04-29 | Keep 2-layer `distill_proj` | Supervisor agreed |
+| 2026-04-29 | Add step-12k kill gate | Avoid 4h waste on unsalvageable run |
+| 2026-04-29 | Add eval-suite gate before Stage 2 | Don't inherit broken encoder into CLIP |
+| 2026-04-29 | Per-param-group LR (3e-6 backbone, 1e-5 head) | Slow backbone protects against Goodhart; head needs full LR to converge |

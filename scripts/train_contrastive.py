@@ -454,6 +454,7 @@ def main(cfg: DictConfig):
             warmup_steps=cfg.model.warmup_steps,
             max_steps=cfg.trainer.max_steps,
             gradient_clip_val=cfg.model.gradient_clip_val,
+            freeze_text_encoder_steps=int(cfg.model.get("freeze_text_encoder_steps", 0)),
         )
         print(f"Using DistillContrastiveLightningModule "
               f"(lambda_max={distill_cfg.get('lambda_max', 0.3)}, "
@@ -469,6 +470,7 @@ def main(cfg: DictConfig):
             warmup_steps=cfg.model.warmup_steps,
             max_steps=cfg.trainer.max_steps,
             gradient_clip_val=cfg.model.gradient_clip_val,
+            freeze_text_encoder_steps=int(cfg.model.get("freeze_text_encoder_steps", 0)),
         )
 
     # Callbacks
