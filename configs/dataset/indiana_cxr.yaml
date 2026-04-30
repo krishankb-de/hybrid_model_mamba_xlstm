@@ -13,6 +13,9 @@
 
 dataset_name: "indiana_cxr"
 dataset_version: null   # single config on HF
+# HuggingFace repo ID for the dataset. dz-osamu/IU-Xray uses path-based images
+# (snapshot_download is triggered automatically to materialise image files).
+hf_repo_id: "dz-osamu/IU-Xray"
 
 # Splits
 train_split: "train"
@@ -44,7 +47,11 @@ contrastive_mode: "clip"
 image_encoder_name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
 
 # Text fields in the dataset
+# For PIL-based datasets (image column): findings_field + impression_field
 findings_field: "findings"
 impression_field: "impression"
-# If both fields present, concatenate: "Findings: <findings> Impression: <impression>"
 concatenate_sections: true
+# For path-based datasets (images column, e.g. dz-osamu/IU-Xray):
+# report_field is the text column; image_index selects frontal (0) or lateral (1)
+report_field: "response"
+image_index: 0

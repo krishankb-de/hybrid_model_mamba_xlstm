@@ -280,20 +280,103 @@ def load_pubmed(cfg, split: str, tokenizer, teacher_tokenizer=None, teacher_max_
     return TextOnlyDataset(ds, tokenizer, cfg.dataset.max_length)
 
 
+class IUXrayPathDataset(Dataset):
+    """Handles dz-osamu/IU-Xray schema: images are repo file paths, text is in 'response'."""
+
+    def __init__(self, hf_dataset, repo_local: str, tokenizer, cfg):
+        self.tokenizer = tokenizer
+        self.max_length = cfg.dataset.max_length
+        self.repo_local = repo_local
+        self.report_field = cfg.dataset.get("report_field", "response")
+        self.image_index = cfg.dataset.get("image_index", 0)
+
+        mean = cfg.dataset.get("image_mean", [0.48145466, 0.4578275, 0.40821073])
+        std  = cfg.dataset.get("image_std",  [0.26862954, 0.26130258, 0.27577711])
+        size = cfg.dataset.get("image_size", 224)
+        self.img_transform = T.Compose([
+            T.Resize((size, size)),
+            T.Grayscale(num_output_channels=3),
+            T.ToTensor(),
+            T.Normalize(mean=mean, std=std),
+        ])
+
+        # Pre-filter to samples where the image file actually exists
+        self.samples = []
+        for i in range(len(hf_dataset)):
+            row = hf_dataset[i]
+            paths = row.get("images", [])
+            if not paths:
+                continue
+            abs_path = os.path.join(repo_local, paths[self.image_index].lstrip("/"))
+            if os.path.exists(abs_path):
+                self.samples.append((row, abs_path))
+        print(f"IUXrayPathDataset: {len(self.samples)} samples with valid image files")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        row, abs_path = self.samples[idx]
+        text = row.get(self.report_field, "") or ""
+        enc = self.tokenizer(
+            text,
+            max_length=self.max_length,
+            truncation=True,
+            padding="max_length",
+            return_tensors="pt",
+        )
+        img = Image.open(abs_path).convert("RGB")
+        pixel_values = self.img_transform(img)
+        return {
+            "input_ids": enc["input_ids"].squeeze(0),
+            "attention_mask": enc["attention_mask"].squeeze(0),
+            "pixel_values": pixel_values,
+        }
+
+
 def load_indiana_cxr(cfg, split: str, tokenizer):
-    """Load Indiana University CXR from HuggingFace."""
-    ds = load_dataset(
-        "dz-osamu/IU-Xray",
-        split=split,
-        cache_dir=cfg.dataset.cache_dir,
+    """Load Indiana University CXR from HuggingFace.
+
+    Supports two schemas:
+    - PIL-based (image column contains PIL Image objects): uses ImageTextDataset
+    - Path-based (images column is a list of repo-relative paths): uses IUXrayPathDataset
+      with snapshot_download to materialise the image files on disk.
+    """
+    hf_repo = cfg.dataset.get("hf_repo_id", "dz-osamu/IU-Xray")
+
+    ds = load_dataset(hf_repo, split=split, cache_dir=cfg.dataset.cache_dir)
+    print(f"Original dataset size: {len(ds)}, columns: {ds.column_names}")
+
+    # --- PIL-based schema (image column is a decoded PIL Image) ---
+    if "image" in ds.column_names:
+        ds = ds.filter(lambda x: x.get("image") is not None)
+        print(f"Filtered dataset size (non-None images): {len(ds)}")
+        if len(ds) == 0:
+            raise RuntimeError(
+                f"All {len(ds)} samples have image=None in {hf_repo}. "
+                "Check hf_repo_id or image column."
+            )
+        return ImageTextDataset(ds, tokenizer, cfg)
+
+    # --- Path-based schema (images column is a list of relative paths) ---
+    if "images" in ds.column_names:
+        from huggingface_hub import snapshot_download
+        repo_cache = os.path.join(cfg.dataset.cache_dir, "repo_snapshot")
+        print(f"Downloading full repo snapshot for {hf_repo} → {repo_cache} ...")
+        repo_local = snapshot_download(hf_repo, local_dir=repo_cache)
+        print(f"Snapshot ready: {repo_local}")
+        dataset = IUXrayPathDataset(ds, repo_local, tokenizer, cfg)
+        if len(dataset) == 0:
+            raise RuntimeError(
+                f"IUXrayPathDataset: 0 samples after resolving image paths from {repo_local}. "
+                "Check that snapshot_download succeeded and paths match."
+            )
+        return dataset
+
+    raise RuntimeError(
+        f"Neither 'image' nor 'images' column found in {hf_repo}. "
+        f"Available columns: {ds.column_names}. Set hf_repo_id in the dataset config."
     )
-    
-    # Filter out samples with None images
-    print(f"Original dataset size: {len(ds)}")
-    ds = ds.filter(lambda x: x.get("image") is not None)
-    print(f"Filtered dataset size (non-None images): {len(ds)}")
-    
-    return ImageTextDataset(ds, tokenizer, cfg)
 
 
 def prepare_dataloader(cfg, split: str, tokenizer, teacher_tokenizer=None):
