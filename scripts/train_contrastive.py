@@ -60,6 +60,7 @@ from hybrid_xmamba.training.signal_callbacks import SignalCheckpointCallback
 from hybrid_xmamba.training.contrastive_eval_callback import (
     ContrastiveEvalCallback,
     AnomalyDetectionCallback,
+    CLIPRetrievalCallback,
 )
 from hybrid_xmamba.utils.run_metadata import write_run_metadata
 
@@ -555,6 +556,8 @@ def main(cfg: DictConfig):
             max_steps=cfg.trainer.max_steps,
             gradient_clip_val=cfg.model.gradient_clip_val,
             freeze_text_encoder_steps=int(cfg.model.get("freeze_text_encoder_steps", 0)),
+            vit_unfreeze_blocks=int(cfg.model.get("vit_unfreeze_blocks", 0)),
+            vit_lr=float(cfg.model.get("vit_lr", 1e-6)),
         )
         print(f"Using DistillContrastiveLightningModule "
               f"(lambda_max={distill_cfg.get('lambda_max', 0.3)}, "
@@ -571,6 +574,8 @@ def main(cfg: DictConfig):
             max_steps=cfg.trainer.max_steps,
             gradient_clip_val=cfg.model.gradient_clip_val,
             freeze_text_encoder_steps=int(cfg.model.get("freeze_text_encoder_steps", 0)),
+            vit_unfreeze_blocks=int(cfg.model.get("vit_unfreeze_blocks", 0)),
+            vit_lr=float(cfg.model.get("vit_lr", 1e-6)),
         )
 
     # Callbacks
@@ -599,6 +604,10 @@ def main(cfg: DictConfig):
             )
         )
         callbacks.append(AnomalyDetectionCallback(max_steps=200))
+
+    # Stage 2 CLIP: retrieval metrics (R@1/5/10 i2t and t2i)
+    if contrastive_mode == "clip":
+        callbacks.append(CLIPRetrievalCallback(eval_every_n_epochs=1, max_samples=0))
 
     # Loggers
     loggers = [TensorBoardLogger(save_dir=cfg.log_dir, name="tensorboard")]

@@ -73,23 +73,25 @@ python scripts/train_contrastive.py \
   trainer=a100_single_gpu \
   contrastive_mode=clip \
   trainer.max_steps=5000 \
-  trainer.accumulate_grad_batches=8 \
+  trainer.accumulate_grad_batches=1 \
   trainer.val_check_interval=250 \
   trainer.log_every_n_steps=25 \
-  dataset.batch_size=8 \
-  dataset.eval_batch_size=8 \
-  dataset.num_workers=2 \
+  dataset.batch_size=64 \
+  dataset.eval_batch_size=64 \
+  dataset.num_workers=4 \
   dataset.pin_memory=false \
   lm_checkpoint="${STAGE1_CHECKPOINT}" \
-  experiment_name=stage2_indiana_clip \
-  output_dir=./outputs/stage2_indiana_clip \
+  experiment_name=stage2_indiana_clip_v2 \
+  output_dir=./outputs/stage2_indiana_clip_v2 \
   wandb.enabled=false \
-  model.learning_rate=1e-5 \
+  model.learning_rate=3e-5 \
   model.warmup_steps=200 \
   model.gradient_clip_val=1.0 \
-  +model.freeze_text_encoder_steps=500
+  +model.freeze_text_encoder_steps=500 \
+  +model.vit_unfreeze_blocks=2 \
+  +model.vit_lr=1e-6
 
 echo ""
 echo "=== JOB END (Stage 2: CLIP complete) ==="
-echo "Checkpoint saved to: ./outputs/stage2_indiana_clip/checkpoints/"
+echo "Checkpoint saved to: ./outputs/stage2_indiana_clip_v2/checkpoints/"
 date
