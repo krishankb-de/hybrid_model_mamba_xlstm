@@ -285,66 +285,68 @@ class HybridContrastiveLightningModule(HybridLightningModule):
             self._lm_currently_frozen = True
 
         if self.contrastive_mode == "clip":
-            # Load BiomedCLIP image encoder from HuggingFace
+            # Load BiomedCLIP image encoder from HuggingFace.
+            # BiomedCLIP's visual encoder is a TimmModel which does not expose
+            # output_dim directly — we probe it with a dummy forward pass instead.
+            import open_clip
+            import torch as _torch
+
+            def _get_img_out_dim(visual_encoder: torch.nn.Module) -> int:
+                """Probe output dimension with a dummy forward pass (CPU, no grad)."""
+                was_training = visual_encoder.training
+                visual_encoder.eval()
+                with _torch.no_grad():
+                    dummy = _torch.zeros(1, 3, 224, 224)
+                    out = visual_encoder(dummy)
+                visual_encoder.train(was_training)
+                # out may be a tensor or a named tuple; handle both
+                if isinstance(out, _torch.Tensor):
+                    return out.shape[-1]
+                return out[0].shape[-1]
+
+            model_name = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+            print(f"Loading BiomedCLIP image encoder from: {model_name}")
             try:
-                import open_clip
-                # BiomedCLIP uses a specific loading method
-                # Try loading from HuggingFace hub directly
-                model_name = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
-                
-                print(f"Loading BiomedCLIP image encoder from: {model_name}")
-                
-                # Load the full BiomedCLIP model
-                self.image_encoder, _ = open_clip.create_model_from_pretrained(
+                full_model, _ = open_clip.create_model_from_pretrained(
                     'hf-hub:' + model_name
                 )
-                
-                # Extract just the visual encoder
-                self.image_encoder = self.image_encoder.visual
+                self.image_encoder = full_model.visual
                 self.image_encoder.eval()
-                
-                # Freeze image encoder completely
                 for p in self.image_encoder.parameters():
                     p.requires_grad = False
-                
-                # Linear bridge if dimensions differ
-                img_out = self.image_encoder.output_dim
+
+                img_out = _get_img_out_dim(self.image_encoder)
                 txt_out = model.embed_dim
                 self.img_proj = (
                     torch.nn.Linear(img_out, txt_out, bias=False)
                     if img_out != txt_out else torch.nn.Identity()
                 )
-                
-                print(f"✓ BiomedCLIP image encoder loaded successfully")
-                print(f"  Image output dim: {img_out}")
-                print(f"  Text output dim: {txt_out}")
-                
+                print(f"✓ BiomedCLIP image encoder loaded. "
+                      f"img_dim={img_out}, txt_dim={txt_out}")
+
             except Exception as e:
-                print(f"Error loading BiomedCLIP: {e}")
-                print("Trying alternative loading method...")
-                
-                # Fallback: Use a standard CLIP model
+                print(f"BiomedCLIP load failed ({e}). Falling back to LAION CLIP.")
                 try:
-                    self.image_encoder, _ = open_clip.create_model_from_pretrained(
+                    full_model, _ = open_clip.create_model_from_pretrained(
                         'hf-hub:laion/CLIP-ViT-B-16-laion2B-s34B-b88K'
                     )
-                    self.image_encoder = self.image_encoder.visual
+                    self.image_encoder = full_model.visual
                     self.image_encoder.eval()
                     for p in self.image_encoder.parameters():
                         p.requires_grad = False
-                    
-                    img_out = self.image_encoder.output_dim
+
+                    img_out = _get_img_out_dim(self.image_encoder)
                     txt_out = model.embed_dim
                     self.img_proj = (
                         torch.nn.Linear(img_out, txt_out, bias=False)
                         if img_out != txt_out else torch.nn.Identity()
                     )
-                    print(f"✓ Fallback CLIP model loaded successfully")
+                    print(f"✓ Fallback LAION CLIP loaded. "
+                          f"img_dim={img_out}, txt_dim={txt_out}")
                 except Exception as e2:
                     raise ImportError(
-                        f"Failed to load image encoder. Original error: {e}\n"
-                        f"Fallback error: {e2}\n"
-                        "Please ensure open-clip-torch is installed: pip install open-clip-torch"
+                        f"Failed to load BiomedCLIP ({e}) and fallback ({e2}). "
+                        "Ensure open-clip-torch is installed: pip install open-clip-torch"
                     )
 
     # ------------------------------------------------------------------
