@@ -260,6 +260,8 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         max_steps: int = 10000,
         gradient_clip_val: float = 1.0,
         freeze_text_encoder_steps: int = 0,
+        vit_unfreeze_blocks: int = 0,
+        vit_lr: float = 1e-6,
     ):
         # Pass a dummy HybridLanguageModel so the parent __init__ is happy;
         # we override forward / training_step completely below.
@@ -273,6 +275,10 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         )
         self.contrastive_mode = contrastive_mode.lower()
         self.image_encoder = None
+        self.img_proj = None
+        self._img_out = None
+        self.vit_unfreeze_blocks = int(vit_unfreeze_blocks)
+        self.vit_lr = float(vit_lr)
         # Stage 2 safeguard: freeze the LM backbone for the first N steps so the
         # newly-initialised image-text projection can stabilise before yanking
         # the freshly-trained text encoder weights toward image space.
@@ -285,67 +291,147 @@ class HybridContrastiveLightningModule(HybridLightningModule):
             self._lm_currently_frozen = True
 
         if self.contrastive_mode == "clip":
-            # Load BiomedCLIP image encoder from HuggingFace
+            import open_clip
+
+            def _get_dim(clip_model, visual) -> int:
+                """Get image encoder output dim robustly across open_clip versions.
+
+                TimmModel (BiomedCLIP) dropped .output_dim in newer open_clip.
+                Reading embed_dim from the parent CLIP model before extracting
+                .visual is the safest cross-version approach.
+                """
+                if hasattr(clip_model, 'embed_dim'):
+                    return clip_model.embed_dim
+                if hasattr(visual, 'output_dim'):
+                    return visual.output_dim
+                if hasattr(visual, 'embed_dim'):
+                    return visual.embed_dim
+                with torch.no_grad():
+                    dummy = torch.zeros(1, 3, 224, 224)
+                    return visual.cpu()(dummy).shape[-1]
+
+            def _load_clip_encoder(model_id: str):
+                clip_model, _ = open_clip.create_model_from_pretrained(
+                    'hf-hub:' + model_id
+                )
+                img_out = _get_dim(clip_model, clip_model.visual)
+                return clip_model.visual, img_out
+
+            biomedclip_id = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+            fallback_id   = "laion/CLIP-ViT-B-16-laion2B-s34B-b88K"
+
+            print(f"Loading BiomedCLIP image encoder from: {biomedclip_id}")
             try:
-                import open_clip
-                # BiomedCLIP uses a specific loading method
-                # Try loading from HuggingFace hub directly
-                model_name = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
-                
-                print(f"Loading BiomedCLIP image encoder from: {model_name}")
-                
-                # Load the full BiomedCLIP model
-                self.image_encoder, _ = open_clip.create_model_from_pretrained(
-                    'hf-hub:' + model_name
-                )
-                
-                # Extract just the visual encoder
-                self.image_encoder = self.image_encoder.visual
-                self.image_encoder.eval()
-                
-                # Freeze image encoder completely
-                for p in self.image_encoder.parameters():
-                    p.requires_grad = False
-                
-                # Linear bridge if dimensions differ
-                img_out = self.image_encoder.output_dim
-                txt_out = model.embed_dim
-                self.img_proj = (
-                    torch.nn.Linear(img_out, txt_out, bias=False)
-                    if img_out != txt_out else torch.nn.Identity()
-                )
-                
-                print(f"✓ BiomedCLIP image encoder loaded successfully")
-                print(f"  Image output dim: {img_out}")
-                print(f"  Text output dim: {txt_out}")
-                
+                self.image_encoder, img_out = _load_clip_encoder(biomedclip_id)
+                print(f"✓ BiomedCLIP loaded. Image dim: {img_out}, "
+                      f"Text dim: {model.embed_dim}")
             except Exception as e:
-                print(f"Error loading BiomedCLIP: {e}")
-                print("Trying alternative loading method...")
-                
-                # Fallback: Use a standard CLIP model
+                print(f"BiomedCLIP load error: {e} — falling back to {fallback_id}")
                 try:
-                    self.image_encoder, _ = open_clip.create_model_from_pretrained(
-                        'hf-hub:laion/CLIP-ViT-B-16-laion2B-s34B-b88K'
-                    )
-                    self.image_encoder = self.image_encoder.visual
-                    self.image_encoder.eval()
-                    for p in self.image_encoder.parameters():
-                        p.requires_grad = False
-                    
-                    img_out = self.image_encoder.output_dim
-                    txt_out = model.embed_dim
-                    self.img_proj = (
-                        torch.nn.Linear(img_out, txt_out, bias=False)
-                        if img_out != txt_out else torch.nn.Identity()
-                    )
-                    print(f"✓ Fallback CLIP model loaded successfully")
+                    self.image_encoder, img_out = _load_clip_encoder(fallback_id)
+                    print(f"✓ Fallback CLIP loaded. Image dim: {img_out}")
                 except Exception as e2:
                     raise ImportError(
-                        f"Failed to load image encoder. Original error: {e}\n"
-                        f"Fallback error: {e2}\n"
-                        "Please ensure open-clip-torch is installed: pip install open-clip-torch"
+                        f"Failed to load image encoder.\n"
+                        f"BiomedCLIP error: {e}\nFallback error: {e2}\n"
+                        "Install open-clip-torch: pip install open-clip-torch"
                     )
+
+            # Freeze entire image encoder; selective unfreeze handled below.
+            self.image_encoder.eval()
+            for p in self.image_encoder.parameters():
+                p.requires_grad = False
+
+            txt_out = model.embed_dim
+            self.img_proj = (
+                torch.nn.Linear(img_out, txt_out, bias=False)
+                if img_out != txt_out else torch.nn.Identity()
+            )
+            self._img_out = img_out
+
+            # Optionally unfreeze the last N ViT transformer blocks with low LR.
+            if self.vit_unfreeze_blocks > 0:
+                blocks = self._get_vit_blocks()
+                for blk in blocks[-self.vit_unfreeze_blocks:]:
+                    for p in blk.parameters():
+                        p.requires_grad = True
+                self.image_encoder.train()
+                n_unfreeze = sum(
+                    p.numel() for blk in blocks[-self.vit_unfreeze_blocks:]
+                    for p in blk.parameters()
+                )
+                print(f"✓ Unfreezing last {self.vit_unfreeze_blocks} ViT blocks "
+                      f"({n_unfreeze/1e6:.1f}M params, lr={self.vit_lr})")
+
+    # ------------------------------------------------------------------
+    # ViT block discovery helper
+    # ------------------------------------------------------------------
+    def _get_vit_blocks(self):
+        """Return a list of transformer blocks from the image encoder.
+
+        Handles both open_clip VisionTransformer (.transformer.resblocks)
+        and TimmModel backbones (.trunk.blocks).
+        """
+        enc = self.image_encoder
+        if hasattr(enc, 'transformer') and hasattr(enc.transformer, 'resblocks'):
+            return list(enc.transformer.resblocks)
+        if hasattr(enc, 'trunk') and hasattr(enc.trunk, 'blocks'):
+            return list(enc.trunk.blocks)
+        if hasattr(enc, 'blocks'):
+            return list(enc.blocks)
+        raise AttributeError(
+            f"Cannot find transformer blocks in image encoder {type(enc)}. "
+            "Expected .transformer.resblocks, .trunk.blocks, or .blocks."
+        )
+
+    # ------------------------------------------------------------------
+    # Optimizer: 3 param groups when ViT unfreeze is active
+    # ------------------------------------------------------------------
+    def configure_optimizers(self):
+        if self.vit_unfreeze_blocks > 0 and self.image_encoder is not None:
+            # Group 1: main model + projection head at base LR
+            main_params = (
+                list(self.model.parameters()) +
+                list(self.img_proj.parameters())
+            )
+            # Group 2: unfrozen ViT blocks at vit_lr
+            blocks = self._get_vit_blocks()
+            vit_params = [
+                p for blk in blocks[-self.vit_unfreeze_blocks:]
+                for p in blk.parameters() if p.requires_grad
+            ]
+            param_groups = [
+                {"params": main_params, "lr": self.learning_rate,
+                 "weight_decay": self.weight_decay},
+                {"params": vit_params, "lr": self.vit_lr,
+                 "weight_decay": self.weight_decay},
+            ]
+            optimizer = torch.optim.AdamW(param_groups)
+        else:
+            optimizer = torch.optim.AdamW(
+                self.parameters(),
+                lr=self.learning_rate,
+                weight_decay=self.weight_decay,
+            )
+
+        from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+        warmup = LinearLR(
+            optimizer, start_factor=0.01, end_factor=1.0,
+            total_iters=max(1, self.warmup_steps),
+        )
+        cosine = CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, self.max_steps - self.warmup_steps),
+            eta_min=self.learning_rate * 0.1,
+        )
+        scheduler = SequentialLR(
+            optimizer, schedulers=[warmup, cosine],
+            milestones=[self.warmup_steps],
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step", "frequency": 1},
+        }
 
     # ------------------------------------------------------------------
     # Contrastive loss (symmetric NT-Xent / InfoNCE)
@@ -458,10 +544,12 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         # Text embeddings (trained)
         z_text = self.model.encode(input_ids, attention_mask=attention_mask)
 
-        # Image embeddings (frozen)
-        with torch.no_grad():
-            # The image encoder is already just the visual part
+        # Image embeddings — frozen unless vit_unfreeze_blocks > 0
+        if self.vit_unfreeze_blocks > 0:
             z_img_raw = self.image_encoder(pixel_values)
+        else:
+            with torch.no_grad():
+                z_img_raw = self.image_encoder(pixel_values)
         z_img = torch.nn.functional.normalize(
             self.img_proj(z_img_raw.float()), dim=-1
         )

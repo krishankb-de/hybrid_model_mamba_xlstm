@@ -347,3 +347,110 @@ class AnomalyDetectionCallback(pl.Callback):
 
     def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
         torch.autograd.set_detect_anomaly(False)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 retrieval evaluation: R@1, R@5, R@10 (image→text and text→image)
+# ---------------------------------------------------------------------------
+
+class CLIPRetrievalCallback(pl.Callback):
+    """Compute image-text retrieval metrics on the validation dataloader.
+
+    At the end of each validation epoch, embeds the full validation set and
+    computes R@1, R@5, R@10 in both directions (image→text and text→image).
+
+    Requires ``pl_module.image_encoder``, ``pl_module.img_proj``, and
+    ``pl_module.model.encode()`` to exist (i.e. CLIP mode).
+
+    Args:
+        eval_every_n_epochs: Run retrieval eval every N epochs (default 1).
+        max_samples:         Cap validation set at this many samples to avoid
+                             OOM on large datasets. 0 = no cap.
+    """
+
+    def __init__(
+        self,
+        eval_every_n_epochs: int = 1,
+        max_samples: int = 0,
+    ):
+        super().__init__()
+        self.eval_every_n_epochs = eval_every_n_epochs
+        self.max_samples = max_samples
+
+    def on_validation_epoch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+    ) -> None:
+        if trainer.current_epoch % self.eval_every_n_epochs != 0:
+            return
+        if not hasattr(pl_module, 'image_encoder') or pl_module.image_encoder is None:
+            return
+
+        val_loader = trainer.val_dataloaders
+        if val_loader is None:
+            return
+        # PyTorch Lightning wraps in a list for single loader
+        if isinstance(val_loader, list):
+            val_loader = val_loader[0]
+
+        device = pl_module.device
+        all_z_img = []
+        all_z_txt = []
+
+        pl_module.eval()
+        with torch.no_grad():
+            for i, batch in enumerate(val_loader):
+                if self.max_samples > 0 and i * len(batch["input_ids"]) >= self.max_samples:
+                    break
+                input_ids = batch["input_ids"].to(device)
+                attn_mask = batch.get("attention_mask")
+                if attn_mask is not None:
+                    attn_mask = attn_mask.to(device)
+                pixel_values = batch["pixel_values"].to(device)
+
+                z_txt = pl_module.model.encode(input_ids, attention_mask=attn_mask)
+                z_img_raw = pl_module.image_encoder(pixel_values)
+                z_img = F.normalize(
+                    pl_module.img_proj(z_img_raw.float()), dim=-1
+                )
+                all_z_img.append(z_img.cpu())
+                all_z_txt.append(z_txt.cpu())
+
+        if not all_z_img:
+            return
+
+        Z_img = torch.cat(all_z_img, dim=0)
+        Z_txt = torch.cat(all_z_txt, dim=0)
+        N = Z_img.shape[0]
+
+        # Pairwise cosine similarity matrix (N, N)
+        sim = Z_img @ Z_txt.T  # already L2-normalised
+
+        ks = [1, 5, 10]
+        metrics = {}
+        for direction, rows, cols in [("i2t", sim, sim), ("t2i", sim.T, sim.T)]:
+            mat = rows if direction == "i2t" else cols
+            for k in ks:
+                k_eff = min(k, N)
+                top_k = mat.topk(k_eff, dim=1).indices  # (N, k)
+                labels = torch.arange(N).unsqueeze(1)   # (N, 1)
+                hits = (top_k == labels).any(dim=1).float().mean().item()
+                key = f"val/retrieval_{direction}_R@{k}"
+                metrics[key] = hits
+
+        for key, val in metrics.items():
+            pl_module.log(key, val, prog_bar=True, on_epoch=True, sync_dist=True)
+
+        r1 = (metrics.get("val/retrieval_i2t_R@1", 0) +
+              metrics.get("val/retrieval_t2i_R@1", 0)) / 2
+        print(
+            f"[CLIPRetrieval epoch={trainer.current_epoch}] "
+            f"i2t R@1={metrics.get('val/retrieval_i2t_R@1', 0):.3f} "
+            f"R@5={metrics.get('val/retrieval_i2t_R@5', 0):.3f} "
+            f"R@10={metrics.get('val/retrieval_i2t_R@10', 0):.3f} | "
+            f"t2i R@1={metrics.get('val/retrieval_t2i_R@1', 0):.3f} "
+            f"R@5={metrics.get('val/retrieval_t2i_R@5', 0):.3f} "
+            f"R@10={metrics.get('val/retrieval_t2i_R@10', 0):.3f} | "
+            f"mean_R@1={r1:.3f} | N={N}"
+        )
