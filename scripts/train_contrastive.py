@@ -335,47 +335,64 @@ class IUXrayPathDataset(Dataset):
 
 
 def load_indiana_cxr(cfg, split: str, tokenizer):
-    """Load Indiana University CXR from HuggingFace.
+    """Load CXR dataset from HuggingFace for Stage 2 CLIP alignment.
 
-    Supports two schemas:
-    - PIL-based (image column contains PIL Image objects): uses ImageTextDataset
-    - Path-based (images column is a list of repo-relative paths): uses IUXrayPathDataset
-      with snapshot_download to materialise the image files on disk.
+    Configured via cfg.dataset.hf_repo_id (default: itsanmolgupta/mimic-cxr-dataset).
+
+    Handles two schemas automatically:
+    - PIL-based (image column): uses ImageTextDataset directly.
+    - Path-based (images column): uses IUXrayPathDataset with snapshot_download.
+
+    For datasets with only a "train" split (e.g. itsanmolgupta/mimic-cxr-dataset),
+    both train and validation use "train" — the dataloader shuffle handles diversity.
     """
-    hf_repo = cfg.dataset.get("hf_repo_id", "dz-osamu/IU-Xray")
+    hf_repo = cfg.dataset.get("hf_repo_id", "itsanmolgupta/mimic-cxr-dataset")
 
-    ds = load_dataset(hf_repo, split=split, cache_dir=cfg.dataset.cache_dir)
-    print(f"Original dataset size: {len(ds)}, columns: {ds.column_names}")
+    # Always load from "train" — some datasets have no val/test splits.
+    # The yaml sets validation_split="train" for such datasets.
+    hf_split = "train"
+    ds = load_dataset(hf_repo, split=hf_split, cache_dir=cfg.dataset.cache_dir)
+    print(f"Loaded {hf_repo} ({hf_split}): {len(ds)} samples, columns: {ds.column_names}")
 
-    # --- PIL-based schema (image column is a decoded PIL Image) ---
+    # For validation, use the last 5% of samples as a held-out set
+    if split == "validation":
+        val_size = max(1, len(ds) // 20)  # 5%
+        ds = ds.select(range(len(ds) - val_size, len(ds)))
+        print(f"Validation subset: {len(ds)} samples (last 5%)")
+    elif split == "train":
+        train_size = len(ds) - max(1, len(ds) // 20)
+        ds = ds.select(range(train_size))
+        print(f"Train subset: {len(ds)} samples (first 95%)")
+
+    # --- PIL-based schema (image column contains decoded PIL Image objects) ---
     if "image" in ds.column_names:
         ds = ds.filter(lambda x: x.get("image") is not None)
-        print(f"Filtered dataset size (non-None images): {len(ds)}")
+        print(f"After filtering None images: {len(ds)} samples")
         if len(ds) == 0:
             raise RuntimeError(
-                f"All {len(ds)} samples have image=None in {hf_repo}. "
-                "Check hf_repo_id or image column."
+                f"All samples have image=None in {hf_repo}. "
+                "Check hf_repo_id or switch dataset."
             )
         return ImageTextDataset(ds, tokenizer, cfg)
 
-    # --- Path-based schema (images column is a list of relative paths) ---
+    # --- Path-based schema (images column is a list of repo-relative paths) ---
     if "images" in ds.column_names:
         from huggingface_hub import snapshot_download
         repo_cache = os.path.join(cfg.dataset.cache_dir, "repo_snapshot")
-        print(f"Downloading full repo snapshot for {hf_repo} → {repo_cache} ...")
+        print(f"Downloading repo snapshot for {hf_repo} → {repo_cache} ...")
         repo_local = snapshot_download(hf_repo, local_dir=repo_cache)
         print(f"Snapshot ready: {repo_local}")
         dataset = IUXrayPathDataset(ds, repo_local, tokenizer, cfg)
         if len(dataset) == 0:
             raise RuntimeError(
-                f"IUXrayPathDataset: 0 samples after resolving image paths from {repo_local}. "
-                "Check that snapshot_download succeeded and paths match."
+                f"IUXrayPathDataset: 0 valid samples after resolving paths. "
+                "snapshot_download may have failed or paths do not match."
             )
         return dataset
 
     raise RuntimeError(
         f"Neither 'image' nor 'images' column found in {hf_repo}. "
-        f"Available columns: {ds.column_names}. Set hf_repo_id in the dataset config."
+        f"Columns: {ds.column_names}. Update hf_repo_id in indiana_cxr.yaml."
     )
 
 

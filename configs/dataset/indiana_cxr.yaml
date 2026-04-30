@@ -1,26 +1,26 @@
-# Indiana University Chest X-ray dataset configuration
-# Used for Stage 2: contrastive image-text alignment fine-tuning.
+# Chest X-ray dataset configuration for Stage 2 CLIP alignment.
 #
-# Dataset: Indiana University CXR Collection
-#   - 7,470 radiology reports paired with frontal/lateral CXR images
-#   - Fully open access — no credentials required
-#   - HuggingFace ID: "Corran/IU-Xray" (community mirror)
-#   - Original: https://openi.nlm.nih.gov/
+# Dataset: itsanmolgupta/mimic-cxr-dataset (public subset of MIMIC-CXR)
+#   - 30,633 image-text pairs, fully open access (no credentials required)
+#   - PIL Image objects embedded directly (no snapshot_download needed)
+#   - Fields: image, findings, impression
+#   - Single split: "train" — we carve out validation internally
+#   - Original MIMIC-CXR: https://physionet.org/content/mimic-cxr/
+#
+# Previous dataset dz-osamu/IU-Xray failed: snapshot_download returned 401
+# Unauthorized because the LFS image files are in a private/gated repo.
 #
 # Image encoder: microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224
 #   - Frozen during training (only text encoder is trained)
-#   - Outputs 512-dim L2-normalised image embeddings
 
 dataset_name: "indiana_cxr"
-dataset_version: null   # single config on HF
-# HuggingFace repo ID for the dataset. dz-osamu/IU-Xray uses path-based images
-# (snapshot_download is triggered automatically to materialise image files).
-hf_repo_id: "dz-osamu/IU-Xray"
+dataset_version: null
+hf_repo_id: "itsanmolgupta/mimic-cxr-dataset"
 
-# Splits
+# This dataset only has a "train" split — validation is carved out in code
 train_split: "train"
-validation_split: "validation"
-test_split: "test"
+validation_split: "train"
+test_split: "train"
 
 # Tokenization — match pubmed pretraining tokenizer
 tokenizer: "gpt2"
