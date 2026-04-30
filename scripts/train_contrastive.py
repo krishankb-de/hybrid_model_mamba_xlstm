@@ -337,45 +337,43 @@ class IUXrayPathDataset(Dataset):
 def load_indiana_cxr(cfg, split: str, tokenizer):
     """Load CXR dataset from HuggingFace for Stage 2 CLIP alignment.
 
-    Configured via cfg.dataset.hf_repo_id (default: itsanmolgupta/mimic-cxr-dataset).
+    Dataset configured via cfg.dataset.hf_repo_id.
+    Default: MLforHealthcare/Indiana_University_Chest_X-ray_Collection
+      - 7,430 IU-Xray images (train=6,687 / test=743)
+      - PIL images embedded, fields: image / report
+      - Public, no token required
 
-    Handles two schemas automatically:
+    Handles two schemas:
     - PIL-based (image column): uses ImageTextDataset directly.
     - Path-based (images column): uses IUXrayPathDataset with snapshot_download.
-
-    For datasets with only a "train" split (e.g. itsanmolgupta/mimic-cxr-dataset),
-    both train and validation use "train" — the dataloader shuffle handles diversity.
     """
-    hf_repo = cfg.dataset.get("hf_repo_id", "itsanmolgupta/mimic-cxr-dataset")
+    hf_repo = cfg.dataset.get("hf_repo_id",
+                               "MLforHealthcare/Indiana_University_Chest_X-ray_Collection")
 
-    # Always load from "train" — some datasets have no val/test splits.
-    # The yaml sets validation_split="train" for such datasets.
-    hf_split = "train"
+    # Map logical split names to HF split names via yaml config
+    split_map = {
+        "train":      cfg.dataset.get("train_split", "train"),
+        "validation": cfg.dataset.get("validation_split", "test"),
+        "test":       cfg.dataset.get("test_split", "test"),
+    }
+    hf_split = split_map.get(split, split)
+
     ds = load_dataset(hf_repo, split=hf_split, cache_dir=cfg.dataset.cache_dir)
-    print(f"Loaded {hf_repo} ({hf_split}): {len(ds)} samples, columns: {ds.column_names}")
+    print(f"Loaded {hf_repo} (split={hf_split}): {len(ds)} samples, "
+          f"columns: {ds.column_names}")
 
-    # For validation, use the last 5% of samples as a held-out set
-    if split == "validation":
-        val_size = max(1, len(ds) // 20)  # 5%
-        ds = ds.select(range(len(ds) - val_size, len(ds)))
-        print(f"Validation subset: {len(ds)} samples (last 5%)")
-    elif split == "train":
-        train_size = len(ds) - max(1, len(ds) // 20)
-        ds = ds.select(range(train_size))
-        print(f"Train subset: {len(ds)} samples (first 95%)")
-
-    # --- PIL-based schema (image column contains decoded PIL Image objects) ---
+    # --- PIL-based schema ---
     if "image" in ds.column_names:
         ds = ds.filter(lambda x: x.get("image") is not None)
         print(f"After filtering None images: {len(ds)} samples")
         if len(ds) == 0:
             raise RuntimeError(
                 f"All samples have image=None in {hf_repo}. "
-                "Check hf_repo_id or switch dataset."
+                "Check hf_repo_id in indiana_cxr.yaml."
             )
         return ImageTextDataset(ds, tokenizer, cfg)
 
-    # --- Path-based schema (images column is a list of repo-relative paths) ---
+    # --- Path-based schema (fallback for path-based repos) ---
     if "images" in ds.column_names:
         from huggingface_hub import snapshot_download
         repo_cache = os.path.join(cfg.dataset.cache_dir, "repo_snapshot")
@@ -385,8 +383,8 @@ def load_indiana_cxr(cfg, split: str, tokenizer):
         dataset = IUXrayPathDataset(ds, repo_local, tokenizer, cfg)
         if len(dataset) == 0:
             raise RuntimeError(
-                f"IUXrayPathDataset: 0 valid samples after resolving paths. "
-                "snapshot_download may have failed or paths do not match."
+                f"IUXrayPathDataset: 0 valid samples after resolving paths from "
+                f"{repo_local}. Check hf_repo_id and image paths."
             )
         return dataset
 

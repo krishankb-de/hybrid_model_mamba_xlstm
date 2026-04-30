@@ -1,37 +1,35 @@
-# Chest X-ray dataset configuration for Stage 2 CLIP alignment.
+# Indiana University Chest X-ray dataset configuration for Stage 2 CLIP alignment.
 #
-# Dataset: itsanmolgupta/mimic-cxr-dataset (public subset of MIMIC-CXR)
-#   - 30,633 image-text pairs, fully open access (no credentials required)
-#   - PIL Image objects embedded directly (no snapshot_download needed)
-#   - Fields: image, findings, impression
-#   - Single split: "train" — we carve out validation internally
-#   - Original MIMIC-CXR: https://physionet.org/content/mimic-cxr/
-#
-# Previous dataset dz-osamu/IU-Xray failed: snapshot_download returned 401
-# Unauthorized because the LFS image files are in a private/gated repo.
+# Dataset: MLforHealthcare/Indiana_University_Chest_X-ray_Collection
+#   - 7,430 image-text pairs (6,687 train + 743 test)
+#   - Fully public, no HF token required
+#   - PIL Image objects embedded directly (no download script needed)
+#   - Fields: image (PIL), question (str), report (str)
+#   - This is the standard IU-Xray benchmark used in BioViL-T / BiomedCLIP papers
 #
 # Image encoder: microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224
 #   - Frozen during training (only text encoder is trained)
+#   - Outputs 512-dim L2-normalised image embeddings
 
 dataset_name: "indiana_cxr"
 dataset_version: null
-hf_repo_id: "itsanmolgupta/mimic-cxr-dataset"
+hf_repo_id: "MLforHealthcare/Indiana_University_Chest_X-ray_Collection"
 
-# This dataset only has a "train" split — validation is carved out in code
+# Splits — dataset has train and test
 train_split: "train"
-validation_split: "train"
-test_split: "train"
+validation_split: "test"
+test_split: "test"
 
 # Tokenization — match pubmed pretraining tokenizer
 tokenizer: "gpt2"
-max_length: 256         # Radiology reports: Findings + Impression fit in 256 tokens
+max_length: 256         # Radiology reports fit comfortably in 256 tokens
 max_seq_length: 256
 
 # Data loading
-batch_size: 64          # Small dataset; large batch helps contrastive learning
-eval_batch_size: 64
-num_workers: 4
-pin_memory: true
+batch_size: 8           # Small effective batch per step; accum=8 gives eff=64
+eval_batch_size: 8
+num_workers: 2
+pin_memory: false
 
 # No streaming — dataset is small enough to cache fully
 streaming: false
@@ -46,12 +44,8 @@ image_std:  [0.26862954, 0.26130258, 0.27577711]
 contrastive_mode: "clip"
 image_encoder_name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
 
-# Text fields in the dataset
-# For PIL-based datasets (image column): findings_field + impression_field
-findings_field: "findings"
-impression_field: "impression"
-concatenate_sections: true
-# For path-based datasets (images column, e.g. dz-osamu/IU-Xray):
-# report_field is the text column; image_index selects frontal (0) or lateral (1)
-report_field: "response"
-image_index: 0
+# Text fields — MLforHealthcare dataset has a single "report" field
+# Set findings_field="report" and concatenate_sections=false to use it directly
+findings_field: "report"
+impression_field: "report"
+concatenate_sections: false
