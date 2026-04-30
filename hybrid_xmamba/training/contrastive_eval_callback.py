@@ -382,6 +382,8 @@ class CLIPRetrievalCallback(pl.Callback):
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
     ) -> None:
+        if trainer.sanity_checking:
+            return
         if trainer.current_epoch % self.eval_every_n_epochs != 0:
             return
         if not hasattr(pl_module, 'image_encoder') or pl_module.image_encoder is None:

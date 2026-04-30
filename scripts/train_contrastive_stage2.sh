@@ -74,11 +74,11 @@ python scripts/train_contrastive.py \
   contrastive_mode=clip \
   trainer.max_steps=5000 \
   trainer.accumulate_grad_batches=1 \
-  trainer.val_check_interval=250 \
-  trainer.log_every_n_steps=25 \
+  trainer.val_check_interval=1.0 \
+  trainer.log_every_n_steps=10 \
   dataset.batch_size=64 \
   dataset.eval_batch_size=64 \
-  dataset.num_workers=4 \
+  dataset.num_workers=2 \
   dataset.pin_memory=false \
   lm_checkpoint="${STAGE1_CHECKPOINT}" \
   experiment_name=stage2_indiana_clip_v2 \
