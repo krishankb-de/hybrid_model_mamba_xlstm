@@ -16,12 +16,23 @@
 # Effective batch = 16 × accum8 = 128.
 # Live kill gate: scancel this job if R@10 < 0.15 at step 3000 and not rising.
 #
-# Override checkpoint path:
-#   STAGE0_CHECKPOINT=/path/to/ckpt sbatch scripts/train_joint_mimic.sh
+# Submit from the parent dir (where hybrid_model_mamba_xlstm/ is cloned):
+#   cd /scratch/bhushkri/hybrid_xmamba_a100_70m_40
+#   sbatch hybrid_model_mamba_xlstm/scripts/train_joint_mimic.sh
+#
+# This single job does: (1) MIMIC-CXR verify + precache into MIMIC_CACHE_DIR,
+# then (2) joint training. No need to submit verify and train as separate sbatches.
+#
+# Overrides:
+#   STAGE0_CHECKPOINT=/path/to/ckpt sbatch hybrid_model_mamba_xlstm/scripts/train_joint_mimic.sh
+#   MIMIC_CACHE_DIR=/scratch/bhushkri/mimic_cxr_cache (default)
+#   SKIP_VERIFY=1 (skip pre-flight if cache already warm)
 
 set -euo pipefail
 
 STAGE0_CHECKPOINT="${STAGE0_CHECKPOINT:-./outputs/hybrid_70m_stage0_kd_pubmed/checkpoints/stage0_model_only.pt}"
+MIMIC_CACHE_DIR="${MIMIC_CACHE_DIR:-/scratch/bhushkri/mimic_cxr_cache}"
+SKIP_VERIFY="${SKIP_VERIFY:-0}"
 
 echo "=== JOB START (Joint MIMIC-CXR: KD+CLIP+SimCSE) ==="
 date
@@ -70,6 +81,23 @@ if [ ! -f "${STAGE0_CHECKPOINT}" ]; then
 fi
 echo "Stage 0 checkpoint verified: ${STAGE0_CHECKPOINT}"
 
+# Phase 4 pre-flight: MIMIC-CXR verify + precache into the same cache_dir the
+# trainer will read from. Same cache → no double download. Surfaces HF/network
+# failures before the GPU is held.
+mkdir -p "${MIMIC_CACHE_DIR}"
+if [ "${SKIP_VERIFY}" = "1" ]; then
+    echo ""
+    echo "SKIP_VERIFY=1 → skipping MIMIC-CXR pre-flight verify."
+else
+    echo ""
+    echo "=== Pre-flight: MIMIC-CXR verify + precache into ${MIMIC_CACHE_DIR} ==="
+    python scripts/verify_mimic_cxr.py \
+        --cache-dir "${MIMIC_CACHE_DIR}" \
+        --split train \
+        --precache
+    echo "=== Pre-flight complete ==="
+fi
+
 echo ""
 echo "Starting joint MIMIC-CXR training..."
 
@@ -88,7 +116,7 @@ python scripts/train_contrastive.py \
   dataset.eval_batch_size=16 \
   dataset.num_workers=4 \
   dataset.pin_memory=true \
-  dataset.cache_dir=/scratch/bhushkri/mimic_cxr_cache \
+  dataset.cache_dir="${MIMIC_CACHE_DIR}" \
   model.use_gradient_checkpointing=true \
   lm_checkpoint="${STAGE0_CHECKPOINT}" \
   experiment_name=joint_mimic_cxr \

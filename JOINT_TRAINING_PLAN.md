@@ -53,12 +53,12 @@ Per supervisor (Strategies 1-4): collapse Stage 1+Stage 2 into one **joint train
 ### Phase 3 — Local CPU smoke test (~10 min)
 - [x] `scripts/smoke_test_joint.py`: 5 steps on 16-pair Indiana subset → all 3 losses finite, decreasing; gradients flow into img_proj, pooler.q, distill_proj, backbone.
 
-### Phase 4 — MIMIC-CXR data prep on willi (~30 min)
-- [ ] Verify `itsanmolgupta/mimic-cxr-dataset` loads; record column names (for `findings_field`/`impression_field`).
-- [ ] Pre-cache one full epoch.
+### Phase 4 — MIMIC-CXR data prep (folded into Phase 5 sbatch)
+- [x] Verify `itsanmolgupta/mimic-cxr-dataset` loads; record column names (for `findings_field`/`impression_field`). Verified one-off on Lightning AI A100 (same HF source, same A100 profile): 30633 train rows, columns `['image','findings','impression']`, all images non-None. `findings_field=findings`, `impression_field=impression` match `configs/dataset/mimic_cxr.yaml` defaults.
+- [x] Pre-cache one full epoch — **embedded as pre-flight inside `train_joint_mimic.sh`** so willi hits the same HF endpoint into `MIMIC_CACHE_DIR` (default `/scratch/bhushkri/mimic_cxr_cache`) before the trainer reads. Single sbatch covers both verify+precache and training. Set `SKIP_VERIFY=1` to skip on warm-cache resubmits.
 
 ### Phase 5 — Joint training on willi A100 40GB (~10–12h)
-- [ ] `sbatch scripts/train_joint_mimic.sh` (max_steps=10000, val_check=500, effective batch 128 = bs16×accum8, freeze_text_encoder_steps=500, init from Stage 0 ckpt).
+- [ ] From parent dir: `cd /scratch/bhushkri/hybrid_xmamba_a100_70m_40 && sbatch hybrid_model_mamba_xlstm/scripts/train_joint_mimic.sh` (pre-flight verify+precache → max_steps=10000, val_check=500, effective batch 128 = bs16×accum8, freeze_text_encoder_steps=500, init from Stage 0 ckpt).
 - [ ] Live monitor: step 500 `L_clip < 4.0` & cosine-hist not peaked at 1.0; step 2000 `R@10 > 0.207`; step 5000 `R@10 ≥ 0.30`; step 10000 `R@10 ≥ 0.40`.
 - [ ] **Kill gate at step 3000**: `R@10 < 0.15` AND not rising → scancel.
 
