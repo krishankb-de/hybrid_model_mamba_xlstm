@@ -49,6 +49,11 @@ use_gradient_checkpointing: false
 # backbone (0.1 is too weak: Stage 0 embeddings already well-separated at tau=0.2)
 proj_head_dropout: 0.1
 
+# Pooling strategy for contrastive encoder.
+# "attention" = single-query attention pooling (Strategy 4 fix).
+# Baselines stay on "mean" as ablation controls — do NOT copy this key there.
+pooling_strategy: attention
+
 # Optimization
 learning_rate: 6.0e-4
 weight_decay: 0.1

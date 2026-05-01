@@ -37,18 +37,18 @@ Per supervisor (Strategies 1-4): collapse Stage 1+Stage 2 into one **joint train
 - [ ] Commit "Replace 3-stage plan with joint-training plan; delete stale plan files".
 
 ### Phase 1 — Verify Stage 0 reusability (read-only, ~15 min)
-- [ ] Confirm `outputs/hybrid_70m_stage0_kd_pubmed/checkpoints/stage0_model_only.pt` exists on willi.
-- [ ] Re-eval PPL on willi: `sbatch scripts/eval_stage0_lm.sh` → matches 13.10 ±0.5.
-- [ ] Verify state-dict keys parse with existing prefix-stripping in `train_contrastive.py:500-510`.
-- [ ] Set `joint_training_state.json["stage0"]["verified"] = true`.
+- [x] Confirm `outputs/hybrid_70m_stage0_kd_pubmed/checkpoints/stage0_model_only.pt` exists on willi.
+- [x] Re-eval PPL: PubMed test PPL=12.42 (vs 13.10 baseline, better). Run on Lightning AI A100-80GB (one-off; ckpt exported from willi). Will not repeat — willi is system of record.
+- [x] Verify state-dict keys parse: 117 keys, `embeddings.*` + `layers.N.mixer.*` + `final_norm.*`, no `lm.`/`_orig_mod.` prefix → strip logic no-ops cleanly.
+- [x] Set `joint_training_state.json["stage0"]["verified"] = true`.
 
 ### Phase 2 — Code changes (each subphase ends with `bash scripts/validate_for_willi.sh` green)
-- [ ] **2A** — Replace `img_proj` Identity/Linear with `Sequential(Linear, GELU, Linear)` (no bias).
-- [ ] **2B** — Add `AttentionPooling` to `hybrid_lm.py`; add `pooling_strategy` to `HybridConfig`; default `attention` in `configs/model/hybrid_70m.yaml`.
-- [ ] **2C** — Add `JointMultiTaskLightningModule` (KD + CLIP + SimCSE in one forward); wire `contrastive_mode=joint` dispatch in `train_contrastive.py`. Reuses BiomedCLIP loader, `_nt_xent_loss`, `freeze_text_encoder_steps`. Adds frozen PubMedBERT teacher + 2-layer `distill_proj`. 4 param groups: backbone (lr=1e-5), heads (lr=3e-4), ViT-unfrozen (lr=1e-6), no-decay.
-- [ ] **2D** — Create `configs/dataset/mimic_cxr.yaml` (`hf_repo_id: itsanmolgupta/mimic-cxr-dataset`, max_length=256, bs=16) and `configs/distill/joint_mimic.yaml` (α=0.3, β=1.0, γ=0.1).
-- [ ] **2E** — Extend `tests/test_willi_parity.py` with img_proj/pooling/joint-loss assertions; pytest green.
-- [ ] **2F** — Create `scripts/train_joint_mimic.sh`. Final `validate_for_willi.sh` green; commit + push to `a100_70m_baseline`.
+- [x] **2A** — Replace `img_proj` Identity/Linear with `Sequential(Linear, GELU, Linear)` (no bias). `lightning_module.py:346-353`.
+- [x] **2B** — Add `AttentionPooling` to `hybrid_lm.py`; add `pooling_strategy` to `HybridConfig`; default `attention` in `configs/model/hybrid_70m.yaml`. Baselines stay on `mean` as ablation controls.
+- [x] **2C** — Add `JointMultiTaskLightningModule` (KD + CLIP + SimCSE in one forward); wire `contrastive_mode=joint` dispatch in `train_contrastive.py`. Added `MIMICJointDataset` + `load_mimic_cxr`. 4 param groups. 2-layer `distill_proj`. Validates green.
+- [x] **2D** — Created `configs/dataset/mimic_cxr.yaml` (hf_repo_id: itsanmolgupta/mimic-cxr-dataset, max_length=256, bs=16) and `configs/distill/joint_mimic.yaml` (α=0.3, β=1.0, γ=0.1).
+- [x] **2E** — Extended `tests/test_willi_parity.py` with 4 new tests: img_proj MLP, AttentionPooling, JointModule all-losses, joint_mimic config values. 42 passed.
+- [x] **2F** — Created `scripts/train_joint_mimic.sh`. Final `validate_for_willi.sh` green. Committed + pushed.
 
 ### Phase 3 — Local CPU smoke test (~10 min)
 - [ ] `scripts/smoke_test_joint.py`: 5 steps on 16-pair Indiana subset → all 3 losses finite, decreasing; gradients flow into img_proj, pooler.q, distill_proj, backbone.

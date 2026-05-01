@@ -1,0 +1,35 @@
+# Joint multi-task distillation config for MIMIC-CXR training.
+#
+# Loss = α·L_KD(PubMedBERT) + β·L_CLIP(BiomedCLIP) + γ·L_SimCSE
+#
+# Loss weight rationale:
+#   β=1.0  — CLIP is the primary objective (retrieval metric target R@10 ≥ 0.40).
+#   α=0.3  — KD preserves biomedical language geometry from PubMedBERT (BIOSSES=0.85).
+#             Lower than β so CLIP dominates; enough to prevent text-space collapse.
+#   γ=0.1  — SimCSE adds intra-text geometry regularisation without overwhelming CLIP.
+#             Can be set to 0 if OOM at batch_size=16 × 3 forward passes.
+#
+# Teacher: PubMedBERT (110M, frozen). Same model used in Stage 1 KD (stage1_pubmedbert.yaml).
+#
+# LR groups (4):
+#   backbone_lr=1e-5  — fine-tunes pretrained Stage 0 backbone slowly.
+#   head_lr=3e-4      — trains projection head, distill_proj, img_proj, attn_pool from scratch.
+#   vit_lr=1e-6       — only if model.vit_unfreeze_blocks > 0.
+#
+# freeze_text_encoder_steps=500: stabilise img_proj + distill_proj before releasing backbone.
+
+teacher_model: "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"
+teacher_dtype: "bfloat16"
+teacher_max_length: 512
+
+# Joint loss weights
+alpha_kd: 0.3
+beta_clip: 1.0
+gamma_simcse: 0.1
+
+# Per-group learning rates
+backbone_lr: 1.0e-5
+head_lr: 3.0e-4
+
+# Backbone freeze during head warm-up
+freeze_text_encoder_steps: 500

@@ -343,9 +343,12 @@ class HybridContrastiveLightningModule(HybridLightningModule):
                 p.requires_grad = False
 
             txt_out = model.embed_dim
-            self.img_proj = (
-                torch.nn.Linear(img_out, txt_out, bias=False)
-                if img_out != txt_out else torch.nn.Identity()
+            # 2-layer MLP aligns BiomedCLIP image space to text space.
+            # Identity/Linear was insufficient — caused Stage 2 R@10 plateau at 0.207.
+            self.img_proj = torch.nn.Sequential(
+                torch.nn.Linear(img_out, txt_out, bias=False),
+                torch.nn.GELU(),
+                torch.nn.Linear(txt_out, txt_out, bias=False),
             )
             self._img_out = img_out
 
@@ -676,6 +679,200 @@ class DistillContrastiveLightningModule(HybridContrastiveLightningModule):
                      student_teacher_cos.mean().item(), on_step=True, prog_bar=True)
 
         return total_loss
+
+
+class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
+    """Joint KD + CLIP + SimCSE training on MIMIC-CXR.
+
+    Loss = α·L_KD(PubMedBERT) + β·L_CLIP(BiomedCLIP) + γ·L_SimCSE
+
+    Batch must contain: input_ids, attention_mask, pixel_values,
+    teacher_input_ids, teacher_attention_mask.
+
+    4 param groups:
+      1. backbone weight matrices  — lr=backbone_lr, wd=weight_decay
+      2. backbone bias/norm        — lr=backbone_lr, wd=0
+      3. head params               — lr=head_lr, wd=weight_decay
+      4. ViT unfrozen blocks       — lr=vit_lr (only if vit_unfreeze_blocks > 0)
+    """
+
+    def __init__(
+        self,
+        model,
+        teacher: nn.Module,
+        alpha_kd: float = 0.3,
+        beta_clip: float = 1.0,
+        gamma_simcse: float = 0.1,
+        backbone_lr: float = 1e-5,
+        head_lr: float = 3e-4,
+        weight_decay: float = 0.01,
+        warmup_steps: int = 500,
+        max_steps: int = 10000,
+        gradient_clip_val: float = 1.0,
+        freeze_text_encoder_steps: int = 500,
+        vit_unfreeze_blocks: int = 0,
+        vit_lr: float = 1e-6,
+    ):
+        # contrastive_mode="clip" so parent loads BiomedCLIP + img_proj MLP.
+        super().__init__(
+            model=model,
+            contrastive_mode="clip",
+            learning_rate=backbone_lr,
+            weight_decay=weight_decay,
+            warmup_steps=warmup_steps,
+            max_steps=max_steps,
+            gradient_clip_val=gradient_clip_val,
+            freeze_text_encoder_steps=freeze_text_encoder_steps,
+            vit_unfreeze_blocks=vit_unfreeze_blocks,
+            vit_lr=vit_lr,
+        )
+        self.save_hyperparameters(ignore=['model', 'teacher'])
+        self.teacher = teacher
+        self.alpha_kd = alpha_kd
+        self.beta_clip = beta_clip
+        self.gamma_simcse = gamma_simcse
+        self.backbone_lr = backbone_lr
+        self.head_lr = head_lr
+
+        student_dim = model.embed_dim
+        teacher_dim = teacher.config.hidden_size
+        self.distill_proj = nn.Sequential(
+            nn.Linear(student_dim, teacher_dim, bias=False),
+            nn.GELU(),
+            nn.Linear(teacher_dim, teacher_dim, bias=False),
+        )
+
+    # ------------------------------------------------------------------
+    # Optimizer: 4 param groups
+    # ------------------------------------------------------------------
+    def configure_optimizers(self):
+        def _is_no_decay(name):
+            return name.endswith('.bias') or 'norm' in name.lower()
+
+        backbone_wd, backbone_no_wd = [], []
+        for name, p in self.model.lm.named_parameters():
+            if not p.requires_grad:
+                continue
+            if _is_no_decay(name):
+                backbone_no_wd.append(p)
+            else:
+                backbone_wd.append(p)
+
+        head_params = (
+            list(self.model.projection_head.parameters())
+            + (list(self.model.attn_pool.parameters())
+               if self.model.attn_pool is not None else [])
+            + [self.model.logit_scale]
+            + list(self.distill_proj.parameters())
+            + list(self.img_proj.parameters())
+        )
+
+        param_groups = [
+            {"params": backbone_wd,    "lr": self.backbone_lr, "weight_decay": self.weight_decay},
+            {"params": backbone_no_wd, "lr": self.backbone_lr, "weight_decay": 0.0},
+            {"params": head_params,    "lr": self.head_lr,     "weight_decay": self.weight_decay},
+        ]
+
+        if self.vit_unfreeze_blocks > 0 and self.image_encoder is not None:
+            blocks = self._get_vit_blocks()
+            vit_params = [
+                p for blk in blocks[-self.vit_unfreeze_blocks:]
+                for p in blk.parameters() if p.requires_grad
+            ]
+            if vit_params:
+                param_groups.append(
+                    {"params": vit_params, "lr": self.vit_lr,
+                     "weight_decay": self.weight_decay}
+                )
+
+        optimizer = torch.optim.AdamW(param_groups)
+
+        from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+        warmup = LinearLR(
+            optimizer, start_factor=0.01, end_factor=1.0,
+            total_iters=max(1, self.warmup_steps),
+        )
+        cosine = CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, self.max_steps - self.warmup_steps),
+            eta_min=self.backbone_lr * 0.1,
+        )
+        scheduler = SequentialLR(
+            optimizer, schedulers=[warmup, cosine],
+            milestones=[self.warmup_steps],
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step", "frequency": 1},
+        }
+
+    # ------------------------------------------------------------------
+    # Steps
+    # ------------------------------------------------------------------
+    def training_step(self, batch, batch_idx):
+        return self._joint_step(batch, batch_idx, split="train")
+
+    def validation_step(self, batch, batch_idx):
+        return self._joint_step(batch, batch_idx, split="val")
+
+    def _joint_step(self, batch, batch_idx, split):
+        input_ids = batch["input_ids"]
+        attention_mask = batch.get("attention_mask")
+        pixel_values = batch.get("pixel_values")
+
+        if split == "train":
+            self.model.train()
+
+        # Text embedding view 1 — reused for CLIP, KD, and SimCSE anchor
+        z_text = self.model.encode(input_ids, attention_mask=attention_mask)
+
+        # L_CLIP
+        if pixel_values is not None and self.image_encoder is not None:
+            if self.vit_unfreeze_blocks > 0:
+                z_img_raw = self.image_encoder(pixel_values)
+            else:
+                with torch.no_grad():
+                    z_img_raw = self.image_encoder(pixel_values)
+            z_img = F.normalize(self.img_proj(z_img_raw.float()), dim=-1)
+            l_clip = self._nt_xent_loss(z_text, z_img, self.model.logit_scale)
+        else:
+            l_clip = torch.tensor(0.0, device=z_text.device)
+
+        # L_SimCSE — second dropout view
+        z_text2 = self.model.encode(input_ids, attention_mask=attention_mask)
+        l_simcse = self._nt_xent_loss(
+            z_text, z_text2, self.model.logit_scale, fixed_scale=20.0
+        )
+
+        # L_KD — cosine distillation toward PubMedBERT CLS
+        l_kd = torch.tensor(0.0, device=z_text.device)
+        if "teacher_input_ids" in batch:
+            t_ids = batch["teacher_input_ids"]
+            t_mask = batch.get("teacher_attention_mask")
+            with torch.no_grad():
+                t_out = self.teacher(input_ids=t_ids, attention_mask=t_mask)
+                t_cls = F.normalize(
+                    t_out.last_hidden_state[:, 0, :].float(), dim=-1
+                )
+            z_proj = F.normalize(self.distill_proj(z_text.float()), dim=-1)
+            l_kd = (1.0 - F.cosine_similarity(z_proj, t_cls, dim=-1)).mean()
+
+        total = (
+            self.alpha_kd * l_kd
+            + self.beta_clip * l_clip
+            + self.gamma_simcse * l_simcse
+        )
+
+        on_step = (split == "train")
+        self.log(f"{split}/kd_loss",     l_kd,     prog_bar=False, on_step=on_step, on_epoch=True)
+        self.log(f"{split}/clip_loss",   l_clip,   prog_bar=True,  on_step=on_step, on_epoch=True)
+        self.log(f"{split}/simcse_loss", l_simcse, prog_bar=False, on_step=on_step, on_epoch=True)
+        self.log(f"{split}/total_loss",  total,    prog_bar=True,  on_step=on_step, on_epoch=True)
+        if split == "train":
+            pos_cos = (z_text * z_text2).sum(dim=-1).mean()
+            self.log("train/pos_cosine_mean", pos_cos, on_step=True, on_epoch=False)
+
+        return total
 
 
 class MQARLightningModule(HybridLightningModule):

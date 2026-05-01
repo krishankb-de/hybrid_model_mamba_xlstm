@@ -310,6 +310,45 @@ class HybridLanguageModel(nn.Module):
         return [layer.layer_type for layer in self.layers]
 
 
+class AttentionPooling(nn.Module):
+    """Single-query attention pooling over a sequence of hidden states.
+
+    Computes a weighted sum of token vectors using a learnable query,
+    with proper masking of padding positions before softmax.
+    Handles the all-padding edge case (e.g. during smoke tests) by
+    falling back to uniform weights when every position is masked.
+    """
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.q = nn.Parameter(torch.zeros(dim))
+        nn.init.normal_(self.q, std=0.02)
+        self._scale = dim ** -0.5
+
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            hidden: (B, L, D)
+            mask:   (B, L) — 1 for real tokens, 0 for padding; None = all real.
+        Returns:
+            (B, D) pooled representation.
+        """
+        scores = torch.matmul(hidden, self.q) * self._scale  # (B, L)
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, float('-inf'))
+            # Fall back to uniform if every token is masked (edge case)
+            all_masked = (mask.sum(dim=-1) == 0)  # (B,)
+            if all_masked.any():
+                uniform = torch.zeros_like(scores)
+                scores = torch.where(all_masked.unsqueeze(-1), uniform, scores)
+        weights = torch.softmax(scores, dim=-1)  # (B, L)
+        return torch.einsum('bl,bld->bd', weights, hidden)
+
+
 class HybridTextEncoder(nn.Module):
     """Hybrid Mamba-xLSTM text encoder for contrastive / retrieval tasks.
 
@@ -339,6 +378,14 @@ class HybridTextEncoder(nn.Module):
 
         # Full LM backbone — reuse existing class
         self.lm = HybridLanguageModel(config)
+
+        # Attention pooler — only instantiated when strategy is "attention"
+        # so baseline checkpoints (pooling_strategy="mean") stay unaffected.
+        self.pooling_strategy = getattr(config, "pooling_strategy", "mean")
+        if self.pooling_strategy == "attention":
+            self.attn_pool = AttentionPooling(config.dim)
+        else:
+            self.attn_pool = None
 
         # Projection head: hidden_dim → embed_dim (no bias, standard in CLIP).
         # Dropout between layers provides the stochastic augmentation that
@@ -386,14 +433,17 @@ class HybridTextEncoder(nn.Module):
         )
         last_hidden = outputs.hidden_states[-1]   # (B, L, dim)
 
-        # Mean pooling over non-padding positions
-        if attention_mask is not None:
-            mask = attention_mask.to(last_hidden.dtype).unsqueeze(-1)  # (B, L, 1)
+        if self.pooling_strategy == "attention":
+            seq_repr = self.attn_pool(last_hidden, mask=attention_mask)
         else:
-            mask = torch.ones(
-                last_hidden.shape[:2], dtype=last_hidden.dtype, device=last_hidden.device
-            ).unsqueeze(-1)
-        seq_repr = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)  # (B, dim)
+            # Mean pooling over non-padding positions
+            if attention_mask is not None:
+                mask = attention_mask.to(last_hidden.dtype).unsqueeze(-1)  # (B, L, 1)
+            else:
+                mask = torch.ones(
+                    last_hidden.shape[:2], dtype=last_hidden.dtype, device=last_hidden.device
+                ).unsqueeze(-1)
+            seq_repr = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
 
         projected = self.projection_head(seq_repr)
         return nn.functional.normalize(projected, dim=-1, eps=1e-8)

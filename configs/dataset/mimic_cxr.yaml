@@ -1,0 +1,52 @@
+# MIMIC-CXR dataset configuration for joint KD+CLIP+SimCSE training.
+#
+# Dataset: itsanmolgupta/mimic-cxr-dataset (~30K image-report pairs)
+#   - Fields verified in Phase 4 before training; defaults below are best-guess.
+#   - findings_field / impression_field: update after Phase 4 column check.
+#   - Requires HF_TOKEN (MIMIC-CXR is credentialed on PhysioNet).
+#
+# Image encoder: microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224
+#   - Produces 512-dim L2-normalised image embeddings.
+#   - Frozen by default (ViT unfreeze via model.vit_unfreeze_blocks).
+#
+# Text: reports are findings + impression concatenated (concat=true).
+#   CXR reports average ~250 tokens; max_length=256 covers ~95% without truncation.
+
+dataset_name: "mimic_cxr"
+hf_repo_id: "itsanmolgupta/mimic-cxr-dataset"
+
+# Splits
+train_split: "train"
+validation_split: "validation"
+test_split: "test"
+
+# Tokenization — match Stage 0 pretraining tokenizer
+tokenizer: "gpt2"
+max_length: 256
+max_seq_length: 256
+
+# Teacher tokenization (PubMedBERT WordPiece); populated by distill config
+teacher_max_length: 512
+
+# Data loading
+# Effective batch = batch_size × accumulate_grad_batches = 16 × 8 = 128
+batch_size: 16
+eval_batch_size: 16
+num_workers: 4
+pin_memory: true
+streaming: false
+cache_dir: "/scratch/bhushkri/mimic_cxr_cache"
+
+# Image preprocessing (BiomedCLIP ViT-B/16, CLIP normalisation)
+image_size: 224
+image_mean: [0.48145466, 0.4578275, 0.40821073]
+image_std:  [0.26862954, 0.26130258, 0.27577711]
+
+# Contrastive training settings
+contrastive_mode: "joint"
+image_encoder_name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+
+# Text fields — update after Phase 4 column verification
+findings_field: "findings"
+impression_field: "impression"
+concatenate_sections: true

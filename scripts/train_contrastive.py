@@ -55,6 +55,7 @@ from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
 from hybrid_xmamba.training.lightning_module import (
     HybridContrastiveLightningModule,
     DistillContrastiveLightningModule,
+    JointMultiTaskLightningModule,
 )
 from hybrid_xmamba.training.signal_callbacks import SignalCheckpointCallback
 from hybrid_xmamba.training.contrastive_eval_callback import (
@@ -335,6 +336,106 @@ class IUXrayPathDataset(Dataset):
         }
 
 
+class MIMICJointDataset(Dataset):
+    """MIMIC-CXR image-text dataset for joint KD+CLIP+SimCSE training.
+
+    Emits student tokens, image pixel_values, and teacher (PubMedBERT) tokens
+    in a single batch so all three losses share one forward pass.
+    """
+
+    def __init__(self, hf_dataset, student_tokenizer, teacher_tokenizer, cfg):
+        self.data = hf_dataset
+        self.student_tok = student_tokenizer
+        self.teacher_tok = teacher_tokenizer
+        self.max_length = cfg.dataset.max_length
+        self.teacher_max_length = cfg.dataset.get("teacher_max_length", 512)
+        self.findings_field = cfg.dataset.get("findings_field", "findings")
+        self.impression_field = cfg.dataset.get("impression_field", "impression")
+        self.concat = cfg.dataset.get("concatenate_sections", True)
+
+        mean = cfg.dataset.get("image_mean", [0.48145466, 0.4578275, 0.40821073])
+        std  = cfg.dataset.get("image_std",  [0.26862954, 0.26130258, 0.27577711])
+        size = cfg.dataset.get("image_size", 224)
+        self.img_transform = T.Compose([
+            T.Resize((size, size)),
+            T.Grayscale(num_output_channels=3),
+            T.ToTensor(),
+            T.Normalize(mean=mean, std=std),
+        ])
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data[idx]
+
+        findings   = item.get(self.findings_field, "")  or ""
+        impression = item.get(self.impression_field, "") or ""
+        text = (
+            f"Findings: {findings} Impression: {impression}".strip()
+            if self.concat else (findings or impression)
+        )
+
+        s_enc = self.student_tok(
+            text, max_length=self.max_length,
+            truncation=True, padding="max_length", return_tensors="pt",
+        )
+        t_enc = self.teacher_tok(
+            text, max_length=self.teacher_max_length,
+            truncation=True, padding="max_length", return_tensors="pt",
+        )
+
+        img = item.get("image")
+        if img is None:
+            raise ValueError(f"Image is None for sample {idx}")
+        if isinstance(img, str):
+            img = Image.open(img).convert("RGB")
+        elif not isinstance(img, Image.Image):
+            img = Image.fromarray(img).convert("RGB")
+        else:
+            img = img.convert("RGB")
+        pixel_values = self.img_transform(img)
+
+        return {
+            "input_ids":              s_enc["input_ids"].squeeze(0),
+            "attention_mask":         s_enc["attention_mask"].squeeze(0),
+            "pixel_values":           pixel_values,
+            "teacher_input_ids":      t_enc["input_ids"].squeeze(0),
+            "teacher_attention_mask": t_enc["attention_mask"].squeeze(0),
+        }
+
+
+def load_mimic_cxr(cfg, split, tokenizer, teacher_tokenizer=None):
+    """Load MIMIC-CXR from HuggingFace for joint training.
+
+    When teacher_tokenizer is provided, returns MIMICJointDataset (dual tokens + image).
+    Otherwise returns ImageTextDataset (image + student tokens only).
+    """
+    hf_repo = cfg.dataset.get("hf_repo_id", "itsanmolgupta/mimic-cxr-dataset")
+    split_map = {
+        "train":      cfg.dataset.get("train_split", "train"),
+        "validation": cfg.dataset.get("validation_split", "validation"),
+        "test":       cfg.dataset.get("test_split", "test"),
+    }
+    hf_split = split_map.get(split, split)
+
+    ds = load_dataset(hf_repo, split=hf_split, cache_dir=cfg.dataset.cache_dir)
+    print(f"Loaded {hf_repo} (split={hf_split}): {len(ds)} samples, "
+          f"columns: {ds.column_names}")
+
+    ds = ds.filter(lambda x: x.get("image") is not None)
+    print(f"After filtering None images: {len(ds)} samples")
+    if len(ds) == 0:
+        raise RuntimeError(
+            f"All samples have image=None in {hf_repo}. "
+            "Check hf_repo_id in mimic_cxr.yaml."
+        )
+
+    if teacher_tokenizer is not None:
+        return MIMICJointDataset(ds, tokenizer, teacher_tokenizer, cfg)
+    return ImageTextDataset(ds, tokenizer, cfg)
+
+
 def load_indiana_cxr(cfg, split: str, tokenizer):
     """Load CXR dataset from HuggingFace for Stage 2 CLIP alignment.
 
@@ -408,6 +509,11 @@ def prepare_dataloader(cfg, split: str, tokenizer, teacher_tokenizer=None):
         )
     elif name == "indiana_cxr":
         dataset = load_indiana_cxr(cfg, split, tokenizer)
+    elif name == "mimic_cxr":
+        dataset = load_mimic_cxr(
+            cfg, split, tokenizer,
+            teacher_tokenizer=teacher_tokenizer,
+        )
     else:
         raise ValueError(f"Unknown dataset for contrastive training: {name}")
 
@@ -491,6 +597,7 @@ def main(cfg: DictConfig):
         tie_word_embeddings=cfg.model.tie_word_embeddings,
         use_gradient_checkpointing=cfg.model.get("use_gradient_checkpointing", False),
         proj_head_dropout=cfg.model.get("proj_head_dropout", 0.1),
+        pooling_strategy=cfg.model.get("pooling_strategy", "mean"),
     )
 
     # Build text encoder
@@ -519,11 +626,58 @@ def main(cfg: DictConfig):
         "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224",
     )
 
-    # --- Distillation (Stage 1 PubMedBERT embedding KD) ---
+    # --- Module dispatch ---
     distill_cfg = cfg.get("distill", None)
     teacher_tokenizer = None
 
-    if distill_cfg is not None and contrastive_mode == "simcse":
+    if contrastive_mode == "joint":
+        if distill_cfg is None:
+            raise ValueError(
+                "contrastive_mode=joint requires a distill config. "
+                "Add distill=joint_mimic to your command."
+            )
+        teacher_name = distill_cfg.teacher_model
+        teacher_dtype_str = distill_cfg.get("teacher_dtype", "bfloat16")
+        teacher_dtype = torch.bfloat16 if teacher_dtype_str == "bfloat16" else torch.float16
+
+        print(f"\nLoading joint teacher: {teacher_name} ({teacher_dtype_str})...")
+        teacher_model = AutoModel.from_pretrained(
+            teacher_name,
+            torch_dtype=teacher_dtype,
+            low_cpu_mem_usage=True,
+        )
+        teacher_model.eval()
+        for p in teacher_model.parameters():
+            p.requires_grad_(False)
+
+        teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_name)
+        t_params = sum(p.numel() for p in teacher_model.parameters())
+        print(f"Teacher params: {t_params:,} ({t_params/1e6:.0f}M), frozen.")
+
+        lightning_module = JointMultiTaskLightningModule(
+            model=text_encoder,
+            teacher=teacher_model,
+            alpha_kd=float(distill_cfg.get("alpha_kd", 0.3)),
+            beta_clip=float(distill_cfg.get("beta_clip", 1.0)),
+            gamma_simcse=float(distill_cfg.get("gamma_simcse", 0.1)),
+            backbone_lr=float(distill_cfg.get("backbone_lr", 1e-5)),
+            head_lr=float(distill_cfg.get("head_lr", 3e-4)),
+            weight_decay=cfg.model.weight_decay,
+            warmup_steps=cfg.model.warmup_steps,
+            max_steps=cfg.trainer.max_steps,
+            gradient_clip_val=cfg.model.gradient_clip_val,
+            freeze_text_encoder_steps=int(distill_cfg.get("freeze_text_encoder_steps", 500)),
+            vit_unfreeze_blocks=int(cfg.model.get("vit_unfreeze_blocks", 0)),
+            vit_lr=float(cfg.model.get("vit_lr", 1e-6)),
+        )
+        print(
+            f"JointMultiTaskLightningModule: "
+            f"α_kd={distill_cfg.get('alpha_kd', 0.3)} "
+            f"β_clip={distill_cfg.get('beta_clip', 1.0)} "
+            f"γ_simcse={distill_cfg.get('gamma_simcse', 0.1)}"
+        )
+
+    elif distill_cfg is not None and contrastive_mode == "simcse":
         teacher_name = distill_cfg.teacher_model
         teacher_dtype_str = distill_cfg.get("teacher_dtype", "bfloat16")
         teacher_dtype = torch.bfloat16 if teacher_dtype_str == "bfloat16" else torch.float16
@@ -563,6 +717,7 @@ def main(cfg: DictConfig):
               f"(lambda_max={distill_cfg.get('lambda_max', 0.3)}, "
               f"warmup={distill_cfg.get('warmup_steps', 500)}, "
               f"ramp={distill_cfg.get('ramp_steps', 500)})")
+
     else:
         lightning_module = HybridContrastiveLightningModule(
             model=text_encoder,
@@ -579,7 +734,13 @@ def main(cfg: DictConfig):
         )
 
     # Callbacks
-    monitor_metric = "val/total_loss" if distill_cfg else "val/contrastive_loss"
+    use_total_loss_monitor = (distill_cfg is not None or contrastive_mode == "joint")
+    monitor_metric = "val/total_loss" if use_total_loss_monitor else "val/contrastive_loss"
+    ckpt_fname = (
+        "contrastive-{step:06d}-{val/total_loss:.4f}"
+        if use_total_loss_monitor
+        else "contrastive-{step:06d}-{val/contrastive_loss:.4f}"
+    )
     callbacks = [
         ModelCheckpoint(
             dirpath=cfg.checkpoint_dir,
@@ -587,14 +748,13 @@ def main(cfg: DictConfig):
             mode="min",
             save_top_k=3,
             save_last=True,
-            filename="contrastive-{step:06d}-{val/total_loss:.4f}" if distill_cfg
-                     else "contrastive-{step:06d}-{val/contrastive_loss:.4f}",
+            filename=ckpt_fname,
         ),
         LearningRateMonitor(logging_interval="step"),
         SignalCheckpointCallback(checkpoint_dir=cfg.checkpoint_dir),
     ]
 
-    # Stage 1 SimCSE: add in-training biomedical eval + anomaly detection
+    # Stage 1 SimCSE: in-training biomedical eval + anomaly detection
     if contrastive_mode == "simcse":
         callbacks.append(
             ContrastiveEvalCallback(
@@ -605,8 +765,8 @@ def main(cfg: DictConfig):
         )
         callbacks.append(AnomalyDetectionCallback(max_steps=200))
 
-    # Stage 2 CLIP: retrieval metrics (R@1/5/10 i2t and t2i)
-    if contrastive_mode == "clip":
+    # CLIP / joint: retrieval metrics (R@1/5/10 i2t and t2i)
+    if contrastive_mode in ("clip", "joint"):
         callbacks.append(CLIPRetrievalCallback(eval_every_n_epochs=1, max_samples=0))
 
     # Loggers

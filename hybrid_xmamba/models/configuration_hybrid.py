@@ -87,6 +87,11 @@ class HybridConfig:
     # Memory optimisation
     use_gradient_checkpointing: bool = False
 
+    # Pooling strategy for contrastive encoder: "mean" or "attention".
+    # "attention" uses a single learnable query; baselines should stay "mean"
+    # to serve as a clean ablation control.
+    pooling_strategy: str = "mean"
+
     # Contrastive encoder — projection head dropout.
     # SimCSE view diversity comes from dropout; 0.3 gives meaningful
     # positive-pair variance for a pretrained backbone (default 0.1 is too
