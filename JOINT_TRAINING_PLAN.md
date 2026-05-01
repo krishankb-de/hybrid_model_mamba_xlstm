@@ -51,7 +51,7 @@ Per supervisor (Strategies 1-4): collapse Stage 1+Stage 2 into one **joint train
 - [x] **2F** — Created `scripts/train_joint_mimic.sh`. Final `validate_for_willi.sh` green. Committed + pushed.
 
 ### Phase 3 — Local CPU smoke test (~10 min)
-- [ ] `scripts/smoke_test_joint.py`: 5 steps on 16-pair Indiana subset → all 3 losses finite, decreasing; gradients flow into img_proj, pooler.q, distill_proj, backbone.
+- [x] `scripts/smoke_test_joint.py`: 5 steps on 16-pair Indiana subset → all 3 losses finite, decreasing; gradients flow into img_proj, pooler.q, distill_proj, backbone.
 
 ### Phase 4 — MIMIC-CXR data prep on willi (~30 min)
 - [ ] Verify `itsanmolgupta/mimic-cxr-dataset` loads; record column names (for `findings_field`/`impression_field`).
