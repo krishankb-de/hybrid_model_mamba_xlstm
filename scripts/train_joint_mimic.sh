@@ -105,7 +105,7 @@ python scripts/train_contrastive.py \
   --config-name config_70m \
   model=hybrid_70m \
   dataset=mimic_cxr \
-  distill=joint_mimic \
+  +distill=joint_mimic \
   trainer=a100_single_gpu \
   contrastive_mode=joint \
   trainer.max_steps=10000 \
