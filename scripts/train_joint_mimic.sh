@@ -3,7 +3,7 @@
 #SBATCH --account=mitarb
 #SBATCH --gres=gpu:mitarb:1
 #SBATCH --mem=40G
-#SBATCH --time=12:00:00
+#SBATCH --time=30:00:00
 #SBATCH --job-name=joint_mimic_cxr
 #SBATCH --output=/scratch/bhushkri/hybrid_xmamba_a100_70m_40/logs/%x_%j.log
 #SBATCH --error=/scratch/bhushkri/hybrid_xmamba_a100_70m_40/logs/%x_%j.log
