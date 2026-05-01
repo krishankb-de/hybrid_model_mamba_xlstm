@@ -15,10 +15,11 @@
 dataset_name: "mimic_cxr"
 hf_repo_id: "itsanmolgupta/mimic-cxr-dataset"
 
-# Splits
-train_split: "train"
-validation_split: "validation"
-test_split: "test"
+# Splits — itsanmolgupta/mimic-cxr-dataset only has "train"; slice it.
+# 90/10 split: ~27569 train / ~3063 val.
+train_split: "train[:90%]"
+validation_split: "train[90%:]"
+test_split: "train[90%:]"
 
 # Tokenization — match Stage 0 pretraining tokenizer
 tokenizer: "gpt2"
