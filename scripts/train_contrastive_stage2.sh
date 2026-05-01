@@ -87,6 +87,7 @@ python scripts/train_contrastive.py \
   model.learning_rate=3e-5 \
   model.warmup_steps=200 \
   model.gradient_clip_val=1.0 \
+  model.use_gradient_checkpointing=true \
   +model.freeze_text_encoder_steps=500 \
   +model.vit_unfreeze_blocks=2 \
   +model.vit_lr=1e-6
