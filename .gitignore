@@ -84,12 +84,10 @@ multirun/
 *.md   
 
 # Allow specific markdown files
-!PHASE_PLAN.md
-!STAGE1_RECOVERY_PLAN.md
+!JOINT_TRAINING_PLAN.md
 
 
 
 
-# Multi-phase plan local state (regenerated from PHASE_PLAN.md checkboxes)
-phase_state.json
-stage1_recovery_state.json
+# Multi-phase plan local state (regenerated from JOINT_TRAINING_PLAN.md checkboxes)
+joint_training_state.json
