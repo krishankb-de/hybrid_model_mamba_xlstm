@@ -58,13 +58,14 @@ Per supervisor (Strategies 1-4): collapse Stage 1+Stage 2 into one **joint train
 - [x] Pre-cache one full epoch — **embedded as pre-flight inside `train_joint_mimic.sh`** so willi hits the same HF endpoint into `MIMIC_CACHE_DIR` (default `/scratch/bhushkri/mimic_cxr_cache`) before the trainer reads. Single sbatch covers both verify+precache and training. Set `SKIP_VERIFY=1` to skip on warm-cache resubmits.
 
 ### Phase 5 — Joint training on willi A100 40GB (~10–12h)
-- [ ] From parent dir: `cd /scratch/bhushkri/hybrid_xmamba_a100_70m_40 && sbatch hybrid_model_mamba_xlstm/scripts/train_joint_mimic.sh` (pre-flight verify+precache → max_steps=10000, val_check=500, effective batch 128 = bs16×accum8, freeze_text_encoder_steps=500, init from Stage 0 ckpt).
-- [ ] Live monitor: step 500 `L_clip < 4.0` & cosine-hist not peaked at 1.0; step 2000 `R@10 > 0.207`; step 5000 `R@10 ≥ 0.30`; step 10000 `R@10 ≥ 0.40`.
-- [ ] **Kill gate at step 3000**: `R@10 < 0.15` AND not rising → scancel.
+- [x] From parent dir: `cd /scratch/bhushkri/hybrid_xmamba_a100_70m_40 && sbatch hybrid_model_mamba_xlstm/scripts/train_joint_mimic.sh` (pre-flight verify+precache → max_steps=10000, val_check=500, effective batch 128 = bs16×accum8, freeze_text_encoder_steps=500, init from Stage 0 ckpt).
+- [x] Live monitor: peak MIMIC val R@10=9.37% at step~1915, classic overfit onset after step~3010.
+- [x] **Kill gate**: job killed past optimum (~step 6657). Best ckpt: `contrastive-step=001915-val/total_loss=1.9140.ckpt`.
 
 ### Phase 6 — Eval + decision gate (~1h)
-- [ ] Run `evaluate_retrieval.py` on Indiana CXR test (held out → cross-dataset eval).
-- [ ] Run `eval_stage1_suite.sh` on the joint ckpt for STS-B/BIOSSES regression check.
+- [ ] Run `eval_joint_indiana_cxr.sh` → Indiana/IU-Xray test (743) cross-dataset eval.
+- [ ] Run `eval_joint_mimic_cxr_val.sh` → MIMIC val (3063) in-distribution sanity check.
+- [ ] (Optional) Run `eval_stage1_suite.sh` on joint ckpt for STS-B regression check.
 - [ ] **Decision**:
   - Pass: `Indiana i2t R@10 ≥ 0.40 AND STS-B ≥ 0.5` → done.
   - Partial: `R@10 ∈ [0.25, 0.40)` → Phase 7.
