@@ -128,12 +128,28 @@ def build_img_proj(img_proj_state: Dict, device: str) -> nn.Sequential:
 
 def load_image_encoder(device: str):
     import open_clip
+
+    def _get_dim(clip_model) -> int:
+        if hasattr(clip_model, 'embed_dim'):
+            return clip_model.embed_dim
+        if hasattr(clip_model.visual, 'output_dim'):
+            return clip_model.visual.output_dim
+        if hasattr(clip_model.visual, 'embed_dim'):
+            return clip_model.visual.embed_dim
+        with torch.no_grad():
+            dummy = torch.zeros(1, 3, 224, 224)
+            return clip_model.visual.cpu()(dummy).shape[-1]
+
     try:
         clip_model, _ = open_clip.create_model_from_pretrained("hf-hub:" + BIOMEDCLIP_ID)
-        print(f"  ✓ BiomedCLIP image encoder loaded (dim={clip_model.visual.output_dim if hasattr(clip_model.visual,'output_dim') else clip_model.embed_dim})")
+        model_name = "BiomedCLIP"
     except Exception as e:
-        print(f"  BiomedCLIP failed ({e}), falling back to {FALLBACK_CLIP_ID}")
+        print(f"  BiomedCLIP load failed ({e}), falling back to {FALLBACK_CLIP_ID}")
         clip_model, _ = open_clip.create_model_from_pretrained("hf-hub:" + FALLBACK_CLIP_ID)
+        model_name = "laion CLIP (fallback)"
+
+    dim = _get_dim(clip_model)
+    print(f"  ✓ {model_name} image encoder loaded (dim={dim})")
     enc = clip_model.visual.to(device).eval()
     for p in enc.parameters():
         p.requires_grad = False
