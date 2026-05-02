@@ -104,7 +104,7 @@ def load_text_encoder(text_state: Dict, device: str) -> HybridTextEncoder:
         max_position_embeddings=1024,
         pooling_strategy="attention",
     )
-    model = HybridTextEncoder(cfg, embed_dim=dim, pooling_strategy="attention")
+    model = HybridTextEncoder(cfg, embed_dim=dim)
     missing, unexpected = model.load_state_dict(text_state, strict=False)
     if missing:
         print(f"  [text encoder] {len(missing)} missing keys (first 5): {missing[:5]}")
