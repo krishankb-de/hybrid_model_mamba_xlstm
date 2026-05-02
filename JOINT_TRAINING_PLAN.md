@@ -63,15 +63,21 @@ Per supervisor (Strategies 1-4): collapse Stage 1+Stage 2 into one **joint train
 - [x] **Kill gate**: job killed past optimum (~step 6657). Best ckpt: `contrastive-step=001915-val/total_loss=1.9140.ckpt`.
 
 ### Phase 6 — Eval + decision gate (~1h)
-- [ ] Run `eval_joint_indiana_cxr.sh` → Indiana/IU-Xray test (743) cross-dataset eval.
-- [ ] Run `eval_joint_mimic_cxr_val.sh` → MIMIC val (3063) in-distribution sanity check.
-- [ ] (Optional) Run `eval_stage1_suite.sh` on joint ckpt for STS-B regression check.
-- [ ] **Decision**:
-  - Pass: `Indiana i2t R@10 ≥ 0.40 AND STS-B ≥ 0.5` → done.
-  - Partial: `R@10 ∈ [0.25, 0.40)` → Phase 7.
-  - Fail: `R@10 < 0.25` OR text quality collapsed → debug loss weights, return to Phase 2.
+- [x] Run `eval_joint_indiana_cxr.sh` → Indiana i2t R@10=**3.10%**, t2i R@10=6.06% (jobs 1250/1251).
+- [x] Run `eval_joint_mimic_cxr_val.sh` → MIMIC val i2t R@10=**8.55%**, paired cos=0.314.
+- [x] **Decision: FAIL** — R@10 < 0.25 on both datasets.
+  - Root cause: InfoNCE ceiling at 9.4% with only 15 in-batch negatives (batch_size=16). R@10 plateaued from epoch 9; structural, not fixable by more steps or regularisation.
+  - Action: Phase 5b (v2 retry) — double negatives, reduce KD weight.
 
-### Phase 7 — FAISS hard-neg mining (CONDITIONAL — only if Phase 6 = Partial)
+### Phase 5b — Joint training v2 (~6h, `train_joint_mimic_v2.sh`)
+- [ ] On willi: clean old checkpoints (keep step=001915 only), then submit:
+  `cd /scratch/bhushkri/hybrid_xmamba_a100_70m_40 && sbatch hybrid_model_mamba_xlstm/scripts/train_joint_mimic_v2.sh`
+- [ ] **v2 changes**: `batch_size=32` (31 negatives), `accum=4`, `alpha_kd=0.1`, `max_steps=5000`, `val_check=250`.
+- [ ] Live monitor: step 500 `val/clip_loss < 2.0`; step 1500 `R@10 > 0.10`; step 3000 `R@10 ≥ 0.20`.
+- [ ] **Kill gate at step 2000**: `R@10 < 0.10` AND not rising → scancel.
+- [ ] After job: copy log to `output_willi_server/joint_mimic_cxr_v2_<job>.log`, run Phase 6 evals.
+
+### Phase 7 — FAISS hard-neg mining (CONDITIONAL — only if Phase 6 v2 = Partial)
 - [ ] Encode 30K MIMIC reports → FAISS index → mine top-50 hard negatives per anchor (different patient).
 - [ ] Inject K=4 mined negatives per anchor into InfoNCE batch.
 - [ ] Continue training 5000 steps from Phase 5 ckpt; re-eval. Gate `R@10 ≥ 0.40`.
@@ -79,10 +85,11 @@ Per supervisor (Strategies 1-4): collapse Stage 1+Stage 2 into one **joint train
 ## Resolved decisions
 
 - Reuse Stage 0 ckpt (PPL=13.10); skip broken Stage 1 (joint training replaces it).
-- Loss weights α=0.3 / β=1.0 / γ=0.1 (no early sweep).
-- Keep SimCSE term unless OOM (anchors text geometry vs CLIP-only drift).
-- Effective batch 128 (256 OOM'd previously).
-- Phase 7 gated to `[0.25, 0.40)` only.
+- **v1** loss weights α=0.3 / β=1.0 / γ=0.1 → R@10 ceiling 9.4%. α too high.
+- **v2** loss weights α=0.1 / β=1.0 / γ=0.1 — CLIP gets 3× more relative weight vs KD.
+- Keep SimCSE term (γ=0.1 unchanged — anchors text geometry vs CLIP-only drift).
+- Effective batch 128 (256 OOM'd previously); v2 uses bs=32×accum=4 (same eff batch, 2× negatives).
+- Phase 7 gated to v2 R@10 `[0.25, 0.40)` only.
 
 ## Resumability contract
 
