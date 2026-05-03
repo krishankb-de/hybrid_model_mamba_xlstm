@@ -1,6 +1,8 @@
 # Joint Multi-Task CLIP+KD+SimCSE on MIMIC-CXR — Plan-of-Record
 
-> **Resumable plan-of-record.** Read this file + `joint_training_state.json` (gitignored, repo root) before any work. Resume at `joint_training_state.json["current_phase"]`. Checkboxes here are ground truth.
+> ⚠️ **DEPRECATED — 2026-05-03.** Superseded by `BIOMEDCLIP_KD_PLAN.md` + `biomedclip_kd_state.json`. Phases 5 / 5b / 7 of this plan plateaued at R@10 ≈ 9% (paired cos 0.21–0.29 — confirmed BiomedCLIP-image ↔ Mamba-text modality gap that PubMedBERT KD cannot bridge). Pivot: distil from BiomedCLIP's own text tower (Option D) instead of PubMedBERT. This file is retained as historical record only — do **not** resume against it.
+
+> **Resumable plan-of-record.** ~~Read this file + `joint_training_state.json` (gitignored, repo root) before any work. Resume at `joint_training_state.json["current_phase"]`. Checkboxes here are ground truth.~~
 >
 > **Full plan with all detail / rationale:** `/Users/krish/.claude/plans/previously-i-ran-the-drifting-garden.md`
 
