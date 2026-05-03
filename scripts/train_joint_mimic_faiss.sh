@@ -98,6 +98,10 @@ fi
 # -----------------------------------------------------------------------
 echo ""
 echo "=== Step 2: Joint training with hard negatives ==="
+# Paths with '=' in filenames must be single-quoted for Hydra's override grammar.
+# resume_from_checkpoint restores full model + optimizer state; lm_checkpoint
+# is NOT set here because it only loads the backbone (loses img_proj/distill_proj).
+# max_steps=7000 = 1637 (already trained) + ~5363 new steps.
 
 python scripts/train_contrastive.py \
   --config-name config_70m \
@@ -106,7 +110,7 @@ python scripts/train_contrastive.py \
   +distill=joint_mimic \
   trainer=a100_single_gpu \
   contrastive_mode=joint \
-  trainer.max_steps=5000 \
+  trainer.max_steps=7000 \
   trainer.accumulate_grad_batches=4 \
   trainer.val_check_interval=250 \
   trainer.log_every_n_steps=25 \
@@ -114,13 +118,12 @@ python scripts/train_contrastive.py \
   dataset.eval_batch_size=32 \
   dataset.num_workers=4 \
   dataset.pin_memory=true \
-  dataset.cache_dir="${MIMIC_CACHE_DIR}" \
-  dataset.hard_neg_file="${HARD_NEG_FILE}" \
+  "dataset.cache_dir=${MIMIC_CACHE_DIR}" \
+  "dataset.hard_neg_file=${HARD_NEG_FILE}" \
   dataset.hard_neg_k=4 \
   distill.alpha_kd=0.1 \
   model.use_gradient_checkpointing=true \
-  lm_checkpoint="${V2_CKPT}" \
-  resume_from_checkpoint="${V2_CKPT}" \
+  "resume_from_checkpoint='${V2_CKPT}'" \
   experiment_name=joint_mimic_cxr_faiss \
   output_dir=./outputs/joint_mimic_cxr_faiss \
   wandb.enabled=false
