@@ -77,13 +77,19 @@ Per supervisor (Strategies 1-4): collapse Stage 1+Stage 2 into one **joint train
 - [x] **Kill gate**: job killed at epoch 15 past optimum. Best ckpt: `contrastive-step=001637-val/total_loss=2.4715.ckpt`.
 - [x] After job: log at `output_willi_server/joint_mimic_v2_1253.log`. Phase 6 evals run (jobs 1269/1270).
 
-### Phase 7 — FAISS hard-neg mining (ACTIVATED — in-batch strategies exhausted)
+### Phase 7 — FAISS hard-neg mining (COMPLETE — FAIL)
 - [x] Code: `scripts/mine_hard_negatives.py` (chunked torch matmul, no FAISS dep). `MIMICHardNegDataset` in `train_contrastive.py`. `_clip_loss_with_hard_negs` in `lightning_module.py`. `configs/dataset/mimic_cxr.yaml` adds `hard_neg_file/hard_neg_k`. validate_for_willi.sh green.
-- [x] SLURM: `scripts/train_joint_mimic_faiss.sh` — Step 1 mines top-50 negs (~20 min), Step 2 resumes training from v2 best ckpt with K=4 hard negs injected per step.
-- [ ] On willi: `cd /scratch/bhushkri/hybrid_xmamba_a100_70m_40 && sbatch hybrid_model_mamba_xlstm/scripts/train_joint_mimic_faiss.sh`
-- [ ] Live monitor: val/clip_loss falling AND R@10 > 10% by epoch 5. Kill gate: R@10 stagnant at 9% after epoch 8.
-- [ ] After job: copy log → `output_willi_server/joint_mimic_faiss_<job>.log`. Re-run Phase 6 evals on best ckpt.
-- [ ] If still < 0.25 after FAISS: consider unfreezing BiomedCLIP visual encoder or deeper img_proj.
+- [x] SLURM: `scripts/train_joint_mimic_faiss.sh` — Step 1 mined top-50 negs (27570×50 index saved). Step 2 resumed from v2 best ckpt (job 1274).
+- [x] Live monitor (6 val checks): R@10 range 8.36–8.98% — never exceeded v2 peak 9.76%. Val/clip floor 2.47 unchanged. **Kill gate triggered — job killed.**
+- [x] **FAIL verdict**: Hard negatives raised training difficulty (train/clip 2.72 vs v2 1.57) but zero improvement in val R@10 or val/clip. Structural modality gap confirmed.
+
+**Root cause (final):** BiomedCLIP visual encoder is tuned to align with PubMedBERT text. Mamba produces a fundamentally different text space. Paired cosine 0.21–0.29 after full training with all negative strategies exhausted. A 2-layer MLP bridge cannot close this gap.
+
+**All in-batch negative strategies exhausted. Awaiting supervisor input on:**
+- Option A: Unfreeze BiomedCLIP ViT (`vit_unfreeze_blocks > 0`)
+- Option B: 3-layer `img_proj` with LayerNorm
+- Option C: KD from BiomedCLIP text encoder → Mamba (pulls Mamba into BiomedCLIP's native space)
+- Option D: Cross-attention bridge (high VRAM, complex)
 
 ## Resolved decisions
 
