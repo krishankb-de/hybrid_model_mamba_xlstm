@@ -110,7 +110,7 @@ python scripts/train_contrastive.py \
   +distill=joint_mimic \
   trainer=a100_single_gpu \
   contrastive_mode=joint \
-  trainer.max_steps=7000 \
+  trainer.max_steps=4500 \
   trainer.accumulate_grad_batches=4 \
   trainer.val_check_interval=250 \
   trainer.log_every_n_steps=25 \
