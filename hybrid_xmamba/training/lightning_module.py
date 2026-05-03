@@ -439,6 +439,38 @@ class HybridContrastiveLightningModule(HybridLightningModule):
     # ------------------------------------------------------------------
     # Contrastive loss (symmetric NT-Xent / InfoNCE)
     # ------------------------------------------------------------------
+    def _clip_loss_with_hard_negs(
+        self,
+        z_img: torch.Tensor,
+        z_txt: torch.Tensor,
+        z_hard: torch.Tensor,
+        logit_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        """InfoNCE with K pre-mined hard negatives appended to the text bank.
+
+        Args:
+            z_img:  L2-normalised image embeddings [B, D].
+            z_txt:  L2-normalised positive text embeddings [B, D].
+            z_hard: L2-normalised hard neg text embeddings [B, K, D].
+            logit_scale: Learnable temperature scalar.
+
+        The i2t logit matrix is [B, B + B*K]: positives on the diagonal,
+        hard negs for item i at columns B + i*K .. B + (i+1)*K.
+        t2i uses the standard symmetric [B, B] matrix (image bank unchanged).
+        """
+        scale = logit_scale.exp().clamp(min=1.0, max=100.0)
+        B, K, D = z_hard.shape
+        z_hard_flat = z_hard.view(B * K, D)             # [B*K, D]
+        z_txt_aug = torch.cat([z_txt, z_hard_flat], dim=0)  # [B + B*K, D]
+
+        logits_i2t = scale * (z_img @ z_txt_aug.T)       # [B, B + B*K]
+        logits_t2i = scale * (z_txt @ z_img.T)           # [B, B]
+        labels = torch.arange(B, device=z_img.device)
+
+        loss_i2t = F.cross_entropy(logits_i2t, labels)
+        loss_t2i = F.cross_entropy(logits_t2i, labels)
+        return (loss_i2t + loss_t2i) / 2.0
+
     def _nt_xent_loss(
         self,
         z1: torch.Tensor,
@@ -826,7 +858,7 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         # Text embedding view 1 — reused for CLIP, KD, and SimCSE anchor
         z_text = self.model.encode(input_ids, attention_mask=attention_mask)
 
-        # L_CLIP
+        # L_CLIP (with optional hard negatives)
         if pixel_values is not None and self.image_encoder is not None:
             if self.vit_unfreeze_blocks > 0:
                 z_img_raw = self.image_encoder(pixel_values)
@@ -834,7 +866,21 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
                 with torch.no_grad():
                     z_img_raw = self.image_encoder(pixel_values)
             z_img = F.normalize(self.img_proj(z_img_raw.float()), dim=-1)
-            l_clip = self._nt_xent_loss(z_text, z_img, self.model.logit_scale)
+
+            hn_ids = batch.get("hard_neg_input_ids", None)
+            if hn_ids is not None and split == "train":
+                # hn_ids: [B, K, L] — encode hard neg texts
+                hn_mask = batch.get("hard_neg_attention_mask", None)
+                B, K, L = hn_ids.shape
+                z_hard = self.model.encode(
+                    hn_ids.view(B * K, L),
+                    attention_mask=hn_mask.view(B * K, L) if hn_mask is not None else None,
+                ).view(B, K, -1)              # [B, K, D]
+                l_clip = self._clip_loss_with_hard_negs(
+                    z_img, z_text, z_hard, self.model.logit_scale
+                )
+            else:
+                l_clip = self._nt_xent_loss(z_text, z_img, self.model.logit_scale)
         else:
             l_clip = torch.tensor(0.0, device=z_text.device)
 

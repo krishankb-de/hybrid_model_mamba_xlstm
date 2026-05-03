@@ -405,10 +405,64 @@ class MIMICJointDataset(Dataset):
         }
 
 
+class MIMICHardNegDataset(Dataset):
+    """Wraps MIMICJointDataset and appends K hard negative texts per item.
+
+    hard_neg_indices: LongTensor [N, K] — pre-mined FAISS indices into hf_dataset.
+    Training uses cfg.dataset.hard_neg_k (default 4) columns from the index.
+    """
+
+    def __init__(self, hf_dataset, student_tokenizer, teacher_tokenizer, cfg,
+                 hard_neg_indices):
+        self._base = MIMICJointDataset(hf_dataset, student_tokenizer, teacher_tokenizer, cfg)
+        self.data = hf_dataset
+        self.student_tok = student_tokenizer
+        self.max_length = cfg.dataset.max_length
+        self.k = int(cfg.dataset.get("hard_neg_k", 4))
+        self.hard_neg_indices = hard_neg_indices[:, :self.k]  # [N, K]
+        findings_field = cfg.dataset.get("findings_field", "findings")
+        impression_field = cfg.dataset.get("impression_field", "impression")
+        concat = cfg.dataset.get("concatenate_sections", True)
+        self._findings_field = findings_field
+        self._impression_field = impression_field
+        self._concat = concat
+
+    def __len__(self):
+        return len(self._base)
+
+    def _get_text(self, idx):
+        item = self.data[int(idx)]
+        findings = item.get(self._findings_field, "") or ""
+        impression = item.get(self._impression_field, "") or ""
+        if self._concat:
+            return "Findings: {} Impression: {}".format(findings, impression).strip()
+        return findings or impression
+
+    def __getitem__(self, idx):
+        base_item = self._base[idx]
+
+        neg_indices = self.hard_neg_indices[idx]  # [K]
+        hn_ids_list = []
+        hn_mask_list = []
+        for neg_idx in neg_indices.tolist():
+            text = self._get_text(neg_idx)
+            enc = self.student_tok(
+                text, max_length=self.max_length,
+                truncation=True, padding="max_length", return_tensors="pt",
+            )
+            hn_ids_list.append(enc["input_ids"].squeeze(0))
+            hn_mask_list.append(enc["attention_mask"].squeeze(0))
+
+        base_item["hard_neg_input_ids"] = torch.stack(hn_ids_list, dim=0)       # [K, L]
+        base_item["hard_neg_attention_mask"] = torch.stack(hn_mask_list, dim=0)  # [K, L]
+        return base_item
+
+
 def load_mimic_cxr(cfg, split, tokenizer, teacher_tokenizer=None):
     """Load MIMIC-CXR from HuggingFace for joint training.
 
     When teacher_tokenizer is provided, returns MIMICJointDataset (dual tokens + image).
+    When cfg.dataset.hard_neg_file is set (train split only), wraps in MIMICHardNegDataset.
     Otherwise returns ImageTextDataset (image + student tokens only).
     """
     hf_repo = cfg.dataset.get("hf_repo_id", "itsanmolgupta/mimic-cxr-dataset")
@@ -431,9 +485,24 @@ def load_mimic_cxr(cfg, split, tokenizer, teacher_tokenizer=None):
             "Check hf_repo_id in mimic_cxr.yaml."
         )
 
-    if teacher_tokenizer is not None:
-        return MIMICJointDataset(ds, tokenizer, teacher_tokenizer, cfg)
-    return ImageTextDataset(ds, tokenizer, cfg)
+    if teacher_tokenizer is None:
+        return ImageTextDataset(ds, tokenizer, cfg)
+
+    hard_neg_file = cfg.dataset.get("hard_neg_file", None)
+    if hard_neg_file and split == "train":
+        print(f"Loading hard neg index from: {hard_neg_file}")
+        payload = torch.load(hard_neg_file, map_location="cpu", weights_only=False)
+        hard_neg_indices = payload["indices"]  # [N, K_stored]
+        k_use = int(cfg.dataset.get("hard_neg_k", 4))
+        print(f"  Hard neg index: {hard_neg_indices.shape}, using top-{k_use} per anchor")
+        if len(hard_neg_indices) != len(ds):
+            raise RuntimeError(
+                f"Hard neg index length {len(hard_neg_indices)} != dataset length {len(ds)}. "
+                "Re-run mine_hard_negatives.py with the same train split."
+            )
+        return MIMICHardNegDataset(ds, tokenizer, teacher_tokenizer, cfg, hard_neg_indices)
+
+    return MIMICJointDataset(ds, tokenizer, teacher_tokenizer, cfg)
 
 
 def load_indiana_cxr(cfg, split: str, tokenizer):

@@ -51,3 +51,7 @@ image_encoder_name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
 findings_field: "findings"
 impression_field: "impression"
 concatenate_sections: true
+
+# Phase 7 FAISS hard negatives (null = disabled; set via CLI override)
+hard_neg_file: null
+hard_neg_k: 4

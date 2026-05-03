@@ -70,17 +70,20 @@ Per supervisor (Strategies 1-4): collapse Stage 1+Stage 2 into one **joint train
   - Action: Phase 5b (v2 retry) — double negatives, reduce KD weight.
 
 ### Phase 5b — Joint training v2 (~6h, `train_joint_mimic_v2.sh`)
-- [ ] On willi: clean old checkpoints (keep step=001915 only), then submit:
+- [x] On willi: clean old checkpoints (keep step=001915 only), then submit:
   `cd /scratch/bhushkri/hybrid_xmamba_a100_70m_40 && sbatch hybrid_model_mamba_xlstm/scripts/train_joint_mimic_v2.sh`
-- [ ] **v2 changes**: `batch_size=32` (31 negatives), `accum=4`, `alpha_kd=0.1`, `max_steps=5000`, `val_check=250`.
-- [ ] Live monitor: step 500 `val/clip_loss < 2.0`; step 1500 `R@10 > 0.10`; step 3000 `R@10 ≥ 0.20`.
-- [ ] **Kill gate at step 2000**: `R@10 < 0.10` AND not rising → scancel.
-- [ ] After job: copy log to `output_willi_server/joint_mimic_cxr_v2_<job>.log`, run Phase 6 evals.
+- [x] **v2 changes**: `batch_size=32` (31 negatives), `accum=4`, `alpha_kd=0.1`, `max_steps=5000`, `val_check=250`.
+- [x] Live monitor: peak MIMIC val R@10=9.76% at epoch 8 (step ~1637). Overfit onset epoch 8 (val/clip 2.47→2.56). Killed epoch 15.
+- [x] **Kill gate**: job killed at epoch 15 past optimum. Best ckpt: `contrastive-step=001637-val/total_loss=2.4715.ckpt`.
+- [x] After job: log at `output_willi_server/joint_mimic_v2_1253.log`. Phase 6 evals run (jobs 1269/1270).
 
-### Phase 7 — FAISS hard-neg mining (CONDITIONAL — only if Phase 6 v2 = Partial)
-- [ ] Encode 30K MIMIC reports → FAISS index → mine top-50 hard negatives per anchor (different patient).
-- [ ] Inject K=4 mined negatives per anchor into InfoNCE batch.
-- [ ] Continue training 5000 steps from Phase 5 ckpt; re-eval. Gate `R@10 ≥ 0.40`.
+### Phase 7 — FAISS hard-neg mining (ACTIVATED — in-batch strategies exhausted)
+- [x] Code: `scripts/mine_hard_negatives.py` (chunked torch matmul, no FAISS dep). `MIMICHardNegDataset` in `train_contrastive.py`. `_clip_loss_with_hard_negs` in `lightning_module.py`. `configs/dataset/mimic_cxr.yaml` adds `hard_neg_file/hard_neg_k`. validate_for_willi.sh green.
+- [x] SLURM: `scripts/train_joint_mimic_faiss.sh` — Step 1 mines top-50 negs (~20 min), Step 2 resumes training from v2 best ckpt with K=4 hard negs injected per step.
+- [ ] On willi: `cd /scratch/bhushkri/hybrid_xmamba_a100_70m_40 && sbatch hybrid_model_mamba_xlstm/scripts/train_joint_mimic_faiss.sh`
+- [ ] Live monitor: val/clip_loss falling AND R@10 > 10% by epoch 5. Kill gate: R@10 stagnant at 9% after epoch 8.
+- [ ] After job: copy log → `output_willi_server/joint_mimic_faiss_<job>.log`. Re-run Phase 6 evals on best ckpt.
+- [ ] If still < 0.25 after FAISS: consider unfreezing BiomedCLIP visual encoder or deeper img_proj.
 
 ## Resolved decisions
 
@@ -89,7 +92,8 @@ Per supervisor (Strategies 1-4): collapse Stage 1+Stage 2 into one **joint train
 - **v2** loss weights α=0.1 / β=1.0 / γ=0.1 — CLIP gets 3× more relative weight vs KD.
 - Keep SimCSE term (γ=0.1 unchanged — anchors text geometry vs CLIP-only drift).
 - Effective batch 128 (256 OOM'd previously); v2 uses bs=32×accum=4 (same eff batch, 2× negatives).
-- Phase 7 gated to v2 R@10 `[0.25, 0.40)` only.
+- **v2 result**: Indiana i2t R@10=4.17%, MIMIC val i2t R@10=8.95%. Paired cos 0.29. Only +0.4pp vs v1 despite 2× negatives → structural ceiling confirmed.
+- Phase 7 FAISS activated despite < 0.25 gate — no remaining in-batch strategies. Start from v2 best ckpt.
 
 ## Resumability contract
 
