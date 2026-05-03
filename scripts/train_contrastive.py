@@ -883,10 +883,12 @@ def main(cfg: DictConfig):
     print("Starting contrastive training...")
 
     trainer.fit(
-        lightning_module, 
-        train_dataloaders=train_dl, 
+        lightning_module,
+        train_dataloaders=train_dl,
         val_dataloaders=val_dl,
-        ckpt_path=resume_ckpt
+        ckpt_path=resume_ckpt,
+        # PyTorch 2.6+ defaults weights_only=True, which blocks BertModel in ckpt
+        weights_only=False,
     )
     print("Done.")
 
