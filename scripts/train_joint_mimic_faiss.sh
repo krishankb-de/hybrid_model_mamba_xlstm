@@ -123,7 +123,7 @@ python scripts/train_contrastive.py \
   dataset.hard_neg_k=4 \
   distill.alpha_kd=0.1 \
   model.use_gradient_checkpointing=true \
-  "resume_from_checkpoint='${V2_CKPT}'" \
+  "+resume_from_checkpoint='${V2_CKPT}'" \
   experiment_name=joint_mimic_cxr_faiss \
   output_dir=./outputs/joint_mimic_cxr_faiss \
   wandb.enabled=false
