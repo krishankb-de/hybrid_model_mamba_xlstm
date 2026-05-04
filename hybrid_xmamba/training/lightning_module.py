@@ -681,10 +681,27 @@ class DistillContrastiveLightningModule(HybridContrastiveLightningModule):
         return total_loss
 
 
+def _load_biomedclip_text_teacher():
+    """Load BiomedCLIP wrapper exposing ``encode_text`` as the KD teacher.
+
+    Returns the full open_clip CLIP wrapper (frozen, eval). The 512-d
+    post-projection joint embedding is shared with the image tower by
+    construction — this is the reason for the Phase 4 pivot.
+    """
+    import open_clip
+    model, _ = open_clip.create_model_from_pretrained(
+        'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'
+    )
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
+    return model
+
+
 class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
     """Joint KD + CLIP + SimCSE training on MIMIC-CXR.
 
-    Loss = α·L_KD(PubMedBERT) + β·L_CLIP(BiomedCLIP) + γ·L_SimCSE
+    Loss = α·L_KD(BiomedCLIP-text) + β·L_CLIP(BiomedCLIP) + γ·L_SimCSE
 
     Batch must contain: input_ids, attention_mask, pixel_values,
     teacher_input_ids, teacher_attention_mask.
@@ -735,7 +752,9 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         self.head_lr = head_lr
 
         student_dim = model.embed_dim
-        teacher_dim = teacher.config.hidden_size
+        # BiomedCLIP joint embedding is 512-d by construction (open_clip
+        # CLIP wrapper has no .config.hidden_size).
+        teacher_dim = 512
         self.distill_proj = nn.Sequential(
             nn.Linear(student_dim, teacher_dim, bias=False),
             nn.GELU(),
@@ -844,18 +863,16 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
             z_text, z_text2, self.model.logit_scale, fixed_scale=20.0
         )
 
-        # L_KD — cosine distillation toward PubMedBERT CLS
+        # L_KD — cosine distillation toward BiomedCLIP text tower (512-d
+        # joint embedding shared with the image tower by construction).
         l_kd = torch.tensor(0.0, device=z_text.device)
         if "teacher_input_ids" in batch:
             t_ids = batch["teacher_input_ids"]
-            t_mask = batch.get("teacher_attention_mask")
             with torch.no_grad():
-                t_out = self.teacher(input_ids=t_ids, attention_mask=t_mask)
-                t_cls = F.normalize(
-                    t_out.last_hidden_state[:, 0, :].float(), dim=-1
-                )
+                t_emb = self.teacher.encode_text(t_ids)  # (B, 512)
+                t_emb = F.normalize(t_emb.float(), dim=-1)
             z_proj = F.normalize(self.distill_proj(z_text.float()), dim=-1)
-            l_kd = (1.0 - F.cosine_similarity(z_proj, t_cls, dim=-1)).mean()
+            l_kd = (1.0 - F.cosine_similarity(z_proj, t_emb, dim=-1)).mean()
 
         total = (
             self.alpha_kd * l_kd

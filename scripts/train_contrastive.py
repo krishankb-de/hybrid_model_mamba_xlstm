@@ -346,9 +346,16 @@ class MIMICJointDataset(Dataset):
     def __init__(self, hf_dataset, student_tokenizer, teacher_tokenizer, cfg):
         self.data = hf_dataset
         self.student_tok = student_tokenizer
+        # BiomedCLIP open_clip tokenizer is Callable[[List[str]], LongTensor]
+        # (no `pad_token_id`, no kwargs). HuggingFace AutoTokenizer has both.
+        # Wrap the open_clip path so __getitem__ stays uniform.
+        self._teacher_is_hf = hasattr(teacher_tokenizer, "pad_token_id")
         self.teacher_tok = teacher_tokenizer
         self.max_length = cfg.dataset.max_length
-        self.teacher_max_length = cfg.dataset.get("teacher_max_length", 512)
+        # BiomedCLIP context window is fixed at 256; legacy PubMedBERT uses cfg value.
+        self.teacher_max_length = (
+            cfg.dataset.get("teacher_max_length", 512) if self._teacher_is_hf else 256
+        )
         self.findings_field = cfg.dataset.get("findings_field", "findings")
         self.impression_field = cfg.dataset.get("impression_field", "impression")
         self.concat = cfg.dataset.get("concatenate_sections", True)
@@ -380,10 +387,18 @@ class MIMICJointDataset(Dataset):
             text, max_length=self.max_length,
             truncation=True, padding="max_length", return_tensors="pt",
         )
-        t_enc = self.teacher_tok(
-            text, max_length=self.teacher_max_length,
-            truncation=True, padding="max_length", return_tensors="pt",
-        )
+        if self._teacher_is_hf:
+            t_enc = self.teacher_tok(
+                text, max_length=self.teacher_max_length,
+                truncation=True, padding="max_length", return_tensors="pt",
+            )
+            t_ids = t_enc["input_ids"].squeeze(0)
+            t_mask = t_enc["attention_mask"].squeeze(0)
+        else:
+            # open_clip tokenizer: Callable[[List[str]], LongTensor of shape (1, L)]
+            # Pads/truncates to its built-in context (256 for BiomedCLIP).
+            t_ids = self.teacher_tok([text])[0]
+            t_mask = (t_ids != 0).long()
 
         img = item.get("image")
         if img is None:
@@ -400,8 +415,8 @@ class MIMICJointDataset(Dataset):
             "input_ids":              s_enc["input_ids"].squeeze(0),
             "attention_mask":         s_enc["attention_mask"].squeeze(0),
             "pixel_values":           pixel_values,
-            "teacher_input_ids":      t_enc["input_ids"].squeeze(0),
-            "teacher_attention_mask": t_enc["attention_mask"].squeeze(0),
+            "teacher_input_ids":      t_ids,
+            "teacher_attention_mask": t_mask,
         }
 
 
@@ -636,23 +651,39 @@ def main(cfg: DictConfig):
                 "contrastive_mode=joint requires a distill config. "
                 "Add distill=joint_mimic to your command."
             )
-        teacher_name = distill_cfg.teacher_model
-        teacher_dtype_str = distill_cfg.get("teacher_dtype", "bfloat16")
-        teacher_dtype = torch.bfloat16 if teacher_dtype_str == "bfloat16" else torch.float16
 
-        print(f"\nLoading joint teacher: {teacher_name} ({teacher_dtype_str})...")
-        teacher_model = AutoModel.from_pretrained(
-            teacher_name,
-            torch_dtype=teacher_dtype,
-            low_cpu_mem_usage=True,
-        )
-        teacher_model.eval()
-        for p in teacher_model.parameters():
-            p.requires_grad_(False)
+        teacher_kind = distill_cfg.get("teacher", "pubmedbert")
+        if teacher_kind == "biomedclip_text":
+            import open_clip
+            from hybrid_xmamba.training.lightning_module import (
+                _load_biomedclip_text_teacher,
+            )
 
-        teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_name)
-        t_params = sum(p.numel() for p in teacher_model.parameters())
-        print(f"Teacher params: {t_params:,} ({t_params/1e6:.0f}M), frozen.")
+            print("\nLoading joint teacher: BiomedCLIP text tower (512-d joint)...")
+            teacher_model = _load_biomedclip_text_teacher()
+            teacher_tokenizer = open_clip.get_tokenizer(
+                'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'
+            )
+            t_params = sum(p.numel() for p in teacher_model.parameters())
+            print(f"Teacher params: {t_params:,} ({t_params/1e6:.0f}M), frozen.")
+        else:
+            teacher_name = distill_cfg.teacher_model
+            teacher_dtype_str = distill_cfg.get("teacher_dtype", "bfloat16")
+            teacher_dtype = torch.bfloat16 if teacher_dtype_str == "bfloat16" else torch.float16
+
+            print(f"\nLoading joint teacher: {teacher_name} ({teacher_dtype_str})...")
+            teacher_model = AutoModel.from_pretrained(
+                teacher_name,
+                torch_dtype=teacher_dtype,
+                low_cpu_mem_usage=True,
+            )
+            teacher_model.eval()
+            for p in teacher_model.parameters():
+                p.requires_grad_(False)
+
+            teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_name)
+            t_params = sum(p.numel() for p in teacher_model.parameters())
+            print(f"Teacher params: {t_params:,} ({t_params/1e6:.0f}M), frozen.")
 
         lightning_module = JointMultiTaskLightningModule(
             model=text_encoder,

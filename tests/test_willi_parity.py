@@ -655,17 +655,14 @@ def test_joint_module_all_losses_finite():
     )
     enc = HybridTextEncoder(cfg, embed_dim=64)
 
-    class _StubTeacher(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.config = type("C", (), {"hidden_size": 128})()
+    class _StubBiomedCLIPText(torch.nn.Module):
+        """Mimic open_clip CLIP wrapper: encode_text returns (B, 512)."""
 
-        def forward(self, input_ids, attention_mask=None):
-            B, L = input_ids.shape
-            hidden = torch.randn(B, L, 128)
-            return type("O", (), {"last_hidden_state": hidden})()
+        def encode_text(self, input_ids):
+            B = input_ids.shape[0]
+            return torch.randn(B, 512)
 
-    teacher = _StubTeacher()
+    teacher = _StubBiomedCLIPText()
 
     try:
         mod = JointMultiTaskLightningModule(
@@ -697,6 +694,13 @@ def test_joint_module_all_losses_finite():
         "teacher_input_ids": input_ids,
         "teacher_attention_mask": attn,
     }
+
+    # Phase 2 pivot: distill_proj must project into the 512-d BiomedCLIP joint
+    # space, not the legacy 768-d PubMedBERT hidden.
+    assert mod.distill_proj[-1].out_features == 512, (
+        f"distill_proj should project to 512-d (BiomedCLIP joint), "
+        f"got {mod.distill_proj[-1].out_features}"
+    )
 
     loss = mod._joint_step(batch, batch_idx=0, split="train")
     assert torch.isfinite(loss), f"Joint total loss not finite: {loss.item()}"
@@ -732,6 +736,33 @@ def test_joint_mimic_config_values():
     assert cfg.get("freeze_text_encoder_steps") == 500, (
         f"freeze_text_encoder_steps should be 500, got {cfg.get('freeze_text_encoder_steps')}"
     )
+
+
+@pytest.mark.willi_parity
+def test_biomedclip_kd_config_values():
+    """biomedclip_kd_joint.yaml must have plan-specified Phase 4 values."""
+    pytest.importorskip("yaml")
+    import yaml
+
+    cfg_path = REPO_ROOT / "configs" / "distill" / "biomedclip_kd_joint.yaml"
+    assert cfg_path.exists(), f"Missing {cfg_path}"
+    with open(cfg_path, "r") as f:
+        cfg = yaml.safe_load(f)
+
+    assert cfg.get("teacher") == "biomedclip_text", (
+        f"teacher should be 'biomedclip_text', got {cfg.get('teacher')}"
+    )
+    assert cfg.get("alpha_kd") == 0.3,   f"alpha_kd should be 0.3, got {cfg.get('alpha_kd')}"
+    assert cfg.get("beta_clip") == 1.0,  f"beta_clip should be 1.0, got {cfg.get('beta_clip')}"
+    assert cfg.get("gamma_simcse") == 0.1, f"gamma_simcse should be 0.1, got {cfg.get('gamma_simcse')}"
+    assert cfg.get("backbone_lr") == 1e-5, f"backbone_lr should be 1e-5, got {cfg.get('backbone_lr')}"
+    assert cfg.get("head_lr") == 3e-4,  f"head_lr should be 3e-4, got {cfg.get('head_lr')}"
+    assert cfg.get("freeze_text_encoder_steps") == 500, (
+        f"freeze_text_encoder_steps should be 500, got {cfg.get('freeze_text_encoder_steps')}"
+    )
+    # PubMedBERT-specific keys must NOT leak into this config.
+    for forbidden in ("teacher_model", "teacher_dtype", "teacher_max_length"):
+        assert forbidden not in cfg, f"{forbidden} is PubMedBERT-specific; remove from biomedclip_kd_joint.yaml"
 
 
 @pytest.mark.willi_parity

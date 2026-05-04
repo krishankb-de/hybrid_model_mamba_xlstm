@@ -1,0 +1,31 @@
+# BiomedCLIP-text-KD joint config (Plan-of-Record Phase 4).
+#
+# Loss = α·L_KD(BiomedCLIP-text, 512-d) + β·L_CLIP(BiomedCLIP-vit) + γ·L_SimCSE
+#
+# Pivot rationale (vs joint_mimic.yaml): the previous PubMedBERT teacher lives
+# in a 768-d space *related to but not coincident with* BiomedCLIP's 512-d
+# joint embedding. Phase 5/5b/7 plateaued at R@10 ≈ 9 % with paired cosine
+# 0.21–0.29 — the modality gap. Distilling from BiomedCLIP's own text tower
+# pulls the student into the SAME 512-d metric the image tower lives in by
+# construction, eliminating the bridging burden on img_proj.
+#
+# Loss weights: α reset to v1 baseline (0.3) — KD now PUSHES toward the CLIP
+# target space rather than competing for direction, so it should be safer than
+# v2's 0.1.
+#
+# No teacher_model / teacher_dtype / teacher_max_length keys — those are
+# PubMedBERT-specific. BiomedCLIP context is fixed at 256 tokens.
+
+teacher: "biomedclip_text"
+
+# Joint loss weights
+alpha_kd: 0.3
+beta_clip: 1.0
+gamma_simcse: 0.1
+
+# Per-group learning rates
+backbone_lr: 1.0e-5
+head_lr: 3.0e-4
+
+# Backbone freeze during head warm-up
+freeze_text_encoder_steps: 500

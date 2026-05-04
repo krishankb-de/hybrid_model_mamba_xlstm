@@ -90,12 +90,12 @@ GPT-2 toks ─▶ Mamba ─▶ proj_head   GPT-2 toks ─▶ Mamba ─▶ proj_h
 - [ ] Commit: "Pivot to BiomedCLIP text-KD plan; deprecate JOINT_TRAINING_PLAN".
 
 ### Phase 2 — Code change: BiomedCLIP text teacher (~2 hours, single subphase)
-- [ ] **2A** — Add module-level helper `_load_biomedclip_text_teacher()` in `lightning_module.py`: calls `open_clip.create_model_from_pretrained('hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224')`, freezes the whole CLIP wrapper (`requires_grad=False`, `.eval()`), returns it (keep `encode_text` API; don't reach into `.text` directly).
-- [ ] **2B** — In `JointMultiTaskLightningModule.__init__` (line 738):
+- [x] **2A** — Add module-level helper `_load_biomedclip_text_teacher()` in `lightning_module.py`: calls `open_clip.create_model_from_pretrained('hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224')`, freezes the whole CLIP wrapper (`requires_grad=False`, `.eval()`), returns it (keep `encode_text` API; don't reach into `.text` directly).
+- [x] **2B** — In `JointMultiTaskLightningModule.__init__` (line 738):
   - replace `teacher_dim = teacher.config.hidden_size` with `teacher_dim = 512` (constant; open_clip CLIP wrapper has no `.config.hidden_size`);
   - resize the existing `nn.Sequential(Linear(student,768) → GELU → Linear(768,768))` to `nn.Sequential(Linear(student,512) → GELU → Linear(512,512))` — still no bias;
   - keep `self.teacher = teacher` API (caller now passes a CLIP wrapper instead of `transformers.AutoModel`).
-- [ ] **2C** — In `_joint_step` (line 855), replace
+- [x] **2C** — In `_joint_step` (line 855), replace
   ```
   t_cls = F.normalize(t_out.last_hidden_state[:, 0, :].float(), dim=-1)
   ```
@@ -105,9 +105,9 @@ GPT-2 toks ─▶ Mamba ─▶ proj_head   GPT-2 toks ─▶ Mamba ─▶ proj_h
   t_emb = F.normalize(t_emb.float(), dim=-1)
   ```
   Keep the cosine-distance KD form: `1 - cos(distill_proj(z_text), t_emb)`.
-- [ ] **2D** — In `MIMICJointDataset` (`train_contrastive.py:339-405`): leave dataset shape (5 keys) and student tokenization untouched. Only swap the teacher tokenizer source — when `teacher_tokenizer` is the BiomedCLIP `open_clip` tokenizer, it's a `Callable[[List[str]], LongTensor]` not a HuggingFace `AutoTokenizer`, so add a small adapter inside the dataset constructor (`def _teacher_tok(text): ids = teacher_tok([text])[0]; return {"input_ids": ids, "attention_mask": (ids != 0).long()}`). teacher_max_length is fixed to 256 (BiomedCLIP context) — drop the cfg lookup.
-- [ ] **2E** — In `train_contrastive.py:633-655` (`if contrastive_mode == "joint":` block): when `distill_cfg.teacher == "biomedclip_text"`, load the teacher via the new helper and the BiomedCLIP `open_clip` tokenizer. Keep the legacy PubMedBERT branch behind `teacher: pubmedbert` for backwards compat (so `joint_mimic.yaml` still runs unchanged).
-- [ ] **2F** — Create `configs/distill/biomedclip_kd_joint.yaml`:
+- [x] **2D** — In `MIMICJointDataset` (`train_contrastive.py:339-405`): leave dataset shape (5 keys) and student tokenization untouched. Only swap the teacher tokenizer source — when `teacher_tokenizer` is the BiomedCLIP `open_clip` tokenizer, it's a `Callable[[List[str]], LongTensor]` not a HuggingFace `AutoTokenizer`, so add a small adapter inside the dataset constructor (`def _teacher_tok(text): ids = teacher_tok([text])[0]; return {"input_ids": ids, "attention_mask": (ids != 0).long()}`). teacher_max_length is fixed to 256 (BiomedCLIP context) — drop the cfg lookup.
+- [x] **2E** — In `train_contrastive.py:633-655` (`if contrastive_mode == "joint":` block): when `distill_cfg.teacher == "biomedclip_text"`, load the teacher via the new helper and the BiomedCLIP `open_clip` tokenizer. Keep the legacy PubMedBERT branch behind `teacher: pubmedbert` for backwards compat (so `joint_mimic.yaml` still runs unchanged).
+- [x] **2F** — Create `configs/distill/biomedclip_kd_joint.yaml`:
   ```yaml
   teacher: "biomedclip_text"   # NEW dispatch key
   alpha_kd: 0.3                # reset to v1 baseline; KD now PUSHES toward CLIP space
@@ -118,10 +118,10 @@ GPT-2 toks ─▶ Mamba ─▶ proj_head   GPT-2 toks ─▶ Mamba ─▶ proj_h
   freeze_text_encoder_steps: 500
   ```
   (No `teacher_model` / `teacher_dtype` / `teacher_max_length` keys — those are PubMedBERT-specific.)
-- [ ] **2G** — Extend `tests/test_willi_parity.py`:
+- [x] **2G** — Extend `tests/test_willi_parity.py`:
   - update `test_joint_module_all_losses_finite` (lines 640-712): stub `encode_text` returning `(B, 512)` instead of `last_hidden_state` stub; assert `mod.distill_proj[-1].out_features == 512`;
   - new `test_biomedclip_kd_config_values` mirroring `test_joint_mimic_config_values`.
-- [ ] **2H** — `pytest tests/ -m "not cuda and not slow" -v` green; `bash scripts/validate_for_willi.sh` green. Commit.
+- [x] **2H** — `pytest tests/ -m "not cuda and not slow" -v` green; `bash scripts/validate_for_willi.sh` green. Commit.
 
 ### Phase 3 — CPU smoke test (~10 min)
 - [ ] Adapt `scripts/smoke_test_joint.py`:
