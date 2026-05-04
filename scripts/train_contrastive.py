@@ -700,6 +700,8 @@ def main(cfg: DictConfig):
             freeze_text_encoder_steps=int(distill_cfg.get("freeze_text_encoder_steps", 500)),
             vit_unfreeze_blocks=int(cfg.model.get("vit_unfreeze_blocks", 0)),
             vit_lr=float(cfg.model.get("vit_lr", 1e-6)),
+            moco_queue_size=int(distill_cfg.get("moco_queue_size", 0)),
+            moco_momentum=float(distill_cfg.get("moco_momentum", 0.999)),
         )
         print(
             f"JointMultiTaskLightningModule: "

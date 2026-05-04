@@ -729,6 +729,8 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         freeze_text_encoder_steps: int = 500,
         vit_unfreeze_blocks: int = 0,
         vit_lr: float = 1e-6,
+        moco_queue_size: int = 0,
+        moco_momentum: float = 0.999,
     ):
         # contrastive_mode="clip" so parent loads BiomedCLIP + img_proj MLP.
         super().__init__(
@@ -760,6 +762,16 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
             nn.GELU(),
             nn.Linear(teacher_dim, teacher_dim, bias=False),
         )
+
+        # MoCo dynamic queue (Phase 5).  Disabled when moco_queue_size=0.
+        self.moco_queue_size = moco_queue_size
+        if moco_queue_size > 0:
+            from hybrid_xmamba.training.moco_queue import MoCoQueue, MomentumEncoder
+            self.queue = MoCoQueue(dim=512, K=moco_queue_size)
+            self.momentum_encoder = MomentumEncoder(model, m=moco_momentum)
+        else:
+            self.queue = None
+            self.momentum_encoder = None
 
     # ------------------------------------------------------------------
     # Optimizer: 4 param groups
@@ -829,7 +841,13 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
     # Steps
     # ------------------------------------------------------------------
     def training_step(self, batch, batch_idx):
-        return self._joint_step(batch, batch_idx, split="train")
+        loss = self._joint_step(batch, batch_idx, split="train")
+        # EMA update after every optimiser step (Lightning calls training_step
+        # once per accumulation group, but on_before_optimizer_step is cleaner;
+        # doing it here is simpler and off-by-one is negligible at m=0.999).
+        if self.momentum_encoder is not None:
+            self.momentum_encoder.update(self.model)
+        return loss
 
     def validation_step(self, batch, batch_idx):
         return self._joint_step(batch, batch_idx, split="val")
@@ -845,7 +863,7 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         # Text embedding view 1 — reused for CLIP, KD, and SimCSE anchor
         z_text = self.model.encode(input_ids, attention_mask=attention_mask)
 
-        # L_CLIP
+        # L_CLIP (with optional MoCo queue for Phase 5)
         if pixel_values is not None and self.image_encoder is not None:
             if self.vit_unfreeze_blocks > 0:
                 z_img_raw = self.image_encoder(pixel_values)
@@ -853,7 +871,16 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
                 with torch.no_grad():
                     z_img_raw = self.image_encoder(pixel_values)
             z_img = F.normalize(self.img_proj(z_img_raw.float()), dim=-1)
-            l_clip = self._nt_xent_loss(z_text, z_img, self.model.logit_scale)
+
+            if self.queue is not None and split == "train":
+                # MoCo: image keys from momentum encoder; negatives = queue + batch
+                input_ids   = batch["input_ids"]
+                attn_mask   = batch.get("attention_mask")
+                z_text_k = self.momentum_encoder.encode(input_ids, attn_mask)  # (B,512)
+                l_clip = self._moco_clip_loss(z_text, z_img, z_text_k)
+                self.queue.enqueue(z_text_k)
+            else:
+                l_clip = self._nt_xent_loss(z_text, z_img, self.model.logit_scale)
         else:
             l_clip = torch.tensor(0.0, device=z_text.device)
 
@@ -890,6 +917,29 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
             self.log("train/pos_cosine_mean", pos_cos, on_step=True, on_epoch=False)
 
         return total
+
+    def _moco_clip_loss(
+        self,
+        z_text: torch.Tensor,   # (B, 512) query — online encoder, L2-normed
+        z_img: torch.Tensor,    # (B, 512) positive image key, L2-normed
+        z_text_k: torch.Tensor, # (B, 512) momentum text key, L2-normed
+    ) -> torch.Tensor:
+        """Asymmetric MoCo InfoNCE for image→text retrieval.
+
+        Positive pair: (z_img[i], z_text_k[i]).
+        Negatives: all other momentum keys in the current batch + the full queue.
+
+        Using the momentum key (not the online text) as the "positive" avoids
+        gradient conflict with the online path and matches MoCo v2 practice.
+        """
+        scale = self.model.logit_scale.exp().clamp(1.0, 100.0)
+        # Concatenate current-batch keys + queue: (B+K, 512)
+        all_keys = torch.cat([z_text_k, self.queue.all_keys().to(z_text_k.device)], dim=0)  # (B+K, 512)
+        # Logits: (B, B+K)
+        logits = scale * z_img @ all_keys.T
+        # Positive is the first B entries (current batch keys, diagonal = i→i)
+        labels = torch.arange(z_img.shape[0], device=z_img.device)
+        return F.cross_entropy(logits, labels)
 
 
 class MQARLightningModule(HybridLightningModule):

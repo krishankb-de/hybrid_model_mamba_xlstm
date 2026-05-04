@@ -766,6 +766,67 @@ def test_biomedclip_kd_config_values():
 
 
 @pytest.mark.willi_parity
+def test_moco_queue_shape_and_enqueue():
+    """MoCoQueue: buffer shape correct; enqueue fills and wraps correctly."""
+    from hybrid_xmamba.training.moco_queue import MoCoQueue
+    import torch.nn.functional as F
+
+    K, dim, B = 64, 16, 8
+    q = MoCoQueue(dim=dim, K=K)
+    assert q.queue.shape == (dim, K), f"Expected ({dim},{K}), got {q.queue.shape}"
+
+    # Fill with known values and verify ptr advances
+    keys = F.normalize(torch.randn(B, dim), dim=-1)
+    q.enqueue(keys)
+    assert int(q.queue_ptr) == B, f"ptr should be {B}, got {int(q.queue_ptr)}"
+
+    # Verify stored keys match
+    stored = q.all_keys()[:B]  # first B rows
+    assert torch.allclose(stored, keys, atol=1e-5), "Stored keys don't match enqueued"
+
+    # Fill remaining capacity (K - B already written) then verify wrap-around
+    for _ in range(K // B - 1):
+        q.enqueue(F.normalize(torch.randn(B, dim), dim=-1))
+    assert int(q.queue_ptr) == 0, "Ptr should wrap to 0 after exactly K enqueued keys"
+
+
+@pytest.mark.willi_parity
+def test_momentum_encoder_ema_delta():
+    """MomentumEncoder: EMA update moves params by exactly (1-m) fraction."""
+    from hybrid_xmamba.training.moco_queue import MomentumEncoder
+    import torch.nn as nn
+
+    m = 0.9
+    query = nn.Linear(8, 4, bias=False)
+    nn.init.constant_(query.weight, 1.0)
+
+    ema = MomentumEncoder(query, m=m)
+    nn.init.constant_(ema.encoder.weight, 0.0)  # start EMA at 0
+
+    ema.update(query)
+    # Expected: 0.9 * 0.0 + 0.1 * 1.0 = 0.1
+    expected = (1 - m) * 1.0
+    assert torch.allclose(ema.encoder.weight, torch.full_like(ema.encoder.weight, expected), atol=1e-6), \
+        f"EMA weight should be {expected}, got {ema.encoder.weight.mean().item()}"
+
+
+@pytest.mark.willi_parity
+def test_moco_config_values():
+    """biomedclip_kd_joint.yaml must have Phase 5 MoCo knobs."""
+    pytest.importorskip("yaml")
+    import yaml
+
+    cfg_path = REPO_ROOT / "configs" / "distill" / "biomedclip_kd_joint.yaml"
+    with open(cfg_path, "r") as f:
+        cfg = yaml.safe_load(f)
+
+    assert cfg.get("moco_queue_size") == 16384, \
+        f"moco_queue_size should be 16384, got {cfg.get('moco_queue_size')}"
+    assert cfg.get("moco_momentum") == 0.999, \
+        f"moco_momentum should be 0.999, got {cfg.get('moco_momentum')}"
+
+
+@pytest.mark.willi_parity
 def test_stage1_proj_head_dropout_default():
     """hybrid_70m.yaml must keep proj_head_dropout=0.1 (literature SimCSE default).
 

@@ -29,3 +29,7 @@ head_lr: 3.0e-4
 
 # Backbone freeze during head warm-up
 freeze_text_encoder_steps: 500
+
+# Phase 5: MoCo dynamic queue (set moco_queue_size: 0 to disable)
+moco_queue_size: 16384
+moco_momentum: 0.999
