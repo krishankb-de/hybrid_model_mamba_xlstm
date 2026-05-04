@@ -38,7 +38,10 @@ sys.path.insert(0, str(project_root))
 # Mock open_clip BEFORE any code that triggers `import open_clip`
 # ---------------------------------------------------------------------------
 
-_MOCK_IMG_DIM = 32  # BiomedCLIP image output dim (mocked, real=512)
+_MOCK_IMG_DIM  = 32   # BiomedCLIP image output dim (mocked, real=512)
+# MUST equal the constant 512 hardcoded in JointMultiTaskLightningModule.
+# The distill_proj is Linear(student→512); teacher outputs must match.
+_MOCK_TEXT_DIM = 512  # BiomedCLIP text joint dim (matches real dim)
 
 
 class _MockVisual(nn.Module):
@@ -54,10 +57,30 @@ class _MockVisual(nn.Module):
         return self.proj(pooled.flatten(1))
 
 
-class _MockClipModel:
+class _MockClipModel(nn.Module):
+    """Mimic the open_clip CLIP wrapper.
+
+    Exposes:
+      * .visual (for image encoding via HybridContrastiveLightningModule)
+      * .encode_text(input_ids) -> (B, _MOCK_TEXT_DIM)  ← Phase 2 teacher API
+    """
+
     def __init__(self) -> None:
+        super().__init__()
         self.embed_dim = _MOCK_IMG_DIM
         self.visual = _MockVisual(_MOCK_IMG_DIM)
+        self._text_proj = nn.Linear(8, _MOCK_TEXT_DIM)  # dummy trainable param
+
+    def encode_text(self, input_ids: torch.Tensor) -> torch.Tensor:
+        B = input_ids.shape[0]
+        return torch.randn(B, _MOCK_TEXT_DIM)
+
+
+def _mock_get_tokenizer(name: str) -> Any:
+    """open_clip tokenizer stub: Callable[[List[str]], LongTensor (1, 32)]."""
+    def _tok(texts):
+        return torch.randint(1, 100, (len(texts), 32))
+    return _tok
 
 
 def _install_mock_open_clip() -> None:
@@ -67,6 +90,7 @@ def _install_mock_open_clip() -> None:
         return _MockClipModel(), None
 
     mock.create_model_from_pretrained = create_model_from_pretrained  # type: ignore[attr-defined]
+    mock.get_tokenizer = _mock_get_tokenizer  # type: ignore[attr-defined]
     sys.modules["open_clip"] = mock
 
 
@@ -74,31 +98,25 @@ _install_mock_open_clip()
 
 
 # ---------------------------------------------------------------------------
-# Mock PubMedBERT teacher (no network, small hidden size for CPU speed)
+# Mock BiomedCLIP text teacher (Phase 2 pivot: encode_text API, 512-d)
 # ---------------------------------------------------------------------------
 
-_TEACHER_HIDDEN = 128
+class MockBiomedCLIPText(nn.Module):
+    """Frozen mock teacher mirroring the open_clip CLIP wrapper.
 
-
-class _MockBERTConfig:
-    hidden_size = _TEACHER_HIDDEN
-
-
-class MockPubMedBERT(nn.Module):
-    """Frozen mock teacher. Returns deterministic hidden states."""
+    Returns (_MOCK_TEXT_DIM,) embeddings via encode_text — same as the real
+    BiomedCLIP text tower. No .config.hidden_size: distill_proj uses the
+    constant 512 (mocked here as _MOCK_TEXT_DIM).
+    """
 
     def __init__(self) -> None:
         super().__init__()
-        self.config = _MockBERTConfig()
-        self.embed = nn.Embedding(1000, _TEACHER_HIDDEN)
+        # Dummy param so frozen-teacher grad-flow assertion can be made
+        self._dummy = nn.Embedding(10, _MOCK_TEXT_DIM)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor = None,
-        attention_mask: torch.Tensor = None,
-    ) -> Any:
-        h = self.embed(input_ids)  # (B, L, H)
-        return types.SimpleNamespace(last_hidden_state=h)
+    def encode_text(self, input_ids: torch.Tensor) -> torch.Tensor:
+        B = input_ids.shape[0]
+        return torch.randn(B, _MOCK_TEXT_DIM)
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +188,7 @@ def _make_indiana_subset(n_pairs: int = 16, seq_len: int = 32) -> List[Dict[str,
 def _build_joint_module():
     from hybrid_xmamba.training.lightning_module import JointMultiTaskLightningModule
     enc = _make_text_encoder(embed_dim=64)
-    teacher = MockPubMedBERT()
+    teacher = MockBiomedCLIPText()
     teacher.eval()
     for p in teacher.parameters():
         p.requires_grad_(False)
@@ -240,12 +258,15 @@ def test_single_step_losses_finite() -> None:
     # Run the joint step in train mode (gradients enabled)
     loss = mod._joint_step(batch, batch_idx=0, split="train")
     assert torch.isfinite(loss), f"total loss not finite: {loss.item()}"
-
-    # Pull the per-loss values out of the logged metrics
-    logs = mod.trainer.callback_metrics if mod._trainer is not None else {}
-    # During manual call there is no Trainer; rely on a re-run with hooks instead.
-    # Re-derive losses by inspecting the submodules directly:
     print(f"  total_loss (combined): {loss.item():.4f}")
+
+    # Verify teacher params received NO gradient (frozen)
+    loss.backward()
+    for name, p in mod.teacher.named_parameters():
+        assert p.grad is None or p.grad.abs().sum().item() == 0.0, (
+            f"teacher param '{name}' has gradient — teacher must be frozen"
+        )
+    print("  ✓ teacher params have no gradient (frozen)")
     print("  PASS")
 
 
@@ -307,13 +328,10 @@ def test_5step_training_loop() -> None:
         l_simcse = mod._nt_xent_loss(z_text, z_text2, mod.model.logit_scale, fixed_scale=20.0)
 
         with torch.no_grad():
-            t_out = mod.teacher(
-                input_ids=batch["teacher_input_ids"],
-                attention_mask=batch["teacher_attention_mask"],
-            )
-            t_cls = nn.functional.normalize(t_out.last_hidden_state[:, 0, :].float(), dim=-1)
+            t_emb = mod.teacher.encode_text(batch["teacher_input_ids"])  # (B, _MOCK_TEXT_DIM)
+            t_emb = nn.functional.normalize(t_emb.float(), dim=-1)
         z_proj = nn.functional.normalize(mod.distill_proj(z_text.float()), dim=-1)
-        l_kd = (1.0 - nn.functional.cosine_similarity(z_proj, t_cls, dim=-1)).mean()
+        l_kd = (1.0 - nn.functional.cosine_similarity(z_proj, t_emb, dim=-1)).mean()
 
         total = mod.alpha_kd * l_kd + mod.beta_clip * l_clip + mod.gamma_simcse * l_simcse
 
