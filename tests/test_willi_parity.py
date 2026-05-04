@@ -862,8 +862,9 @@ def test_moco_symmetric_loss_both_directions():
         pytest.skip("open_clip not installed")
 
     assert isinstance(mod.text_queue, MoCoQueue), "text_queue must be MoCoQueue"
-    assert isinstance(mod.img_queue,  MoCoQueue), "img_queue must be MoCoQueue"
-    assert mod.text_queue.K == 32 and mod.img_queue.K == 32
+    assert not hasattr(mod, 'img_queue') or mod.img_queue is None, \
+        "img_queue must not exist — random-init queue causes max-entropy t2i loss"
+    assert mod.text_queue.K == 32
 
     # Exercise the symmetric loss directly
     B, D = 4, 512

@@ -763,19 +763,20 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
             nn.Linear(teacher_dim, teacher_dim, bias=False),
         )
 
-        # MoCo symmetric queues (Phase 5 fix).  Disabled when moco_queue_size=0.
-        # text_queue: momentum text keys  — negatives for i2t direction
-        # img_queue:  frozen image keys   — negatives for t2i direction
-        # Both queues feed the symmetric loss so gradients flow in both directions.
+        # MoCo text queue only.  Disabled when moco_queue_size=0.
+        # text_queue: momentum text keys — negatives for i2t direction.
+        # No img_queue: image encoder is frozen, so its outputs are
+        # deterministic — in-batch negatives for t2i are consistent and
+        # sufficient. An img_queue filled with random init vectors at
+        # startup produces max-entropy t2i loss (log(K+1)≈9.7) that
+        # dominates and destroys the useful i2t signal.
         self.moco_queue_size = moco_queue_size
         if moco_queue_size > 0:
             from hybrid_xmamba.training.moco_queue import MoCoQueue, MomentumEncoder
             self.text_queue = MoCoQueue(dim=512, K=moco_queue_size)
-            self.img_queue  = MoCoQueue(dim=512, K=moco_queue_size)
             self.momentum_encoder = MomentumEncoder(model, m=moco_momentum)
         else:
             self.text_queue = None
-            self.img_queue  = None
             self.momentum_encoder = None
 
     # ------------------------------------------------------------------
@@ -878,17 +879,16 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
             z_img = F.normalize(self.img_proj(z_img_raw.float()), dim=-1)
 
             if self.text_queue is not None and split == "train":
-                # Symmetric MoCo (Phase 5 fix):
-                #   i2t: z_img  queries → text_queue negatives
-                #   t2i: z_text queries → img_queue  negatives
-                # Both directions trained simultaneously; image encoder is frozen
-                # so img_queue keys are deterministic (no momentum copy needed).
+                # MoCo i2t + in-batch t2i:
+                #   i2t: z_img  queries → [z_text_k | text_queue] (16K+ negatives)
+                #   t2i: z_text queries → z_img in-batch only
+                # Image encoder is frozen → in-batch image keys are deterministic;
+                # no img_queue needed (and it would start full of random noise).
                 z_text_k = self.momentum_encoder.encode(
                     batch["input_ids"], batch.get("attention_mask")
                 )  # (B, 512) momentum text key
                 l_clip = self._moco_clip_loss_symmetric(z_text, z_img, z_text_k)
                 self.text_queue.enqueue(z_text_k)
-                self.img_queue.enqueue(z_img)  # frozen ViT keys — no momentum needed
             else:
                 l_clip = self._nt_xent_loss(z_text, z_img, self.model.logit_scale)
         else:
@@ -931,33 +931,33 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
     def _moco_clip_loss_symmetric(
         self,
         z_text: torch.Tensor,   # (B, 512) online text query, L2-normed
-        z_img: torch.Tensor,    # (B, 512) frozen image key, L2-normed
+        z_img: torch.Tensor,    # (B, 512) frozen image embedding, L2-normed
         z_text_k: torch.Tensor, # (B, 512) momentum text key, L2-normed
     ) -> torch.Tensor:
-        """Symmetric MoCo InfoNCE — trains both i2t and t2i directions.
+        """Hybrid MoCo InfoNCE — large text queue for i2t, in-batch for t2i.
 
-        i2t: z_img  queries against [z_text_k | text_queue] keys
-        t2i: z_text queries against [z_img    | img_queue]  keys
+        i2t: z_img  queries against [z_text_k | text_queue]  → 16K+ text negatives
+        t2i: z_text queries against z_img (in-batch only)    → B-1 image negatives
 
-        Positives are the diagonal of the current batch (index i matches index i).
-        Using momentum text keys (not online z_text) as i2t targets avoids
-        gradient conflict between the two loss directions.
-        Image keys are deterministic (frozen ViT) so no momentum copy is needed.
+        i2t gets the MoCo boost (16K negatives vs 31).
+        t2i uses in-batch, which is safe because the image encoder is frozen
+        and its outputs are deterministic — no warmup problem.
+
+        No img_queue: a queue seeded with random unit vectors produces a
+        t2i InfoNCE loss at the theoretical maximum log(K+1)≈9.7, flooding
+        the optimiser with noise and preventing any useful learning.
         """
         scale = self.model.logit_scale.exp().clamp(1.0, 100.0)
         labels = torch.arange(z_img.shape[0], device=z_img.device)
 
-        # i2t: image queries → text key bank (B + K keys)
+        # i2t: image queries → text key bank (B + K keys from queue)
         text_bank = torch.cat(
             [z_text_k, self.text_queue.all_keys().to(z_text_k.device)], dim=0
         )  # (B+K, 512)
         l_i2t = F.cross_entropy(scale * z_img @ text_bank.T, labels)
 
-        # t2i: text queries → image key bank (B + K keys)
-        img_bank = torch.cat(
-            [z_img, self.img_queue.all_keys().to(z_img.device)], dim=0
-        )  # (B+K, 512)
-        l_t2i = F.cross_entropy(scale * z_text @ img_bank.T, labels)
+        # t2i: text queries → in-batch image keys only (frozen encoder = consistent)
+        l_t2i = F.cross_entropy(scale * z_text @ z_img.T, labels)
 
         return 0.5 * (l_i2t + l_t2i)
 
