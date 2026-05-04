@@ -827,6 +827,59 @@ def test_moco_config_values():
 
 
 @pytest.mark.willi_parity
+def test_moco_symmetric_loss_both_directions():
+    """_moco_clip_loss_symmetric must train both i2t and t2i directions.
+
+    Checks: loss is finite; gradients flow into z_text (t2i path); the
+    text_queue and img_queue are both initialised on the module.
+    """
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
+    from hybrid_xmamba.training.lightning_module import JointMultiTaskLightningModule
+    from hybrid_xmamba.training.moco_queue import MoCoQueue
+
+    cfg = HybridConfig(
+        vocab_size=100, dim=64, num_layers=2,
+        layer_pattern=["mamba", "mlstm"],
+        max_position_embeddings=64,
+        use_fast_path=False, use_tfla=False,
+        pooling_strategy="attention",
+    )
+    enc = HybridTextEncoder(cfg, embed_dim=64)
+
+    class _StubTeacher(torch.nn.Module):
+        def encode_text(self, input_ids):
+            return torch.randn(input_ids.shape[0], 512)
+
+    try:
+        mod = JointMultiTaskLightningModule(
+            model=enc, teacher=_StubTeacher(),
+            warmup_steps=2, max_steps=10,
+            freeze_text_encoder_steps=0,
+            moco_queue_size=32,  # small queue for CPU test
+        )
+    except ImportError:
+        pytest.skip("open_clip not installed")
+
+    assert isinstance(mod.text_queue, MoCoQueue), "text_queue must be MoCoQueue"
+    assert isinstance(mod.img_queue,  MoCoQueue), "img_queue must be MoCoQueue"
+    assert mod.text_queue.K == 32 and mod.img_queue.K == 32
+
+    # Exercise the symmetric loss directly
+    B, D = 4, 512
+    raw_text = torch.randn(B, D, requires_grad=True)
+    z_text   = torch.nn.functional.normalize(raw_text, dim=-1)
+    z_img    = torch.nn.functional.normalize(torch.randn(B, D), dim=-1)
+    z_text_k = torch.nn.functional.normalize(torch.randn(B, D), dim=-1)
+    loss = mod._moco_clip_loss_symmetric(z_text, z_img, z_text_k)
+    assert torch.isfinite(loss), f"Symmetric MoCo loss not finite: {loss.item()}"
+    loss.backward()
+    # raw_text is the leaf — grad must flow through t2i path (z_text @ img_bank)
+    assert raw_text.grad is not None, "No gradient into z_text (t2i path broken)"
+    assert torch.isfinite(raw_text.grad).all(), "NaN in z_text gradient"
+
+
+@pytest.mark.willi_parity
 def test_stage1_proj_head_dropout_default():
     """hybrid_70m.yaml must keep proj_head_dropout=0.1 (literature SimCSE default).
 

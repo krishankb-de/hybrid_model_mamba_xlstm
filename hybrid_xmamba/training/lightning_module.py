@@ -763,14 +763,19 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
             nn.Linear(teacher_dim, teacher_dim, bias=False),
         )
 
-        # MoCo dynamic queue (Phase 5).  Disabled when moco_queue_size=0.
+        # MoCo symmetric queues (Phase 5 fix).  Disabled when moco_queue_size=0.
+        # text_queue: momentum text keys  — negatives for i2t direction
+        # img_queue:  frozen image keys   — negatives for t2i direction
+        # Both queues feed the symmetric loss so gradients flow in both directions.
         self.moco_queue_size = moco_queue_size
         if moco_queue_size > 0:
             from hybrid_xmamba.training.moco_queue import MoCoQueue, MomentumEncoder
-            self.queue = MoCoQueue(dim=512, K=moco_queue_size)
+            self.text_queue = MoCoQueue(dim=512, K=moco_queue_size)
+            self.img_queue  = MoCoQueue(dim=512, K=moco_queue_size)
             self.momentum_encoder = MomentumEncoder(model, m=moco_momentum)
         else:
-            self.queue = None
+            self.text_queue = None
+            self.img_queue  = None
             self.momentum_encoder = None
 
     # ------------------------------------------------------------------
@@ -872,13 +877,18 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
                     z_img_raw = self.image_encoder(pixel_values)
             z_img = F.normalize(self.img_proj(z_img_raw.float()), dim=-1)
 
-            if self.queue is not None and split == "train":
-                # MoCo: image keys from momentum encoder; negatives = queue + batch
-                input_ids   = batch["input_ids"]
-                attn_mask   = batch.get("attention_mask")
-                z_text_k = self.momentum_encoder.encode(input_ids, attn_mask)  # (B,512)
-                l_clip = self._moco_clip_loss(z_text, z_img, z_text_k)
-                self.queue.enqueue(z_text_k)
+            if self.text_queue is not None and split == "train":
+                # Symmetric MoCo (Phase 5 fix):
+                #   i2t: z_img  queries → text_queue negatives
+                #   t2i: z_text queries → img_queue  negatives
+                # Both directions trained simultaneously; image encoder is frozen
+                # so img_queue keys are deterministic (no momentum copy needed).
+                z_text_k = self.momentum_encoder.encode(
+                    batch["input_ids"], batch.get("attention_mask")
+                )  # (B, 512) momentum text key
+                l_clip = self._moco_clip_loss_symmetric(z_text, z_img, z_text_k)
+                self.text_queue.enqueue(z_text_k)
+                self.img_queue.enqueue(z_img)  # frozen ViT keys — no momentum needed
             else:
                 l_clip = self._nt_xent_loss(z_text, z_img, self.model.logit_scale)
         else:
@@ -918,28 +928,38 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
 
         return total
 
-    def _moco_clip_loss(
+    def _moco_clip_loss_symmetric(
         self,
-        z_text: torch.Tensor,   # (B, 512) query — online encoder, L2-normed
-        z_img: torch.Tensor,    # (B, 512) positive image key, L2-normed
+        z_text: torch.Tensor,   # (B, 512) online text query, L2-normed
+        z_img: torch.Tensor,    # (B, 512) frozen image key, L2-normed
         z_text_k: torch.Tensor, # (B, 512) momentum text key, L2-normed
     ) -> torch.Tensor:
-        """Asymmetric MoCo InfoNCE for image→text retrieval.
+        """Symmetric MoCo InfoNCE — trains both i2t and t2i directions.
 
-        Positive pair: (z_img[i], z_text_k[i]).
-        Negatives: all other momentum keys in the current batch + the full queue.
+        i2t: z_img  queries against [z_text_k | text_queue] keys
+        t2i: z_text queries against [z_img    | img_queue]  keys
 
-        Using the momentum key (not the online text) as the "positive" avoids
-        gradient conflict with the online path and matches MoCo v2 practice.
+        Positives are the diagonal of the current batch (index i matches index i).
+        Using momentum text keys (not online z_text) as i2t targets avoids
+        gradient conflict between the two loss directions.
+        Image keys are deterministic (frozen ViT) so no momentum copy is needed.
         """
         scale = self.model.logit_scale.exp().clamp(1.0, 100.0)
-        # Concatenate current-batch keys + queue: (B+K, 512)
-        all_keys = torch.cat([z_text_k, self.queue.all_keys().to(z_text_k.device)], dim=0)  # (B+K, 512)
-        # Logits: (B, B+K)
-        logits = scale * z_img @ all_keys.T
-        # Positive is the first B entries (current batch keys, diagonal = i→i)
         labels = torch.arange(z_img.shape[0], device=z_img.device)
-        return F.cross_entropy(logits, labels)
+
+        # i2t: image queries → text key bank (B + K keys)
+        text_bank = torch.cat(
+            [z_text_k, self.text_queue.all_keys().to(z_text_k.device)], dim=0
+        )  # (B+K, 512)
+        l_i2t = F.cross_entropy(scale * z_img @ text_bank.T, labels)
+
+        # t2i: text queries → image key bank (B + K keys)
+        img_bank = torch.cat(
+            [z_img, self.img_queue.all_keys().to(z_img.device)], dim=0
+        )  # (B+K, 512)
+        l_t2i = F.cross_entropy(scale * z_text @ img_bank.T, labels)
+
+        return 0.5 * (l_i2t + l_t2i)
 
 
 class MQARLightningModule(HybridLightningModule):
