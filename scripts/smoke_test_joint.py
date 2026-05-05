@@ -189,7 +189,7 @@ def _make_indiana_subset(n_pairs: int = 16, seq_len: int = 32) -> List[Dict[str,
 # Build the JointMultiTaskLightningModule (CPU)
 # ---------------------------------------------------------------------------
 
-def _build_joint_module():
+def _build_joint_module(freeze_text_encoder_steps: int = 0, moco_queue_size: int = 0):
     from hybrid_xmamba.training.lightning_module import JointMultiTaskLightningModule
     enc = _make_text_encoder(embed_dim=64)
     teacher = MockBiomedCLIPText()
@@ -197,7 +197,7 @@ def _build_joint_module():
     for p in teacher.parameters():
         p.requires_grad_(False)
 
-    mod = JointMultiTaskLightningModule(
+    kwargs: Dict[str, Any] = dict(
         model=enc,
         teacher=teacher,
         alpha_kd=0.3,
@@ -209,9 +209,21 @@ def _build_joint_module():
         warmup_steps=2,
         max_steps=5,
         gradient_clip_val=1.0,
-        freeze_text_encoder_steps=0,  # no freeze so backbone grads flow in 5 steps
+        freeze_text_encoder_steps=freeze_text_encoder_steps,
         vit_unfreeze_blocks=0,
     )
+    if moco_queue_size > 0:
+        # MoCoQueue dim is hardcoded to 512 in JointMultiTaskLightningModule;
+        # override the queue post-construction with the smoke-test embed dim.
+        from hybrid_xmamba.training.moco_queue import MoCoQueue, MomentumEncoder
+        kwargs["moco_queue_size"] = moco_queue_size
+
+    mod = JointMultiTaskLightningModule(**kwargs)
+    if moco_queue_size > 0:
+        # Replace 512-d queue with embed_dim queue for the tiny student.
+        from hybrid_xmamba.training.moco_queue import MoCoQueue, MomentumEncoder
+        mod.text_queue = MoCoQueue(dim=_STUDENT_EMBED_DIM, K=moco_queue_size)
+        mod.momentum_encoder = MomentumEncoder(enc, m=0.999)
     # Phase 8 sanity: dead modules must not exist
     assert not hasattr(mod, "distill_proj") or mod.distill_proj is None or (
         not isinstance(mod.distill_proj, nn.Module)
@@ -390,18 +402,84 @@ def test_5step_training_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 4 — Phase 11 CLIP gating: l_clip == 0 during warmup, non-zero after;
+# MoCo queue stays empty during warmup, enqueues after unfreeze.
+# ---------------------------------------------------------------------------
+
+def test_phase11_clip_gating() -> None:
+    print("\n--- Phase 11 gating: l_clip / queue gated by freeze_text_encoder_steps ---")
+    # Without a Lightning trainer attached, mod.global_step == 0. So:
+    #   freeze=10 → global_step(0) < 10  → CLIP gated OFF, queue untouched.
+    #   freeze=0  → global_step(0) >= 0  → CLIP active, queue enqueues.
+    batch = _make_indiana_subset(n_pairs=4, seq_len=32)[0]
+
+    # --- warmup case ---
+    mod_warm = _build_joint_module(freeze_text_encoder_steps=10, moco_queue_size=32)
+    mod_warm.train()
+    assert mod_warm.text_queue is not None, "text_queue must be initialised"
+    ptr_before = int(mod_warm.text_queue.queue_ptr)
+    queue_before = mod_warm.text_queue.queue.clone()
+
+    # Capture clip_loss via the logger; simpler to recompute total and inspect via
+    # rerunning with no pixel_values to compare. Instead read through _joint_step
+    # and inspect the logged clip_loss by intercepting self.log.
+    logged: Dict[str, float] = {}
+
+    def _capture(self, name, value, *args, **kwargs):  # type: ignore[no-untyped-def]
+        try:
+            logged[name] = float(value.detach().item() if hasattr(value, "detach") else value)
+        except Exception:
+            pass
+
+    import types as _types
+    mod_warm.log = _types.MethodType(_capture, mod_warm)
+    _ = mod_warm._joint_step(batch, batch_idx=0, split="train")
+    ptr_after = int(mod_warm.text_queue.queue_ptr)
+
+    clip_warm = logged.get("train/clip_loss", None)
+    assert clip_warm is not None, "train/clip_loss not logged"
+    assert clip_warm == 0.0, f"CLIP loss must be 0 during warmup, got {clip_warm}"
+    assert ptr_after == ptr_before, (
+        f"text_queue ptr must be untouched during warmup; {ptr_before}→{ptr_after}"
+    )
+    assert torch.equal(mod_warm.text_queue.queue, queue_before), \
+        "text_queue contents must be untouched during warmup"
+    print(f"  ✓ warmup: clip_loss={clip_warm:.4f}, queue_ptr unchanged ({ptr_before})")
+
+    # --- post-warmup case ---
+    mod_post = _build_joint_module(freeze_text_encoder_steps=0, moco_queue_size=32)
+    mod_post.train()
+    ptr_before2 = int(mod_post.text_queue.queue_ptr)
+    logged.clear()
+    mod_post.log = _types.MethodType(_capture, mod_post)
+    _ = mod_post._joint_step(batch, batch_idx=0, split="train")
+    ptr_after2 = int(mod_post.text_queue.queue_ptr)
+
+    clip_post = logged.get("train/clip_loss", None)
+    assert clip_post is not None and clip_post > 0.0, \
+        f"CLIP loss must be > 0 post-warmup, got {clip_post}"
+    assert ptr_after2 > ptr_before2, (
+        f"text_queue must enqueue post-warmup; ptr {ptr_before2}→{ptr_after2}"
+    )
+    print(f"  ✓ post-warmup: clip_loss={clip_post:.4f}, queue_ptr "
+          f"{ptr_before2}→{ptr_after2}")
+    print("  PASS")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     print("=" * 60)
-    print("Phase 8: Joint KD+CLIP+SimCSE smoke test (no img_proj/distill_proj, CPU)")
+    print("Phase 11: Joint KD+CLIP+SimCSE smoke test (CPU, gated CLIP)")
     print("=" * 60)
 
     tests = [
         ("Construction + 4-group optimizer", test_construction_and_optimizer),
         ("Single forward: 3 losses finite",  test_single_step_losses_finite),
         ("5-step CPU training loop",         test_5step_training_loop),
+        ("Phase 11 CLIP gating + queue",     test_phase11_clip_gating),
     ]
 
     passed = 0

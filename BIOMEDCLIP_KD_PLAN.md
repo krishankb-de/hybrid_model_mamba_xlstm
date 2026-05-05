@@ -231,10 +231,10 @@ During 500-step frozen warm-up, `projection_head` (not `distill_proj`) learns to
 - [x] **10F** — `bash scripts/validate_for_willi.sh` green (52 passed, 5 skipped, 6/6 gates).
 
 ### Phase 11 — Smoke + SLURM scripts → submit Phase 6d run
-- [ ] **11A** — `scripts/smoke_test_joint.py`: parametrise `freeze_text_encoder_steps` and assert `l_clip == 0` for steps `< warmup`, then non-zero. Confirm queue is empty during warmup.
-- [ ] **11B** — `scripts/train_biomedclip_kd_phase6d.sh` (NEW): copy Phase 6 script, `experiment_name=biomedclip_kd_phase6d`, comment block referencing this plan.
-- [ ] **11C** — `scripts/eval_biomedclip_kd_phase6d.sh` (NEW): eval wrapper for best Phase 6d checkpoint.
-- [ ] **11D** — Verification gates: `pytest tests/ -m "not cuda and not slow" -v` green; smoke test green; `validate_for_willi.sh` 6/6 green.
+- [x] **11A** — `scripts/smoke_test_joint.py`: parametrise `freeze_text_encoder_steps` and assert `l_clip == 0` for steps `< warmup`, then non-zero. Confirm queue is empty during warmup.
+- [x] **11B** — `scripts/train_biomedclip_kd_phase6d.sh` (NEW): copy Phase 6 script, `experiment_name=biomedclip_kd_phase6d`, comment block referencing this plan.
+- [x] **11C** — `scripts/eval_biomedclip_kd_phase6d.sh` (NEW): eval wrapper for best Phase 6d checkpoint.
+- [x] **11D** — Verification gates: `pytest tests/ -m "not cuda and not slow" -v` green; smoke test green; `validate_for_willi.sh` 6/6 green.
 - [ ] **11E** — Commit + push.
 - [ ] **11F** — `sbatch scripts/train_biomedclip_kd_phase6d.sh` on willi.
 - [ ] **11G** — **Monitor (key signals):**
