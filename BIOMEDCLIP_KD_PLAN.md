@@ -1,10 +1,26 @@
 # BiomedCLIP Text-KD Architectural Pivot — Plan-of-Record
 
 > Supersedes `JOINT_TRAINING_PLAN.md` + `joint_training_state.json`. Resumable. Read this file + `biomedclip_kd_state.json` (gitignored) at session start.
+>
+> **Current phase: 6 — ready to submit.** Push branch, then `sbatch scripts/train_biomedclip_kd_phase6.sh`.
+
+## Experiment history
+
+| Job | Phase | Key change | MIMIC-val i2t R@10 | Indiana i2t R@10 | Paired cos |
+|-----|-------|-----------|-------------------|-----------------|------------|
+| (old runs) | PubMedBERT teacher, JOINT_TRAINING_PLAN | bs=16→32, FAISS hard-neg | 8.55–8.98% | 3.10–4.17% | 0.21–0.29 |
+| 1285 | 4 | BiomedCLIP text KD, in-batch, cancelled ~1700 steps | 8.75% best | — | — |
+| 1288 | 5a | + MoCo asymmetric (i2t only) | 5.5% plateau | — | — |
+| 1290 | 5b | + MoCo symmetric + img_queue | 0.5% (broken: random img_queue = noise) | — | — |
+| 1291 | 5c | + MoCo symmetric, text_queue only | 9.99% best | **3.36%** (eval) | **0.226** |
+| 1297 | 6a | bypass img_proj + alpha_kd=1.0 | CANCELLED (diverged) | 0.49% → random | clip_loss 2.88→3.47 |
+| TBD | **6b** | **bypass img_proj + alpha_kd=0.3** | TBD | TBD | TBD |
+
+**Phase 5c root-cause diagnosis (2026-05-05):** `clip_model.visual` already outputs BiomedCLIP-projected 512-d embeddings (joint space). The `img_proj` (random-init `512→GELU→512` MLP) was applied on top, distorting them. The CLIP loss (β=1.0) dominated KD (α=0.3) and pulled Mamba text toward the distorted space — explaining why paired cosine stayed at 0.22-0.29 across ALL runs since Phase 4, identical to the PubMedBERT era.
 
 ## Context
 
-Three full training runs on MIMIC-CXR (Phase 5 / 5b / 7) plateaued the CLIP retrieval R@10 at a **structural ceiling**:
+Three full training runs on MIMIC-CXR (Phase 5 / 5b / 7 of the OLD plan) plateaued the CLIP retrieval R@10 at a **structural ceiling**:
 
 | Run | Config change | MIMIC val R@10 | Indiana i2t R@10 | Paired cos |
 |---|---|---|---|---|
@@ -68,7 +84,10 @@ GPT-2 toks ─▶ Mamba ─▶ proj_head   GPT-2 toks ─▶ Mamba ─▶ proj_h
 | `tests/test_willi_parity.py:640-734` | Update `test_joint_module_all_losses_finite` to use a 512-d `encode_text` stub; assert `distill_proj[-1].out_features == 512`; new `test_biomedclip_kd_config_values` | 2 |
 | `scripts/train_biomedclip_kd.sh` (NEW) | SLURM wrapper; copy `train_joint_mimic_v2.sh` shape; 12 h walltime, A100 40 GB | 4 |
 | `hybrid_xmamba/training/moco_queue.py` (NEW) | `MoCoQueue` (FIFO embedding bank) + `MomentumEncoder` (EMA wrapper); ~150 LoC | 5 |
-| `hybrid_xmamba/training/lightning_module.py` (`_joint_step`) | Add `_rdrop_loss` helper; second forward + symmetric KL on text projections | 6 |
+| `hybrid_xmamba/training/lightning_module.py` (`_joint_step` line ~879) | **Phase 6**: `z_img = F.normalize(z_img_raw.float(), dim=-1)` — bypass `img_proj`; `clip_model.visual` already projects to joint space | 6 |
+| `configs/distill/biomedclip_kd_joint.yaml` | **Phase 6**: `alpha_kd: 1.0` (was 0.3) — KD must dominate now that image side is clean | 6 |
+| `scripts/train_biomedclip_kd_phase6.sh` (NEW) | SLURM wrapper, Phase 6 training, `experiment_name=biomedclip_kd_phase6` | 6 |
+| `scripts/eval_biomedclip_kd_phase6.sh` (NEW) | SLURM eval for Phase 6 best checkpoint | 6 |
 
 ### Verified facts (corrects assumptions in original draft)
 
@@ -80,83 +99,82 @@ GPT-2 toks ─▶ Mamba ─▶ proj_head   GPT-2 toks ─▶ Mamba ─▶ proj_h
 
 ## Phases
 
-### Phase 1 — Bootstrap & deprecate old plan (NO training, NO model code edits)
-- [ ] Write `BIOMEDCLIP_KD_PLAN.md` at repo root (copy of this plan, repo-relative paths).
-- [ ] Write `biomedclip_kd_state.json` at repo root: `{"current_phase": "1", "phase1": {}, …, "last_updated": "<ISO>", "notes": []}`.
-- [ ] Edit `.gitignore`: add `!BIOMEDCLIP_KD_PLAN.md` next to existing `!JOINT_TRAINING_PLAN.md` allowlist (line 87); append `biomedclip_kd_state.json` to the local-state block (after line 93).
-- [ ] Edit `CLAUDE.md` Session Bootstrap (lines 5-7): repoint to `BIOMEDCLIP_KD_PLAN.md` + `biomedclip_kd_state.json`. Preserve the structural advice (resume at `current_phase`, update `last_updated` after every change). Leave the `/Users/krish/.claude/plans/previously-i-ran-the-drifting-garden.md` historical pointer alone — orthogonal.
-- [ ] Add a 5-line deprecation banner to top of `JOINT_TRAINING_PLAN.md` pointing to the new plan; do **not** delete the file.
-- [ ] `bash scripts/validate_for_willi.sh` green (no Python edits — should be no-op).
-- [ ] Commit: "Pivot to BiomedCLIP text-KD plan; deprecate JOINT_TRAINING_PLAN".
+### Phase 1 — Bootstrap & deprecate old plan ✅ COMPLETE
+- [x] Write `BIOMEDCLIP_KD_PLAN.md` at repo root.
+- [x] Write `biomedclip_kd_state.json` at repo root (gitignored).
+- [x] Edit `.gitignore`: allowlist `BIOMEDCLIP_KD_PLAN.md`; add `biomedclip_kd_state.json` to local-state block.
+- [x] Edit `CLAUDE.md` Session Bootstrap: repoint to `BIOMEDCLIP_KD_PLAN.md` + `biomedclip_kd_state.json`.
+- [x] Add deprecation banner to `JOINT_TRAINING_PLAN.md`.
+- [x] `bash scripts/validate_for_willi.sh` green (42 passed).
 
-### Phase 2 — Code change: BiomedCLIP text teacher (~2 hours, single subphase)
-- [x] **2A** — Add module-level helper `_load_biomedclip_text_teacher()` in `lightning_module.py`: calls `open_clip.create_model_from_pretrained('hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224')`, freezes the whole CLIP wrapper (`requires_grad=False`, `.eval()`), returns it (keep `encode_text` API; don't reach into `.text` directly).
-- [x] **2B** — In `JointMultiTaskLightningModule.__init__` (line 738):
-  - replace `teacher_dim = teacher.config.hidden_size` with `teacher_dim = 512` (constant; open_clip CLIP wrapper has no `.config.hidden_size`);
-  - resize the existing `nn.Sequential(Linear(student,768) → GELU → Linear(768,768))` to `nn.Sequential(Linear(student,512) → GELU → Linear(512,512))` — still no bias;
-  - keep `self.teacher = teacher` API (caller now passes a CLIP wrapper instead of `transformers.AutoModel`).
-- [x] **2C** — In `_joint_step` (line 855), replace
-  ```
-  t_cls = F.normalize(t_out.last_hidden_state[:, 0, :].float(), dim=-1)
-  ```
-  with
-  ```
-  t_emb = self.teacher.encode_text(t_ids)            # (B, 512)
-  t_emb = F.normalize(t_emb.float(), dim=-1)
-  ```
-  Keep the cosine-distance KD form: `1 - cos(distill_proj(z_text), t_emb)`.
-- [x] **2D** — In `MIMICJointDataset` (`train_contrastive.py:339-405`): leave dataset shape (5 keys) and student tokenization untouched. Only swap the teacher tokenizer source — when `teacher_tokenizer` is the BiomedCLIP `open_clip` tokenizer, it's a `Callable[[List[str]], LongTensor]` not a HuggingFace `AutoTokenizer`, so add a small adapter inside the dataset constructor (`def _teacher_tok(text): ids = teacher_tok([text])[0]; return {"input_ids": ids, "attention_mask": (ids != 0).long()}`). teacher_max_length is fixed to 256 (BiomedCLIP context) — drop the cfg lookup.
-- [x] **2E** — In `train_contrastive.py:633-655` (`if contrastive_mode == "joint":` block): when `distill_cfg.teacher == "biomedclip_text"`, load the teacher via the new helper and the BiomedCLIP `open_clip` tokenizer. Keep the legacy PubMedBERT branch behind `teacher: pubmedbert` for backwards compat (so `joint_mimic.yaml` still runs unchanged).
-- [x] **2F** — Create `configs/distill/biomedclip_kd_joint.yaml`:
-  ```yaml
-  teacher: "biomedclip_text"   # NEW dispatch key
-  alpha_kd: 0.3                # reset to v1 baseline; KD now PUSHES toward CLIP space
-  beta_clip: 1.0
-  gamma_simcse: 0.1
-  backbone_lr: 1.0e-5
-  head_lr: 3.0e-4
-  freeze_text_encoder_steps: 500
-  ```
-  (No `teacher_model` / `teacher_dtype` / `teacher_max_length` keys — those are PubMedBERT-specific.)
-- [x] **2G** — Extend `tests/test_willi_parity.py`:
-  - update `test_joint_module_all_losses_finite` (lines 640-712): stub `encode_text` returning `(B, 512)` instead of `last_hidden_state` stub; assert `mod.distill_proj[-1].out_features == 512`;
-  - new `test_biomedclip_kd_config_values` mirroring `test_joint_mimic_config_values`.
-- [x] **2H** — `pytest tests/ -m "not cuda and not slow" -v` green; `bash scripts/validate_for_willi.sh` green. Commit.
+### Phase 2 — BiomedCLIP text teacher wiring ✅ COMPLETE
+- [x] **2A** — `_load_biomedclip_text_teacher()` helper in `lightning_module.py`.
+- [x] **2B** — `teacher_dim = 512` constant; `distill_proj` resized to `512→GELU→512`.
+- [x] **2C** — `_joint_step`: `teacher.encode_text(t_ids)` replaces `last_hidden_state[:,0,:]`.
+- [x] **2D** — `MIMICJointDataset`: open_clip tokenizer adapter (`_teacher_is_hf` branch); `teacher_max_length=256`.
+- [x] **2E** — `train_contrastive.py` joint dispatch: `teacher=="biomedclip_text"` branch added.
+- [x] **2F** — `configs/distill/biomedclip_kd_joint.yaml` created.
+- [x] **2G** — `tests/test_willi_parity.py` updated: `encode_text` stub; `distill_proj[-1].out_features==512`; `test_biomedclip_kd_config_values`.
+- [x] **2H** — `validate_for_willi.sh` green (43 passed).
 
-### Phase 3 — CPU smoke test (~10 min)
-- [ ] Adapt `scripts/smoke_test_joint.py`:
-  - extend `_install_mock_open_clip` to add `.encode_text` on `_MockClipModel` returning `(B, 512)` and a `get_tokenizer` returning a stub callable;
-  - replace `MockPubMedBERT` with a thin wrapper exposing `encode_text(input_ids) -> (B, 512)`;
-  - assert: 5 steps, all 3 losses finite; gradient flow into backbone + `attn_pool.q` + `img_proj` + `distill_proj`; **no gradient** into BiomedCLIP teacher params.
+### Phase 3 — CPU smoke test ✅ COMPLETE
+- [x] `scripts/smoke_test_joint.py`: `_MockBiomedCLIPText` with `encode_text(B,512)`; `get_tokenizer` stub; frozen-teacher grad assertion.
+- [x] 3/3 tests pass on CPU.
 
-### Phase 4 — Joint training v3 on willi A100 40GB (~6–8 h, BiomedCLIP-text-KD only)
-- [ ] Create `scripts/train_biomedclip_kd.sh` (SLURM, copy of `train_joint_mimic_v2.sh`): same hyperparams except `+distill=biomedclip_kd_joint`, `experiment_name=biomedclip_kd_v3`, `output_dir=./outputs/biomedclip_kd_v3`. Init from `outputs/hybrid_70m_stage0_kd_pubmed/checkpoints/stage0_model_only.pt`. `bs=32`, `accum=4`, `max_steps=5000`, `val_check_interval=250`.
-- [ ] Submit. Live monitor: step 250 `val/clip < 2.0`, step 1000 `R@10 ≥ 0.15`, step 2500 `R@10 ≥ 0.25`. Early-kill gate at step 2000: `R@10 < 0.12` AND not rising → `scancel`.
-- [ ] Run `evaluate_cxr_retrieval.py` on Indiana + MIMIC-val using the best checkpoint.
-- [ ] **Decision gate:**
-  - R@10 ≥ 0.40 (MIMIC val) → SUCCESS, skip Phases 5–6.
-  - R@10 ∈ [0.25, 0.40) → PARTIAL, advance to Phase 5 (MoCo).
-  - R@10 ∈ [0.15, 0.25) → MARGINAL, advance to Phase 5; reassess after.
-  - R@10 < 0.15 → BAD; do **not** proceed to MoCo. Re-examine teacher loading + dim alignment + smoke test before any further training.
+### Phase 4 — Joint training v3, BiomedCLIP-text-KD only ✅ COMPLETE (job 1285)
+- [x] `scripts/train_biomedclip_kd.sh` created and submitted.
+- [x] **Verdict:** Cancelled at ~1700 steps. Best `i2t_R@10=8.75%`. BiomedCLIP teacher converges 3× faster than PubMedBERT but hits same ~9% ceiling from 31 in-batch negatives. Advancing to Phase 5 (MoCo).
 
-### Phase 5 — MoCo dynamic queue (CONDITIONAL, only if Phase 4 R@10 < 0.40)
-- [ ] Implement `hybrid_xmamba/training/moco_queue.py`:
-  - `MoCoQueue(dim=512, K=16384)`: FIFO ring buffer, registered as buffer, normalized;
-  - `MomentumEncoder(query_encoder, m=0.999)`: EMA copy with `requires_grad=False`.
-- [ ] Wire into `JointMultiTaskLightningModule`: maintain a momentum copy of the student text encoder; image embeddings from each batch enqueued; CLIP loss denominator now sums over current-batch + queue keys.
-- [ ] Add config knobs to `biomedclip_kd_joint.yaml`: `moco_queue_size: 16384`, `moco_momentum: 0.999`.
-- [ ] Tests: queue tensor shape `(K, 512)` after K updates; EMA delta correctness on a 2-step toy.
-- [ ] Retrain (`train_biomedclip_kd_moco.sh`). Re-eval. Decision gate identical to Phase 4.
+### Phase 5 — MoCo dynamic queue ✅ COMPLETE (jobs 1288 / 1290 / 1291)
 
-### Phase 6 — R-Drop consistency (CONDITIONAL, only if Phase 5 R@10 < 0.40)
-- [ ] Add a second forward in `_joint_step` with independent dropout → `z_text₁`, `z_text₂` post-projection.
-- [ ] Symmetric KL: `L_rdrop = 0.5 (KL(softmax(z₁·z_img.T) || softmax(z₂·z_img.T)) + reverse)`, scaled by `alpha_rdrop`.
-- [ ] Add `alpha_rdrop: 1.0` knob; default `0.0` keeps R-Drop off.
-- [ ] Retrain (`train_biomedclip_kd_moco_rdrop.sh`). Re-eval.
+Three iterations to reach correct design:
 
-### Phase 7 — Final eval + writeup
-- [ ] Cross-checkpoint comparison table: Phase 4 / 5 / 6 best ckpts × {Indiana, MIMIC-val} × {i2t, t2i} R@1/5/10 + paired cosine.
-- [ ] If best run R@10 ≥ 0.25, write up ablation: which fix moved the needle, by how much.
+**5a — Asymmetric MoCo (job 1288):** `i2t`-only queue loss → `t2i > i2t` imbalance, plateau at 5.5%. Fixed.
+
+**5b — Symmetric + img_queue (job 1290):** img_queue seeded with random unit vectors → `t2i` InfoNCE starts at `log(16385)=9.70` (theoretical max) = pure noise gradients. R@10 stuck at 0.5%. Fixed by removing img_queue.
+
+**5c — Symmetric, text_queue only (job 1291):** ✅ Correct design.
+- `i2t`: `z_img` queries vs `[z_text_k | text_queue]` (16K+ text negatives)
+- `t2i`: `z_text` queries vs `z_img` in-batch only (frozen ViT = deterministic, no queue needed)
+- Best MIMIC-val `i2t_R@10 = 9.99%`, `t2i_R@10 = 9.73%`
+- **Eval result (2026-05-05):** Indiana `i2t_R@10 = 3.36%`, MIMIC-val `i2t_R@10 = 8.36%`, paired cos = 0.226
+
+- [x] `hybrid_xmamba/training/moco_queue.py` — `MoCoQueue` + `MomentumEncoder`.
+- [x] Wired into `JointMultiTaskLightningModule`; `text_queue` + `momentum_encoder`; `_moco_clip_loss_symmetric`.
+- [x] Config knobs: `moco_queue_size: 16384`, `moco_momentum: 0.999` in `biomedclip_kd_joint.yaml`.
+- [x] Tests: queue shape, EMA delta, symmetric loss grad flow (49 passed).
+- [x] `train_biomedclip_kd_moco.sh` + `eval_biomedclip_kd_moco.sh` created.
+
+**Phase 5c root-cause finding:** Paired cosine 0.22-0.29 is IDENTICAL to PubMedBERT era. `clip_model.visual` already outputs BiomedCLIP's projected 512-d joint-space embeddings. The `img_proj` MLP (random-init `512→GELU→512`) distorted them AFTER the fact. CLIP loss (β=1.0) dominated KD (α=0.3) and pulled Mamba text toward the distorted space instead of BiomedCLIP joint space. The BiomedCLIP text KD pivot was correct but neutralised by this bug.
+
+### Phase 6 — Fix img_proj (two iterations)
+
+#### Phase 6a ✗ FAILED (job 1297, cancelled)
+- [x] `lightning_module.py` `_joint_step`: bypass img_proj — `z_img = F.normalize(z_img_raw.float(), dim=-1)`.
+- [x] `alpha_kd: 1.0` — **WRONG.** KD (→BiomedCLIP text) and CLIP (→BiomedCLIP image) point in different directions even in the joint space (matched-pair cos ~0.5–0.7, not 1.0). Equal α=β=1.0 causes gradient conflict. val/clip_loss diverged from 2.88 → 3.47 over 5 epochs; i2t R@10 = 0.49% (near-random). Cancelled.
+
+#### Phase 6b 🔄 READY TO SUBMIT
+**Key insight:** the img_proj bypass is the correct architectural fix. α_kd must stay at 0.3 — the KD and CLIP objectives are not fully aligned even in joint space.
+
+- [x] `lightning_module.py` `_joint_step`: img_proj bypass retained.
+- [x] `configs/distill/biomedclip_kd_joint.yaml`: `alpha_kd: 0.3` (reset from 1.0 — isolates architectural fix).
+- [x] `tests/test_willi_parity.py`: `test_biomedclip_kd_config_values` asserts `alpha_kd==0.3`.
+- [x] `scripts/train_biomedclip_kd_phase6.sh` updated (Phase 6b comment block).
+- [x] `scripts/eval_biomedclip_kd_phase6.sh` created.
+- [x] `validate_for_willi.sh` green (all 6 gates).
+- [ ] **Cancel job 1297:** `scancel 1297`
+- [ ] **Submit:** `sbatch hybrid_model_mamba_xlstm/scripts/train_biomedclip_kd_phase6.sh`
+- [ ] **Monitor:** val/clip_loss should drop BELOW 2.47 (Phase 5c baseline) within first 3 epochs if fix works. If it starts below 2.47 and continues falling → img_proj bypass is confirmed working.
+- [ ] **Eval:** `sbatch hybrid_model_mamba_xlstm/scripts/eval_biomedclip_kd_phase6.sh` after training.
+- [ ] **Decision gate (Indiana i2t R@10):**
+  - ≥ 40% → SUCCESS
+  - 25–40% → PARTIAL — manuscript quality
+  - 15–25% → MARGINAL — try R-Drop or unfreeze ViT last 2 blocks
+  - < 15% → verify `clip_model.visual` output dim is 512 (print `z_img_raw.shape` in first step); if 512 confirmed, investigate BiomedCLIP paired cosine baseline
+
+### Phase 7 — Final eval + writeup (pending Phase 6 result)
+- [ ] Cross-checkpoint comparison table: Phase 4 / 5c / 6 best ckpts × {Indiana, MIMIC-val} × {i2t, t2i} R@1/5/10 + paired cosine.
+- [ ] If best run Indiana R@10 ≥ 15%, write ablation: which fix moved the needle, by how much.
 - [ ] Update `biomedclip_kd_state.json` with final verdict.
 
 ## Verification
@@ -185,7 +203,13 @@ bash scripts/validate_for_willi.sh
 
 ## Open questions
 
-- BiomedCLIP `open_clip` tokenizer max length: confirm `open_clip.get_tokenizer('hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224')` returns a callable that pads/truncates to 256 tokens (BiomedCLIP context). If it caps at 77 (vanilla CLIP default) instead, MIMIC reports lose context — switch to `transformers.AutoTokenizer.from_pretrained('microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224')` for tokenization while still using `open_clip.encode_text` for the forward.
-- KD loss form: cosine-distance vs MSE on L2-normalized embeddings. Default to current cosine form; revisit only if KD loss saturates above 0.3.
-- α_kd starting value: 0.3 chosen as v1 baseline. With BiomedCLIP teacher, KD and CLIP no longer compete for direction (same target space) — α=0.3 should be safer than v2's 0.1. May still need a sweep [0.3, 0.5, 0.7] in Phase 4 if R@10 sits in marginal band.
-- Parent class `HybridContrastiveLightningModule.__init__` (line 616-617) uses single Linear `distill_proj` and `teacher.config.hidden_size`. Out of scope for Phase 2 (joint mode is what's retrained), but a future Stage 1/2 standalone run with a BiomedCLIP teacher would need the same fix there.
+- **Phase 6 key question:** Does `clip_model.visual` for BiomedCLIP (TimmModel backbone) include the linear projection to 512-d joint space, or does it return raw ViT 768-d features? If the latter, `z_img_raw` is 768-d and `F.normalize(z_img_raw)` is NOT in joint space. Verify in Phase 6 run by checking `z_img_raw.shape[-1]` early in training — should be 512. If 768: need to pass through `clip_model.visual_projection` manually before normalising.
+- **α_kd stability (resolved for 6b):** α_kd=1.0 confirmed broken — gradient conflict with CLIP objective in job 1297. α_kd=0.3 is the safe value for Phase 6b. If 6b plateaus and a sweep is needed, try 0.5 only; do not go above 0.7.
+- **img_proj param group:** `img_proj` still exists as a parameter group in the optimizer but receives zero gradient (bypassed in forward). This wastes ~500K params of optimizer state. Not worth fixing for one run, but remove for any future clean implementation.
+- **Parent class HybridContrastiveLightningModule** (line ~222): still uses single Linear `distill_proj` and `teacher.config.hidden_size`. Out of scope — only joint mode is being retrained. Note for future standalone Stage 1/2 BiomedCLIP runs.
+
+## Resolved questions (archived)
+
+- ~~BiomedCLIP tokenizer max length:~~ Confirmed 256 tokens via `open_clip.get_tokenizer`; `_teacher_is_hf` adapter in `MIMICJointDataset` handles it.
+- ~~α_kd=0.3 vs 0.1:~~ Phase 4 (0.3) and old Phase 5b (0.1) both plateau at ~9% MIMIC. Not the bottleneck.
+- ~~MoCo queue size:~~ K=16384 confirmed working. Not the bottleneck either — paired cos unchanged with 16K vs 31 negatives.

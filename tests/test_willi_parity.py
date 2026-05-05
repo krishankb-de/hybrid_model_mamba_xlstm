@@ -752,7 +752,7 @@ def test_biomedclip_kd_config_values():
     assert cfg.get("teacher") == "biomedclip_text", (
         f"teacher should be 'biomedclip_text', got {cfg.get('teacher')}"
     )
-    assert cfg.get("alpha_kd") == 1.0,   f"alpha_kd should be 1.0 (Phase 6), got {cfg.get('alpha_kd')}"
+    assert cfg.get("alpha_kd") == 0.3,   f"alpha_kd should be 0.3 (Phase 6b), got {cfg.get('alpha_kd')}"
     assert cfg.get("beta_clip") == 1.0,  f"beta_clip should be 1.0, got {cfg.get('beta_clip')}"
     assert cfg.get("gamma_simcse") == 0.1, f"gamma_simcse should be 0.1, got {cfg.get('gamma_simcse')}"
     assert cfg.get("backbone_lr") == 1e-5, f"backbone_lr should be 1e-5, got {cfg.get('backbone_lr')}"

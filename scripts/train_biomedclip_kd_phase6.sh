@@ -9,7 +9,7 @@
 #SBATCH --error=/scratch/bhushkri/hybrid_xmamba_a100_70m_40/logs/%x_%j.log
 #SBATCH --requeue
 
-# Phase 6 — Fix: bypass img_proj + higher KD weight
+# Phase 6b — Fix: bypass img_proj ONLY (alpha_kd reset to 0.3)
 #
 # Root cause diagnosis (Phase 5c eval):
 #   Indiana i2t R@10 = 3.36%, MIMIC-val = 8.36%, paired cosine = 0.22-0.29
@@ -17,14 +17,16 @@
 #
 # Why: clip_model.visual already includes BiomedCLIP's image projection
 #   → output is 512-d in BiomedCLIP's joint space.
-#   img_proj (random-init 512→GELU→512) was being applied ON TOP,
-#   distorting the correct joint-space embeddings. The CLIP loss (β=1.0)
-#   then pulled Mamba text toward the distorted space instead of BiomedCLIP
-#   joint space, neutralising the KD signal.
+#   img_proj (random-init 512→GELU→512) was applied ON TOP, distorting them.
+#   CLIP loss (β=1.0) pulled Mamba text toward the distorted space.
 #
-# Fix:
-#   1. _joint_step: z_img = F.normalize(z_img_raw.float()) — skip img_proj
-#   2. alpha_kd: 0.3 → 1.0 — stronger KD signal now that both sides are clean
+# Phase 6 (job 1297) failure: alpha_kd=1.0 caused gradient conflict.
+#   KD (→ BiomedCLIP text space) and CLIP (→ BiomedCLIP image space) pull in
+#   different directions even in the joint space (text≠image, cos~0.5-0.7).
+#   val/clip_loss diverged 2.88→3.47; i2t R@10 collapsed to 0.49% (near-random).
+#
+# Phase 6b fix: img_proj bypass ONLY; alpha_kd back to 0.3 (same as Phase 5c).
+#   Isolates the architectural fix from the weight change.
 #
 # Submit:
 #   cd /scratch/bhushkri/hybrid_xmamba_a100_70m_40
@@ -36,7 +38,7 @@ STAGE0_CHECKPOINT="${STAGE0_CHECKPOINT:-./outputs/hybrid_70m_stage0_kd_pubmed/ch
 MIMIC_CACHE_DIR="${MIMIC_CACHE_DIR:-/scratch/bhushkri/mimic_cxr_cache}"
 SKIP_VERIFY="${SKIP_VERIFY:-1}"
 
-echo "=== JOB START (BiomedCLIP-KD Phase 6: no img_proj + alpha_kd=1.0) ==="
+echo "=== JOB START (BiomedCLIP-KD Phase 6b: no img_proj, alpha_kd=0.3) ==="
 date
 echo "Host: $(hostname)"
 echo "Submit dir: ${SLURM_SUBMIT_DIR}"
@@ -91,7 +93,7 @@ else
 fi
 
 echo ""
-echo "Starting BiomedCLIP-KD Phase 6 (no img_proj, alpha_kd=1.0)..."
+echo "Starting BiomedCLIP-KD Phase 6b (no img_proj, alpha_kd=0.3)..."
 
 python scripts/train_contrastive.py \
   --config-name config_70m \

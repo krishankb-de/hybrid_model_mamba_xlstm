@@ -19,9 +19,10 @@
 teacher: "biomedclip_text"
 
 # Joint loss weights
-# Phase 6: increased from 0.3 — images now in correct joint space so KD must
-# dominate to pull text into the same space (not compete with a distorted z_img).
-alpha_kd: 1.0
+# Phase 6b: reset to 0.3 — alpha_kd=1.0 caused gradient conflict (KD and CLIP
+# pull in different directions even in BiomedCLIP joint space; CLIP loss diverged
+# from 2.88→3.47 in job 1297). img_proj bypass is the key fix; KD weight unchanged.
+alpha_kd: 0.3
 beta_clip: 1.0
 gamma_simcse: 0.1
 
