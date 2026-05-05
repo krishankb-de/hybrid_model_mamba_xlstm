@@ -18,11 +18,16 @@
 
 teacher: "biomedclip_text"
 
-# Joint loss weights
-# Phase 6b: reset to 0.3 — alpha_kd=1.0 caused gradient conflict (KD and CLIP
-# pull in different directions even in BiomedCLIP joint space; CLIP loss diverged
-# from 2.88→3.47 in job 1297). img_proj bypass is the key fix; KD weight unchanged.
+# Joint loss weights.
+#
+# Phase 10: α_kd schedule. CLIP is gated off during the freeze window
+# (Phase 9), so α_kd_warmup=1.0 cannot conflict with CLIP gradient — KD owns
+# the warmup entirely. After unfreeze, CLIP turns on and α_kd_post=0.3 is the
+# safe coexistence weight (1.0 caused the 6a/6b/6c divergence). `alpha_kd` is
+# kept as the legacy single-value fallback for non-scheduled call sites.
 alpha_kd: 0.3
+alpha_kd_warmup: 1.0
+alpha_kd_post: 0.3
 beta_clip: 1.0
 gamma_simcse: 0.1
 
@@ -30,8 +35,12 @@ gamma_simcse: 0.1
 backbone_lr: 1.0e-5
 head_lr: 3.0e-4
 
-# Backbone freeze during head warm-up
-freeze_text_encoder_steps: 500
+# Backbone freeze during head warm-up.
+# Phase 10: 500→1000. The 500-step window of Phase 6c was insufficient for
+# z_text to fully migrate into BiomedCLIP-text space; CLIP turning on too
+# early polluted proj_head. 1000 steps + α_kd_warmup=1.0 should drive
+# cos(z_text, t_emb) ≥ 0.7 before CLIP engages.
+freeze_text_encoder_steps: 1000
 
 # Phase 5: MoCo dynamic queue (set moco_queue_size: 0 to disable)
 moco_queue_size: 16384

@@ -2,7 +2,7 @@
 
 > Supersedes `JOINT_TRAINING_PLAN.md` + `joint_training_state.json`. Resumable. Read this file + `biomedclip_kd_state.json` (gitignored) at session start.
 >
-> **Current phase: 10 — α_kd schedule + warmup extension + diagnostic.** Phase 9 complete (CLIP gated by step, MoCo queue cold-start at unfreeze, momentum encoder hard-resync). Next: Phase 10 (warmup 500→1000, α_kd_warmup=1.0/α_kd_post=0.3, `cos_text_teacher` log) → Phase 11 (smoke + sbatch Phase 6d) → Phase 12 (final writeup).
+> **Current phase: 11 — smoke + SLURM scripts → Phase 6d run.** Phase 10 complete (warmup 500→1000, α_kd_warmup=1.0/α_kd_post=0.3, cos_text_teacher + effective_alpha_kd logs, schedule unit test). Next: Phase 11 (smoke gated-CLIP assertion, train/eval Phase 6d sbatch wrappers, submit on willi) → Phase 12 (final writeup).
 
 ## Experiment history
 
@@ -220,15 +220,15 @@ During 500-step frozen warm-up, `projection_head` (not `distill_proj`) learns to
 - [x] **9D** — Tests added: `test_clip_loss_gated_during_warmup` (queue ptr unchanged during warmup), `test_moco_queue_cold_start_reset`, `test_momentum_encoder_copy_from`, `test_joint_unfreeze_triggers_resync_and_reset`.
 - [x] **9E** — `bash scripts/validate_for_willi.sh` green (51 passed, 5 skipped, 6/6 gates).
 
-### Phase 10 — Hyperparameter rebalance + alignment diagnostic
+### Phase 10 — Hyperparameter rebalance + alignment diagnostic ✅ COMPLETE
 **Goal:** give the warm-up enough time AND signal strength to bring `z_text` into BCT space before CLIP turns on. Boost α_kd while CLIP is gated off (no gradient conflict possible), then decay back to the safe post-warmup value.
 
-- [ ] **10A** — `configs/distill/biomedclip_kd_joint.yaml`: `freeze_text_encoder_steps: 500 → 1000`.
-- [ ] **10B** — Add `alpha_kd_warmup: 1.0` and `alpha_kd_post: 0.3` to config; thread through `JointMultiTaskLightningModule.__init__`.
-- [ ] **10C** — `_joint_step`: `effective_alpha = alpha_kd_warmup if global_step < freeze_text_encoder_steps else alpha_kd_post`.
-- [ ] **10D** — Add diagnostic log `train/cos_text_teacher = cos(z_text, t_emb).mean()` (and matching `val/`) every step; this is the kill-job signal.
-- [ ] **10E** — Test: assert effective alpha switches at the threshold; assert diagnostic is logged.
-- [ ] **10F** — `bash scripts/validate_for_willi.sh` green.
+- [x] **10A** — `configs/distill/biomedclip_kd_joint.yaml`: `freeze_text_encoder_steps: 500 → 1000`.
+- [x] **10B** — Added `alpha_kd_warmup: 1.0` and `alpha_kd_post: 0.3` to config; threaded through `JointMultiTaskLightningModule.__init__` (defaults to legacy `alpha_kd` if either override is None) and `train_contrastive.py` joint dispatch.
+- [x] **10C** — `_joint_step`: `effective_alpha_kd = alpha_kd_warmup if global_step < freeze_text_encoder_steps else alpha_kd_post`; total uses `effective_alpha_kd`.
+- [x] **10D** — Added diagnostic logs: `{train,val}/cos_text_teacher = cos(z_text, t_emb).mean()` (kill-job signal) and `train/effective_alpha_kd` (sanity-check that schedule fires at the boundary).
+- [x] **10E** — `tests/test_willi_parity.py::test_alpha_kd_schedule_switches_at_threshold`: asserts (a) `alpha_kd_warmup`/`alpha_kd_post` stored on the module; (b) back-compat (no overrides → both = `alpha_kd`); (c) total loss differs between threshold=1000 (warmup α) vs threshold=0 (post α) under fixed RNG.
+- [x] **10F** — `bash scripts/validate_for_willi.sh` green (52 passed, 5 skipped, 6/6 gates).
 
 ### Phase 11 — Smoke + SLURM scripts → submit Phase 6d run
 - [ ] **11A** — `scripts/smoke_test_joint.py`: parametrise `freeze_text_encoder_steps` and assert `l_clip == 0` for steps `< warmup`, then non-zero. Confirm queue is empty during warmup.

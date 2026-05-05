@@ -717,6 +717,8 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         model,
         teacher: nn.Module,
         alpha_kd: float = 0.3,
+        alpha_kd_warmup: Optional[float] = None,
+        alpha_kd_post: Optional[float] = None,
         beta_clip: float = 1.0,
         gamma_simcse: float = 0.1,
         backbone_lr: float = 1e-5,
@@ -748,6 +750,13 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         self.save_hyperparameters(ignore=['model', 'teacher'])
         self.teacher = teacher
         self.alpha_kd = alpha_kd
+        # Phase 10: α_kd schedule. CLIP is gated off during warmup (Phase 9),
+        # so α_kd_warmup can be high (default 1.0) without gradient conflict.
+        # Post-unfreeze, CLIP engages and α_kd drops back to the safe value
+        # (default == alpha_kd, typically 0.3). If neither override is given,
+        # behaviour reduces to the pre-Phase-10 constant α_kd.
+        self.alpha_kd_warmup = float(alpha_kd_warmup) if alpha_kd_warmup is not None else float(alpha_kd)
+        self.alpha_kd_post = float(alpha_kd_post) if alpha_kd_post is not None else float(alpha_kd)
         self.beta_clip = beta_clip
         self.gamma_simcse = gamma_simcse
         self.backbone_lr = backbone_lr
@@ -958,15 +967,29 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         # tower (512-d joint space, same as image tower by construction).
         # Phase 8: distill_proj deleted. KD trains projection_head directly.
         l_kd = torch.tensor(0.0, device=z_text.device)
+        cos_text_teacher = torch.tensor(0.0, device=z_text.device)
         if "teacher_input_ids" in batch:
             t_ids = batch["teacher_input_ids"]
             with torch.no_grad():
                 t_emb = self.teacher.encode_text(t_ids)  # (B, 512)
                 t_emb = F.normalize(t_emb.float(), dim=-1)
-            l_kd = (1.0 - F.cosine_similarity(z_text.float(), t_emb, dim=-1)).mean()
+            cos_per_sample = F.cosine_similarity(z_text.float(), t_emb, dim=-1)
+            l_kd = (1.0 - cos_per_sample).mean()
+            cos_text_teacher = cos_per_sample.detach().mean()
+
+        # Phase 10: α_kd schedule. During the gated warmup (CLIP off), KD
+        # owns the gradient — boost α_kd_warmup to drive z_text into BCT
+        # space fast. Post-unfreeze, decay to α_kd_post to avoid the 6a/6b/6c
+        # KD-vs-CLIP gradient conflict (text and image targets cos~0.5–0.7
+        # apart in joint space).
+        effective_alpha_kd = (
+            self.alpha_kd_warmup
+            if self.global_step < self.freeze_text_encoder_steps
+            else self.alpha_kd_post
+        )
 
         total = (
-            self.alpha_kd * l_kd
+            effective_alpha_kd * l_kd
             + self.beta_clip * l_clip
             + self.gamma_simcse * l_simcse
         )
@@ -976,6 +999,19 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         self.log(f"{split}/clip_loss",   l_clip,   prog_bar=True,  on_step=on_step, on_epoch=True)
         self.log(f"{split}/simcse_loss", l_simcse, prog_bar=False, on_step=on_step, on_epoch=True)
         self.log(f"{split}/total_loss",  total,    prog_bar=True,  on_step=on_step, on_epoch=True)
+        # Phase 10: cos_text_teacher = cos(z_text, BCT). Kill-job signal:
+        # must rise from ~0 to ≥0.7 by step 800 of warmup. If <0.5 by 800
+        # → α_kd_warmup or proj_head LR is wrong.
+        self.log(
+            f"{split}/cos_text_teacher", cos_text_teacher,
+            prog_bar=(split == "train"), on_step=on_step, on_epoch=True,
+        )
+        if split == "train":
+            self.log(
+                "train/effective_alpha_kd",
+                float(effective_alpha_kd),
+                on_step=True, on_epoch=False,
+            )
         if split == "train":
             pos_cos = (z_text * z_text2).sum(dim=-1).mean()
             self.log("train/pos_cosine_mean", pos_cos, on_step=True, on_epoch=False)

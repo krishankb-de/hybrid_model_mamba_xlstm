@@ -689,6 +689,14 @@ def main(cfg: DictConfig):
             model=text_encoder,
             teacher=teacher_model,
             alpha_kd=float(distill_cfg.get("alpha_kd", 0.3)),
+            alpha_kd_warmup=(
+                float(distill_cfg.get("alpha_kd_warmup"))
+                if distill_cfg.get("alpha_kd_warmup", None) is not None else None
+            ),
+            alpha_kd_post=(
+                float(distill_cfg.get("alpha_kd_post"))
+                if distill_cfg.get("alpha_kd_post", None) is not None else None
+            ),
             beta_clip=float(distill_cfg.get("beta_clip", 1.0)),
             gamma_simcse=float(distill_cfg.get("gamma_simcse", 0.1)),
             backbone_lr=float(distill_cfg.get("backbone_lr", 1e-5)),
@@ -706,8 +714,11 @@ def main(cfg: DictConfig):
         print(
             f"JointMultiTaskLightningModule: "
             f"α_kd={distill_cfg.get('alpha_kd', 0.3)} "
+            f"(warmup={distill_cfg.get('alpha_kd_warmup', distill_cfg.get('alpha_kd', 0.3))}, "
+            f"post={distill_cfg.get('alpha_kd_post', distill_cfg.get('alpha_kd', 0.3))}) "
             f"β_clip={distill_cfg.get('beta_clip', 1.0)} "
-            f"γ_simcse={distill_cfg.get('gamma_simcse', 0.1)}"
+            f"γ_simcse={distill_cfg.get('gamma_simcse', 0.1)} "
+            f"freeze_text_encoder_steps={distill_cfg.get('freeze_text_encoder_steps', 500)}"
         )
 
     elif distill_cfg is not None and contrastive_mode == "simcse":

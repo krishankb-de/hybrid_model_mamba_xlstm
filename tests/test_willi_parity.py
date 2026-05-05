@@ -779,16 +779,126 @@ def test_biomedclip_kd_config_values():
         f"teacher should be 'biomedclip_text', got {cfg.get('teacher')}"
     )
     assert cfg.get("alpha_kd") == 0.3,   f"alpha_kd should be 0.3 (Phase 6b), got {cfg.get('alpha_kd')}"
+    # Phase 10: α_kd schedule keys.
+    assert cfg.get("alpha_kd_warmup") == 1.0, (
+        f"alpha_kd_warmup should be 1.0 (Phase 10), got {cfg.get('alpha_kd_warmup')}"
+    )
+    assert cfg.get("alpha_kd_post") == 0.3, (
+        f"alpha_kd_post should be 0.3 (Phase 10), got {cfg.get('alpha_kd_post')}"
+    )
     assert cfg.get("beta_clip") == 1.0,  f"beta_clip should be 1.0, got {cfg.get('beta_clip')}"
     assert cfg.get("gamma_simcse") == 0.1, f"gamma_simcse should be 0.1, got {cfg.get('gamma_simcse')}"
     assert cfg.get("backbone_lr") == 1e-5, f"backbone_lr should be 1e-5, got {cfg.get('backbone_lr')}"
     assert cfg.get("head_lr") == 3e-4,  f"head_lr should be 3e-4, got {cfg.get('head_lr')}"
-    assert cfg.get("freeze_text_encoder_steps") == 500, (
-        f"freeze_text_encoder_steps should be 500, got {cfg.get('freeze_text_encoder_steps')}"
+    # Phase 10: 500→1000.
+    assert cfg.get("freeze_text_encoder_steps") == 1000, (
+        f"freeze_text_encoder_steps should be 1000 (Phase 10), got {cfg.get('freeze_text_encoder_steps')}"
     )
     # PubMedBERT-specific keys must NOT leak into this config.
     for forbidden in ("teacher_model", "teacher_dtype", "teacher_max_length"):
         assert forbidden not in cfg, f"{forbidden} is PubMedBERT-specific; remove from biomedclip_kd_joint.yaml"
+
+
+@pytest.mark.willi_parity
+def test_alpha_kd_schedule_switches_at_threshold():
+    """Phase 10: effective α_kd must equal alpha_kd_warmup while
+    global_step < freeze_text_encoder_steps, and alpha_kd_post otherwise.
+    Also asserts that __init__ without overrides reduces to the legacy
+    constant α_kd (back-compat).
+    """
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
+    from hybrid_xmamba.training.lightning_module import JointMultiTaskLightningModule
+
+    cfg = HybridConfig(
+        vocab_size=100, dim=64, num_layers=2,
+        layer_pattern=["mamba", "mlstm"],
+        max_position_embeddings=64,
+        use_fast_path=False, use_tfla=False,
+        pooling_strategy="attention",
+    )
+    enc = HybridTextEncoder(cfg, embed_dim=512)
+
+    class _StubBiomedCLIPText(torch.nn.Module):
+        def encode_text(self, input_ids):
+            return torch.randn(input_ids.shape[0], 512)
+
+    teacher = _StubBiomedCLIPText()
+
+    try:
+        mod = JointMultiTaskLightningModule(
+            model=enc, teacher=teacher,
+            alpha_kd=0.3, alpha_kd_warmup=1.0, alpha_kd_post=0.3,
+            beta_clip=1.0, gamma_simcse=0.1,
+            backbone_lr=1e-5, head_lr=3e-4, weight_decay=0.01,
+            warmup_steps=5, max_steps=50, gradient_clip_val=1.0,
+            freeze_text_encoder_steps=1000,
+        )
+    except ImportError:
+        pytest.skip("open_clip not installed")
+
+    assert mod.alpha_kd_warmup == 1.0
+    assert mod.alpha_kd_post == 0.3
+
+    # Back-compat: no overrides → both fall back to alpha_kd.
+    try:
+        mod2 = JointMultiTaskLightningModule(
+            model=enc, teacher=teacher, alpha_kd=0.42,
+            beta_clip=1.0, gamma_simcse=0.1,
+            backbone_lr=1e-5, head_lr=3e-4, weight_decay=0.01,
+            warmup_steps=5, max_steps=50, gradient_clip_val=1.0,
+            freeze_text_encoder_steps=0,
+        )
+    except ImportError:
+        pytest.skip("open_clip not installed")
+    assert mod2.alpha_kd_warmup == 0.42
+    assert mod2.alpha_kd_post == 0.42
+
+    # Verify the schedule actually applies inside _joint_step by varying the
+    # threshold (global_step==0 when no trainer is attached). With threshold
+    # 1000 the warmup α applies; with threshold 0 the post α applies. With
+    # l_clip=0 (no pixel_values) the total loss differs only by the α_kd
+    # multiplier on l_kd, so any change in α produces a measurably different
+    # total under a fixed RNG seed.
+    input_ids = torch.randint(0, 100, (2, 8))
+    attn = torch.ones(2, 8, dtype=torch.long)
+    batch = {
+        "input_ids": input_ids, "attention_mask": attn,
+        "teacher_input_ids": input_ids, "teacher_attention_mask": attn,
+    }
+
+    try:
+        mod_warmup = JointMultiTaskLightningModule(
+            model=enc, teacher=teacher,
+            alpha_kd=0.3, alpha_kd_warmup=1.0, alpha_kd_post=0.3,
+            beta_clip=1.0, gamma_simcse=0.1,
+            backbone_lr=1e-5, head_lr=3e-4, weight_decay=0.01,
+            warmup_steps=5, max_steps=50, gradient_clip_val=1.0,
+            freeze_text_encoder_steps=1000,  # global_step(0) < 1000 → warmup α
+        )
+        mod_post = JointMultiTaskLightningModule(
+            model=enc, teacher=teacher,
+            alpha_kd=0.3, alpha_kd_warmup=1.0, alpha_kd_post=0.3,
+            beta_clip=1.0, gamma_simcse=0.1,
+            backbone_lr=1e-5, head_lr=3e-4, weight_decay=0.01,
+            warmup_steps=5, max_steps=50, gradient_clip_val=1.0,
+            freeze_text_encoder_steps=0,     # global_step(0) >= 0 → post α
+        )
+    except ImportError:
+        pytest.skip("open_clip not installed")
+
+    mod_warmup.eval()
+    mod_post.eval()
+
+    torch.manual_seed(0)
+    loss_warmup = mod_warmup._joint_step(batch, batch_idx=0, split="train").item()
+    torch.manual_seed(0)
+    loss_post = mod_post._joint_step(batch, batch_idx=0, split="train").item()
+
+    # Different effective α must produce a different total loss.
+    assert loss_warmup != loss_post, (
+        f"α_kd schedule did not change loss: warmup={loss_warmup}, post={loss_post}"
+    )
 
 
 @pytest.mark.willi_parity
