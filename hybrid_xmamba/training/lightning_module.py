@@ -906,14 +906,19 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
 
         # L_KD — cosine distillation toward BiomedCLIP text tower (512-d
         # joint embedding shared with the image tower by construction).
+        # Phase 6c: KD applied DIRECTLY on z_text (no distill_proj).
+        # distill_proj was absorbing all KD gradient, leaving z_text unconstrained
+        # in GPT-2 space. Without img_proj as bridge, CLIP loss had no traction
+        # (loss stuck at log(32)≈3.47 in jobs 1297+1299). Direct KD forces
+        # proj_head to output BiomedCLIP-space embeddings during warm-up, so
+        # CLIP can converge once the text encoder is near the image target space.
         l_kd = torch.tensor(0.0, device=z_text.device)
         if "teacher_input_ids" in batch:
             t_ids = batch["teacher_input_ids"]
             with torch.no_grad():
                 t_emb = self.teacher.encode_text(t_ids)  # (B, 512)
                 t_emb = F.normalize(t_emb.float(), dim=-1)
-            z_proj = F.normalize(self.distill_proj(z_text.float()), dim=-1)
-            l_kd = (1.0 - F.cosine_similarity(z_proj, t_emb, dim=-1)).mean()
+            l_kd = (1.0 - F.cosine_similarity(z_text.float(), t_emb, dim=-1)).mean()
 
         total = (
             self.alpha_kd * l_kd

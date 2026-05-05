@@ -13,8 +13,9 @@
 | 1288 | 5a | + MoCo asymmetric (i2t only) | 5.5% plateau | — | — |
 | 1290 | 5b | + MoCo symmetric + img_queue | 0.5% (broken: random img_queue = noise) | — | — |
 | 1291 | 5c | + MoCo symmetric, text_queue only | 9.99% best | **3.36%** (eval) | **0.226** |
-| 1297 | 6a | bypass img_proj + alpha_kd=1.0 | CANCELLED (diverged) | 0.49% → random | clip_loss 2.88→3.47 |
-| TBD | **6b** | **bypass img_proj + alpha_kd=0.3** | TBD | TBD | TBD |
+| 1297 | 6a | bypass img_proj + alpha_kd=1.0 | CANCELLED | 0.49% (random) | clip_loss 2.88→3.47 |
+| 1299 | 6b | bypass img_proj + alpha_kd=0.3 | CANCELLED | 0.46% (random) | clip_loss 3.0→3.47 |
+| TBD | **6c** | **bypass img_proj + direct KD on z_text** | TBD | TBD | TBD |
 
 **Phase 5c root-cause diagnosis (2026-05-05):** `clip_model.visual` already outputs BiomedCLIP-projected 512-d embeddings (joint space). The `img_proj` (random-init `512→GELU→512` MLP) was applied on top, distorting them. The CLIP loss (β=1.0) dominated KD (α=0.3) and pulled Mamba text toward the distorted space — explaining why paired cosine stayed at 0.22-0.29 across ALL runs since Phase 4, identical to the PubMedBERT era.
 
@@ -153,24 +154,33 @@ Three iterations to reach correct design:
 - [x] `lightning_module.py` `_joint_step`: bypass img_proj — `z_img = F.normalize(z_img_raw.float(), dim=-1)`.
 - [x] `alpha_kd: 1.0` — **WRONG.** KD (→BiomedCLIP text) and CLIP (→BiomedCLIP image) point in different directions even in the joint space (matched-pair cos ~0.5–0.7, not 1.0). Equal α=β=1.0 causes gradient conflict. val/clip_loss diverged from 2.88 → 3.47 over 5 epochs; i2t R@10 = 0.49% (near-random). Cancelled.
 
-#### Phase 6b 🔄 READY TO SUBMIT
-**Key insight:** the img_proj bypass is the correct architectural fix. α_kd must stay at 0.3 — the KD and CLIP objectives are not fully aligned even in joint space.
+#### Phase 6b ✗ FAILED (job 1299, cancelled)
+Same failure: clip_loss 3.0→3.47, i2t R@10=0.46%. Root cause was deeper: `distill_proj` absorbs ALL KD gradient — it only teaches `distill_proj` to map `z_text` → BiomedCLIP space, `z_text` itself (used by CLIP) stays in GPT-2 space. Without `img_proj` as bridge, CLIP has zero traction from step 1.
 
+#### Phase 6c 🔄 READY TO SUBMIT
+**Root cause:** `distill_proj` acts as a gradient absorber — KD never reaches `z_text` directly.
+
+```
+OLD:  KD = 1 - cos(distill_proj(z_text), BCT)   ← trains distill_proj, not z_text
+NEW:  KD = 1 - cos(z_text, BCT)                  ← trains z_text directly
+```
+
+During 500-step frozen warm-up, `projection_head` (not `distill_proj`) learns to map Stage-0 Mamba outputs → BiomedCLIP text space. By step 500, `z_text ≈ BCT`. When CLIP engages, `z_text` (≈ BCT) and `z_img` (BCI, bypassing img_proj) are both in BiomedCLIP joint space — CLIP can converge.
+
+- [x] `lightning_module.py` `_joint_step`: KD directly on `z_text` — `l_kd = (1 - cos(z_text, t_emb)).mean()`; `distill_proj` still exists (optimizer compat) but removed from KD path.
 - [x] `lightning_module.py` `_joint_step`: img_proj bypass retained.
-- [x] `configs/distill/biomedclip_kd_joint.yaml`: `alpha_kd: 0.3` (reset from 1.0 — isolates architectural fix).
-- [x] `tests/test_willi_parity.py`: `test_biomedclip_kd_config_values` asserts `alpha_kd==0.3`.
-- [x] `scripts/train_biomedclip_kd_phase6.sh` updated (Phase 6b comment block).
-- [x] `scripts/eval_biomedclip_kd_phase6.sh` created.
-- [x] `validate_for_willi.sh` green (all 6 gates).
-- [ ] **Cancel job 1297:** `scancel 1297`
+- [x] `tests/test_willi_parity.py`: `test_joint_module_all_losses_finite` updated — `embed_dim=512`, asserts `projection_head` gets gradient (not `distill_proj`).
+- [x] `scripts/train_biomedclip_kd_phase6.sh` updated (Phase 6c comment block).
+- [x] `validate_for_willi.sh` green (24 tests, all 6 gates).
+- [ ] **Cancel job 1299:** `scancel 1299`
 - [ ] **Submit:** `sbatch hybrid_model_mamba_xlstm/scripts/train_biomedclip_kd_phase6.sh`
-- [ ] **Monitor:** val/clip_loss should drop BELOW 2.47 (Phase 5c baseline) within first 3 epochs if fix works. If it starts below 2.47 and continues falling → img_proj bypass is confirmed working.
+- [ ] **Monitor (key signal):** val/clip_loss at first checkpoint. Must start **below 2.47** (Phase 5c floor). If it's still near 3.0+, z_text is still not reaching BiomedCLIP space — investigate `freeze_text_encoder_steps` or increase α_kd to 0.5.
 - [ ] **Eval:** `sbatch hybrid_model_mamba_xlstm/scripts/eval_biomedclip_kd_phase6.sh` after training.
 - [ ] **Decision gate (Indiana i2t R@10):**
   - ≥ 40% → SUCCESS
   - 25–40% → PARTIAL — manuscript quality
   - 15–25% → MARGINAL — try R-Drop or unfreeze ViT last 2 blocks
-  - < 15% → verify `clip_model.visual` output dim is 512 (print `z_img_raw.shape` in first step); if 512 confirmed, investigate BiomedCLIP paired cosine baseline
+  - < 15% → check paired cosine trajectory; if not rising above 0.30 by epoch 2, increase α_kd to 0.5
 
 ### Phase 7 — Final eval + writeup (pending Phase 6 result)
 - [ ] Cross-checkpoint comparison table: Phase 4 / 5c / 6 best ckpts × {Indiana, MIMIC-val} × {i2t, t2i} R@1/5/10 + paired cosine.

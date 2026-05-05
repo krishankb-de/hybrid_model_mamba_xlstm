@@ -639,7 +639,8 @@ def test_attention_pooling_correctness():
 @pytest.mark.willi_parity
 def test_joint_module_all_losses_finite():
     """JointMultiTaskLightningModule._joint_step must produce finite KD, CLIP, and
-    SimCSE losses with gradients flowing into backbone, heads, and distill_proj.
+    SimCSE losses with gradients flowing into backbone and proj_head.
+    Phase 6c: KD applied directly on z_text (no distill_proj in KD path).
     img_proj and image_encoder are skipped (open_clip unavailable); l_clip=0 is OK.
     """
     from hybrid_xmamba.models.configuration_hybrid import HybridConfig
@@ -653,7 +654,9 @@ def test_joint_module_all_losses_finite():
         use_fast_path=False, use_tfla=False,
         pooling_strategy="attention",
     )
-    enc = HybridTextEncoder(cfg, embed_dim=64)
+    # embed_dim=512 matches BiomedCLIP joint space; Phase 6c KD is applied directly
+    # on z_text, so z_text and t_emb must share the same dimension.
+    enc = HybridTextEncoder(cfg, embed_dim=512)
 
     class _StubBiomedCLIPText(torch.nn.Module):
         """Mimic open_clip CLIP wrapper: encode_text returns (B, 512)."""
@@ -695,10 +698,9 @@ def test_joint_module_all_losses_finite():
         "teacher_attention_mask": attn,
     }
 
-    # Phase 2 pivot: distill_proj must project into the 512-d BiomedCLIP joint
-    # space, not the legacy 768-d PubMedBERT hidden.
+    # distill_proj still exists (optimizer compatibility) but is no longer in KD path.
     assert mod.distill_proj[-1].out_features == 512, (
-        f"distill_proj should project to 512-d (BiomedCLIP joint), "
+        f"distill_proj should be 512-d (BiomedCLIP joint), "
         f"got {mod.distill_proj[-1].out_features}"
     )
 
@@ -707,9 +709,11 @@ def test_joint_module_all_losses_finite():
     assert loss.item() > 0.0, "Joint loss should be > 0 (l_kd + l_simcse active)"
 
     loss.backward()
-    for name, param in mod.distill_proj.named_parameters():
-        assert param.grad is not None, f"No grad for distill_proj.{name}"
-        assert torch.isfinite(param.grad).all(), f"NaN grad for distill_proj.{name}"
+    # Phase 6c: KD applied directly on z_text → projection_head must receive gradient.
+    # distill_proj is bypassed in KD path → no gradient expected there.
+    for name, param in mod.model.projection_head.named_parameters():
+        assert param.grad is not None, f"No grad for projection_head.{name}"
+        assert torch.isfinite(param.grad).all(), f"NaN grad for projection_head.{name}"
     if mod.model.attn_pool is not None:
         for name, param in mod.model.attn_pool.named_parameters():
             assert param.grad is not None, f"No grad for attn_pool.{name}"

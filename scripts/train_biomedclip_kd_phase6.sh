@@ -25,8 +25,15 @@
 #   different directions even in the joint space (text≠image, cos~0.5-0.7).
 #   val/clip_loss diverged 2.88→3.47; i2t R@10 collapsed to 0.49% (near-random).
 #
-# Phase 6b fix: img_proj bypass ONLY; alpha_kd back to 0.3 (same as Phase 5c).
-#   Isolates the architectural fix from the weight change.
+# Phase 6b (job 1299) ALSO failed: clip_loss 3.0→3.47, i2t R@10=0.46% (random).
+# Root cause: distill_proj absorbs ALL KD gradient. KD only teaches distill_proj
+# to map z_text → BiomedCLIP text space; z_text itself (used by CLIP) stays in
+# GPT-2 space. Without img_proj as bridge, CLIP has zero traction from step 1.
+#
+# Phase 6c fix (this script): KD applied DIRECTLY on z_text (no distill_proj in
+# KD path). During 500-step frozen warm-up, proj_head learns to output BiomedCLIP
+# text-space embeddings. When CLIP kicks in, z_text ≈ BiomedCLIP text → CLIP
+# converges because image (BiomedCLIP joint) and text are in the same space.
 #
 # Submit:
 #   cd /scratch/bhushkri/hybrid_xmamba_a100_70m_40
@@ -38,7 +45,7 @@ STAGE0_CHECKPOINT="${STAGE0_CHECKPOINT:-./outputs/hybrid_70m_stage0_kd_pubmed/ch
 MIMIC_CACHE_DIR="${MIMIC_CACHE_DIR:-/scratch/bhushkri/mimic_cxr_cache}"
 SKIP_VERIFY="${SKIP_VERIFY:-1}"
 
-echo "=== JOB START (BiomedCLIP-KD Phase 6b: no img_proj, alpha_kd=0.3) ==="
+echo "=== JOB START (BiomedCLIP-KD Phase 6c: no img_proj, direct KD on z_text) ==="
 date
 echo "Host: $(hostname)"
 echo "Submit dir: ${SLURM_SUBMIT_DIR}"
@@ -93,7 +100,7 @@ else
 fi
 
 echo ""
-echo "Starting BiomedCLIP-KD Phase 6b (no img_proj, alpha_kd=0.3)..."
+echo "Starting BiomedCLIP-KD Phase 6c (no img_proj, direct KD on z_text, alpha_kd=0.3)..."
 
 python scripts/train_contrastive.py \
   --config-name config_70m \
