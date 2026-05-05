@@ -2,7 +2,7 @@
 
 > Supersedes `JOINT_TRAINING_PLAN.md` + `joint_training_state.json`. Resumable. Read this file + `biomedclip_kd_state.json` (gitignored) at session start.
 >
-> **Current phase: 6 — ready to submit.** Push branch, then `sbatch scripts/train_biomedclip_kd_phase6.sh`.
+> **Current phase: 7 — plan update (Phase 6c failure recovery; Phases 8–12 designed).** Phase 6c (job 1300) failed identically to 6a/6b. Next session executes Phase 8 (delete `distill_proj`/`img_proj`) → Phase 9 (gate CLIP, cold-start MoCo) → Phase 10 (warmup 500→1000, α_kd schedule) → Phase 11 (smoke + sbatch Phase 6d) → Phase 12 (final writeup).
 
 ## Experiment history
 
@@ -15,9 +15,12 @@
 | 1291 | 5c | + MoCo symmetric, text_queue only | 9.99% best | **3.36%** (eval) | **0.226** |
 | 1297 | 6a | bypass img_proj + alpha_kd=1.0 | CANCELLED | 0.49% (random) | clip_loss 2.88→3.47 |
 | 1299 | 6b | bypass img_proj + alpha_kd=0.3 | CANCELLED | 0.46% (random) | clip_loss 3.0→3.47 |
-| TBD | **6c** | **bypass img_proj + direct KD on z_text** | TBD | TBD | TBD |
+| 1300 | 6c | bypass img_proj + direct KD on z_text | CANCELLED | 0.49% (random) | clip_loss 2.97→3.45 |
+| TBD | **6d** | **delete dead modules + gate CLIP + cold-start MoCo + warmup 500→1000** | TBD | TBD | TBD |
 
 **Phase 5c root-cause diagnosis (2026-05-05):** `clip_model.visual` already outputs BiomedCLIP-projected 512-d embeddings (joint space). The `img_proj` (random-init `512→GELU→512` MLP) was applied on top, distorting them. The CLIP loss (β=1.0) dominated KD (α=0.3) and pulled Mamba text toward the distorted space — explaining why paired cosine stayed at 0.22-0.29 across ALL runs since Phase 4, identical to the PubMedBERT era.
+
+**Phase 6c root-cause diagnosis (2026-05-05, job 1300):** Direct KD on `z_text` was implemented but failed identically (val/clip_loss 2.97→3.45 across 5 epochs, i2t R@10=0.49%). Three vulnerabilities remained, all unaddressed by 6c: (1) `distill_proj` and `img_proj` are still in the optimizer as dead weights (cosmetic, but future bug surface). (2) **CLIP loss is NOT gated by `freeze_text_encoder_steps`** — it runs from step 0 against a `z_text` still in GPT-2 space, polluting proj_head gradients before KD can stabilise it. (3) **MoCo `text_queue` enqueues from step 0** — by step 500 the 16K queue is full of stale GPT-2-space embeddings, and the post-unfreeze InfoNCE loss against this stale queue produces random gradients (the divergence pattern observed in jobs 1297/1299/1300). Phase 6d combines four complementary fixes: delete dead modules, gate CLIP, cold-start the queue, extend warmup 500→1000 with α_kd schedule.
 
 ## Context
 
@@ -89,6 +92,18 @@ GPT-2 toks ─▶ Mamba ─▶ proj_head   GPT-2 toks ─▶ Mamba ─▶ proj_h
 | `configs/distill/biomedclip_kd_joint.yaml` | **Phase 6**: `alpha_kd: 1.0` (was 0.3) — KD must dominate now that image side is clean | 6 |
 | `scripts/train_biomedclip_kd_phase6.sh` (NEW) | SLURM wrapper, Phase 6 training, `experiment_name=biomedclip_kd_phase6` | 6 |
 | `scripts/eval_biomedclip_kd_phase6.sh` (NEW) | SLURM eval for Phase 6 best checkpoint | 6 |
+| `hybrid_xmamba/training/lightning_module.py:760-764` | **Phase 8**: delete `self.distill_proj` block | 8 |
+| `hybrid_xmamba/training/lightning_module.py:~222` (parent) | **Phase 8**: delete `self.img_proj` and `self.distill_proj`; remove from `configure_optimizers` | 8 |
+| `hybrid_xmamba/training/lightning_module.py` ckpt-load path | **Phase 8**: `strict=False` (or pre-strip) for back-compat with Phase 5c checkpoints | 8 |
+| `hybrid_xmamba/training/lightning_module.py:873-899` | **Phase 9**: gate CLIP block on `global_step >= freeze_text_encoder_steps`; skip queue enqueue when gated | 9 |
+| `hybrid_xmamba/training/lightning_module.py:478-490` | **Phase 9**: at unfreeze step, call `momentum_encoder.copy_from(model)` + `text_queue.reset()` | 9 |
+| `hybrid_xmamba/training/moco_queue.py` | **Phase 9**: add `MomentumEncoder.copy_from()` + `MoCoQueue.reset()` | 9 |
+| `configs/distill/biomedclip_kd_joint.yaml` | **Phase 10**: `freeze_text_encoder_steps: 500→1000`; add `alpha_kd_warmup: 1.0` + `alpha_kd_post: 0.3` | 10 |
+| `hybrid_xmamba/training/lightning_module.py` `_joint_step` | **Phase 10**: effective α_kd schedule + `cos_text_teacher` diagnostic logging | 10 |
+| `tests/test_willi_parity.py` | **Phase 8/9/10**: deletion asserts + gating tests + α_kd schedule test | 8/9/10 |
+| `scripts/smoke_test_joint.py` | **Phase 11**: assert `l_clip==0` during warmup, non-zero after; queue empty during warmup | 11 |
+| `scripts/train_biomedclip_kd_phase6d.sh` (NEW) | **Phase 11**: SLURM wrapper, `experiment_name=biomedclip_kd_phase6d` | 11 |
+| `scripts/eval_biomedclip_kd_phase6d.sh` (NEW) | **Phase 11**: SLURM eval for best Phase 6d checkpoint | 11 |
 
 ### Verified facts (corrects assumptions in original draft)
 
@@ -157,8 +172,8 @@ Three iterations to reach correct design:
 #### Phase 6b ✗ FAILED (job 1299, cancelled)
 Same failure: clip_loss 3.0→3.47, i2t R@10=0.46%. Root cause was deeper: `distill_proj` absorbs ALL KD gradient — it only teaches `distill_proj` to map `z_text` → BiomedCLIP space, `z_text` itself (used by CLIP) stays in GPT-2 space. Without `img_proj` as bridge, CLIP has zero traction from step 1.
 
-#### Phase 6c 🔄 READY TO SUBMIT
-**Root cause:** `distill_proj` acts as a gradient absorber — KD never reaches `z_text` directly.
+#### Phase 6c ✗ FAILED (job 1300, cancelled 2026-05-05)
+**Root cause (then-believed):** `distill_proj` acts as a gradient absorber — KD never reaches `z_text` directly.
 
 ```
 OLD:  KD = 1 - cos(distill_proj(z_text), BCT)   ← trains distill_proj, not z_text
@@ -172,19 +187,71 @@ During 500-step frozen warm-up, `projection_head` (not `distill_proj`) learns to
 - [x] `tests/test_willi_parity.py`: `test_joint_module_all_losses_finite` updated — `embed_dim=512`, asserts `projection_head` gets gradient (not `distill_proj`).
 - [x] `scripts/train_biomedclip_kd_phase6.sh` updated (Phase 6c comment block).
 - [x] `validate_for_willi.sh` green (24 tests, all 6 gates).
-- [ ] **Cancel job 1299:** `scancel 1299`
-- [ ] **Submit:** `sbatch hybrid_model_mamba_xlstm/scripts/train_biomedclip_kd_phase6.sh`
-- [ ] **Monitor (key signal):** val/clip_loss at first checkpoint. Must start **below 2.47** (Phase 5c floor). If it's still near 3.0+, z_text is still not reaching BiomedCLIP space — investigate `freeze_text_encoder_steps` or increase α_kd to 0.5.
-- [ ] **Eval:** `sbatch hybrid_model_mamba_xlstm/scripts/eval_biomedclip_kd_phase6.sh` after training.
-- [ ] **Decision gate (Indiana i2t R@10):**
+- [x] Job 1300 submitted.
+- [x] **Verdict:** CANCELLED. val/clip_loss started at 2.97 (above Phase 5c floor 2.47), diverged 2.97→3.02→3.14→3.28→3.45 over 5 epochs. i2t R@10 = 0.49% (near-random). Direct KD on `z_text` was implemented correctly but three vulnerabilities remained: (a) CLIP loss runs from step 0 (no `freeze_text_encoder_steps` gate in `_joint_step`), polluting `proj_head` gradients before KD can stabilise; (b) MoCo `text_queue` enqueues from step 0, filling with stale GPT-2-space embeddings that produce random InfoNCE gradients post-unfreeze; (c) `distill_proj`/`img_proj` still in optimizer as dead weights. Advancing to Phase 8+ (combined fix → Phase 6d run).
+
+### Phase 7 — Plan update (Phase 6c failure recovery design) ⏳ IN PROGRESS
+**Scope: only plan files. NO code, NO tests, NO commits in this phase.**
+- [x] Refreshed Plan-of-Record header (Current phase line) and experiment history table (job 1300 row, Phase 6d placeholder).
+- [x] Added Phase 6c root-cause diagnosis to Context (immediately above this Phases section).
+- [x] Folded Phase 6c verdict into the Phase 6 sub-section above.
+- [x] Inserted Phases 8 / 9 / 10 / 11 below; renumbered final eval+writeup to **Phase 12**.
+- [ ] Update `biomedclip_kd_state.json` (`current_phase` → `7_plan_update_pending`; `phase6.6c_verdict`; pre-create phase8–phase12 keys; append note for job 1300).
+- [ ] `bash scripts/validate_for_willi.sh` (sanity, doc-only changes — should remain green).
+- [ ] Commit (user-approved): `plan: phase 6c verdict + phases 8-12 for queue/CLIP gating + dead-module deletion`.
+
+### Phase 8 — Architectural cleanup (delete dead modules)
+**Goal:** remove `distill_proj` and `img_proj` from the architecture entirely (not just the forward path), eliminating ~500K wasted optimizer-state params and future regression surface.
+
+- [ ] **8A** — Delete `self.distill_proj` block (`lightning_module.py:760-764`) from `JointMultiTaskLightningModule.__init__`.
+- [ ] **8B** — In parent `HybridContrastiveLightningModule` (line ~222), delete `self.img_proj` and `self.distill_proj` definitions used by Stage-2 CLIP / Stage-1 KD modes. Joint mode no longer references either.
+- [ ] **8C** — `configure_optimizers` (joint + parent): remove `distill_proj.parameters()` and `img_proj.parameters()` from the head_lr param group.
+- [ ] **8D** — `grep -rn "distill_proj\|img_proj" hybrid_xmamba/ scripts/` → must be zero in non-test code paths.
+- [ ] **8E** — Back-compat: load existing Phase 5c checkpoints with `strict=False` (or pre-strip `distill_proj.*` / `img_proj.*` keys). Add a smoke test that loading a frozen 5c-shaped state-dict succeeds.
+- [ ] **8F** — `tests/test_willi_parity.py`: drop `distill_proj.out_features == 512` assertion; add `assert not hasattr(module, "distill_proj")` and `assert not hasattr(module, "img_proj")`.
+- [ ] **8G** — `bash scripts/validate_for_willi.sh` green.
+
+### Phase 9 — Curriculum gating (CLIP off + MoCo cold-start)
+**Goal:** prevent contamination of `proj_head` and the MoCo queue during the KD-only warm-up window. CLIP loss and queue enqueue are both off until `global_step >= freeze_text_encoder_steps`. At the unfreeze boundary, hard-resync the momentum encoder from the live model and reset the queue.
+
+- [ ] **9A** — `_joint_step` (lines 873–899): wrap CLIP block in `if self.global_step >= self.freeze_text_encoder_steps:`. Gated-off branch sets `l_clip = torch.tensor(0.0, device=z_text.device)` and skips both `momentum_encoder.encode` and `text_queue.enqueue`.
+- [ ] **9B** — `hybrid_xmamba/training/moco_queue.py`: add `MomentumEncoder.copy_from(model)` (hard weight copy; reset EMA buffers if any). Add `MoCoQueue.reset()` (zero the buffer, reset pointer).
+- [ ] **9C** — `on_train_batch_start` (lines 478–490): on the unfreeze step, additionally call `self.momentum_encoder.copy_from(self.model)` and `self.text_queue.reset()`.
+- [ ] **9D** — Tests: `test_clip_loss_gated_during_warmup`, `test_moco_queue_cold_start`, `test_momentum_resync_at_unfreeze`.
+- [ ] **9E** — `bash scripts/validate_for_willi.sh` green.
+
+### Phase 10 — Hyperparameter rebalance + alignment diagnostic
+**Goal:** give the warm-up enough time AND signal strength to bring `z_text` into BCT space before CLIP turns on. Boost α_kd while CLIP is gated off (no gradient conflict possible), then decay back to the safe post-warmup value.
+
+- [ ] **10A** — `configs/distill/biomedclip_kd_joint.yaml`: `freeze_text_encoder_steps: 500 → 1000`.
+- [ ] **10B** — Add `alpha_kd_warmup: 1.0` and `alpha_kd_post: 0.3` to config; thread through `JointMultiTaskLightningModule.__init__`.
+- [ ] **10C** — `_joint_step`: `effective_alpha = alpha_kd_warmup if global_step < freeze_text_encoder_steps else alpha_kd_post`.
+- [ ] **10D** — Add diagnostic log `train/cos_text_teacher = cos(z_text, t_emb).mean()` (and matching `val/`) every step; this is the kill-job signal.
+- [ ] **10E** — Test: assert effective alpha switches at the threshold; assert diagnostic is logged.
+- [ ] **10F** — `bash scripts/validate_for_willi.sh` green.
+
+### Phase 11 — Smoke + SLURM scripts → submit Phase 6d run
+- [ ] **11A** — `scripts/smoke_test_joint.py`: parametrise `freeze_text_encoder_steps` and assert `l_clip == 0` for steps `< warmup`, then non-zero. Confirm queue is empty during warmup.
+- [ ] **11B** — `scripts/train_biomedclip_kd_phase6d.sh` (NEW): copy Phase 6 script, `experiment_name=biomedclip_kd_phase6d`, comment block referencing this plan.
+- [ ] **11C** — `scripts/eval_biomedclip_kd_phase6d.sh` (NEW): eval wrapper for best Phase 6d checkpoint.
+- [ ] **11D** — Verification gates: `pytest tests/ -m "not cuda and not slow" -v` green; smoke test green; `validate_for_willi.sh` 6/6 green.
+- [ ] **11E** — Commit + push.
+- [ ] **11F** — `sbatch scripts/train_biomedclip_kd_phase6d.sh` on willi.
+- [ ] **11G** — **Monitor (key signals):**
+  - **Step 100/500/900 (warm-up phase):** `train/cos_text_teacher` must rise from ~0 to **≥0.7**. If `<0.5` by step 800, KILL the job — α_kd_warmup too low or proj_head LR wrong.
+  - **Step 1000 (CLIP turns on):** first `val/clip_loss` reading must be **below 2.47** (Phase 5c floor). If above, `z_text` is still not in BCT space — investigate before letting it run.
+  - **After 5 epochs:** `i2t R@10` ≥ 12% (above Phase 5c's 9.99% peak) is the success signal.
+- [ ] **11H** — Eval: `sbatch scripts/eval_biomedclip_kd_phase6d.sh`. Record verdict in state JSON.
+- [ ] **11I** — **Decision gate (Indiana i2t R@10):**
   - ≥ 40% → SUCCESS
   - 25–40% → PARTIAL — manuscript quality
   - 15–25% → MARGINAL — try R-Drop or unfreeze ViT last 2 blocks
-  - < 15% → check paired cosine trajectory; if not rising above 0.30 by epoch 2, increase α_kd to 0.5
+  - < 15% → re-examine warmup length / α_kd_warmup; consider dropping momentum encoder
 
-### Phase 7 — Final eval + writeup (pending Phase 6 result)
-- [ ] Cross-checkpoint comparison table: Phase 4 / 5c / 6 best ckpts × {Indiana, MIMIC-val} × {i2t, t2i} R@1/5/10 + paired cosine.
-- [ ] If best run Indiana R@10 ≥ 15%, write ablation: which fix moved the needle, by how much.
+### Phase 12 — Final eval + writeup (replaces old Phase 7)
+- [ ] Cross-checkpoint comparison table: Phase 4 / 5c / 6c / 6d best ckpts × {Indiana, MIMIC-val} × {i2t, t2i} R@1/5/10 + paired cosine.
+- [ ] Ablation: which fix moved the needle (queue cold-start vs CLIP gating vs warmup length vs module deletion vs α_kd schedule).
+- [ ] If best Indiana R@10 ≥ 15%, write up the recovery story: 6c root-cause → 6d combined fix → result.
 - [ ] Update `biomedclip_kd_state.json` with final verdict.
 
 ## Verification
@@ -196,6 +263,11 @@ Per-phase gates (each must pass before advancing):
 3. **Phase 3**: 5-step smoke test passes locally on CPU; loss-finite + grad-flow assertions hold; teacher params unchanged.
 4. **Phase 4**: SLURM job within 12 h walltime, no OOM; eval R@10 measured on both Indiana + MIMIC-val with `evaluate_cxr_retrieval.py`; verdict logged in state JSON.
 5. **Phase 5/6**: queue/R-Drop unit tests pass; resumed training shows train_loss continuing to drop (sanity: not NaN, not stuck).
+6. **Phase 7**: `BIOMEDCLIP_KD_PLAN.md` + `biomedclip_kd_state.json` updated; `validate_for_willi.sh` still green (no code changes); commit pushed.
+7. **Phase 8**: `grep -rn "distill_proj\|img_proj" hybrid_xmamba/` returns zero non-test hits; checkpoint back-compat smoke test green; `validate_for_willi.sh` green.
+8. **Phase 9**: `test_clip_loss_gated_during_warmup` green (l_clip==0 at step<warmup); `test_moco_queue_cold_start` green (queue empty during warmup); `test_momentum_resync_at_unfreeze` green.
+9. **Phase 10**: effective-alpha switch test green; `train/cos_text_teacher` diagnostic visible in W&B/log output during smoke run.
+10. **Phase 11**: 5-step smoke shows `l_clip[0:warmup]==0` then non-zero; `cos_text_teacher` rises monotonically across 5 steps (sign of life); SLURM job survives warmup window without `cos_text_teacher` collapse.
 
 End-to-end smoke before each willi sbatch:
 ```
@@ -213,13 +285,15 @@ bash scripts/validate_for_willi.sh
 
 ## Open questions
 
-- **Phase 6 key question:** Does `clip_model.visual` for BiomedCLIP (TimmModel backbone) include the linear projection to 512-d joint space, or does it return raw ViT 768-d features? If the latter, `z_img_raw` is 768-d and `F.normalize(z_img_raw)` is NOT in joint space. Verify in Phase 6 run by checking `z_img_raw.shape[-1]` early in training — should be 512. If 768: need to pass through `clip_model.visual_projection` manually before normalising.
-- **α_kd stability (resolved for 6b):** α_kd=1.0 confirmed broken — gradient conflict with CLIP objective in job 1297. α_kd=0.3 is the safe value for Phase 6b. If 6b plateaus and a sweep is needed, try 0.5 only; do not go above 0.7.
-- **img_proj param group:** `img_proj` still exists as a parameter group in the optimizer but receives zero gradient (bypassed in forward). This wastes ~500K params of optimizer state. Not worth fixing for one run, but remove for any future clean implementation.
-- **Parent class HybridContrastiveLightningModule** (line ~222): still uses single Linear `distill_proj` and `teacher.config.hidden_size`. Out of scope — only joint mode is being retrained. Note for future standalone Stage 1/2 BiomedCLIP runs.
+- **`alpha_kd_post` value:** 0.3 inherited from 6b. If Phase 6d marginal (15–25% Indiana R@10), sweep `{0.1, 0.3, 0.5}` post-warmup.
+- **ViT unfreeze:** if Phase 6d MARGINAL, escalate by unfreezing BiomedCLIP ViT last 2 blocks (small image-side adaptation). Out of scope until 6d result.
+- **Drop momentum encoder?** If queue cold-start + gating + extended warmup yields the win, the momentum encoder may be unnecessary overhead. Validate by a 6d-NoMomentum ablation if 6d succeeds.
+- **Phase 6 key question (still open):** Does `clip_model.visual` for BiomedCLIP (TimmModel backbone) include the linear projection to 512-d joint space, or return raw ViT 768-d features? Verify in Phase 6d by logging `z_img_raw.shape[-1]` once at startup — must be 512. If 768: pass through `clip_model.visual_projection` manually before normalising.
 
 ## Resolved questions (archived)
 
 - ~~BiomedCLIP tokenizer max length:~~ Confirmed 256 tokens via `open_clip.get_tokenizer`; `_teacher_is_hf` adapter in `MIMICJointDataset` handles it.
 - ~~α_kd=0.3 vs 0.1:~~ Phase 4 (0.3) and old Phase 5b (0.1) both plateau at ~9% MIMIC. Not the bottleneck.
 - ~~MoCo queue size:~~ K=16384 confirmed working. Not the bottleneck either — paired cos unchanged with 16K vs 31 negatives.
+- ~~α_kd stability with bypass img_proj:~~ α_kd=1.0 broken in 6a; 0.3 broken in 6b/6c. Phase 6d resolves via schedule (1.0 during gated warmup, 0.3 post-warmup) — no gradient conflict possible while CLIP is gated off.
+- ~~`distill_proj` / `img_proj` dead-weight:~~ Decided to delete entirely in Phase 8.
