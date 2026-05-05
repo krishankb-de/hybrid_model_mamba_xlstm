@@ -876,7 +876,11 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
             else:
                 with torch.no_grad():
                     z_img_raw = self.image_encoder(pixel_values)
-            z_img = F.normalize(self.img_proj(z_img_raw.float()), dim=-1)
+            # Phase 6: clip_model.visual already includes BiomedCLIP's image
+            # projection → output is already in the 512-d joint space.
+            # img_proj (random-init MLP) was distorting those clean embeddings,
+            # keeping paired cosine stuck at 0.22-0.29 across all runs.
+            z_img = F.normalize(z_img_raw.float(), dim=-1)
 
             if self.text_queue is not None and split == "train":
                 # MoCo i2t + in-batch t2i:

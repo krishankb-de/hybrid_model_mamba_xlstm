@@ -19,7 +19,9 @@
 teacher: "biomedclip_text"
 
 # Joint loss weights
-alpha_kd: 0.3
+# Phase 6: increased from 0.3 — images now in correct joint space so KD must
+# dominate to pull text into the same space (not compete with a distorted z_img).
+alpha_kd: 1.0
 beta_clip: 1.0
 gamma_simcse: 0.1
 
