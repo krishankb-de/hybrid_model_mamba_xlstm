@@ -858,10 +858,40 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
                 f"(img_proj/distill_proj) — loading Phase ≤6c checkpoint."
             )
 
+    def on_train_batch_start(self, batch, batch_idx):
+        """Phase 9: at the unfreeze step, hard-resync the momentum encoder
+        from the live model and reset the MoCo queue.
+
+        During the KD-only warmup CLIP is gated off, the queue is not enqueued
+        and the EMA encoder is not updated. At step == freeze_text_encoder_steps
+        the live model has been pulled into BiomedCLIP-text space; the EMA
+        copy is still ~Stage-0 weights and the queue still holds its random-
+        init unit vectors. Hard-copying weights and resetting the queue makes
+        the first post-unfreeze batch's negatives non-stale.
+        """
+        was_frozen = self._lm_currently_frozen
+        super().on_train_batch_start(batch, batch_idx)
+        just_unfroze = was_frozen and not self._lm_currently_frozen
+        if just_unfroze and self.momentum_encoder is not None:
+            self.momentum_encoder.copy_from(self.model)
+            if self.text_queue is not None:
+                self.text_queue.reset()
+            self.print(
+                f"[Phase 9 resync] global_step={self.global_step}: "
+                "copied live model → momentum_encoder; reset text_queue."
+            )
+
     def training_step(self, batch, batch_idx):
         loss = self._joint_step(batch, batch_idx, split="train")
-        # EMA update after every optimiser step.
-        if self.momentum_encoder is not None:
+        # EMA update after every optimiser step — but only once CLIP is gated on.
+        # During KD-only warmup the queue is not enqueued, so EMA drift is wasted
+        # work and would force the post-unfreeze hard-resync to do strictly more
+        # corrective work. Skipping it keeps the EMA copy at its init state until
+        # the resync happens at the unfreeze boundary.
+        if (
+            self.momentum_encoder is not None
+            and self.global_step >= self.freeze_text_encoder_steps
+        ):
             self.momentum_encoder.update(self.model)
         return loss
 
@@ -879,8 +909,18 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         # Text embedding view 1 — reused for CLIP, KD, and SimCSE anchor
         z_text = self.model.encode(input_ids, attention_mask=attention_mask)
 
-        # L_CLIP (with optional MoCo queue for Phase 5)
-        if pixel_values is not None and self.image_encoder is not None:
+        # L_CLIP (with optional MoCo queue for Phase 5).
+        # Phase 9: CLIP loss is gated off during the KD-only warmup. Until
+        # global_step >= freeze_text_encoder_steps, z_text is still in (or
+        # near) GPT-2 space — running CLIP at this point pollutes proj_head
+        # gradients and fills the MoCo queue with stale keys that produce
+        # random InfoNCE gradients post-unfreeze (the 6a/6b/6c failure mode).
+        clip_gated_on = self.global_step >= self.freeze_text_encoder_steps
+        if (
+            pixel_values is not None
+            and self.image_encoder is not None
+            and (split != "train" or clip_gated_on)
+        ):
             if self.vit_unfreeze_blocks > 0:
                 z_img_raw = self.image_encoder(pixel_values)
             else:

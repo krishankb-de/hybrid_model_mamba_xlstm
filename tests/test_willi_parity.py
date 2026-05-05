@@ -909,6 +909,187 @@ def test_moco_symmetric_loss_both_directions():
 
 
 @pytest.mark.willi_parity
+def test_clip_loss_gated_during_warmup():
+    """Phase 9: CLIP loss must be gated off (l_clip == 0) and the MoCo queue
+    must NOT enqueue while ``global_step < freeze_text_encoder_steps``.
+
+    Without a Lightning trainer, ``self.global_step`` returns 0; setting
+    ``freeze_text_encoder_steps=1000`` keeps the gate closed.
+    """
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
+    from hybrid_xmamba.training.lightning_module import JointMultiTaskLightningModule
+
+    cfg = HybridConfig(
+        vocab_size=100, dim=64, num_layers=2,
+        layer_pattern=["mamba", "mlstm"],
+        max_position_embeddings=64,
+        use_fast_path=False, use_tfla=False,
+        pooling_strategy="attention",
+    )
+    enc = HybridTextEncoder(cfg, embed_dim=512)
+
+    class _StubTeacher(torch.nn.Module):
+        def encode_text(self, input_ids):
+            return torch.randn(input_ids.shape[0], 512)
+
+    try:
+        mod = JointMultiTaskLightningModule(
+            model=enc, teacher=_StubTeacher(),
+            warmup_steps=2, max_steps=10,
+            freeze_text_encoder_steps=1000,
+            moco_queue_size=32,
+        )
+    except ImportError:
+        pytest.skip("open_clip not installed")
+
+    # Inject a dummy image encoder (open_clip-free) so the CLIP branch could fire.
+    # If gating works, the branch is skipped despite this being available.
+    B = 4
+
+    class _StubImageEncoder(torch.nn.Module):
+        def forward(self, px):
+            return torch.randn(px.shape[0], 512)
+
+    mod.image_encoder = _StubImageEncoder()
+
+    input_ids = torch.randint(0, 100, (B, 16))
+    attn = torch.ones(B, 16, dtype=torch.long)
+    batch = {
+        "input_ids": input_ids,
+        "attention_mask": attn,
+        "pixel_values": torch.randn(B, 3, 8, 8),
+        "teacher_input_ids": input_ids,
+        "teacher_attention_mask": attn,
+    }
+
+    ptr_before = int(mod.text_queue.queue_ptr)
+    queue_before = mod.text_queue.queue.clone()
+    loss = mod._joint_step(batch, batch_idx=0, split="train")
+    ptr_after = int(mod.text_queue.queue_ptr)
+
+    assert torch.isfinite(loss), "Joint loss not finite during warmup"
+    assert ptr_after == ptr_before, (
+        f"text_queue must not enqueue during warmup; ptr {ptr_before}→{ptr_after}"
+    )
+    assert torch.equal(mod.text_queue.queue, queue_before), \
+        "text_queue contents must be untouched during warmup"
+
+
+@pytest.mark.willi_parity
+def test_moco_queue_cold_start_reset():
+    """Phase 9: MoCoQueue.reset() zeros the pointer and re-randomises the buffer
+    so post-warmup InfoNCE negatives start fresh (not stale GPT-2-space keys)."""
+    from hybrid_xmamba.training.moco_queue import MoCoQueue
+    import torch.nn.functional as F
+
+    K, dim, B = 64, 16, 8
+    q = MoCoQueue(dim=dim, K=K)
+    keys = F.normalize(torch.randn(B, dim), dim=-1)
+    q.enqueue(keys)
+    assert int(q.queue_ptr) == B
+    q_before = q.queue.clone()
+
+    q.reset()
+    assert int(q.queue_ptr) == 0, "reset() must zero queue_ptr"
+    # Buffer is re-randomised — should differ from pre-reset state almost surely.
+    assert not torch.equal(q.queue, q_before), "reset() must change queue contents"
+    # Still L2-normalised columns.
+    norms = q.queue.norm(dim=0)
+    assert torch.allclose(norms, torch.ones(K), atol=1e-5), \
+        "reset() queue columns must remain unit-norm"
+
+
+@pytest.mark.willi_parity
+def test_momentum_encoder_copy_from():
+    """Phase 9: copy_from() hard-resyncs momentum encoder weights to live model."""
+    from hybrid_xmamba.training.moco_queue import MomentumEncoder
+    import torch.nn as nn
+
+    query = nn.Linear(8, 4, bias=False)
+    nn.init.constant_(query.weight, 1.0)
+
+    ema = MomentumEncoder(query, m=0.999)
+    nn.init.constant_(ema.encoder.weight, 0.0)
+    assert not torch.allclose(ema.encoder.weight, query.weight), \
+        "Pre-condition: ema and query must differ"
+
+    ema.copy_from(query)
+    assert torch.allclose(ema.encoder.weight, query.weight, atol=1e-7), \
+        "copy_from must produce identical weights to live model"
+    # All ema params must remain non-trainable.
+    for p in ema.encoder.parameters():
+        assert not p.requires_grad, "EMA encoder params must stay frozen after copy_from"
+
+
+@pytest.mark.willi_parity
+def test_joint_unfreeze_triggers_resync_and_reset():
+    """Phase 9: at the unfreeze step, on_train_batch_start must call
+    momentum_encoder.copy_from(model) and text_queue.reset()."""
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
+    from hybrid_xmamba.training.lightning_module import JointMultiTaskLightningModule
+    import torch.nn.functional as F
+
+    cfg = HybridConfig(
+        vocab_size=100, dim=64, num_layers=2,
+        layer_pattern=["mamba", "mlstm"],
+        max_position_embeddings=64,
+        use_fast_path=False, use_tfla=False,
+        pooling_strategy="attention",
+    )
+    enc = HybridTextEncoder(cfg, embed_dim=512)
+
+    class _StubTeacher(torch.nn.Module):
+        def encode_text(self, input_ids):
+            return torch.randn(input_ids.shape[0], 512)
+
+    try:
+        mod = JointMultiTaskLightningModule(
+            model=enc, teacher=_StubTeacher(),
+            warmup_steps=2, max_steps=10,
+            freeze_text_encoder_steps=0,  # so global_step(0) >= threshold triggers unfreeze
+            moco_queue_size=32,
+        )
+    except ImportError:
+        pytest.skip("open_clip not installed")
+
+    # Force the "currently frozen" flag so parent's on_train_batch_start
+    # treats this call as the unfreeze transition. self.print() needs a Trainer
+    # — silence it in the test by overriding at instance level.
+    mod._lm_currently_frozen = True
+    mod.print = lambda *a, **kw: None
+    # Pre-fill queue so reset() has something to clear.
+    keys = F.normalize(torch.randn(4, 512), dim=-1)
+    mod.text_queue.enqueue(keys)
+    queue_before = mod.text_queue.queue.clone()
+
+    # Perturb model weights so ema != model before resync.
+    with torch.no_grad():
+        for p in mod.model.projection_head.parameters():
+            p.add_(0.5)
+
+    # Sanity: ema weights differ from live model before resync.
+    ema_proj = dict(mod.momentum_encoder.encoder.projection_head.named_parameters())
+    live_proj = dict(mod.model.projection_head.named_parameters())
+    diff_before = any(
+        not torch.allclose(ema_proj[k], live_proj[k]) for k in ema_proj
+    )
+    assert diff_before, "Pre-condition: ema must differ from live model"
+
+    mod.on_train_batch_start(batch=None, batch_idx=0)
+
+    # Post-condition: ema == live model (hard-resync).
+    for k in ema_proj:
+        assert torch.allclose(ema_proj[k], live_proj[k], atol=1e-6), \
+            f"momentum_encoder.{k} not resynced after unfreeze"
+    # Post-condition: queue ptr reset and contents changed.
+    assert int(mod.text_queue.queue_ptr) == 0, "text_queue ptr must reset at unfreeze"
+    assert not torch.equal(mod.text_queue.queue, queue_before), \
+        "text_queue contents must be re-randomised at unfreeze"
+
+
+@pytest.mark.willi_parity
 def test_stage1_proj_head_dropout_default():
     """hybrid_70m.yaml must keep proj_head_dropout=0.1 (literature SimCSE default).
 

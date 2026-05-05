@@ -57,6 +57,19 @@ class MoCoQueue(nn.Module):
         """Return a (K, dim) copy of the current queue (detached)."""
         return self.queue.T.detach()
 
+    @torch.no_grad()
+    def reset(self) -> None:
+        """Re-initialise the queue with random unit vectors and zero the pointer.
+
+        Phase 9: called at the unfreeze step to discard pre-warmup stale keys
+        (still in GPT-2 space) so that post-unfreeze InfoNCE negatives are
+        gradually replaced with BCT-aligned text keys.
+        """
+        new_q = F.normalize(torch.randn(self.dim, self.K, device=self.queue.device,
+                                         dtype=self.queue.dtype), dim=0)
+        self.queue.copy_(new_q)
+        self.queue_ptr.zero_()
+
 
 class MomentumEncoder(nn.Module):
     """Exponential moving average (EMA) copy of a query encoder.
@@ -81,6 +94,21 @@ class MomentumEncoder(nn.Module):
         """Pull the query encoder's current weights toward the EMA copy."""
         for p_k, p_q in zip(self.encoder.parameters(), query_encoder.parameters()):
             p_k.data.mul_(self.m).add_((1.0 - self.m) * p_q.data)
+
+    @torch.no_grad()
+    def copy_from(self, query_encoder: nn.Module) -> None:
+        """Hard-resync momentum encoder weights from the live model.
+
+        Phase 9: at the unfreeze step the live model has just been moved into
+        BiomedCLIP-text space by the KD warmup; the EMA copy is still close
+        to the original (Stage-0) weights. A hard copy avoids feeding the
+        queue stale GPT-2-space keys for ~1/(1-m) ≈ 1000 EMA steps.
+        Buffers (e.g. running stats) are also re-copied for completeness.
+        """
+        for p_k, p_q in zip(self.encoder.parameters(), query_encoder.parameters()):
+            p_k.data.copy_(p_q.data)
+        for b_k, b_q in zip(self.encoder.buffers(), query_encoder.buffers()):
+            b_k.data.copy_(b_q.data)
 
     def encode(
         self,

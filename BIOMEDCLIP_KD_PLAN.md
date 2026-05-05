@@ -2,7 +2,7 @@
 
 > Supersedes `JOINT_TRAINING_PLAN.md` + `joint_training_state.json`. Resumable. Read this file + `biomedclip_kd_state.json` (gitignored) at session start.
 >
-> **Current phase: 9 — CLIP gating + MoCo cold-start.** Phase 8 complete (dead-module deletion + ckpt back-compat). Next: Phase 9 (gate CLIP block on `global_step >= freeze_text_encoder_steps`; add `copy_from`/`reset` to MoCo; hard-resync at unfreeze) → Phase 10 (warmup 500→1000, α_kd schedule) → Phase 11 (smoke + sbatch Phase 6d) → Phase 12 (final writeup).
+> **Current phase: 10 — α_kd schedule + warmup extension + diagnostic.** Phase 9 complete (CLIP gated by step, MoCo queue cold-start at unfreeze, momentum encoder hard-resync). Next: Phase 10 (warmup 500→1000, α_kd_warmup=1.0/α_kd_post=0.3, `cos_text_teacher` log) → Phase 11 (smoke + sbatch Phase 6d) → Phase 12 (final writeup).
 
 ## Experiment history
 
@@ -211,14 +211,14 @@ During 500-step frozen warm-up, `projection_head` (not `distill_proj`) learns to
 - [x] **8F** — `tests/test_willi_parity.py`: `test_img_proj_is_sequential_mlp` replaced with `test_img_proj_and_distill_proj_deleted`; `test_joint_module_all_losses_finite` updated; MoCo test fixed (`embed_dim=512`).
 - [x] **8G** — `bash scripts/validate_for_willi.sh` green (47 passed, 5 skipped, 6/6 gates).
 
-### Phase 9 — Curriculum gating (CLIP off + MoCo cold-start)
+### Phase 9 — Curriculum gating (CLIP off + MoCo cold-start) ✅ COMPLETE
 **Goal:** prevent contamination of `proj_head` and the MoCo queue during the KD-only warm-up window. CLIP loss and queue enqueue are both off until `global_step >= freeze_text_encoder_steps`. At the unfreeze boundary, hard-resync the momentum encoder from the live model and reset the queue.
 
-- [ ] **9A** — `_joint_step` (lines 873–899): wrap CLIP block in `if self.global_step >= self.freeze_text_encoder_steps:`. Gated-off branch sets `l_clip = torch.tensor(0.0, device=z_text.device)` and skips both `momentum_encoder.encode` and `text_queue.enqueue`.
-- [ ] **9B** — `hybrid_xmamba/training/moco_queue.py`: add `MomentumEncoder.copy_from(model)` (hard weight copy; reset EMA buffers if any). Add `MoCoQueue.reset()` (zero the buffer, reset pointer).
-- [ ] **9C** — `on_train_batch_start` (lines 478–490): on the unfreeze step, additionally call `self.momentum_encoder.copy_from(self.model)` and `self.text_queue.reset()`.
-- [ ] **9D** — Tests: `test_clip_loss_gated_during_warmup`, `test_moco_queue_cold_start`, `test_momentum_resync_at_unfreeze`.
-- [ ] **9E** — `bash scripts/validate_for_willi.sh` green.
+- [x] **9A** — `_joint_step`: CLIP block gated by `clip_gated_on = self.global_step >= self.freeze_text_encoder_steps`; train-side branch only fires when gated on (val branch unaffected for eval signal). Gated-off path returns `l_clip = 0.0`, skips both `momentum_encoder.encode` and `text_queue.enqueue`.
+- [x] **9B** — `moco_queue.py`: added `MomentumEncoder.copy_from(model)` (hard param + buffer copy, requires_grad preserved=False) and `MoCoQueue.reset()` (re-randomise to unit vectors; zero ptr).
+- [x] **9C** — `JointMultiTaskLightningModule.on_train_batch_start`: detects `was_frozen → not _lm_currently_frozen` transition after super() call; calls `momentum_encoder.copy_from(self.model)` + `text_queue.reset()`. Also gated `momentum_encoder.update()` in `training_step` so EMA only drifts after CLIP turns on.
+- [x] **9D** — Tests added: `test_clip_loss_gated_during_warmup` (queue ptr unchanged during warmup), `test_moco_queue_cold_start_reset`, `test_momentum_encoder_copy_from`, `test_joint_unfreeze_triggers_resync_and_reset`.
+- [x] **9E** — `bash scripts/validate_for_willi.sh` green (51 passed, 5 skipped, 6/6 gates).
 
 ### Phase 10 — Hyperparameter rebalance + alignment diagnostic
 **Goal:** give the warm-up enough time AND signal strength to bring `z_text` into BCT space before CLIP turns on. Boost α_kd while CLIP is gated off (no gradient conflict possible), then decay back to the safe post-warmup value.
