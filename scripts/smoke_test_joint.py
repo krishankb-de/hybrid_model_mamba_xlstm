@@ -8,9 +8,8 @@ A100 sbatch (Phase 5):
   - Gradients flow into:
       * backbone (model.lm)
       * attn_pool.q              (Strategy 4 — attention pooling)
-      * img_proj.{0,2}.weight     (Strategy 3 — 2-layer MLP image projection)
-      * distill_proj.{0,2}.weight (KD projection head)
-  - 4 optimizer param groups configured (backbone_wd / backbone_no_wd / head)
+      * projection_head          (encoder output projection)
+  - 3 optimizer param groups configured (backbone_wd / backbone_no_wd / head)
   - Loss trajectory recorded over 5 steps (warn if not decreasing — random
     init + tiny model is not guaranteed to descend monotonically)
 
@@ -38,10 +37,13 @@ sys.path.insert(0, str(project_root))
 # Mock open_clip BEFORE any code that triggers `import open_clip`
 # ---------------------------------------------------------------------------
 
-_MOCK_IMG_DIM  = 32   # BiomedCLIP image output dim (mocked, real=512)
-# MUST equal the constant 512 hardcoded in JointMultiTaskLightningModule.
-# The distill_proj is Linear(student→512); teacher outputs must match.
-_MOCK_TEXT_DIM = 512  # BiomedCLIP text joint dim (matches real dim)
+# Phase 8: img_proj/distill_proj deleted. clip_model.visual output dim MUST equal
+# student embed_dim (both are 512 in real training). In smoke test, student is 64-d,
+# so mock image encoder must also output 64-d; KD t_emb must be 64-d for direct
+# cosine similarity.
+_STUDENT_EMBED_DIM = 64
+_MOCK_IMG_DIM  = _STUDENT_EMBED_DIM  # must == student embed_dim (Phase 8 assert)
+_MOCK_TEXT_DIM = _STUDENT_EMBED_DIM  # KD: cos(z_text, t_emb) requires matching dims
 
 
 class _MockVisual(nn.Module):
@@ -63,11 +65,13 @@ class _MockClipModel(nn.Module):
     Exposes:
       * .visual (for image encoding via HybridContrastiveLightningModule)
       * .encode_text(input_ids) -> (B, _MOCK_TEXT_DIM)  ← Phase 2 teacher API
+    Phase 8: embed_dim must equal student embed_dim so the Phase 8 assert
+    (img_out == model.embed_dim) passes.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        self.embed_dim = _MOCK_IMG_DIM
+        self.embed_dim = _MOCK_IMG_DIM  # must == _STUDENT_EMBED_DIM
         self.visual = _MockVisual(_MOCK_IMG_DIM)
         self._text_proj = nn.Linear(8, _MOCK_TEXT_DIM)  # dummy trainable param
 
@@ -105,8 +109,8 @@ class MockBiomedCLIPText(nn.Module):
     """Frozen mock teacher mirroring the open_clip CLIP wrapper.
 
     Returns (_MOCK_TEXT_DIM,) embeddings via encode_text — same as the real
-    BiomedCLIP text tower. No .config.hidden_size: distill_proj uses the
-    constant 512 (mocked here as _MOCK_TEXT_DIM).
+    BiomedCLIP text tower. Phase 8: KD is direct cosine sim on z_text, so
+    t_emb dim must equal student embed_dim (_MOCK_TEXT_DIM == _STUDENT_EMBED_DIM).
     """
 
     def __init__(self) -> None:
@@ -152,7 +156,7 @@ _SMALL_CFG_KWARGS: Dict[str, Any] = dict(
 )
 
 
-def _make_text_encoder(embed_dim: int = 64):
+def _make_text_encoder(embed_dim: int = _STUDENT_EMBED_DIM):
     from hybrid_xmamba.models.configuration_hybrid import HybridConfig
     from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
     cfg = HybridConfig(**_SMALL_CFG_KWARGS)
@@ -205,10 +209,13 @@ def _build_joint_module():
         warmup_steps=2,
         max_steps=5,
         gradient_clip_val=1.0,
-        # No freeze in smoke test — we need backbone gradients in 5 steps.
-        freeze_text_encoder_steps=0,
+        freeze_text_encoder_steps=0,  # no freeze so backbone grads flow in 5 steps
         vit_unfreeze_blocks=0,
     )
+    # Phase 8 sanity: dead modules must not exist
+    assert not hasattr(mod, "distill_proj") or mod.distill_proj is None or (
+        not isinstance(mod.distill_proj, nn.Module)
+    ), "distill_proj must be deleted from JointMultiTaskLightningModule (Phase 8)"
     return mod
 
 
@@ -220,11 +227,14 @@ def test_construction_and_optimizer() -> None:
     print("\n--- Construction + optimizer param groups ---")
     mod = _build_joint_module()
 
-    assert mod.image_encoder is not None,           "image_encoder not loaded"
-    assert mod.img_proj is not None,                "img_proj not built"
-    assert isinstance(mod.img_proj, nn.Sequential), "img_proj must be Sequential MLP"
-    assert len(mod.img_proj) == 3,                  f"img_proj should be Linear-GELU-Linear, got {len(mod.img_proj)} layers"
-    assert mod.distill_proj is not None,            "distill_proj not built"
+    assert mod.image_encoder is not None, "image_encoder not loaded"
+    # Phase 8: dead modules must be absent
+    assert not hasattr(mod, "img_proj") or not isinstance(
+        getattr(mod, "img_proj", None), nn.Module
+    ), "img_proj must be deleted (Phase 8)"
+    assert not hasattr(mod, "distill_proj") or not isinstance(
+        getattr(mod, "distill_proj", None), nn.Module
+    ), "distill_proj must be deleted (Phase 8)"
     assert mod.alpha_kd == 0.3 and mod.beta_clip == 1.0 and mod.gamma_simcse == 0.1, \
         "joint loss weights mismatch"
 
@@ -233,7 +243,6 @@ def test_construction_and_optimizer() -> None:
     n_groups = len(optimizer.param_groups)
     assert n_groups == 3, f"expected 3 param groups (vit frozen), got {n_groups}"
 
-    # LRs may already be scaled by LinearLR warmup start_factor; check ratios.
     lrs = [g["lr"] for g in optimizer.param_groups]
     assert abs(lrs[0] - lrs[1]) < 1e-12, f"backbone groups should share LR: {lrs}"
     ratio = lrs[2] / lrs[0]
@@ -274,12 +283,12 @@ def test_single_step_losses_finite() -> None:
 # Test 3 — 5-step training loop: gradients flow + losses finite each step
 # ---------------------------------------------------------------------------
 
+# Phase 8: img_proj and distill_proj deleted — check backbone + projection_head only.
 _REQUIRED_GRAD_PARAMS = [
     # (description, predicate over (name, param))
-    ("backbone (model.lm)",     lambda n, p: n.startswith("model.lm.")),
-    ("attn_pool.q (Strategy 4)", lambda n, p: n == "model.attn_pool.q"),
-    ("img_proj (Strategy 3)",    lambda n, p: n.startswith("img_proj.")),
-    ("distill_proj (KD)",        lambda n, p: n.startswith("distill_proj.")),
+    ("backbone (model.lm)",          lambda n, p: n.startswith("model.lm.")),
+    ("attn_pool.q (Strategy 4)",     lambda n, p: n == "model.attn_pool.q"),
+    ("projection_head",              lambda n, p: n.startswith("model.projection_head.")),
 ]
 
 
@@ -320,18 +329,19 @@ def test_5step_training_loop() -> None:
         # Replicate the joint_step logic but capture per-loss values too.
         z_text = mod.model.encode(batch["input_ids"], attention_mask=batch["attention_mask"])
 
+        # Phase 8: img_proj bypassed — clip_model.visual already in joint space.
         z_img_raw = mod.image_encoder(batch["pixel_values"])
-        z_img = nn.functional.normalize(mod.img_proj(z_img_raw.float()), dim=-1)
+        z_img = nn.functional.normalize(z_img_raw.float(), dim=-1)
         l_clip = mod._nt_xent_loss(z_text, z_img, mod.model.logit_scale)
 
         z_text2 = mod.model.encode(batch["input_ids"], attention_mask=batch["attention_mask"])
         l_simcse = mod._nt_xent_loss(z_text, z_text2, mod.model.logit_scale, fixed_scale=20.0)
 
+        # Phase 8: KD direct on z_text — no distill_proj.
         with torch.no_grad():
-            t_emb = mod.teacher.encode_text(batch["teacher_input_ids"])  # (B, _MOCK_TEXT_DIM)
+            t_emb = mod.teacher.encode_text(batch["teacher_input_ids"])  # (B, embed_dim)
             t_emb = nn.functional.normalize(t_emb.float(), dim=-1)
-        z_proj = nn.functional.normalize(mod.distill_proj(z_text.float()), dim=-1)
-        l_kd = (1.0 - nn.functional.cosine_similarity(z_proj, t_emb, dim=-1)).mean()
+        l_kd = (1.0 - nn.functional.cosine_similarity(z_text.float(), t_emb, dim=-1)).mean()
 
         total = mod.alpha_kd * l_kd + mod.beta_clip * l_clip + mod.gamma_simcse * l_simcse
 
@@ -363,7 +373,8 @@ def test_5step_training_loop() -> None:
         f"no gradient signal observed in: {missing}. "
         f"Required: {[d for d, _ in _REQUIRED_GRAD_PARAMS]}"
     )
-    print(f"  ✓ gradients flowed into: {[d for d, _ in _REQUIRED_GRAD_PARAMS]}")
+    print(f"  ✓ gradients flowed into: {[d for d, _ in _REQUIRED_GRAD_PARAMS]} "
+          f"(img_proj/distill_proj deleted — Phase 8)")
 
     # Loss trajectory check (advisory, not strict — 5 steps + tiny random init)
     first_total = loss_history[0]["total"]
@@ -384,7 +395,7 @@ def test_5step_training_loop() -> None:
 
 def main() -> None:
     print("=" * 60)
-    print("Phase 3: Joint KD+CLIP+SimCSE smoke test (CPU)")
+    print("Phase 8: Joint KD+CLIP+SimCSE smoke test (no img_proj/distill_proj, CPU)")
     print("=" * 60)
 
     tests = [
@@ -409,8 +420,7 @@ def main() -> None:
     print(f"Results: {passed} passed, {failed} failed")
     if failed > 0:
         sys.exit(1)
-    print("ALL CHECKS PASSED — Phase 3 green. Safe to proceed to Phase 4 "
-          "(MIMIC-CXR data prep on willi).")
+    print("ALL CHECKS PASSED — Phase 8 architecture (no img_proj/distill_proj) green.")
     print("=" * 60)
 
 

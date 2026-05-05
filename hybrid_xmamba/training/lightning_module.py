@@ -275,7 +275,9 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         )
         self.contrastive_mode = contrastive_mode.lower()
         self.image_encoder = None
-        self.img_proj = None
+        # Phase 8: img_proj removed. clip_model.visual already projects to the
+        # 512-d BiomedCLIP joint space; the legacy random-init MLP was distorting
+        # it (root cause of Phase 5c paired-cos plateau).
         self._img_out = None
         self.vit_unfreeze_blocks = int(vit_unfreeze_blocks)
         self.vit_lr = float(vit_lr)
@@ -342,15 +344,14 @@ class HybridContrastiveLightningModule(HybridLightningModule):
             for p in self.image_encoder.parameters():
                 p.requires_grad = False
 
-            txt_out = model.embed_dim
-            # 2-layer MLP aligns BiomedCLIP image space to text space.
-            # Identity/Linear was insufficient — caused Stage 2 R@10 plateau at 0.207.
-            self.img_proj = torch.nn.Sequential(
-                torch.nn.Linear(img_out, txt_out, bias=False),
-                torch.nn.GELU(),
-                torch.nn.Linear(txt_out, txt_out, bias=False),
-            )
+            # Phase 8: img_proj deleted. clip_model.visual outputs are already
+            # in the 512-d BiomedCLIP joint space (same as student projection_head
+            # output dim), so a projection here both adds nothing and distorts.
             self._img_out = img_out
+            assert img_out == model.embed_dim, (
+                f"image-encoder out dim ({img_out}) must equal student embed_dim "
+                f"({model.embed_dim}) — both should be 512 for BiomedCLIP."
+            )
 
             # Optionally unfreeze the last N ViT transformer blocks with low LR.
             if self.vit_unfreeze_blocks > 0:
@@ -392,11 +393,9 @@ class HybridContrastiveLightningModule(HybridLightningModule):
     # ------------------------------------------------------------------
     def configure_optimizers(self):
         if self.vit_unfreeze_blocks > 0 and self.image_encoder is not None:
-            # Group 1: main model + projection head at base LR
-            main_params = (
-                list(self.model.parameters()) +
-                list(self.img_proj.parameters())
-            )
+            # Group 1: main model + projection head at base LR.
+            # Phase 8: img_proj deleted — only the student model is trained here.
+            main_params = list(self.model.parameters())
             # Group 2: unfrozen ViT blocks at vit_lr
             blocks = self._get_vit_blocks()
             vit_params = [
@@ -553,9 +552,9 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         else:
             with torch.no_grad():
                 z_img_raw = self.image_encoder(pixel_values)
-        z_img = torch.nn.functional.normalize(
-            self.img_proj(z_img_raw.float()), dim=-1
-        )
+        # Phase 8: img_proj bypassed — clip_model.visual already returns the
+        # 512-d BiomedCLIP joint embedding.
+        z_img = torch.nn.functional.normalize(z_img_raw.float(), dim=-1)
 
         loss = self._nt_xent_loss(z_text, z_img, self.model.logit_scale)
         self.log(f"{split}/contrastive_loss", loss, prog_bar=True,
@@ -732,7 +731,8 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         moco_queue_size: int = 0,
         moco_momentum: float = 0.999,
     ):
-        # contrastive_mode="clip" so parent loads BiomedCLIP + img_proj MLP.
+        # contrastive_mode="clip" so parent loads the BiomedCLIP visual encoder.
+        # Phase 8: img_proj deleted from parent — visual output is used directly.
         super().__init__(
             model=model,
             contrastive_mode="clip",
@@ -753,15 +753,10 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         self.backbone_lr = backbone_lr
         self.head_lr = head_lr
 
-        student_dim = model.embed_dim
-        # BiomedCLIP joint embedding is 512-d by construction (open_clip
-        # CLIP wrapper has no .config.hidden_size).
-        teacher_dim = 512
-        self.distill_proj = nn.Sequential(
-            nn.Linear(student_dim, teacher_dim, bias=False),
-            nn.GELU(),
-            nn.Linear(teacher_dim, teacher_dim, bias=False),
-        )
+        # Phase 8: distill_proj deleted. KD applies directly on z_text vs the
+        # 512-d BiomedCLIP joint embedding (same dim as student projection_head),
+        # so no projection is needed. Removing the dead module saves ~500 K
+        # optimizer-state params and eliminates a future regression surface.
 
         # MoCo text queue only.  Disabled when moco_queue_size=0.
         # text_queue: momentum text keys — negatives for i2t direction.
@@ -795,13 +790,13 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
             else:
                 backbone_wd.append(p)
 
+        # Phase 8: distill_proj + img_proj deleted — head_params is now just
+        # projection_head, attn_pool, and logit_scale.
         head_params = (
             list(self.model.projection_head.parameters())
             + (list(self.model.attn_pool.parameters())
                if self.model.attn_pool is not None else [])
             + [self.model.logit_scale]
-            + list(self.distill_proj.parameters())
-            + list(self.img_proj.parameters())
         )
 
         param_groups = [
@@ -846,11 +841,26 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
     # ------------------------------------------------------------------
     # Steps
     # ------------------------------------------------------------------
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        """Strip dead-module keys from Phase ≤6c checkpoints for back-compat.
+
+        Phase 5c/6a-c checkpoints contain img_proj.* and distill_proj.* keys
+        that no longer exist in Phase 8 model. Removing them here lets Lightning
+        resume without a strict-load KeyError.
+        """
+        sd = checkpoint.get("state_dict", {})
+        dead = [k for k in sd if k.startswith(("img_proj.", "distill_proj."))]
+        for k in dead:
+            del sd[k]
+        if dead:
+            self.print(
+                f"[on_load_checkpoint] stripped {len(dead)} dead keys "
+                f"(img_proj/distill_proj) — loading Phase ≤6c checkpoint."
+            )
+
     def training_step(self, batch, batch_idx):
         loss = self._joint_step(batch, batch_idx, split="train")
-        # EMA update after every optimiser step (Lightning calls training_step
-        # once per accumulation group, but on_before_optimizer_step is cleaner;
-        # doing it here is simpler and off-by-one is negligible at m=0.999).
+        # EMA update after every optimiser step.
         if self.momentum_encoder is not None:
             self.momentum_encoder.update(self.model)
         return loss
@@ -904,14 +914,9 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
             z_text, z_text2, self.model.logit_scale, fixed_scale=20.0
         )
 
-        # L_KD — cosine distillation toward BiomedCLIP text tower (512-d
-        # joint embedding shared with the image tower by construction).
-        # Phase 6c: KD applied DIRECTLY on z_text (no distill_proj).
-        # distill_proj was absorbing all KD gradient, leaving z_text unconstrained
-        # in GPT-2 space. Without img_proj as bridge, CLIP loss had no traction
-        # (loss stuck at log(32)≈3.47 in jobs 1297+1299). Direct KD forces
-        # proj_head to output BiomedCLIP-space embeddings during warm-up, so
-        # CLIP can converge once the text encoder is near the image target space.
+        # L_KD — direct cosine distillation on z_text toward BiomedCLIP text
+        # tower (512-d joint space, same as image tower by construction).
+        # Phase 8: distill_proj deleted. KD trains projection_head directly.
         l_kd = torch.tensor(0.0, device=z_text.device)
         if "teacher_input_ids" in batch:
             t_ids = batch["teacher_input_ids"]

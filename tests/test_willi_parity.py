@@ -529,20 +529,24 @@ def test_stage1_distill_config_values():
     )
 
 
-# ── 12. img_proj must be a 2-layer MLP (Strategy 3 fix) ──────────────────────
+# ── 12. img_proj and distill_proj must NOT exist (Phase 8 deletion) ───────────
 
 @pytest.mark.willi_parity
-def test_img_proj_is_sequential_mlp():
-    """img_proj must be Sequential(Linear, GELU, Linear) — not Identity or single Linear.
+def test_img_proj_and_distill_proj_deleted():
+    """Phase 8: img_proj and distill_proj must be absent from all training modules.
 
-    Strategy 3 fix: a single Linear could not align BiomedCLIP image space to
-    text space, causing Stage 2 R@10 plateau at 0.207. A 2-layer MLP adds the
-    non-linear capacity needed for cross-modal alignment.
+    clip_model.visual already outputs 512-d BiomedCLIP joint embeddings;
+    the random-init img_proj MLP was distorting them (root cause of Phase 5c
+    paired-cos plateau). distill_proj was a gradient absorber that prevented
+    KD from reaching z_text. Both are deleted in Phase 8.
     """
     import torch.nn as nn
     from hybrid_xmamba.models.configuration_hybrid import HybridConfig
     from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
-    from hybrid_xmamba.training.lightning_module import HybridContrastiveLightningModule
+    from hybrid_xmamba.training.lightning_module import (
+        HybridContrastiveLightningModule,
+        JointMultiTaskLightningModule,
+    )
 
     cfg = HybridConfig(
         vocab_size=100, dim=64, num_layers=2,
@@ -550,31 +554,51 @@ def test_img_proj_is_sequential_mlp():
         max_position_embeddings=64,
         use_fast_path=False, use_tfla=False,
     )
-    enc = HybridTextEncoder(cfg, embed_dim=64)
+    enc_simcse = HybridTextEncoder(cfg, embed_dim=64)
 
-    # Instantiate with contrastive_mode="clip" to trigger img_proj creation.
-    # open_clip is not available in willi_parity env, so we only check the
-    # clip branch raises ImportError (not AttributeError / wrong type).
+    # SimCSE mode: neither module should exist.
+    mod_simcse = HybridContrastiveLightningModule(
+        model=enc_simcse, contrastive_mode="simcse",
+        learning_rate=1e-4, weight_decay=0.01,
+        warmup_steps=5, max_steps=50, gradient_clip_val=1.0,
+    )
+    assert not isinstance(getattr(mod_simcse, "img_proj", None), nn.Module), (
+        "img_proj must not be an nn.Module on HybridContrastiveLightningModule"
+    )
+
+    # Joint mode: distill_proj must be absent.
+    # embed_dim=512 required: Phase 8 assert checks img_out == student embed_dim,
+    # and real BiomedCLIP visual outputs 512-d.
+    cfg_joint = HybridConfig(
+        vocab_size=100, dim=64, num_layers=2,
+        layer_pattern=["mamba", "mlstm"],
+        max_position_embeddings=64,
+        use_fast_path=False, use_tfla=False,
+        pooling_strategy="attention",
+    )
+    enc_joint = HybridTextEncoder(cfg_joint, embed_dim=512)
+
+    class _StubTeacher(nn.Module):
+        def encode_text(self, ids):
+            return torch.randn(ids.shape[0], 512)
+
     try:
-        mod = HybridContrastiveLightningModule(
-            model=enc, contrastive_mode="clip",
-            learning_rate=1e-4, weight_decay=0.01,
-            warmup_steps=5, max_steps=50, gradient_clip_val=1.0,
+        mod_joint = JointMultiTaskLightningModule(
+            model=enc_joint,
+            teacher=_StubTeacher(),
+            alpha_kd=0.3, beta_clip=1.0, gamma_simcse=0.1,
+            backbone_lr=1e-5, head_lr=3e-4,
+            weight_decay=0.01, warmup_steps=5, max_steps=50,
+            gradient_clip_val=1.0, freeze_text_encoder_steps=0,
         )
-        # If open_clip is available, verify img_proj is a Sequential MLP
-        assert isinstance(mod.img_proj, nn.Sequential), (
-            f"img_proj should be nn.Sequential, got {type(mod.img_proj)}"
+        assert not isinstance(getattr(mod_joint, "distill_proj", None), nn.Module), (
+            "distill_proj must not be an nn.Module on JointMultiTaskLightningModule (Phase 8)"
         )
-        linear_layers = [m for m in mod.img_proj if isinstance(m, nn.Linear)]
-        assert len(linear_layers) == 2, (
-            f"img_proj MLP should have 2 Linear layers, got {len(linear_layers)}"
-        )
-        gelu_layers = [m for m in mod.img_proj if isinstance(m, nn.GELU)]
-        assert len(gelu_layers) == 1, (
-            f"img_proj MLP should have 1 GELU, got {len(gelu_layers)}"
+        assert not isinstance(getattr(mod_joint, "img_proj", None), nn.Module), (
+            "img_proj must not be an nn.Module on JointMultiTaskLightningModule (Phase 8)"
         )
     except ImportError:
-        pytest.skip("open_clip not installed — img_proj structure not testable (expected in CLIP env)")
+        pytest.skip("open_clip not installed — JointMultiTaskLightningModule requires it")
 
 
 # ── 13. AttentionPooling correctness ──────────────────────────────────────────
@@ -640,8 +664,8 @@ def test_attention_pooling_correctness():
 def test_joint_module_all_losses_finite():
     """JointMultiTaskLightningModule._joint_step must produce finite KD, CLIP, and
     SimCSE losses with gradients flowing into backbone and proj_head.
-    Phase 6c: KD applied directly on z_text (no distill_proj in KD path).
-    img_proj and image_encoder are skipped (open_clip unavailable); l_clip=0 is OK.
+    Phase 8: img_proj and distill_proj deleted. KD is direct cosine sim on z_text.
+    image_encoder skipped (open_clip unavailable); l_clip=0 is OK.
     """
     from hybrid_xmamba.models.configuration_hybrid import HybridConfig
     from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
@@ -698,10 +722,9 @@ def test_joint_module_all_losses_finite():
         "teacher_attention_mask": attn,
     }
 
-    # distill_proj still exists (optimizer compatibility) but is no longer in KD path.
-    assert mod.distill_proj[-1].out_features == 512, (
-        f"distill_proj should be 512-d (BiomedCLIP joint), "
-        f"got {mod.distill_proj[-1].out_features}"
+    # Phase 8: distill_proj must not exist as a trainable module.
+    assert not isinstance(getattr(mod, "distill_proj", None), torch.nn.Module), (
+        "distill_proj must be deleted from JointMultiTaskLightningModule (Phase 8)"
     )
 
     loss = mod._joint_step(batch, batch_idx=0, split="train")
@@ -709,8 +732,7 @@ def test_joint_module_all_losses_finite():
     assert loss.item() > 0.0, "Joint loss should be > 0 (l_kd + l_simcse active)"
 
     loss.backward()
-    # Phase 6c: KD applied directly on z_text → projection_head must receive gradient.
-    # distill_proj is bypassed in KD path → no gradient expected there.
+    # KD is direct cosine on z_text → projection_head must receive gradient.
     for name, param in mod.model.projection_head.named_parameters():
         assert param.grad is not None, f"No grad for projection_head.{name}"
         assert torch.isfinite(param.grad).all(), f"NaN grad for projection_head.{name}"
@@ -842,6 +864,8 @@ def test_moco_symmetric_loss_both_directions():
     from hybrid_xmamba.training.lightning_module import JointMultiTaskLightningModule
     from hybrid_xmamba.training.moco_queue import MoCoQueue
 
+    # embed_dim=512: Phase 8 assert requires img_out (512 for real BiomedCLIP)
+    # to equal student embed_dim.
     cfg = HybridConfig(
         vocab_size=100, dim=64, num_layers=2,
         layer_pattern=["mamba", "mlstm"],
@@ -849,7 +873,7 @@ def test_moco_symmetric_loss_both_directions():
         use_fast_path=False, use_tfla=False,
         pooling_strategy="attention",
     )
-    enc = HybridTextEncoder(cfg, embed_dim=64)
+    enc = HybridTextEncoder(cfg, embed_dim=512)
 
     class _StubTeacher(torch.nn.Module):
         def encode_text(self, input_ids):

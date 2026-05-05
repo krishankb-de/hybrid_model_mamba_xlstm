@@ -359,8 +359,9 @@ class CLIPRetrievalCallback(pl.Callback):
     At the end of each validation epoch, embeds the full validation set and
     computes R@1, R@5, R@10 in both directions (image→text and text→image).
 
-    Requires ``pl_module.image_encoder``, ``pl_module.img_proj``, and
-    ``pl_module.model.encode()`` to exist (i.e. CLIP mode).
+    Requires ``pl_module.image_encoder`` and ``pl_module.model.encode()``
+    to exist (i.e. CLIP mode). Phase 8: img_proj has been deleted —
+    clip_model.visual already returns 512-d BiomedCLIP joint embeddings.
 
     Args:
         eval_every_n_epochs: Run retrieval eval every N epochs (default 1).
@@ -413,9 +414,7 @@ class CLIPRetrievalCallback(pl.Callback):
 
                 z_txt = pl_module.model.encode(input_ids, attention_mask=attn_mask)
                 z_img_raw = pl_module.image_encoder(pixel_values)
-                z_img = F.normalize(
-                    pl_module.img_proj(z_img_raw.float()), dim=-1
-                )
+                z_img = F.normalize(z_img_raw.float(), dim=-1)
                 all_z_img.append(z_img.cpu())
                 all_z_txt.append(z_txt.cpu())
 

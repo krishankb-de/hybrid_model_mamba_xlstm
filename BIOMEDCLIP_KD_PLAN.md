@@ -2,7 +2,7 @@
 
 > Supersedes `JOINT_TRAINING_PLAN.md` + `joint_training_state.json`. Resumable. Read this file + `biomedclip_kd_state.json` (gitignored) at session start.
 >
-> **Current phase: 7 — plan update (Phase 6c failure recovery; Phases 8–12 designed).** Phase 6c (job 1300) failed identically to 6a/6b. Next session executes Phase 8 (delete `distill_proj`/`img_proj`) → Phase 9 (gate CLIP, cold-start MoCo) → Phase 10 (warmup 500→1000, α_kd schedule) → Phase 11 (smoke + sbatch Phase 6d) → Phase 12 (final writeup).
+> **Current phase: 9 — CLIP gating + MoCo cold-start.** Phase 8 complete (dead-module deletion + ckpt back-compat). Next: Phase 9 (gate CLIP block on `global_step >= freeze_text_encoder_steps`; add `copy_from`/`reset` to MoCo; hard-resync at unfreeze) → Phase 10 (warmup 500→1000, α_kd schedule) → Phase 11 (smoke + sbatch Phase 6d) → Phase 12 (final writeup).
 
 ## Experiment history
 
@@ -200,16 +200,16 @@ During 500-step frozen warm-up, `projection_head` (not `distill_proj`) learns to
 - [ ] `bash scripts/validate_for_willi.sh` (sanity, doc-only changes — should remain green).
 - [ ] Commit (user-approved): `plan: phase 6c verdict + phases 8-12 for queue/CLIP gating + dead-module deletion`.
 
-### Phase 8 — Architectural cleanup (delete dead modules)
+### Phase 8 — Architectural cleanup (delete dead modules) ✅ COMPLETE
 **Goal:** remove `distill_proj` and `img_proj` from the architecture entirely (not just the forward path), eliminating ~500K wasted optimizer-state params and future regression surface.
 
-- [ ] **8A** — Delete `self.distill_proj` block (`lightning_module.py:760-764`) from `JointMultiTaskLightningModule.__init__`.
-- [ ] **8B** — In parent `HybridContrastiveLightningModule` (line ~222), delete `self.img_proj` and `self.distill_proj` definitions used by Stage-2 CLIP / Stage-1 KD modes. Joint mode no longer references either.
-- [ ] **8C** — `configure_optimizers` (joint + parent): remove `distill_proj.parameters()` and `img_proj.parameters()` from the head_lr param group.
-- [ ] **8D** — `grep -rn "distill_proj\|img_proj" hybrid_xmamba/ scripts/` → must be zero in non-test code paths.
-- [ ] **8E** — Back-compat: load existing Phase 5c checkpoints with `strict=False` (or pre-strip `distill_proj.*` / `img_proj.*` keys). Add a smoke test that loading a frozen 5c-shaped state-dict succeeds.
-- [ ] **8F** — `tests/test_willi_parity.py`: drop `distill_proj.out_features == 512` assertion; add `assert not hasattr(module, "distill_proj")` and `assert not hasattr(module, "img_proj")`.
-- [ ] **8G** — `bash scripts/validate_for_willi.sh` green.
+- [x] **8A** — Delete `self.distill_proj` block from `JointMultiTaskLightningModule.__init__`.
+- [x] **8B** — Delete `self.img_proj` from `HybridContrastiveLightningModule`; bypass in `_clip_step` and `contrastive_eval_callback.py`; assert `img_out == embed_dim`.
+- [x] **8C** — `configure_optimizers` (joint + parent): removed `distill_proj.parameters()` and `img_proj.parameters()` from head_lr param group.
+- [x] **8D** — All active-path call sites cleaned. `DistillContrastiveLightningModule` retains `distill_proj` (legacy PubMedBERT path; structurally needed for 768-d teacher dim projection).
+- [x] **8E** — `on_load_checkpoint` strips `img_proj.*`/`distill_proj.*` keys from Phase ≤6c checkpoints for back-compat.
+- [x] **8F** — `tests/test_willi_parity.py`: `test_img_proj_is_sequential_mlp` replaced with `test_img_proj_and_distill_proj_deleted`; `test_joint_module_all_losses_finite` updated; MoCo test fixed (`embed_dim=512`).
+- [x] **8G** — `bash scripts/validate_for_willi.sh` green (47 passed, 5 skipped, 6/6 gates).
 
 ### Phase 9 — Curriculum gating (CLIP off + MoCo cold-start)
 **Goal:** prevent contamination of `proj_head` and the MoCo queue during the KD-only warm-up window. CLIP loss and queue enqueue are both off until `global_step >= freeze_text_encoder_steps`. At the unfreeze boundary, hard-resync the momentum encoder from the live model and reset the queue.
