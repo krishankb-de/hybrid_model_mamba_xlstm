@@ -86,6 +86,7 @@ multirun/
 # Allow specific markdown files
 !JOINT_TRAINING_PLAN.md
 !BIOMEDCLIP_KD_PLAN.md
+!CLAUDE.md
 
 
 
