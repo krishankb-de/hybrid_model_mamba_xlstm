@@ -85,11 +85,11 @@ multirun/
 
 # Allow specific markdown files
 !JOINT_TRAINING_PLAN.md
-!BIOMEDCLIP_KD_PLAN.md
-
+!CLAUDE.md
+!A100_100GB_TRAINING_PLAN.md
 
 
 
 # Multi-phase plan local state (regenerated from plan-of-record checkboxes)
 joint_training_state.json
-biomedclip_kd_state.json
+a100_100gb_state.json
