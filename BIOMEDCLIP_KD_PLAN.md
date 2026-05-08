@@ -2,7 +2,7 @@
 
 > Supersedes `JOINT_TRAINING_PLAN.md` + `joint_training_state.json`. Resumable. Read this file + `biomedclip_kd_state.json` (gitignored) at session start.
 >
-> **Current phase: 11 — smoke + SLURM scripts → Phase 6d run.** Phase 10 complete (warmup 500→1000, α_kd_warmup=1.0/α_kd_post=0.3, cos_text_teacher + effective_alpha_kd logs, schedule unit test). Next: Phase 11 (smoke gated-CLIP assertion, train/eval Phase 6d sbatch wrappers, submit on willi) → Phase 12 (final writeup).
+> **Current phase: 13 — drop MoCo queue; Phase 6e (in-batch CLIP + KD warmup).** Phase 6d (job 1313) completed: cos_teacher→0.74 by step 800 ✓ but MoCo K=16384 cold-start at unfreeze produced 512 steps of random-key noise → val/clip_loss 3.52→2.74, MIMIC R@10=3.95% (below Phase 5c's 9.99%). Fix: moco_queue_size=0, in-batch only CLIP post-warmup (no cold-start). Next: Phase 13 (drop queue, 6e scripts, validate, submit) → Phase 14 (writeup).
 
 ## Experiment history
 
@@ -235,23 +235,37 @@ During 500-step frozen warm-up, `projection_head` (not `distill_proj`) learns to
 - [x] **11B** — `scripts/train_biomedclip_kd_phase6d.sh` (NEW): copy Phase 6 script, `experiment_name=biomedclip_kd_phase6d`, comment block referencing this plan.
 - [x] **11C** — `scripts/eval_biomedclip_kd_phase6d.sh` (NEW): eval wrapper for best Phase 6d checkpoint.
 - [x] **11D** — Verification gates: `pytest tests/ -m "not cuda and not slow" -v` green; smoke test green; `validate_for_willi.sh` 6/6 green.
-- [ ] **11E** — Commit + push.
-- [ ] **11F** — `sbatch scripts/train_biomedclip_kd_phase6d.sh` on willi.
-- [ ] **11G** — **Monitor (key signals):**
-  - **Step 100/500/900 (warm-up phase):** `train/cos_text_teacher` must rise from ~0 to **≥0.7**. If `<0.5` by step 800, KILL the job — α_kd_warmup too low or proj_head LR wrong.
-  - **Step 1000 (CLIP turns on):** first `val/clip_loss` reading must be **below 2.47** (Phase 5c floor). If above, `z_text` is still not in BCT space — investigate before letting it run.
-  - **After 5 epochs:** `i2t R@10` ≥ 12% (above Phase 5c's 9.99% peak) is the success signal.
-- [ ] **11H** — Eval: `sbatch scripts/eval_biomedclip_kd_phase6d.sh`. Record verdict in state JSON.
-- [ ] **11I** — **Decision gate (Indiana i2t R@10):**
-  - ≥ 40% → SUCCESS
-  - 25–40% → PARTIAL — manuscript quality
-  - 15–25% → MARGINAL — try R-Drop or unfreeze ViT last 2 blocks
-  - < 15% → re-examine warmup length / α_kd_warmup; consider dropping momentum encoder
+- [x] **11E** — Commit + push.
+- [x] **11F** — `sbatch scripts/train_biomedclip_kd_phase6d.sh` on willi (job 1313, 2026-05-07).
+- [x] **11G** — **Monitor result (job 1313):**
+  - cos_text_teacher: 0→0.74 by step 800 ✓ (gate + warmup worked)
+  - CLIP turned on at step 1000: first val/clip_loss = 3.52 (above 2.47 floor) — MoCo cold-start noise dominant
+  - val/clip_loss 3.52→2.74 over 4000 CLIP-steps (improving but slow)
+  - After 5000 steps: MIMIC i2t R@10 = 3.95%, best = 4.05%
+- [x] **11H** — Verdict logged. **Phase 6d MARGINAL** (3.95% MIMIC R@10 vs Phase 5c's 9.99%). Root cause: MoCo K=16384 cold-start fills queue with 16384 random unit-norm keys at unfreeze → clip_loss 3.52 vs 5c's 2.47 floor → model recovers slowly (K/batch=512 steps to refresh) → only 3488 effective CLIP steps in 5000-step budget.
+- [x] **11I** — Decision gate: < 15% → **drop momentum encoder**. See Phase 13.
 
-### Phase 12 — Final eval + writeup (replaces old Phase 7)
-- [ ] Cross-checkpoint comparison table: Phase 4 / 5c / 6c / 6d best ckpts × {Indiana, MIMIC-val} × {i2t, t2i} R@1/5/10 + paired cosine.
-- [ ] Ablation: which fix moved the needle (queue cold-start vs CLIP gating vs warmup length vs module deletion vs α_kd schedule).
-- [ ] If best Indiana R@10 ≥ 15%, write up the recovery story: 6c root-cause → 6d combined fix → result.
+### Phase 13 — Drop MoCo queue; KD warmup + in-batch CLIP only (Phase 6e)
+
+**Root cause of Phase 6d under-performance:** MoCo K=16384 cold-start fills with random unit-norm vectors at unfreeze. K/batch=512 steps to refresh → first 512 CLIP steps generate near-random gradients → destroys the KD alignment before queue warms. val/clip_loss starts at 3.52 vs Phase 5c floor 2.47.
+
+**Fix:** Set `moco_queue_size: 0`. After 1000-step KD warmup (cos_teacher→0.74), enable in-batch CLIP only (32 negatives). No queue → no cold-start. Clean test of whether KD pre-alignment helps over Phase 5c's CLIP-from-step-1 + warm queue approach.
+
+- [x] **13A** — `configs/distill/biomedclip_kd_joint.yaml`: set `moco_queue_size: 0`
+- [x] **13B** — `scripts/train_biomedclip_kd_phase6e.sh` (NEW): experiment_name=biomedclip_kd_phase6e, same hyperparams otherwise.
+- [x] **13C** — `scripts/eval_biomedclip_kd_phase6e.sh` (NEW): eval wrapper.
+- [x] **13D** — Verify: `test_no_queue_inbatch_clip_fires_post_warmup` added; `test_moco_config_values` updated (16384→0); smoke 4/4 PASS; `validate_for_willi.sh` 53 passed, 5 skipped, 6/6 green.
+- [ ] **13E** — Commit + push → sbatch on willi.
+- [ ] **13F** — Monitor: val/clip_loss at step 1000 must be **below 2.47**. If above, in-batch negatives alone insufficient — increase batch or add MoCo with tiny K (K=64).
+- [ ] **13G** — Decision gate (MIMIC i2t R@10 after 5000 steps):
+  - ≥ 12% and > Phase 5c (9.99%) → KD warmup adds value; advance to Indiana full eval.
+  - 9–12% → parity with 5c; KD warmup neutral; try α_kd_post sweep.
+  - < 9% → in-batch insufficient; restore small queue K=256.
+
+### Phase 14 — Final eval + writeup (replaces old Phase 12)
+- [ ] Cross-checkpoint comparison table: Phase 4 / 5c / 6c / 6d / 6e best ckpts × {Indiana, MIMIC-val} × {i2t, t2i} R@1/5/10 + paired cosine.
+- [ ] Ablation: KD-warmup vs no-warmup; queue vs no-queue; warmup length.
+- [ ] If best Indiana R@10 ≥ 15%, write up the recovery story.
 - [ ] Update `biomedclip_kd_state.json` with final verdict.
 
 ## Verification

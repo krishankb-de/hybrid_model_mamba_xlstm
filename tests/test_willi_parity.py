@@ -948,7 +948,13 @@ def test_momentum_encoder_ema_delta():
 
 @pytest.mark.willi_parity
 def test_moco_config_values():
-    """biomedclip_kd_joint.yaml must have Phase 5 MoCo knobs."""
+    """Phase 13: biomedclip_kd_joint.yaml must have moco_queue_size=0 (queue disabled).
+
+    Phase 6d (job 1313) showed MoCo K=16384 cold-start at unfreeze fills the
+    queue with 16384 random unit-norm vectors; K/batch=512 steps to refresh
+    produces near-random CLIP gradients that destroy the KD warmup (MIMIC
+    R@10=3.95% vs Phase 5c 9.99%). Fix: queue disabled, in-batch only.
+    """
     pytest.importorskip("yaml")
     import yaml
 
@@ -956,8 +962,8 @@ def test_moco_config_values():
     with open(cfg_path, "r") as f:
         cfg = yaml.safe_load(f)
 
-    assert cfg.get("moco_queue_size") == 16384, \
-        f"moco_queue_size should be 16384, got {cfg.get('moco_queue_size')}"
+    assert cfg.get("moco_queue_size") == 0, \
+        f"moco_queue_size should be 0 (Phase 13: queue disabled), got {cfg.get('moco_queue_size')}"
     assert cfg.get("moco_momentum") == 0.999, \
         f"moco_momentum should be 0.999, got {cfg.get('moco_momentum')}"
 
@@ -1197,6 +1203,77 @@ def test_joint_unfreeze_triggers_resync_and_reset():
     assert int(mod.text_queue.queue_ptr) == 0, "text_queue ptr must reset at unfreeze"
     assert not torch.equal(mod.text_queue.queue, queue_before), \
         "text_queue contents must be re-randomised at unfreeze"
+
+
+@pytest.mark.willi_parity
+def test_no_queue_inbatch_clip_fires_post_warmup():
+    """Phase 13: with moco_queue_size=0, text_queue must be None and
+    l_clip must be > 0 once freeze_text_encoder_steps=0 (simulating post-warmup).
+
+    Verifies the no-queue in-batch CLIP path used in Phase 6e.
+    """
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
+    from hybrid_xmamba.training.lightning_module import JointMultiTaskLightningModule
+
+    cfg = HybridConfig(
+        vocab_size=100, dim=64, num_layers=2,
+        layer_pattern=["mamba", "mlstm"],
+        max_position_embeddings=64,
+        use_fast_path=False, use_tfla=False,
+        pooling_strategy="attention",
+    )
+    enc = HybridTextEncoder(cfg, embed_dim=512)
+
+    class _StubTeacher(torch.nn.Module):
+        def encode_text(self, input_ids):
+            return torch.randn(input_ids.shape[0], 512)
+
+    try:
+        mod = JointMultiTaskLightningModule(
+            model=enc, teacher=_StubTeacher(),
+            warmup_steps=2, max_steps=10,
+            freeze_text_encoder_steps=0,   # post-warmup: CLIP active immediately
+            moco_queue_size=0,              # Phase 13: no queue
+        )
+    except ImportError:
+        pytest.skip("open_clip not installed")
+
+    assert mod.text_queue is None, \
+        "text_queue must be None when moco_queue_size=0"
+
+    B = 4
+    class _StubImageEncoder(torch.nn.Module):
+        def forward(self, px):
+            return torch.randn(px.shape[0], 512)
+
+    mod.image_encoder = _StubImageEncoder()
+
+    input_ids = torch.randint(0, 100, (B, 16))
+    attn = torch.ones(B, 16, dtype=torch.long)
+    batch = {
+        "input_ids": input_ids, "attention_mask": attn,
+        "pixel_values": torch.randn(B, 3, 8, 8),
+        "teacher_input_ids": input_ids, "teacher_attention_mask": attn,
+    }
+
+    logged: dict = {}
+
+    def _capture(self, name, value, *args, **kwargs):  # type: ignore[no-untyped-def]
+        try:
+            logged[name] = float(value.detach().item() if hasattr(value, "detach") else value)
+        except Exception:
+            pass
+
+    import types as _types
+    mod.log = _types.MethodType(_capture, mod)
+    loss = mod._joint_step(batch, batch_idx=0, split="train")
+
+    assert torch.isfinite(loss), "Joint loss not finite"
+    clip_val = logged.get("train/clip_loss", None)
+    assert clip_val is not None and clip_val > 0.0, (
+        f"clip_loss must be > 0 post-warmup with no queue; got {clip_val}"
+    )
 
 
 @pytest.mark.willi_parity

@@ -42,6 +42,13 @@ head_lr: 3.0e-4
 # cos(z_text, t_emb) ≥ 0.7 before CLIP engages.
 freeze_text_encoder_steps: 1000
 
-# Phase 5: MoCo dynamic queue (set moco_queue_size: 0 to disable)
-moco_queue_size: 16384
+# Phase 13: MoCo queue DISABLED (moco_queue_size: 0).
+# Phase 6d (job 1313) showed MoCo K=16384 cold-start fills the queue with
+# 16384 random unit-norm vectors at unfreeze. K/batch=512 steps to refresh →
+# first 512 CLIP steps generate near-random InfoNCE gradients, partially
+# destroying the KD-trained alignment (val/clip_loss 3.52 vs 2.47 floor;
+# MIMIC R@10=3.95% vs Phase 5c's 9.99%).
+# Fix: in-batch negatives only (32). No queue → no cold-start. With
+# cos_teacher=0.74 pre-alignment, positive pair sim is real from step 1000.
+moco_queue_size: 0
 moco_momentum: 0.999

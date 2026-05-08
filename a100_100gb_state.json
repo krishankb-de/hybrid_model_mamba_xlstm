@@ -1,0 +1,55 @@
+{
+  "current_phase": "1_done",
+  "last_updated": "2026-05-07T12:00:00Z",
+  "supersedes": "BIOMEDCLIP_KD_PLAN.md (deleted) + biomedclip_kd_state.json (deleted). JOINT_TRAINING_PLAN.md kept as historical only.",
+  "warmstart_ckpt": "output_willi_server/stage0_model_only.pt",
+  "warmstart_ckpt_sha256": null,
+  "branch": "a100_100gb_70m_baseline",
+  "machine": {
+    "gpu": "A100-80GB",
+    "system_ram_gb": 100,
+    "scheduler": "none",
+    "data_cache_dir_env": "DATA_CACHE_DIR"
+  },
+  "phase1": {
+    "status": "completed",
+    "tasks": {
+      "plan_file_committed": true,
+      "state_file_created": true,
+      "claude_md_updated": true,
+      "delete_biomedclip_kd_plan": true,
+      "delete_biomedclip_kd_state": true,
+      "update_gitignore": true,
+      "validate_static_only": true,
+      "commit": true
+    }
+  },
+  "phase2": {"status": "pending", "tasks": {}},
+  "phase3": {"status": "pending", "tasks": {}},
+  "phase4": {"status": "pending", "tasks": {}},
+  "phase5": {"status": "pending", "tasks": {}},
+  "phase6": {"status": "pending", "tasks": {}},
+  "phase7": {"status": "pending", "tasks": {}},
+  "phase8": {"status": "pending", "tasks": {}},
+  "phase9": {"status": "pending", "tasks": {}},
+  "phase10": {"status": "pending", "tasks": {}},
+  "phase11": {"status": "pending", "tasks": {}},
+  "phase12": {"status": "pending", "tasks": {}},
+  "kill_job_rules": [
+    "Phase 10: i2t_r10 not improving by >=1.5pts every 1500 steps after step 2000 -> kill",
+    "Phase 10: paired_cos/text_teacher < 0.15 at step 2000 -> kill (KD not pulling)",
+    "Phase 10: train/loss > 3x baseline-loss for 3 consecutive evals -> kill (divergence)",
+    "Phase 10: gap/L2 > 1.5 sustained 1500 steps -> kill (gap widening)",
+    "Phase 10: Peak GPU mem > 75 GB -> kill, halve batch via grad-accum, restart"
+  ],
+  "decision_gates": {
+    "marginal": "MIMIC val i2t R@10 >= 15% AND Indiana >= 8%",
+    "partial":  "MIMIC val i2t R@10 >= 18% AND Indiana >= 12%",
+    "success":  "MIMIC val i2t R@10 >= 25% AND Indiana >= 20%",
+    "baseline_phase5c_v3": "MIMIC R@10 = 9.99%, Indiana = 3.36%, paired_cos = 0.226"
+  },
+  "notes": [
+    "2026-05-07: Phase 1 started. Created A100_100GB_TRAINING_PLAN.md (committed) + a100_100gb_state.json (gitignored). Replaces BIOMEDCLIP_KD_PLAN.md.",
+    "2026-05-07: Phase 1 complete. CLAUDE.md bootstrap updated, BIOMEDCLIP_KD_PLAN.md git-rm'd, .gitignore allowlist updated, validate --ci-static-only green (4/4 gates). Phase 2 next."
+  ]
+}

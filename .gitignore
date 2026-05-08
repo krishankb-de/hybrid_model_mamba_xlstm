@@ -89,6 +89,9 @@ multirun/
 !CLAUDE.md
 
 
+#Json state files for tracking progress of training plans (regenerated from plan-of-record checkboxes)
+!biomedclip_kd_state.json
+
 
 
 # Multi-phase plan local state (regenerated from plan-of-record checkboxes)
