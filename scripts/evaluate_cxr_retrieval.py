@@ -167,20 +167,20 @@ def load_models(checkpoint_path: str, device: str):
             "No model.* keys found in checkpoint. "
             f"First 10 keys: {list(raw.keys())[:10]}"
         )
-    if not img_proj_state:
-        raise RuntimeError(
-            "No img_proj.* keys found in checkpoint — "
-            "this checkpoint may not be from JointMultiTaskLightningModule."
-        )
-
     print("  Building text encoder ...")
     text_enc = load_text_encoder(text_state, device)
     print(f"  ✓ Text encoder: {sum(p.numel() for p in text_enc.parameters())/1e6:.1f}M params")
 
-    print("  Building img_proj MLP ...")
-    img_proj = build_img_proj(img_proj_state, device)
-    w0 = img_proj_state["0.weight"]
-    print(f"  ✓ img_proj: ({w0.shape[1]} → {w0.shape[0]}) MLP")
+    # Phase 8: img_proj deleted from architecture. Checkpoints from Phase 8+
+    # have no img_proj.* keys — clip_model.visual already outputs 512-d joint
+    # embeddings, so no projection is needed. img_proj=None → passthrough.
+    if img_proj_state:
+        img_proj = build_img_proj(img_proj_state, device)
+        w0 = img_proj_state["0.weight"]
+        print(f"  ✓ img_proj: ({w0.shape[1]} → {w0.shape[0]}) MLP")
+    else:
+        img_proj = None
+        print("  ✓ img_proj: None (Phase 8+ checkpoint — BiomedCLIP visual already in joint space)")
 
     print("  Loading BiomedCLIP image encoder (fresh) ...")
     image_enc = load_image_encoder(device)
@@ -346,9 +346,13 @@ def encode_dataset(
         z_text = text_enc.encode(input_ids, attention_mask=attention_mask)
         all_txt.append(z_text.cpu().float().numpy())
 
-        # Image embeddings
+        # Image embeddings — Phase 8+: img_proj=None means BiomedCLIP visual
+        # already outputs 512-d joint embeddings; just normalise directly.
         z_img_raw = image_enc(pixel_values)
-        z_img = F.normalize(img_proj(z_img_raw.float()), dim=-1)
+        z_img = F.normalize(
+            (img_proj(z_img_raw.float()) if img_proj is not None else z_img_raw.float()),
+            dim=-1,
+        )
         all_img.append(z_img.cpu().float().numpy())
 
     return np.concatenate(all_img, axis=0), np.concatenate(all_txt, axis=0)

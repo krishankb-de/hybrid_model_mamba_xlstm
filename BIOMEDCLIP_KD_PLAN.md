@@ -255,12 +255,19 @@ During 500-step frozen warm-up, `projection_head` (not `distill_proj`) learns to
 - [x] **13B** — `scripts/train_biomedclip_kd_phase6e.sh` (NEW): experiment_name=biomedclip_kd_phase6e, same hyperparams otherwise.
 - [x] **13C** — `scripts/eval_biomedclip_kd_phase6e.sh` (NEW): eval wrapper.
 - [x] **13D** — Verify: `test_no_queue_inbatch_clip_fires_post_warmup` added; `test_moco_config_values` updated (16384→0); smoke 4/4 PASS; `validate_for_willi.sh` 53 passed, 5 skipped, 6/6 green.
-- [ ] **13E** — Commit + push → sbatch on willi.
-- [ ] **13F** — Monitor: val/clip_loss at step 1000 must be **below 2.47**. If above, in-batch negatives alone insufficient — increase batch or add MoCo with tiny K (K=64).
-- [ ] **13G** — Decision gate (MIMIC i2t R@10 after 5000 steps):
-  - ≥ 12% and > Phase 5c (9.99%) → KD warmup adds value; advance to Indiana full eval.
-  - 9–12% → parity with 5c; KD warmup neutral; try α_kd_post sweep.
-  - < 9% → in-batch insufficient; restore small queue K=256.
+- [x] **13E** — Commit + push → sbatch on willi (job 1354, 2026-05-08).
+- [x] **13F** — Monitor result: train/clip_loss first reading=3.17 (no cold-start spike vs 6d's 3.52); val/clip_loss 3.21→2.49 (approached 2.47 floor); cos_teacher 0.89 at unfreeze → 0.53 final (healthy CLIP-pull toward image space).
+- [x] **13G** — Decision gate: MIMIC i2t R@10 best=**8.62%**, final=7.77%. Below Phase 5c's 9.99%. → PARITY range (9–12% gate missed by ~1.4 pp). Best checkpoint: `contrastive-step=003365-val/total_loss=2.6274.ckpt`. Eval script crashed (img_proj missing — Phase 8 compat bug). Fixed in Phase 13H.
+- [x] **13H** — `scripts/evaluate_cxr_retrieval.py`: `load_models` and `encode_dataset` updated to handle `img_proj=None` (Phase 8+ checkpoints). Validate_for_willi green.
+
+### Phase 13 continued — Indiana eval on best checkpoint
+
+- [ ] **13I** — Fix eval script pushed. Re-run Indiana eval on best ckpt (`contrastive-step=003365-val/total_loss=2.6274.ckpt`):
+  ```bash
+  PHASE6E_CKPT=./outputs/biomedclip_kd_phase6e/checkpoints/contrastive-step=003365-val/total_loss=2.6274.ckpt \
+  sbatch hybrid_model_mamba_xlstm/scripts/eval_biomedclip_kd_phase6e.sh
+  ```
+- [ ] **13J** — Record Indiana i2t/t2i R@1/5/10 + paired cosine. Update state JSON.
 
 ### Phase 14 — Final eval + writeup (replaces old Phase 12)
 - [ ] Cross-checkpoint comparison table: Phase 4 / 5c / 6c / 6d / 6e best ckpts × {Indiana, MIMIC-val} × {i2t, t2i} R@1/5/10 + paired cosine.
