@@ -2,7 +2,7 @@
 
 > Supersedes `JOINT_TRAINING_PLAN.md` + `joint_training_state.json`. Resumable. Read this file + `biomedclip_kd_state.json` (gitignored) at session start.
 >
-> **Current phase: 13 — drop MoCo queue; Phase 6e (in-batch CLIP + KD warmup).** Phase 6d (job 1313) completed: cos_teacher→0.74 by step 800 ✓ but MoCo K=16384 cold-start at unfreeze produced 512 steps of random-key noise → val/clip_loss 3.52→2.74, MIMIC R@10=3.95% (below Phase 5c's 9.99%). Fix: moco_queue_size=0, in-batch only CLIP post-warmup (no cold-start). Next: Phase 13 (drop queue, 6e scripts, validate, submit) → Phase 14 (writeup).
+> **Current phase: 6f — K=256 MoCo queue (8-step warm-up) + KD warmup.** Phase 6e (job 1354) completed: MIMIC R@10=8.23%, Indiana=4.04%, cos=0.258. In-batch 32 negatives insufficient vs Phase 5c's warm 16K-key queue (MIMIC gap −1.76pp). Phase 6f fix: K=256 warms in K/batch=8 steps post-unfreeze — negligible cold-start noise while restoring 9× harder negatives vs Phase 6e. Next: validate → commit → sbatch → eval → decision gate.
 
 ## Experiment history
 
@@ -16,7 +16,9 @@
 | 1297 | 6a | bypass img_proj + alpha_kd=1.0 | CANCELLED | 0.49% (random) | clip_loss 2.88→3.47 |
 | 1299 | 6b | bypass img_proj + alpha_kd=0.3 | CANCELLED | 0.46% (random) | clip_loss 3.0→3.47 |
 | 1300 | 6c | bypass img_proj + direct KD on z_text | CANCELLED | 0.49% (random) | clip_loss 2.97→3.45 |
-| TBD | **6d** | **delete dead modules + gate CLIP + cold-start MoCo + warmup 500→1000** | TBD | TBD | TBD |
+| 1313 | 6d | delete dead modules + gate CLIP + cold-start MoCo + warmup 500→1000 | 3.95% (best) | — | — |
+| 1354 | **6e** | **K=0 (in-batch only) + KD warmup 1000 steps** | **8.23%** (best 8.62% step 3365) | **4.04%** | **0.258** |
+| TBD | **6f** | **K=256 MoCo (8-step warm) + KD warmup** | TBD | TBD | TBD |
 
 **Phase 5c root-cause diagnosis (2026-05-05):** `clip_model.visual` already outputs BiomedCLIP-projected 512-d embeddings (joint space). The `img_proj` (random-init `512→GELU→512` MLP) was applied on top, distorting them. The CLIP loss (β=1.0) dominated KD (α=0.3) and pulled Mamba text toward the distorted space — explaining why paired cosine stayed at 0.22-0.29 across ALL runs since Phase 4, identical to the PubMedBERT era.
 
@@ -268,6 +270,19 @@ During 500-step frozen warm-up, `projection_head` (not `distill_proj`) learns to
   sbatch hybrid_model_mamba_xlstm/scripts/eval_biomedclip_kd_phase6e.sh
   ```
 - [ ] **13J** — Record Indiana i2t/t2i R@1/5/10 + paired cosine. Update state JSON.
+
+### Phase 6f — K=256 MoCo queue + KD warmup (small negative pool, fast warm-up)
+
+- [x] **6f-A** — `configs/distill/biomedclip_kd_joint.yaml`: `moco_queue_size: 0` → `256`; rationale comment added.
+- [x] **6f-B** — `tests/test_willi_parity.py`: `test_moco_config_values` assertion updated `== 0` → `== 256`.
+- [x] **6f-C** — `scripts/train_biomedclip_kd_phase6f.sh`: SLURM script (K=256, kill-job rules in header).
+- [x] **6f-D** — `scripts/eval_biomedclip_kd_phase6f.sh`: Eval wrapper (Indiana + MIMIC-val, decision gate in header).
+- [x] **6f-E** — `validate_for_willi.sh`: 53 passed, 5 skipped, 6/6 gates green.
+- [x] **6f-F** — Commit + push.
+- [ ] **6f-G** — `sbatch hybrid_model_mamba_xlstm/scripts/train_biomedclip_kd_phase6f.sh` on willi.
+- [ ] **6f-H** — Monitor: cos_text_teacher ≥ 0.5 by step 800; val/clip_loss at step 1000 < 2.47 (no cold-start spike expected).
+- [ ] **6f-I** — After 5000 steps: submit eval; record MIMIC + Indiana R@1/5/10 + paired cosine.
+- [ ] **6f-J** — Decision gate: MIMIC > 8.23% AND Indiana > 4.04% → FULL WIN; MIMIC > 9.99% → beats all runs; MIMIC < 8.23% → K=256 not helping → Phase 14 writeup.
 
 ### Phase 14 — Final eval + writeup (replaces old Phase 12)
 - [ ] Cross-checkpoint comparison table: Phase 4 / 5c / 6c / 6d / 6e best ckpts × {Indiana, MIMIC-val} × {i2t, t2i} R@1/5/10 + paired cosine.

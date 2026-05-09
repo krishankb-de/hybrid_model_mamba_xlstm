@@ -962,8 +962,8 @@ def test_moco_config_values():
     with open(cfg_path, "r") as f:
         cfg = yaml.safe_load(f)
 
-    assert cfg.get("moco_queue_size") == 0, \
-        f"moco_queue_size should be 0 (Phase 13: queue disabled), got {cfg.get('moco_queue_size')}"
+    assert cfg.get("moco_queue_size") == 256, \
+        f"moco_queue_size should be 256 (Phase 6f: small queue, warms in 8 steps), got {cfg.get('moco_queue_size')}"
     assert cfg.get("moco_momentum") == 0.999, \
         f"moco_momentum should be 0.999, got {cfg.get('moco_momentum')}"
 
