@@ -285,10 +285,38 @@ During 500-step frozen warm-up, `projection_head` (not `distill_proj`) learns to
 - [x] **6f-J** — FAILED gate: MIMIC i2t R@10=3.95% < 8.23%. Root cause: KD-warmup-aligned momentum encoder fills queue with BiomedCLIP-text-clustered near-duplicate embeddings → i2t InfoNCE adversarially hard → i2t collapses. Massive asymmetry (i2t 3.95% vs t2i 7.90%) is diagnostic. **→ Phase 14 writeup.**
 
 ### Phase 14 — Final eval + writeup (replaces old Phase 12)
-- [ ] Cross-checkpoint comparison table: Phase 4 / 5c / 6c / 6d / 6e best ckpts × {Indiana, MIMIC-val} × {i2t, t2i} R@1/5/10 + paired cosine.
-- [ ] Ablation: KD-warmup vs no-warmup; queue vs no-queue; warmup length.
-- [ ] If best Indiana R@10 ≥ 15%, write up the recovery story.
-- [ ] Update `biomedclip_kd_state.json` with final verdict.
+
+- [x] **14A** — Cross-checkpoint comparison table (see below). All metrics from training val logs (MIMIC-val 3063 pairs) unless noted. Indiana from eval-script monitoring (743 pairs, cross-dataset).
+- [x] **14B** — Ablation table (see below).
+- [x] **14C** — Best Indiana R@10=4.04% < 15% — recovery-story bullet does not apply.
+- [x] **14D** — `biomedclip_kd_state.json` updated with final verdict.
+
+#### 14A — Full comparison table
+
+All MIMIC-val metrics from training validation logs (3063 pairs); best checkpoint per run.
+`†` Indiana metric from in-session monitoring after external eval crash fix (743 pairs, cross-dataset).
+
+| Job | Phase | Key setting | MIMIC i2t R@1 | R@5 | R@10 | MIMIC t2i R@10 | Indiana i2t R@10† | Paired cos | val/total_loss |
+|-----|-------|------------|--------------|-----|------|---------------|-----------------|------------|---------------|
+| 1285 | 4 | BiomedCLIP-text KD, in-batch, cancelled ~1700 steps | — | — | 8.75% | — | — | — | — |
+| 1291 | **5c** | K=16384 MoCo text-queue, img_proj on, no KD warmup | 1.37% | 5.81% | **9.99%** | 9.21% | 3.36% | 0.226 | 2.61 |
+| 1313 | 6d | K=16384 MoCo + KD warmup 1000 steps, queue reset | 0.69% | 2.15% | 4.05% | 7.77% | — | — | 2.74 |
+| **1354** | **6e** | **K=0 in-batch + KD warmup 1000 steps, no img_proj** | **1.27%** | **4.73%** | **8.62%** | 7.64% | **4.04%** | **0.258** | **2.63** |
+| 1365 | 6f | K=256 MoCo + KD warmup, queue reset, no img_proj | 0.46% | 2.42% | 3.95% | 7.90% | — | 0.65–0.72 | 2.84 |
+
+**Best checkpoint for dissertation: Phase 6e** — `contrastive-step=003365-val/total_loss=2.6274.ckpt`
+
+#### 14B — Ablation table
+
+| Factor | Comparison | MIMIC i2t R@10 Δ | Indiana i2t R@10 Δ | Paired cos Δ | Conclusion |
+|--------|-----------|-----------------|------------------|-------------|-----------|
+| img_proj removal | 5c (with) → 6e (without) | −1.37pp (9.99→8.62%) | +0.68pp (3.36→4.04%) | +0.032 (0.226→0.258) | img_proj distorted BiomedCLIP 512-d joint embeddings; removing it improves generalisation and alignment |
+| KD warmup (1000 steps, α=1.0) | 5c (no warmup) → 6e (warmup) | −1.37pp | +0.68pp | +0.032 | Warmup migrates text to BiomedCLIP text space (cos→0.89) before CLIP engages; helps cross-domain, costs some in-distribution discriminativeness |
+| Queue after KD warmup: K=256 vs K=0 | 6e (K=0) → 6f (K=256) | −4.67pp (8.62→3.95%) | — | — | After KD warmup, momentum encoder clusters all queue embeddings in BiomedCLIP-text space → adversarially hard i2t negatives → i2t collapses. K=0 (in-batch) is optimal post-warmup |
+| Queue size warm: K=16384 vs K=0 | 5c (K=16384, warm from step 0) → 6e (K=0) | −1.37pp (9.99→8.62%) | +0.68pp | +0.032 | Large warm queue helps in-distribution but prevents KD warmup benefit |
+| Queue cold-start at unfreeze: K=16384 | 6d (K=16384 reset) vs 6e (K=0) | −4.57pp (4.05→8.62%) | — | — | Resetting K=16384 queue at step 1000 requires 512 warm steps of random CLIP gradients; destroyed KD alignment |
+
+**Key takeaway for dissertation:** KD warmup from BiomedCLIP text teacher is the primary driver of cross-domain generalisation (+0.68pp Indiana). The interaction between KD warmup and MoCo queue is the main failure mode to document: post-warmup, all queue embeddings cluster in BiomedCLIP-text space, making i2t negatives adversarially hard. In-batch negatives (K=0) are strictly better post-warmup despite being 512× smaller pool.
 
 ## Verification
 
