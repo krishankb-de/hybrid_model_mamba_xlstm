@@ -293,30 +293,36 @@ During 500-step frozen warm-up, `projection_head` (not `distill_proj`) learns to
 
 #### 14A — Full comparison table
 
-All MIMIC-val metrics from training validation logs (3063 pairs); best checkpoint per run.
-`†` Indiana metric from in-session monitoring after external eval crash fix (743 pairs, cross-dataset).
+Sources: `eval` = confirmed external `evaluate_cxr_retrieval.py` run; `val` = training validation log best checkpoint.
+Phase 6e eval = job 1362 (2026-05-09). Phase 5c eval = from notes (job 1291 eval). MIMIC-val 3063 pairs, Indiana 743 pairs.
 
-| Job | Phase | Key setting | MIMIC i2t R@1 | R@5 | R@10 | MIMIC t2i R@10 | Indiana i2t R@10† | Paired cos | val/total_loss |
-|-----|-------|------------|--------------|-----|------|---------------|-----------------|------------|---------------|
-| 1285 | 4 | BiomedCLIP-text KD, in-batch, cancelled ~1700 steps | — | — | 8.75% | — | — | — | — |
-| 1291 | **5c** | K=16384 MoCo text-queue, img_proj on, no KD warmup | 1.37% | 5.81% | **9.99%** | 9.21% | 3.36% | 0.226 | 2.61 |
-| 1313 | 6d | K=16384 MoCo + KD warmup 1000 steps, queue reset | 0.69% | 2.15% | 4.05% | 7.77% | — | — | 2.74 |
-| **1354** | **6e** | **K=0 in-batch + KD warmup 1000 steps, no img_proj** | **1.27%** | **4.73%** | **8.62%** | 7.64% | **4.04%** | **0.258** | **2.63** |
-| 1365 | 6f | K=256 MoCo + KD warmup, queue reset, no img_proj | 0.46% | 2.42% | 3.95% | 7.90% | — | 0.65–0.72 | 2.84 |
+| Job | Phase | Key setting | MIMIC i2t R@1 | R@5 | R@10 | MIMIC t2i R@10 | MIMIC paired cos | Indiana i2t R@10 | Indiana t2i R@10 | Indiana paired cos | Source |
+|-----|-------|------------|--------------|-----|------|---------------|-----------------|-----------------|-----------------|-------------------|--------|
+| 1285 | 4 | BiomedCLIP-text KD, in-batch, cancelled ~1700 steps | — | — | 8.75% | — | — | — | — | — | val |
+| 1291 | 5c | K=16384 MoCo text-queue, img_proj on, no KD warmup | 1.37% | 5.81% | 9.99% | 9.21% | 0.226 | 3.36% | — | — | val (MIMIC) / eval (Indiana) |
+| 1313 | 6d | K=16384 MoCo + KD warmup 1000 steps, queue reset | 0.69% | 2.15% | 4.05% | 7.77% | — | — | — | — | val |
+| **1354** | **6e** | **K=0 in-batch + KD warmup 1000 steps, no img_proj** | **1.44%** | **4.90%** | **8.23%** | **7.41%** | **0.258** | **4.04%** | **5.25%** | **0.214** | **eval (job 1362)** |
+| 1365 | 6f | K=256 MoCo + KD warmup, queue reset, no img_proj | 0.46% | 2.42% | 3.95% | 7.90% | 0.65–0.72 | — | — | — | val |
 
 **Best checkpoint for dissertation: Phase 6e** — `contrastive-step=003365-val/total_loss=2.6274.ckpt`
 
+Phase 6e external eval summary (job 1362, authoritative):
+- MIMIC-val (3063 pairs): i2t R@10=**8.23%**, t2i R@10=7.41%, mean R@10=7.82%, paired cos=0.258
+- Indiana (743 pairs, cross-dataset): i2t R@10=**4.04%**, t2i R@10=5.25%, mean R@10=4.64%, paired cos=0.214
+
 #### 14B — Ablation table
+
+All Δ computed using confirmed external eval numbers where available (Phase 6e: job 1362; Phase 5c: notes eval). MIMIC i2t R@10 used as primary metric.
 
 | Factor | Comparison | MIMIC i2t R@10 Δ | Indiana i2t R@10 Δ | Paired cos Δ | Conclusion |
 |--------|-----------|-----------------|------------------|-------------|-----------|
-| img_proj removal | 5c (with) → 6e (without) | −1.37pp (9.99→8.62%) | +0.68pp (3.36→4.04%) | +0.032 (0.226→0.258) | img_proj distorted BiomedCLIP 512-d joint embeddings; removing it improves generalisation and alignment |
-| KD warmup (1000 steps, α=1.0) | 5c (no warmup) → 6e (warmup) | −1.37pp | +0.68pp | +0.032 | Warmup migrates text to BiomedCLIP text space (cos→0.89) before CLIP engages; helps cross-domain, costs some in-distribution discriminativeness |
-| Queue after KD warmup: K=256 vs K=0 | 6e (K=0) → 6f (K=256) | −4.67pp (8.62→3.95%) | — | — | After KD warmup, momentum encoder clusters all queue embeddings in BiomedCLIP-text space → adversarially hard i2t negatives → i2t collapses. K=0 (in-batch) is optimal post-warmup |
-| Queue size warm: K=16384 vs K=0 | 5c (K=16384, warm from step 0) → 6e (K=0) | −1.37pp (9.99→8.62%) | +0.68pp | +0.032 | Large warm queue helps in-distribution but prevents KD warmup benefit |
-| Queue cold-start at unfreeze: K=16384 | 6d (K=16384 reset) vs 6e (K=0) | −4.57pp (4.05→8.62%) | — | — | Resetting K=16384 queue at step 1000 requires 512 warm steps of random CLIP gradients; destroyed KD alignment |
+| img_proj removal | 5c (9.99% val, with) → 6e (8.23% eval, without) | −1.76pp (val→eval, mixed sources) | +0.68pp (3.36→4.04%) | +0.032 (0.226→0.258) | img_proj distorted BiomedCLIP 512-d joint embeddings; removing it improves generalisation and alignment |
+| KD warmup (1000 steps, α=1.0) | 5c (no warmup) → 6e (warmup) | see above | +0.68pp | +0.032 | Warmup migrates text to BiomedCLIP text space (cos→0.89) before CLIP engages; improves cross-domain at slight in-distribution cost |
+| Queue after KD warmup: K=256 vs K=0 | 6e (K=0, 8.23% eval) → 6f (K=256, 3.95% val) | −4.28pp | — | — | After KD warmup, momentum encoder clusters all queue embeddings in BiomedCLIP-text space → adversarially hard i2t negatives → i2t collapses; K=0 strictly optimal post-warmup |
+| Queue cold-start at unfreeze: K=16384 | 6d (K=16384 reset, 4.05% val) vs 6e (K=0, 8.23% eval) | −4.18pp | — | — | Resetting K=16384 queue at step 1000 requires K/batch=512 warm steps of random CLIP gradients → destroyed KD alignment |
+| t2i asymmetry in Phase 6f | 6f i2t (3.95%) vs 6f t2i (7.90%) | i2t/t2i gap = 3.95pp | — | — | Diagnostic: t2i uses 32 diverse in-batch image negatives (same as 6e) and performs similarly; only i2t (which uses 256 clustered queue text negatives) collapses — confirms queue clustering as root cause |
 
-**Key takeaway for dissertation:** KD warmup from BiomedCLIP text teacher is the primary driver of cross-domain generalisation (+0.68pp Indiana). The interaction between KD warmup and MoCo queue is the main failure mode to document: post-warmup, all queue embeddings cluster in BiomedCLIP-text space, making i2t negatives adversarially hard. In-batch negatives (K=0) are strictly better post-warmup despite being 512× smaller pool.
+**Key takeaway for dissertation:** KD warmup from BiomedCLIP text teacher is the primary driver of cross-domain generalisation (+0.68pp Indiana confirmed by external eval). The interaction between KD warmup and MoCo queue is the main novel failure mode: post-warmup, all queue embeddings cluster in BiomedCLIP-text space → i2t InfoNCE adversarially hard. The i2t/t2i asymmetry in Phase 6f (3.95% vs 7.90%) is the cleanest evidence. In-batch negatives (K=0) are strictly better post-warmup despite 512× smaller pool.
 
 ## Verification
 
