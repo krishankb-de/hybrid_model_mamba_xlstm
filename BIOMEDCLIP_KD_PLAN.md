@@ -2,7 +2,7 @@
 
 > Supersedes `JOINT_TRAINING_PLAN.md` + `joint_training_state.json`. Resumable. Read this file + `biomedclip_kd_state.json` (gitignored) at session start.
 >
-> **Current phase: 6f — K=256 MoCo queue (8-step warm-up) + KD warmup.** Phase 6e (job 1354) completed: MIMIC R@10=8.23%, Indiana=4.04%, cos=0.258. In-batch 32 negatives insufficient vs Phase 5c's warm 16K-key queue (MIMIC gap −1.76pp). Phase 6f fix: K=256 warms in K/batch=8 steps post-unfreeze — negligible cold-start noise while restoring 9× harder negatives vs Phase 6e. Next: validate → commit → sbatch → eval → decision gate.
+> **Current phase: Phase 14 — final writeup.** Phase 6f (job 1365) FAILED decision gate: MIMIC i2t R@10=3.95% (< 8.23% gate). Root cause: KD-warmup-aligned momentum encoder fills queue with BiomedCLIP-text-clustered near-duplicate embeddings → i2t InfoNCE adversarially hard → i2t collapses (t2i=7.90% confirms asymmetry; t2i uses 32 diverse in-batch negatives). **Best overall: Phase 6e** (MIMIC 8.62%, Indiana 4.04%, cos 0.258). Phase 14: comparison table + ablation + dissertation writeup.
 
 ## Experiment history
 
@@ -18,7 +18,7 @@
 | 1300 | 6c | bypass img_proj + direct KD on z_text | CANCELLED | 0.49% (random) | clip_loss 2.97→3.45 |
 | 1313 | 6d | delete dead modules + gate CLIP + cold-start MoCo + warmup 500→1000 | 3.95% (best) | — | — |
 | 1354 | **6e** | **K=0 (in-batch only) + KD warmup 1000 steps** | **8.23%** (best 8.62% step 3365) | **4.04%** | **0.258** |
-| TBD | **6f** | **K=256 MoCo (8-step warm) + KD warmup** | TBD | TBD | TBD |
+| 1365 | **6f** | **K=256 MoCo (8-step warm) + KD warmup** | **3.95%** (i2t) / 7.90% (t2i) | TBD | 0.65–0.72 |
 
 **Phase 5c root-cause diagnosis (2026-05-05):** `clip_model.visual` already outputs BiomedCLIP-projected 512-d embeddings (joint space). The `img_proj` (random-init `512→GELU→512` MLP) was applied on top, distorting them. The CLIP loss (β=1.0) dominated KD (α=0.3) and pulled Mamba text toward the distorted space — explaining why paired cosine stayed at 0.22-0.29 across ALL runs since Phase 4, identical to the PubMedBERT era.
 
@@ -279,10 +279,10 @@ During 500-step frozen warm-up, `projection_head` (not `distill_proj`) learns to
 - [x] **6f-D** — `scripts/eval_biomedclip_kd_phase6f.sh`: Eval wrapper (Indiana + MIMIC-val, decision gate in header).
 - [x] **6f-E** — `validate_for_willi.sh`: 53 passed, 5 skipped, 6/6 gates green.
 - [x] **6f-F** — Commit + push.
-- [ ] **6f-G** — `sbatch hybrid_model_mamba_xlstm/scripts/train_biomedclip_kd_phase6f.sh` on willi.
-- [ ] **6f-H** — Monitor: cos_text_teacher ≥ 0.5 by step 800; val/clip_loss at step 1000 < 2.47 (no cold-start spike expected).
-- [ ] **6f-I** — After 5000 steps: submit eval; record MIMIC + Indiana R@1/5/10 + paired cosine.
-- [ ] **6f-J** — Decision gate: MIMIC > 8.23% AND Indiana > 4.04% → FULL WIN; MIMIC > 9.99% → beats all runs; MIMIC < 8.23% → K=256 not helping → Phase 14 writeup.
+- [x] **6f-G** — Job 1365 submitted on willi (2026-05-10).
+- [x] **6f-H** — cos_teacher→0.895 at step 1000 ✓. No cold-start spike: first clip=2.93 (vs 6d 3.52). clip_loss floor=2.74.
+- [x] **6f-I** — MIMIC val: i2t R@10=3.95%, t2i R@10=7.90%. val/total_loss best=2.8404 (step 3086).
+- [x] **6f-J** — FAILED gate: MIMIC i2t R@10=3.95% < 8.23%. Root cause: KD-warmup-aligned momentum encoder fills queue with BiomedCLIP-text-clustered near-duplicate embeddings → i2t InfoNCE adversarially hard → i2t collapses. Massive asymmetry (i2t 3.95% vs t2i 7.90%) is diagnostic. **→ Phase 14 writeup.**
 
 ### Phase 14 — Final eval + writeup (replaces old Phase 12)
 - [ ] Cross-checkpoint comparison table: Phase 4 / 5c / 6c / 6d / 6e best ckpts × {Indiana, MIMIC-val} × {i2t, t2i} R@1/5/10 + paired cosine.
