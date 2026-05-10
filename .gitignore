@@ -96,4 +96,3 @@ multirun/
 
 # Multi-phase plan local state (regenerated from plan-of-record checkboxes)
 joint_training_state.json
-biomedclip_kd_state.json
