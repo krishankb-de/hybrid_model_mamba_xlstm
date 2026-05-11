@@ -1,5 +1,7 @@
 # BiomedCLIP Text-KD Architectural Pivot — Plan-of-Record
 
+> ⚠️ **DEPRECATED — 2026-05-11.** Phase 14 complete; superseded by `HYBRID_ARCH_REFACTOR_PLAN.md` + `hybrid_arch_refactor_state.json`. Best result of this plan (Phase 6e, jobs 1354/1362): MIMIC i2t R@10 = 8.23%, Indiana = 4.04%, paired cos = 0.258. After 9 distinct contrastive recipes across two plans (JOINT_TRAINING + BIOMEDCLIP_KD) all plateaued in the 8–10% MIMIC band, the ceiling was diagnosed as structural in the LM backbone (PDF gaps 1, 2, 5, 6 untouched: layer ratio + mLSTM placement, exp-gate stabilization, WSD scheduler, freq-decoupled KD). The new plan re-pretrains Stage 0 with all six PDF fixes and reruns the joint contrastive on the new backbone with the Phase 6e recipe held constant for attributable ablation. **Do NOT resume against this file — it is kept as historical record only.**
+
 > Supersedes `JOINT_TRAINING_PLAN.md` + `joint_training_state.json`. Resumable. Read this file + `biomedclip_kd_state.json` (gitignored) at session start.
 >
 > **Current phase: Phase 14 — final writeup.** Phase 6f (job 1365) FAILED decision gate: MIMIC i2t R@10=3.95% (< 8.23% gate). Root cause: KD-warmup-aligned momentum encoder fills queue with BiomedCLIP-text-clustered near-duplicate embeddings → i2t InfoNCE adversarially hard → i2t collapses (t2i=7.90% confirms asymmetry; t2i uses 32 diverse in-batch negatives). **Best overall: Phase 6e** (MIMIC 8.62%, Indiana 4.04%, cos 0.258). Phase 14: comparison table + ablation + dissertation writeup.

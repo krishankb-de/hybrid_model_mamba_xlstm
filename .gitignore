@@ -86,11 +86,13 @@ multirun/
 # Allow specific markdown files
 !JOINT_TRAINING_PLAN.md
 !BIOMEDCLIP_KD_PLAN.md
+!HYBRID_ARCH_REFACTOR_PLAN.md
 !CLAUDE.md
 
 
 #Json state files for tracking progress of training plans (regenerated from plan-of-record checkboxes)
 !biomedclip_kd_state.json
+!hybrid_arch_refactor_state.json
 
 
 
