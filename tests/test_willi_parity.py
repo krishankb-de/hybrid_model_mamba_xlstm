@@ -1277,6 +1277,27 @@ def test_no_queue_inbatch_clip_fires_post_warmup():
 
 
 @pytest.mark.willi_parity
+def test_mlstm_stability_config_present():
+    """Phase 3D: HybridConfig must expose the three mLSTM gate-stabilisation knobs
+    with safe defaults (cap=15, i_bias=-10, f_bias=0)."""
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+
+    cfg = HybridConfig()
+    assert hasattr(cfg, "mlstm_gate_soft_cap"), \
+        "HybridConfig missing mlstm_gate_soft_cap"
+    assert hasattr(cfg, "mlstm_input_gate_bias_init"), \
+        "HybridConfig missing mlstm_input_gate_bias_init"
+    assert hasattr(cfg, "mlstm_forget_gate_bias_init"), \
+        "HybridConfig missing mlstm_forget_gate_bias_init"
+    assert cfg.mlstm_gate_soft_cap == 15.0, \
+        f"Expected cap=15.0, got {cfg.mlstm_gate_soft_cap}"
+    assert cfg.mlstm_input_gate_bias_init == -10.0, \
+        f"Expected i_bias=-10.0, got {cfg.mlstm_input_gate_bias_init}"
+    assert cfg.mlstm_forget_gate_bias_init == 0.0, \
+        f"Expected f_bias=0.0, got {cfg.mlstm_forget_gate_bias_init}"
+
+
+@pytest.mark.willi_parity
 def test_stage1_proj_head_dropout_default():
     """hybrid_70m.yaml must keep proj_head_dropout=0.1 (literature SimCSE default).
 

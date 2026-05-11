@@ -107,47 +107,62 @@ def tfla_forward_parallel(
     
     # ============================================================
     # INTER-CHUNK RECURRENCE (sequential across chunks only)
+    # m_state: per-dim log-scale running max (LSE stabilizer pass-through, Phase 3C)
+    # Tracks max(log_i - log_f_cum) across chunk boundaries, mirroring the
+    # per-step m_t = max(f̃ + m_{t-1}, ĩ) recurrence in _slow_forward.
     # ============================================================
     C_state = torch.zeros(batch, num_heads, head_dim, head_dim, device=device, dtype=dtype)
     n_state = torch.zeros(batch, num_heads, head_dim, device=device, dtype=dtype)
-    
+    # m_state: (B, H, D) — carries max gate log-signal across chunk boundaries
+    m_state = torch.full(
+        (batch, num_heads, head_dim), float('-inf'), device=device, dtype=dtype
+    )
+
     recurrent_num_list = []
     recurrent_den_list = []
-    
+
     for ci in range(num_chunks):
         # Current chunk's cumulative forget: (B, H, chunk_size, D)
         f_cum_ci = f_cum[:, :, ci]
         log_f_cum_ci = log_f_cum[:, :, ci]
-        
+
         # ----- Recurrent contribution to this chunk -----
-        # Apply forget-gate decay to queries (key dimension) then contract:
-        # h_rec[t,d_v] = sum_d_k(q[t,d_k] * f_cum[t,d_k] * C_state[d_k,d_v])
         q_f = q_c[:, :, ci] * f_cum_ci  # (B, H, C, D)
         h_rec_num = torch.einsum(
             'bhld, bhde -> bhle', q_f, C_state
         )  # (B, H, C, D)
-        
+
         h_rec_den = torch.einsum(
             'bhld, bhd -> bhl', q_f, n_state
         ).unsqueeze(-1)  # (B, H, C, 1)
-        
+
         recurrent_num_list.append(h_rec_num)
         recurrent_den_list.append(h_rec_den)
-        
+
         # ----- Update recurrent state for next chunk -----
         total_f_last = f_cum_ci[:, :, -1, :]  # (B, H, D)
         C_state = total_f_last.unsqueeze(-1) * C_state  # (B,H,D,1) * (B,H,D,D)
         n_state = total_f_last * n_state  # (B,H,D)
-        
+
         # decay_to_end[t] = prod(f[t+1..end]) = f_cum[-1] / f_cum[t]
         decay_to_end = torch.exp(
             log_f_cum_ci[:, :, -1:, :] - log_f_cum_ci
         )  # (B, H, C, D)
-        
+
         # Accumulate new key-value pairs into recurrent state
         k_gated_update = k_c[:, :, ci] * i_c[:, :, ci] * decay_to_end
         C_state = C_state + torch.einsum('bhld, bhle -> bhde', k_gated_update, v_c[:, :, ci])
         n_state = n_state + k_gated_update.sum(dim=2)
+
+        # ----- m_state update (LSE pass-through) -----
+        # log_alpha[j] = log(i[j]) - log_f_cum[j]: log-scale of key at position j
+        log_i_ci = torch.log(i_c[:, :, ci].clamp(min=1e-30))  # (B, H, C, D)
+        log_alpha_ci = log_i_ci - log_f_cum_ci                 # (B, H, C, D)
+        # Max alpha in this chunk: (B, H, D)
+        m_ci = log_alpha_ci.amax(dim=2)
+        # Carry m_state forward: decay by chunk-end forget, then take max with new chunk
+        log_f_last = log_f_cum_ci[:, :, -1, :]                # (B, H, D)
+        m_state = torch.max(log_f_last + m_state, m_ci)
     
     # Stack recurrent contributions (unnormalized): (B, H, nc, C, D) and (B, H, nc, C, 1)
     h_rec_num_all = torch.stack(recurrent_num_list, dim=2)

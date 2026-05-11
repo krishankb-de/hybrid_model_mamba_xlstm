@@ -16,19 +16,27 @@ from hybrid_xmamba.layers.normalization import RMSNorm
 from hybrid_xmamba.layers.activations import exponential_activation
 
 
+def _tanh_soft_cap(x: torch.Tensor, cap: float) -> torch.Tensor:
+    """Soft-cap via tanh: maps x -> tanh(x/cap)*cap, range (-cap, cap)."""
+    return torch.tanh(x / cap) * cap
+
+
 class mLSTMBlock(nn.Module):
     """mLSTM (matrix LSTM) mixer block.
-    
+
     Uses exponential gating and matrix-valued hidden states for enhanced expressiveness.
-    
+
     Args:
         dim: Model dimension
         head_dim: Dimension per attention head
         num_heads: Number of attention heads
         use_tfla: Whether to use Tiled Flash Linear Attention kernel
         proj_factor: Projection factor for input (typically 2)
+        gate_soft_cap: tanh soft-cap applied to raw i/f gate pre-activations
+        input_gate_bias_init: Initial bias for i_gate_proj (negative → small initial gates)
+        forget_gate_bias_init: Initial bias for f_gate_proj
     """
-    
+
     def __init__(
         self,
         dim: int,
@@ -36,115 +44,122 @@ class mLSTMBlock(nn.Module):
         num_heads: Optional[int] = None,
         use_tfla: bool = True,
         proj_factor: int = 2,
+        gate_soft_cap: float = 15.0,
+        input_gate_bias_init: float = -10.0,
+        forget_gate_bias_init: float = 0.0,
     ):
         super().__init__()
         self.dim = dim
         self.head_dim = head_dim
-        
+        self.gate_soft_cap = gate_soft_cap
+
         if num_heads is None:
             self.num_heads = max(1, dim // head_dim)
         else:
             self.num_heads = num_heads
-        
+
         self.inner_dim = self.num_heads * head_dim
         self.use_tfla = use_tfla
         self.proj_factor = proj_factor
-        
+
         # Input projections
         self.in_proj = nn.Linear(dim, self.inner_dim * proj_factor, bias=False)
-        
-        # mLSTM specific projections
+
         # Query, Key, Value for the linear attention mechanism
         self.q_proj = nn.Linear(self.inner_dim, self.inner_dim, bias=False)
         self.k_proj = nn.Linear(self.inner_dim, self.inner_dim, bias=False)
         self.v_proj = nn.Linear(self.inner_dim, self.inner_dim, bias=False)
-        
+
         # Gates: input, forget, output
         self.i_gate_proj = nn.Linear(self.inner_dim, self.inner_dim, bias=True)
         self.f_gate_proj = nn.Linear(self.inner_dim, self.inner_dim, bias=True)
         self.o_gate_proj = nn.Linear(self.inner_dim, self.inner_dim, bias=True)
-        
+
         # Layer normalization for queries and keys
         self.q_norm = RMSNorm(head_dim)
         self.k_norm = RMSNorm(head_dim)
-        
+
         # Output projection
         self.out_proj = nn.Linear(self.inner_dim, dim, bias=False)
-        
-        # Learnable parameters for stabilization
+
         self.register_buffer('eps', torch.tensor(1e-6))
-    
+
+        # Bias init: negative i_gate bias → small initial input gates (prevents overflow)
+        nn.init.constant_(self.i_gate_proj.bias, input_gate_bias_init)
+        nn.init.constant_(self.f_gate_proj.bias, forget_gate_bias_init)
+
     def forward(
-        self, 
+        self,
         x: torch.Tensor,
         cache: Optional[dict] = None
     ) -> torch.Tensor:
         """Forward pass of mLSTM block.
-        
+
         Args:
             x: Input tensor of shape (batch, seq_len, dim)
             cache: Optional cache for inference
-            
+
         Returns:
             Output tensor of shape (batch, seq_len, dim)
         """
         batch, seq_len, dim = x.shape
-        
+
         # Input projection
         x_proj = self.in_proj(x)  # (B, L, inner_dim * proj_factor)
-        
+
         if self.proj_factor == 2:
             x_inner, x_gate = x_proj.chunk(2, dim=-1)
         else:
             x_inner = x_proj
             x_gate = x_inner
-        
+
         # Query, Key, Value projections
-        q = self.q_proj(x_inner)  # (B, L, inner_dim)
-        k = self.k_proj(x_inner)  # (B, L, inner_dim)
-        v = self.v_proj(x_inner)  # (B, L, inner_dim)
-        
+        q = self.q_proj(x_inner)
+        k = self.k_proj(x_inner)
+        v = self.v_proj(x_inner)
+
         # Reshape for multi-head
         q = rearrange(q, 'b l (h d) -> b h l d', h=self.num_heads)
         k = rearrange(k, 'b l (h d) -> b h l d', h=self.num_heads)
         v = rearrange(v, 'b l (h d) -> b h l d', h=self.num_heads)
-        
+
         # Normalize queries and keys
         q = self.q_norm(q)
         k = self.k_norm(k)
-        
-        # Gates with exponential activation
-        i_gate = exponential_activation(self.i_gate_proj(x_inner))  # Input gate
-        f_gate = torch.sigmoid(self.f_gate_proj(x_inner))  # Forget gate
-        o_gate = torch.sigmoid(self.o_gate_proj(x_inner))  # Output gate
-        
+
+        # --- Phase 3A: tanh soft-cap on raw pre-activations before exp/sigmoid ---
+        # Bounds logits to (-cap, cap), preventing exp overflow and sigmoid saturation
+        i_logit = _tanh_soft_cap(self.i_gate_proj(x_inner), self.gate_soft_cap)
+        f_logit = _tanh_soft_cap(self.f_gate_proj(x_inner), self.gate_soft_cap)
+
+        i_gate = exponential_activation(i_logit)      # exp(capped ĩ_t)
+        f_gate = torch.sigmoid(f_logit)               # σ(capped f̃_t)
+        o_gate = torch.sigmoid(self.o_gate_proj(x_inner))
+
         # Reshape gates for multi-head
         i_gate = rearrange(i_gate, 'b l (h d) -> b h l d', h=self.num_heads)
         f_gate = rearrange(f_gate, 'b l (h d) -> b h l d', h=self.num_heads)
         o_gate = rearrange(o_gate, 'b l (h d) -> b h l d', h=self.num_heads)
-        
-        # Apply TFLA or fallback to standard implementation
+
         if self.use_tfla:
-            # Use optimized Triton kernel
             h = apply_tfla(q, k, v, i_gate, f_gate)
         else:
-            # Slow reference implementation
             h = self._slow_forward(q, k, v, i_gate, f_gate)
-        
+
         # Apply output gate
         h = h * o_gate
-        
+
         # Reshape back
         h = rearrange(h, 'b h l d -> b l (h d)')
-        
+
         # Gating with input
         h = h * torch.sigmoid(x_gate)
-        
+
         # Output projection
         output = self.out_proj(h)
-        
+
         return output
-    
+
     def _slow_forward(
         self,
         q: torch.Tensor,
@@ -153,48 +168,64 @@ class mLSTMBlock(nn.Module):
         i_gate: torch.Tensor,
         f_gate: torch.Tensor,
     ) -> torch.Tensor:
-        """Parallel fallback implementation of mLSTM using causal linear attention.
-        
-        Uses masked causal attention to avoid sequential loops.
-        Fully differentiable through standard PyTorch autograd.
-        
+        """Sequential reference mLSTM with LSE stabilizer (Phase 3B).
+
+        Implements Algorithm 1 from Beck et al. 2024 with per-dim gates.
+        This is a stable but slow reference path used when use_tfla=False.
+
         Args:
             q: Queries (B, H, L, D)
             k: Keys (B, H, L, D)
             v: Values (B, H, L, D)
-            i_gate: Input gates (B, H, L, D)
-            f_gate: Forget gates (B, H, L, D)
-            
+            i_gate: Input gates post-exp (B, H, L, D)
+            f_gate: Forget gates post-sigmoid (B, H, L, D)
+
         Returns:
             Output tensor (B, H, L, D)
         """
-        batch, num_heads, seq_len, head_dim = q.shape
-        
-        # Per-dimension cumulative forget gate in log-space
-        log_f = torch.log(f_gate.clamp(min=1e-6))  # (B, H, L, D)
-        log_f_cum = torch.cumsum(log_f, dim=2)       # (B, H, L, D)
-        f_cum = torch.exp(log_f_cum)
-        
-        # Absorb per-dimension decay into query/key — exact, no approximation.
-        # decay[i,j,d] = f_cum[i,d] / f_cum[j,d]
-        # scores[i,j] = sum_d(q_w[i,d] * k_w[j,d]) where
-        #   q_w = q * f_cum, k_w = k_gated / f_cum
-        k_gated = k * i_gate  # (B, H, L, D)
-        q_weighted = q * f_cum
-        k_weighted = k_gated / f_cum.clamp(min=1e-6)
-        
-        # Causal mask
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool), diagonal=1
-        )
-        
-        # Attention scores with exact per-dimension decay
-        scores = torch.einsum('bhid, bhjd -> bhij', q_weighted, k_weighted)  # (B, H, L, L)
-        scores = scores.masked_fill(causal_mask, 0.0)
-        
-        # Compute output
-        h = torch.einsum('bhij, bhjd -> bhid', scores, v)  # (B, H, L, D)
-        denom = scores.sum(dim=-1, keepdim=True).clamp(min=1.0)
-        h = h / denom
-        
-        return h
+        B, H, L, D = q.shape
+
+        log_i = torch.log(i_gate.clamp(min=1e-30))   # (B, H, L, D)
+        log_f = torch.log(f_gate.clamp(min=1e-30))   # (B, H, L, D) ≤ 0
+
+        # Running state
+        C = torch.zeros(B, H, D, D, device=q.device, dtype=q.dtype)
+        n = torch.zeros(B, H, D, device=q.device, dtype=q.dtype)
+        # m_t: running max in log-space — initialized to -inf so first step uses log_i
+        m = torch.full((B, H, D), float('-inf'), device=q.device, dtype=q.dtype)
+
+        outputs = []
+
+        for t in range(L):
+            log_i_t = log_i[:, :, t, :]   # (B, H, D)
+            log_f_t = log_f[:, :, t, :]   # (B, H, D)
+            k_t = k[:, :, t, :]           # (B, H, D)
+            v_t = v[:, :, t, :]           # (B, H, D)
+            q_t = q[:, :, t, :]           # (B, H, D)
+
+            # m_t = max(f̃_t + m_{t-1}, ĩ_t)
+            m_prev = m
+            m = torch.max(log_f_t + m_prev, log_i_t)   # (B, H, D)
+
+            # Stabilized gates: always ≤ 1
+            i_stab = torch.exp(log_i_t - m)             # (B, H, D)
+            f_stab = torch.exp(log_f_t + m_prev - m)    # (B, H, D), = 0 at t=0
+
+            # Matrix cell state update: C[dk, dv] += i_stab[dk] * k[dk] * v[dv]
+            C = f_stab.unsqueeze(-1) * C + torch.einsum(
+                'bhd,bhe->bhde', i_stab * k_t, v_t
+            )
+            # Normalizer vector update
+            n = f_stab * n + i_stab * k_t
+
+            # Query the cell: h = C^T q (sum over key-dim)
+            h_t = torch.einsum('bhde,bhd->bhe', C, q_t)  # (B, H, D)
+
+            # Normalize: denom = max(|n · q|, 1)
+            n_dot = (n * q_t).sum(dim=-1, keepdim=True)  # (B, H, 1)
+            denom = torch.clamp(n_dot.abs(), min=1.0)
+            h_t = h_t / denom
+
+            outputs.append(h_t)
+
+        return torch.stack(outputs, dim=2)  # (B, H, L, D)

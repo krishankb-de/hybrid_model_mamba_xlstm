@@ -1,6 +1,6 @@
 {
-  "current_phase": "phase2_diagnostic",
-  "last_updated": "2026-05-11T12:00:00+0000",
+  "current_phase": "phase4_hybridnorm",
+  "last_updated": "2026-05-11T18:00:00+0000",
   "supersedes": "BIOMEDCLIP_KD_PLAN.md + biomedclip_kd_state.json (Phase 14 complete; best Phase 6e MIMIC 8.23% / Indiana 4.04% / cos 0.258 — ceiling structural per PDF analysis)",
   "primary_thesis": "PDF gaps 1-6 (layer ratio + mLSTM placement, exp-gate stabilization, HybridNorm, doc-boundary resets, WSD scheduler, freq-decoupled KD) are LM-architecture-level and were never touched by prior plans. Re-pretrain Stage 0 with all fixes; re-run joint contrastive with Phase 6e recipe held constant for attributable ablation.",
   "approved_plan": "/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md",
@@ -38,13 +38,13 @@
     }
   },
   "phase2": {
-    "status": "in_progress",
+    "status": "complete",
     "goal": "Diagnose Phase 6e checkpoint: mLSTM gate health, layer norms, doc-contam probe, alignment/uniformity",
     "tasks": {
       "2A_diagnose_script": "done — scripts/diagnose_baseline.py; probes 1-3 verified locally",
       "2B_probe_report": "done — analysis/baseline_probe_report.md; probes 4-5 pending Willi",
       "2C_reweight_priorities": "done — doc-boundary reset elevated to highest priority",
-      "2D_validate_commit": "pending"
+      "2D_validate_commit": "done — ff06611"
     },
     "findings": {
       "mlstm_gate_layer2_i_max": 14.25,
@@ -58,7 +58,19 @@
       "mimic_cosine_pending": true
     }
   },
-  "phase3": {"status": "pending", "goal": "mLSTM stabilization: tanh soft-cap, bias=-10, LSE m_t stabilizer"},
+  "phase3": {
+    "status": "complete",
+    "goal": "mLSTM stabilization: tanh soft-cap, bias=-10, LSE m_t stabilizer",
+    "tasks": {
+      "3A_tanh_softcap_bias_init": "done — mlstm_block.py: _tanh_soft_cap on i/f logits; i_gate_proj.bias=-10, f_gate_proj.bias=0; gate_soft_cap/input_gate_bias_init/forget_gate_bias_init args",
+      "3B_lse_stabilizer_slow_forward": "done — _slow_forward rewritten as sequential LSE recurrence: m_t=max(log_f+m_prev, log_i); i_stab=exp(log_i-m), f_stab=exp(log_f+m_prev-m); matrix C/n state with proper normaliser",
+      "3C_tfla_m_state_passthrough": "done — tfla_interface.py inter-chunk loop: m_state=(B,H,D) initialised -inf; per-chunk update m_state=max(log_f_last+m_state, m_ci) where m_ci=amax(log_i-log_f_cum)",
+      "3D_config_knobs": "done — HybridConfig: mlstm_gate_soft_cap=15.0, mlstm_input_gate_bias_init=-10.0, mlstm_forget_gate_bias_init=0.0; wired through get_layer_config + hybrid_block.py filter",
+      "3E_test_layers": "done — test_mlstm_tanh_softcap_applied, test_mlstm_input_gate_bias_init, test_mlstm_no_overflow_at_large_input",
+      "3F_test_willi_parity": "done — test_mlstm_stability_config_present",
+      "3G_validate_commit": "pending"
+    }
+  },
   "phase4": {"status": "pending", "goal": "HybridNorm: Q/K/V + Δ/B/C pre-norm; FFN post-norm; first block pure pre-norm"},
   "phase5": {"status": "pending", "goal": "Layer pattern v2 (1:3 middle) / v3 (1:7 midpoint); Phase 8 picks winner"},
   "phase6": {"status": "pending", "goal": "cu_seqlens doc-boundary reset; higher-level wrapper, no Triton surgery"},
@@ -73,6 +85,7 @@
   "notes": [
     "2026-05-11: Phase 1 bootstrap started. Plan approved via /Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md. Refined remotely via Ultraplan; file:line refs verified against codebase (25/26 match; layer_pattern line corrected 8→11).",
     "2026-05-11: Phase 1 tasks 1A–1F complete. HYBRID_ARCH_REFACTOR_PLAN.md + state JSON created; .gitignore + CLAUDE.md + BIOMEDCLIP_KD_PLAN.md updated. validate_for_willi.sh green (53 passed, 6/6 gates). Awaiting user approval to commit (1G).",
-    "2026-05-11: Phase 2 started. scripts/diagnose_baseline.py + scripts/diagnose_baseline.sh created. Probes 1-3 run locally on output_willi_server/total_loss=2.6274.ckpt. Key findings: i_gate_raw max=14.25 (near 15.0 soft-cap limit); norm grows 17→59 across 8 blocks (3.5x); doc-contamination mean leak=18.4% CONFIRMED. analysis/baseline_probe_report.md written. Probes 4-5 (STS-B, MIMIC) pending Willi run. Doc-boundary reset elevated to highest priority."
+    "2026-05-11: Phase 2 started. scripts/diagnose_baseline.py + scripts/diagnose_baseline.sh created. Probes 1-3 run locally on output_willi_server/total_loss=2.6274.ckpt. Key findings: i_gate_raw max=14.25 (near 15.0 soft-cap limit); norm grows 17→59 across 8 blocks (3.5x); doc-contamination mean leak=18.4% CONFIRMED. analysis/baseline_probe_report.md written. Probes 4-5 (STS-B, MIMIC) pending Willi run. Doc-boundary reset elevated to highest priority.",
+    "2026-05-11: Phase 2 complete (committed ff06611). Phase 3 started: mLSTM numerical stabilization. 3A: _tanh_soft_cap helper, i_gate capped pre-exp, f_gate capped pre-sigmoid, i_gate_proj.bias=-10; 3B: _slow_forward rewritten as sequential LSE recurrence (m_t running max, stabilised i/f gates, matrix C/n state); 3C: m_state carry added to TFLA inter-chunk loop; 3D: 3 HybridConfig knobs; 3E+3F: 4 new tests. validate_for_willi.sh 57 passed, 6/6 gates green. 3G commit pending."
   ]
 }

@@ -64,6 +64,9 @@ class HybridConfig:
     num_heads: Optional[int] = None  # Auto-computed
     use_tfla: bool = True
     proj_factor: int = 2
+    mlstm_gate_soft_cap: float = 15.0
+    mlstm_input_gate_bias_init: float = -10.0
+    mlstm_forget_gate_bias_init: float = 0.0
     
     # sLSTM parameters
     slstm_hidden_dim: Optional[int] = None  # Defaults to dim
@@ -157,6 +160,9 @@ class HybridConfig:
                 "num_heads": self.num_heads,
                 "use_tfla": self.use_tfla,
                 "proj_factor": self.proj_factor,
+                "gate_soft_cap": self.mlstm_gate_soft_cap,
+                "input_gate_bias_init": self.mlstm_input_gate_bias_init,
+                "forget_gate_bias_init": self.mlstm_forget_gate_bias_init,
             })
         elif layer_type == "slstm":
             base_config.update({

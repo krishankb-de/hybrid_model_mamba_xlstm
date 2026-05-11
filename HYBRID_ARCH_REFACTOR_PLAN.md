@@ -92,13 +92,13 @@ Locate the ceiling before changing anything.
 - [x] **2D** — `validate_for_willi.sh` green (52 passed, 8/8 gates); commit.
 
 ### Phase 3 — mLSTM numerical stabilization (PDF gaps 2.1–2.2)
-- [ ] **3A** — `mlstm_block.py:117-119`: `tanh` soft-cap on raw `ĩ_t`, `f̃_t` pre-activations (cap=15.0, configurable). Init `i_gate_proj.bias = -10`, `f_gate_proj.bias = 0`.
-- [ ] **3B** — `mlstm_block.py:148-200` `_slow_forward`: LSE stabilizer state `m_t = max(log f_t + m_{t-1}, log i_t)`; rescaled gates `i'_t = exp(ĩ_t − m_t)`, `f'_t = exp(f̃_t + m_{t-1} − m_t)`.
-- [ ] **3C** — `tfla_interface.tfla_forward_parallel:74-150`: intra-chunk + inter-chunk `m`-state pass-through.
-- [ ] **3D** — `configuration_hybrid.py`: add `mlstm_gate_soft_cap`, `mlstm_input_gate_bias_init`, `mlstm_forget_gate_bias_init`.
-- [ ] **3E** — `tests/test_layers.py`: `test_mlstm_no_overflow_at_large_input`, `test_mlstm_input_gate_bias_init`, `test_mlstm_tanh_softcap_applied`.
-- [ ] **3F** — `tests/test_willi_parity.py`: `test_mlstm_stability_config_present`.
-- [ ] **3G** — `validate_for_willi.sh` green; commit.
+- [x] **3A** — `mlstm_block.py:117-119`: `tanh` soft-cap on raw `ĩ_t`, `f̃_t` pre-activations (cap=15.0, configurable). Init `i_gate_proj.bias = -10`, `f_gate_proj.bias = 0`.
+- [x] **3B** — `mlstm_block.py:148-200` `_slow_forward`: LSE stabilizer state `m_t = max(log f_t + m_{t-1}, log i_t)`; rescaled gates `i'_t = exp(ĩ_t − m_t)`, `f'_t = exp(f̃_t + m_{t-1} − m_t)`.
+- [x] **3C** — `tfla_interface.tfla_forward_parallel:74-150`: intra-chunk + inter-chunk `m`-state pass-through.
+- [x] **3D** — `configuration_hybrid.py`: add `mlstm_gate_soft_cap`, `mlstm_input_gate_bias_init`, `mlstm_forget_gate_bias_init`.
+- [x] **3E** — `tests/test_layers.py`: `test_mlstm_no_overflow_at_large_input`, `test_mlstm_input_gate_bias_init`, `test_mlstm_tanh_softcap_applied`.
+- [x] **3F** — `tests/test_willi_parity.py`: `test_mlstm_stability_config_present`.
+- [x] **3G** — `validate_for_willi.sh` green (57 passed, 6/6 gates); commit.
 
 ### Phase 4 — HybridNorm topology (PDF gap 3)
 - [ ] **4A** — `mlstm_block.py:103-110`: Q/K/V per-projection RMSNorm pre-mixer (extends existing `q_norm`/`k_norm` at line 68).

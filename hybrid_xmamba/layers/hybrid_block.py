@@ -65,7 +65,8 @@ class HybridBlock(nn.Module):
             self.mixer = MambaBlock(dim, **filtered_kwargs)
         elif self.layer_type == "mlstm":
             # mLSTMBlock parameters
-            mlstm_params = {"head_dim", "num_heads", "use_tfla", "proj_factor"}
+            mlstm_params = {"head_dim", "num_heads", "use_tfla", "proj_factor",
+                            "gate_soft_cap", "input_gate_bias_init", "forget_gate_bias_init"}
             filtered_kwargs = {k: v for k, v in layer_kwargs.items() if k in mlstm_params}
             self.mixer = mLSTMBlock(dim, **filtered_kwargs)
         elif self.layer_type == "slstm":
