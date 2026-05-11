@@ -16,3 +16,14 @@ linear:
 constant:
   scheduler_name: "constant"
   warmup_steps: 1000
+
+# Warmup-Stable-Decay (PDF gap 5)
+# WSDScheduler owns its own warmup; warmup_steps is informational only and is
+# derived from warmup_ratio * max_steps inside the scheduler (default 1%).
+# Decay phase uses factor = 1 - sqrt(p); β2 anneals 0.999 → 0.974 across decay.
+wsd:
+  scheduler_name: "wsd"
+  warmup_steps: 0
+  beta2_schedule: true
+  beta2_start: 0.999
+  beta2_end: 0.974

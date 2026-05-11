@@ -1316,3 +1316,54 @@ def test_stage1_proj_head_dropout_default():
     assert cfg.get("proj_head_dropout") == 0.1, (
         f"proj_head_dropout default should be 0.1, got {cfg.get('proj_head_dropout')}"
     )
+
+
+@pytest.mark.willi_parity
+def test_wsd_scheduler_shape():
+    """Phase 7A: WSDScheduler must produce the plan-of-record shape.
+
+    Asserts: warmup 1% (linear rise), stable 85% (factor==1.0), decay 14%
+    (factor = 1 - sqrt(p) clamped at min_lr_ratio). Also asserts the β2
+    helper anneals 0.999 → 0.974 across the decay phase.
+    """
+    import math as _math
+    from hybrid_xmamba.training.schedulers import (
+        WSDScheduler,
+        wsd_factor,
+        beta2_for_step,
+    )
+
+    base_lr = 1.0
+    max_steps = 10000
+    param = torch.zeros(1, requires_grad=True)
+    optimizer = torch.optim.AdamW([param], lr=base_lr, betas=(0.9, 0.999))
+    sched = WSDScheduler(optimizer, max_steps=max_steps)
+
+    assert sched.warmup_steps == 100, f"warmup_steps={sched.warmup_steps} expected 100"
+    assert sched.stable_steps == 8500, f"stable_steps={sched.stable_steps} expected 8500"
+    assert sched.decay_steps == 1400, f"decay_steps={sched.decay_steps} expected 1400"
+    assert sched.decay_start == 8600
+
+    # Warmup: linear from 0.01 → 1.0 across 100 steps.
+    f_warmup_start = wsd_factor(0, 100, 8500, 1400)
+    f_warmup_mid = wsd_factor(50, 100, 8500, 1400)
+    assert abs(f_warmup_start - 0.01) < 1e-6, f_warmup_start
+    assert 0.4 < f_warmup_mid < 0.6, f_warmup_mid
+
+    # Stable phase: constant 1.0.
+    for s in (100, 1000, 5000, 8599):
+        f = wsd_factor(s, 100, 8500, 1400)
+        assert abs(f - 1.0) < 1e-6, f"stable step {s} factor={f}"
+
+    # Decay: 1 - sqrt(p). At p=0.25, factor=0.5; at p=1, factor=0.
+    f_quarter = wsd_factor(8600 + 350, 100, 8500, 1400)
+    assert abs(f_quarter - 0.5) < 1e-6, f_quarter
+    f_end = wsd_factor(max_steps, 100, 8500, 1400)
+    assert abs(f_end - 0.0) < 1e-6, f_end
+
+    # β2 schedule: constant pre-decay, linear during decay.
+    assert beta2_for_step(0, 8600, 1400) == 0.999
+    assert beta2_for_step(8600, 8600, 1400) == 0.999
+    b2_mid = beta2_for_step(8600 + 700, 8600, 1400)
+    assert abs(b2_mid - 0.9865) < 1e-6, b2_mid
+    assert abs(beta2_for_step(max_steps, 8600, 1400) - 0.974) < 1e-6

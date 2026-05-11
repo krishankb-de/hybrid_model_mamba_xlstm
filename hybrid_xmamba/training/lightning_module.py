@@ -45,19 +45,22 @@ class HybridLightningModule(pl.LightningModule):
         scheduler_name: str = "cosine",
         gradient_clip_val: float = 1.0,
         compile_model: bool = False,
+        beta2_schedule: bool = False,
+        beta2_start: float = 0.999,
+        beta2_end: float = 0.974,
     ):
         super().__init__()
-        
+
         # Save hyperparameters
         self.save_hyperparameters(ignore=['model'])
-        
+
         # Model
         self.model = model
-        
+
         # Compile model if requested (PyTorch 2.0+)
         if compile_model:
             self.model = torch.compile(self.model)
-        
+
         # Training parameters
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
@@ -66,6 +69,14 @@ class HybridLightningModule(pl.LightningModule):
         self.optimizer_name = optimizer_name
         self.scheduler_name = scheduler_name
         self.gradient_clip_val = gradient_clip_val
+        # WSD β2 schedule: linearly anneal β2 from beta2_start → beta2_end
+        # across the WSD decay phase. Only active when scheduler_name == "wsd".
+        self.beta2_schedule = bool(beta2_schedule)
+        self.beta2_start = float(beta2_start)
+        self.beta2_end = float(beta2_end)
+        # Populated by _build_wsd_scheduler when scheduler_name == "wsd".
+        self._wsd_decay_start: Optional[int] = None
+        self._wsd_decay_steps: Optional[int] = None
     
     def forward(self, input_ids: torch.Tensor, **kwargs):
         """Forward pass."""
@@ -164,6 +175,17 @@ class HybridLightningModule(pl.LightningModule):
         )
         
         # Configure scheduler
+        if self.scheduler_name == "wsd":
+            # WSD owns its own warmup; do not wrap with the warmup SequentialLR below.
+            scheduler = self._build_wsd_scheduler(optimizer)
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step",
+                    "frequency": 1,
+                },
+            }
         if self.scheduler_name == "cosine":
             from torch.optim.lr_scheduler import CosineAnnealingLR
             scheduler = CosineAnnealingLR(
@@ -221,6 +243,35 @@ class HybridLightningModule(pl.LightningModule):
             )
             self.log('train/grad_norm', grad_norm, on_step=True)
 
+    # ------------------------------------------------------------------
+    # WSD helpers
+    # ------------------------------------------------------------------
+    def _build_wsd_scheduler(self, optimizer: Optimizer):
+        """Construct a WSDScheduler and record decay-phase metadata for β2."""
+        from hybrid_xmamba.training.schedulers import WSDScheduler
+        sched = WSDScheduler(optimizer, max_steps=self.max_steps)
+        self._wsd_decay_start = sched.decay_start
+        self._wsd_decay_steps = sched.decay_steps
+        return sched
+
+    def on_train_batch_start(self, batch, batch_idx):
+        """Apply β2 schedule when WSD + beta2_schedule are active."""
+        if not (self.beta2_schedule and self.scheduler_name == "wsd"):
+            return
+        if self._wsd_decay_start is None or self._wsd_decay_steps is None:
+            return
+        from hybrid_xmamba.training.schedulers import apply_beta2_schedule
+        optimizer = self.trainer.optimizers[0]
+        b2 = apply_beta2_schedule(
+            optimizer,
+            step=int(self.global_step),
+            decay_start=self._wsd_decay_start,
+            decay_steps=self._wsd_decay_steps,
+            beta2_start=self.beta2_start,
+            beta2_end=self.beta2_end,
+        )
+        self.log('train/adam_beta2', b2, on_step=True)
+
 
 class HybridContrastiveLightningModule(HybridLightningModule):
     """Lightning module for contrastive (SimCSE / CLIP-style) fine-tuning.
@@ -265,6 +316,8 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         freeze_text_encoder_steps: int = 0,
         vit_unfreeze_blocks: int = 0,
         vit_lr: float = 1e-6,
+        scheduler_name: str = "cosine",
+        beta2_schedule: bool = False,
     ):
         # Pass a dummy HybridLanguageModel so the parent __init__ is happy;
         # we override forward / training_step completely below.
@@ -275,6 +328,8 @@ class HybridContrastiveLightningModule(HybridLightningModule):
             warmup_steps=warmup_steps,
             max_steps=max_steps,
             gradient_clip_val=gradient_clip_val,
+            scheduler_name=scheduler_name,
+            beta2_schedule=beta2_schedule,
         )
         self.contrastive_mode = contrastive_mode.lower()
         self.image_encoder = None
@@ -419,20 +474,23 @@ class HybridContrastiveLightningModule(HybridLightningModule):
                 weight_decay=self.weight_decay,
             )
 
-        from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
-        warmup = LinearLR(
-            optimizer, start_factor=0.01, end_factor=1.0,
-            total_iters=max(1, self.warmup_steps),
-        )
-        cosine = CosineAnnealingLR(
-            optimizer,
-            T_max=max(1, self.max_steps - self.warmup_steps),
-            eta_min=self.learning_rate * 0.1,
-        )
-        scheduler = SequentialLR(
-            optimizer, schedulers=[warmup, cosine],
-            milestones=[self.warmup_steps],
-        )
+        if self.scheduler_name == "wsd":
+            scheduler = self._build_wsd_scheduler(optimizer)
+        else:
+            from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+            warmup = LinearLR(
+                optimizer, start_factor=0.01, end_factor=1.0,
+                total_iters=max(1, self.warmup_steps),
+            )
+            cosine = CosineAnnealingLR(
+                optimizer,
+                T_max=max(1, self.max_steps - self.warmup_steps),
+                eta_min=self.learning_rate * 0.1,
+            )
+            scheduler = SequentialLR(
+                optimizer, schedulers=[warmup, cosine],
+                milestones=[self.warmup_steps],
+            )
         return {
             "optimizer": optimizer,
             "lr_scheduler": {"scheduler": scheduler, "interval": "step", "frequency": 1},
@@ -735,6 +793,8 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         vit_lr: float = 1e-6,
         moco_queue_size: int = 0,
         moco_momentum: float = 0.999,
+        scheduler_name: str = "cosine",
+        beta2_schedule: bool = False,
     ):
         # contrastive_mode="clip" so parent loads the BiomedCLIP visual encoder.
         # Phase 8: img_proj deleted from parent — visual output is used directly.
@@ -749,6 +809,8 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
             freeze_text_encoder_steps=freeze_text_encoder_steps,
             vit_unfreeze_blocks=vit_unfreeze_blocks,
             vit_lr=vit_lr,
+            scheduler_name=scheduler_name,
+            beta2_schedule=beta2_schedule,
         )
         self.save_hyperparameters(ignore=['model', 'teacher'])
         self.teacher = teacher
@@ -831,20 +893,23 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
 
         optimizer = torch.optim.AdamW(param_groups)
 
-        from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
-        warmup = LinearLR(
-            optimizer, start_factor=0.01, end_factor=1.0,
-            total_iters=max(1, self.warmup_steps),
-        )
-        cosine = CosineAnnealingLR(
-            optimizer,
-            T_max=max(1, self.max_steps - self.warmup_steps),
-            eta_min=self.backbone_lr * 0.1,
-        )
-        scheduler = SequentialLR(
-            optimizer, schedulers=[warmup, cosine],
-            milestones=[self.warmup_steps],
-        )
+        if self.scheduler_name == "wsd":
+            scheduler = self._build_wsd_scheduler(optimizer)
+        else:
+            from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+            warmup = LinearLR(
+                optimizer, start_factor=0.01, end_factor=1.0,
+                total_iters=max(1, self.warmup_steps),
+            )
+            cosine = CosineAnnealingLR(
+                optimizer,
+                T_max=max(1, self.max_steps - self.warmup_steps),
+                eta_min=self.backbone_lr * 0.1,
+            )
+            scheduler = SequentialLR(
+                optimizer, schedulers=[warmup, cosine],
+                milestones=[self.warmup_steps],
+            )
         return {
             "optimizer": optimizer,
             "lr_scheduler": {"scheduler": scheduler, "interval": "step", "frequency": 1},

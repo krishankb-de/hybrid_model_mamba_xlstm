@@ -130,11 +130,11 @@ Design choice: avoid Triton kernel surgery. Higher-level wrapper splits batch in
 - [x] **6G** — `validate_for_willi.sh` green (62 passed, 6/6); commit.
 
 ### Phase 7 — WSD scheduler + β2 schedule (PDF gap 5)
-- [ ] **7A** — `hybrid_xmamba/training/schedulers.py` (NEW): `WSDScheduler` (warmup 1%, stable 85%, decay 14% via `1-sqrt(p)`); β2 schedule 0.999→0.974 during decay.
-- [ ] **7B** — `lightning_module.py:153-205, 394-436, 793-848`: dispatch on `self.scheduler_name` (cosine vs `wsd`). β2 dispatch on new `beta2_schedule: bool` ctor kwarg.
-- [ ] **7C** — `configs/callbacks/learning_rate.yaml`: add `wsd` variant; default for new training configs.
-- [ ] **7D** — `tests/test_willi_parity.py`: `test_wsd_scheduler_shape`.
-- [ ] **7E** — `validate_for_willi.sh` green; commit.
+- [x] **7A** — `hybrid_xmamba/training/schedulers.py` (NEW): `WSDScheduler` (warmup 1%, stable 85%, decay 14% via `1-sqrt(p)`); β2 schedule 0.999→0.974 during decay.
+- [x] **7B** — `lightning_module.py`: dispatch on `self.scheduler_name` (cosine vs `wsd`) in all 3 `configure_optimizers` paths; β2 dispatch on new `beta2_schedule: bool` ctor kwarg via `on_train_batch_start` hook.
+- [x] **7C** — `configs/callbacks/learning_rate.yaml`: `wsd` variant added.
+- [x] **7D** — `tests/test_willi_parity.py`: `test_wsd_scheduler_shape`.
+- [x] **7E** — `validate_for_willi.sh` green (63 passed, 6/6 gates); commit pending.
 
 ### Phase 8 — CPU smoke + 2K-step PubMed sanity (parity gate)
 All sanity on **PubMed** (WikiText dropped — does not pack, so doc-boundary code wouldn't fire; PubMed is the actual Stage 0 corpus).

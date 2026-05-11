@@ -1,6 +1,6 @@
 {
-  "current_phase": "phase7_wsd_scheduler",
-  "last_updated": "2026-05-11T22:30:00+0000",
+  "current_phase": "phase8_cpu_smoke_pubmed_sanity",
+  "last_updated": "2026-05-11T23:15:00+0000",
   "supersedes": "BIOMEDCLIP_KD_PLAN.md + biomedclip_kd_state.json (Phase 14 complete; best Phase 6e MIMIC 8.23% / Indiana 4.04% / cos 0.258 — ceiling structural per PDF analysis)",
   "primary_thesis": "PDF gaps 1-6 (layer ratio + mLSTM placement, exp-gate stabilization, HybridNorm, doc-boundary resets, WSD scheduler, freq-decoupled KD) are LM-architecture-level and were never touched by prior plans. Re-pretrain Stage 0 with all fixes; re-run joint contrastive with Phase 6e recipe held constant for attributable ablation.",
   "approved_plan": "/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md",
@@ -108,7 +108,17 @@
       "6G_validate_commit": "done — 62 passed (+2), 6/6 gates green; commit pending"
     }
   },
-  "phase7": {"status": "pending", "goal": "WSD scheduler (warmup 1%, stable 85%, sqrt-decay 14%); β2 schedule 0.999→0.974 during decay"},
+  "phase7": {
+    "status": "complete",
+    "goal": "WSD scheduler (warmup 1%, stable 85%, sqrt-decay 14%); β2 schedule 0.999→0.974 during decay",
+    "tasks": {
+      "7A_wsd_scheduler_module": "done — hybrid_xmamba/training/schedulers.py: WSDScheduler (LambdaLR-based), wsd_factor, beta2_for_step, apply_beta2_schedule",
+      "7B_lightning_wire": "done — HybridLightningModule + Contrastive + Joint: scheduler_name='wsd' branch via _build_wsd_scheduler; beta2_schedule ctor kwarg + on_train_batch_start hook applies β2 to optimizer.param_groups during decay",
+      "7C_callbacks_yaml": "done — configs/callbacks/learning_rate.yaml: wsd variant (scheduler_name=wsd, beta2_schedule=true, beta2_start=0.999, beta2_end=0.974)",
+      "7D_parity_test": "done — test_wsd_scheduler_shape: asserts 100/8500/1400 split for 10K steps; warmup linear 0.01→1; stable=1.0; decay=1-sqrt(p) (p=0.25→0.5, p=1→0); β2 0.999→0.974",
+      "7E_validate_commit": "done — 63 passed (+1), 6/6 gates green; commit pending"
+    }
+  },
   "phase8": {"status": "pending", "goal": "CPU smoke + 2K-step PubMed sanity; v1 vs v2 PPL; gate ≤ +5%"},
   "phase9": {"status": "pending", "goal": "Stage 0 re-pretrain on PubMed (10K steps, ~12h A100); PPL gate ≤ 13.76"},
   "phase10": {"status": "pending", "goal": "Freq-decoupled KD: low-band MSE + high-band α=0.1 MSE + cos"},
@@ -123,6 +133,7 @@
     "2026-05-11: Phase 2 complete (committed ff06611). Phase 3 started: mLSTM numerical stabilization. 3A: _tanh_soft_cap helper, i_gate capped pre-exp, f_gate capped pre-sigmoid, i_gate_proj.bias=-10; 3B: _slow_forward rewritten as sequential LSE recurrence (m_t running max, stabilised i/f gates, matrix C/n state); 3C: m_state carry added to TFLA inter-chunk loop; 3D: 3 HybridConfig knobs; 3E+3F: 4 new tests. validate_for_willi.sh 57 passed, 6/6 gates green. 3G commit pending.",
     "2026-05-11: Phase 4 complete. HybridNorm topology gated by config.norm_topology='pre_rms'|'hybrid' (default pre_rms — opt-in to isolate ablation). mlstm_block: v_norm added; mamba_block: dt/B/C pre-norms before scan (dt pre-softplus). hybrid_block: is_first_block + norm_topology ctor args; FFN post-norm post-residual when hybrid&&!first (out=norm2(x+mlp(x))); first block stays pure pre-norm. create_hybrid_blocks threads norm_topology and is_first_block=(i==0). HybridConfig.norm_topology threaded through hybrid_lm. New test test_hybrid_norm_ffn_post_residual_block_ge_1 verifies post-residual via zeroed-mlp diff vs is_first=True. validate_for_willi.sh 58 passed (+1), 6/6 gates green.",
     "2026-05-11: Phase 5 complete. Layer-pattern restructure configs added: hybrid_70m_v2.yaml [m,m,m,L,L,m,m,m] (1:3 middle) and hybrid_70m_v3.yaml [m,m,m,m,L,m,m,m] (1:7 midpoint). All hyperparams identical to hybrid_70m (dim=512, num_layers=8, max_pos=1024, lr=6e-4) for attributable ablation. test_willi_parity parametrize extended +v2, +v3. Param counts: v2=83.14M (parity), v3=82.47M (-0.8%); both within 5% gate, no mlp_ratio adjustment. validate_for_willi.sh 60 passed (+2 from parametrize), 6/6 gates green. 5E commit pending.",
+    "2026-05-11: Phase 7 complete. WSD scheduler (warmup 1% / stable 85% / sqrt-decay 14%) added in hybrid_xmamba/training/schedulers.py (LambdaLR-based WSDScheduler + wsd_factor + beta2_for_step + apply_beta2_schedule). HybridLightningModule grew beta2_schedule/beta2_start/beta2_end ctor kwargs and a _build_wsd_scheduler helper; on_train_batch_start hook applies β2 anneal 0.999→0.974 across decay phase via optimizer.param_groups[*]['betas']. WSD branches wired into all 3 configure_optimizers paths (HybridLightningModule, HybridContrastiveLightningModule, JointMultiTaskLightningModule). configs/callbacks/learning_rate.yaml: wsd variant. test_wsd_scheduler_shape asserts 100/8500/1400 split for max_steps=10K, warmup linear 0.01→1, stable==1.0, decay 1-sqrt(p) (p=0.25→0.5, p=1→0), β2 endpoints. validate_for_willi.sh 63 passed (+1), 6/6 gates green.",
     "2026-05-11: Phase 6 complete. cu_seqlens doc-boundary reset implemented via per-segment wrappers (no Triton kernel surgery, matching plan §122 design). train.py: tokenize_function appends eos_token_id per doc; group_texts emits cu_seqlens (per-position doc-id, list-of-ints) per chunk. lightning_module forwards cu_seqlens into model. hybrid_lm.forward + HybridBlock.forward + Mamba/mLSTM.forward all accept Optional[cu_seqlens]. MambaBlock._forward_segmented and mLSTMBlock._forward_segmented loop per (batch_row, segment) and call self.forward() recursively with cu_seqlens=None — guarantees fresh SSM/matrix state per doc. Plan task 6E (in-TFLA reset) implemented at the block-level wrapper instead; chunk-parallel TFLA makes in-kernel boundary handling fragile, and block-level wrapper is semantically equivalent. test_kernels.py: TestDocBoundaryReset (CPU-runnable) refactored module-level CUDA gate to class-level so doc-boundary asserts run in willi harness; both selective_scan + tfla pass the doc-A perturbation invariant. validate_for_willi.sh 62 passed (+2), 6/6 gates green."
   ]
 }
