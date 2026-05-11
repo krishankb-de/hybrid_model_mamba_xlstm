@@ -143,6 +143,9 @@ def prepare_dataloader(cfg: DictConfig, split: str, tokenizer):
 
     # Tokenization function - use text packing (concatenate + chunk)
     # instead of padding every sample to max_length (wastes compute on padding tokens)
+    # Phase 6A: append eos_token_id after each doc so group_texts can emit cu_seqlens.
+    eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else tokenizer.pad_token_id
+
     def tokenize_function(examples):
         # Handle different text field names across datasets
         if "text" in examples:
@@ -158,15 +161,17 @@ def prepare_dataloader(cfg: DictConfig, split: str, tokenizer):
             truncation=False,
             return_attention_mask=False,
         )
+        if eos_id is not None:
+            tokenized["input_ids"] = [ids + [eos_id] for ids in tokenized["input_ids"]]
         return tokenized
-    
+
     # Group texts into chunks for efficient training (text packing)
     # This eliminates wasted compute on padding tokens
     # Respect max_seq_length override (e.g. +dataset.max_seq_length=128)
     # falling back to max_length from the dataset config
     seq_length = cfg.dataset.get("max_seq_length", cfg.dataset.max_length)
     print(f"Using sequence length: {seq_length} (max_length={cfg.dataset.max_length})")
-    
+
     def group_texts(examples):
         # Concatenate all texts
         concatenated = {k: sum(examples[k], []) for k in examples.keys()}
@@ -178,6 +183,18 @@ def prepare_dataloader(cfg: DictConfig, split: str, tokenizer):
             k: [t[i : i + seq_length] for i in range(0, total_length, seq_length)]
             for k, t in concatenated.items()
         }
+        # Phase 6A: cu_seqlens — per-position doc-id within each chunk.
+        # Run-length encoded by EOS tokens; consumed by mixer per-segment wrappers.
+        if eos_id is not None and total_length > 0:
+            ids_flat = concatenated["input_ids"][:total_length]
+            doc_id, doc_ids_flat = 0, []
+            for tok in ids_flat:
+                doc_ids_flat.append(doc_id)
+                if tok == eos_id:
+                    doc_id += 1
+            result["cu_seqlens"] = [
+                doc_ids_flat[i : i + seq_length] for i in range(0, total_length, seq_length)
+            ]
         return result
     
     # Tokenize dataset

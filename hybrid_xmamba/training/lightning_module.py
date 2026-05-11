@@ -83,14 +83,15 @@ class HybridLightningModule(pl.LightningModule):
         """
         input_ids = batch['input_ids']
         labels = batch.get('labels', input_ids)
-        
+        cu_seqlens = batch.get('cu_seqlens')
+
         # Forward pass
-        outputs = self.model(input_ids, labels=labels, return_dict=True)
+        outputs = self.model(input_ids, labels=labels, cu_seqlens=cu_seqlens, return_dict=True)
         loss = outputs.loss
-        
+
         # Compute perplexity
         perplexity = compute_perplexity(loss)
-        
+
         # Log metrics
         self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=True)
         self.log('train/perplexity', perplexity, prog_bar=True, on_step=True, on_epoch=True)
@@ -110,14 +111,15 @@ class HybridLightningModule(pl.LightningModule):
         """
         input_ids = batch['input_ids']
         labels = batch.get('labels', input_ids)
-        
+        cu_seqlens = batch.get('cu_seqlens')
+
         # Forward pass
-        outputs = self.model(input_ids, labels=labels, return_dict=True)
+        outputs = self.model(input_ids, labels=labels, cu_seqlens=cu_seqlens, return_dict=True)
         loss = outputs.loss
-        
+
         # Compute perplexity
         perplexity = compute_perplexity(loss)
-        
+
         # Log metrics
         self.log('val/loss', loss, prog_bar=True, on_step=False, on_epoch=True)
         self.log('val/perplexity', perplexity, prog_bar=True, on_step=False, on_epoch=True)
@@ -136,14 +138,15 @@ class HybridLightningModule(pl.LightningModule):
         """
         input_ids = batch['input_ids']
         labels = batch.get('labels', input_ids)
-        
+        cu_seqlens = batch.get('cu_seqlens')
+
         # Forward pass
-        outputs = self.model(input_ids, labels=labels, return_dict=True)
+        outputs = self.model(input_ids, labels=labels, cu_seqlens=cu_seqlens, return_dict=True)
         loss = outputs.loss
-        
+
         # Compute perplexity
         perplexity = compute_perplexity(loss)
-        
+
         # Log metrics
         self.log('test/loss', loss, on_step=False, on_epoch=True)
         self.log('test/perplexity', perplexity, on_step=False, on_epoch=True)

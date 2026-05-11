@@ -149,6 +149,7 @@ class HybridLanguageModel(nn.Module):
         input_ids: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
         output_hidden_states: bool = False,
         return_dict: bool = True,
     ) -> Union[CausalLMOutput, Tuple[torch.Tensor, ...]]:
@@ -186,10 +187,10 @@ class HybridLanguageModel(nn.Module):
 
             if use_ckpt:
                 hidden_states = torch.utils.checkpoint.checkpoint(
-                    layer, hidden_states, use_reentrant=False
+                    layer, hidden_states, None, cu_seqlens, use_reentrant=False
                 )
             else:
-                hidden_states = layer(hidden_states)
+                hidden_states = layer(hidden_states, cache=None, cu_seqlens=cu_seqlens)
         
         # Final normalization
         hidden_states = self.final_norm(hidden_states)

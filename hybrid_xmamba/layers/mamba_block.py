@@ -90,19 +90,27 @@ class MambaBlock(nn.Module):
         self.activation = nn.SiLU()
     
     def forward(
-        self, 
-        x: torch.Tensor, 
-        cache: Optional[torch.Tensor] = None
+        self,
+        x: torch.Tensor,
+        cache: Optional[torch.Tensor] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass of Mamba block.
-        
+
         Args:
             x: Input tensor of shape (batch, seq_len, dim)
             cache: Optional cache for inference
-            
+            cu_seqlens: Optional (B, L) int tensor of per-position doc-ids.
+                When provided, splits each batch row into per-doc segments and
+                runs the mixer independently per segment so SSM state does not
+                cross document boundaries (Phase 6).
+
         Returns:
             Output tensor of shape (batch, seq_len, dim)
         """
+        # Phase 6D: per-segment wrapper when cu_seqlens provided.
+        if cu_seqlens is not None:
+            return self._forward_segmented(x, cu_seqlens)
         batch, seq_len, dim = x.shape
         
         # Input projection: split into x and z (gate)
@@ -236,3 +244,34 @@ class MambaBlock(nn.Module):
         if pad_len > 0:
             output = output[:, :seq_len, :]
         return output
+
+    def _forward_segmented(
+        self,
+        x: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-(row, segment) wrapper that resets SSM state at doc boundaries.
+
+        Args:
+            x: (B, L, D)
+            cu_seqlens: (B, L) int tensor; segment id per position.
+
+        Returns:
+            Output (B, L, D) with per-segment selective scan applied independently.
+        """
+        B, L, _ = x.shape
+        out_parts = []
+        for b in range(B):
+            ids = cu_seqlens[b]
+            # boundaries: positions where doc id changes (+ L sentinel)
+            change = torch.ones(L, dtype=torch.bool, device=ids.device)
+            change[1:] = ids[1:] != ids[:-1]
+            starts = torch.nonzero(change, as_tuple=False).flatten().tolist()
+            starts.append(L)
+            row_pieces = []
+            for i in range(len(starts) - 1):
+                s, e = starts[i], starts[i + 1]
+                seg = x[b : b + 1, s:e, :]
+                row_pieces.append(self.forward(seg))  # cu_seqlens=None branch
+            out_parts.append(torch.cat(row_pieces, dim=1))
+        return torch.cat(out_parts, dim=0)

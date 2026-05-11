@@ -117,23 +117,30 @@ class HybridBlock(nn.Module):
             self.mlp = None
     
     def forward(
-        self, 
+        self,
         x: torch.Tensor,
-        cache: Optional[dict] = None
+        cache: Optional[dict] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with residual connections.
-        
+
         Args:
             x: Input tensor of shape (batch, seq_len, dim)
             cache: Optional cache for inference
-            
+            cu_seqlens: Optional (B, L) int tensor of per-position doc-ids for
+                cross-document boundary resets (Phase 6). Only Mamba/mLSTM mixers
+                consume it; sLSTM passes through unchanged.
+
         Returns:
             Output tensor of shape (batch, seq_len, dim)
         """
         # Mixer with residual
         residual = x
         x = self.norm1(x)
-        x = self.mixer(x, cache=cache)
+        if self.layer_type in ("mamba", "mlstm"):
+            x = self.mixer(x, cache=cache, cu_seqlens=cu_seqlens)
+        else:
+            x = self.mixer(x, cache=cache)
         x = residual + x
         
         # MLP with residual (if enabled).

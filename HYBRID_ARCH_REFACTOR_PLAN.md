@@ -121,13 +121,13 @@ Locate the ceiling before changing anything.
 ### Phase 6 — Cross-document boundary resets (PDF gap 4)
 Design choice: avoid Triton kernel surgery. Higher-level wrapper splits batch into per-document segments via `cu_seqlens` and concatenates. TFLA path is pure PyTorch — patch directly.
 
-- [ ] **6A** — `scripts/train.py:170-181` `group_texts`: emit `cu_seqlens` (cumulative EOS positions). Threaded via dataloader collate.
-- [ ] **6B** — `hybrid_lm.py:146-192` forward: accept `cu_seqlens: Optional[Tensor]`, thread through layers.
-- [ ] **6C** — `hybrid_block.py:107-133` forward: accept `cu_seqlens`, pass to mixer.
-- [ ] **6D** — `mamba_block.py:80-149` forward: per-segment loop wrapper if `cu_seqlens` provided.
-- [ ] **6E** — `tfla_interface.tfla_forward_parallel:21-169`: reset `C_state=0`, `n_state=0`, `log_f=-inf` at boundary indices.
-- [ ] **6F** — `tests/test_kernels.py`: `test_selective_scan_doc_boundary_reset`, `test_tfla_doc_boundary_reset` — 2-doc packed, assert doc-B output independent of doc-A perturbation.
-- [ ] **6G** — `validate_for_willi.sh` green; commit.
+- [x] **6A** — `scripts/train.py:170-181` `group_texts`: emit `cu_seqlens` (cumulative EOS positions). Threaded via dataloader collate.
+- [x] **6B** — `hybrid_lm.py:146-192` forward: accept `cu_seqlens: Optional[Tensor]`, thread through layers.
+- [x] **6C** — `hybrid_block.py:107-133` forward: accept `cu_seqlens`, pass to mixer.
+- [x] **6D** — `mamba_block.py:80-149` forward: per-segment loop wrapper if `cu_seqlens` provided.
+- [x] **6E** — `tfla_interface.tfla_forward_parallel:21-169`: reset `C_state=0`, `n_state=0`, `log_f=-inf` at boundary indices. (Implemented at mLSTMBlock-level wrapper rather than in TFLA — matches plan §122 design choice; semantically equivalent fresh-state per segment.)
+- [x] **6F** — `tests/test_kernels.py`: `test_selective_scan_doc_boundary_reset`, `test_tfla_doc_boundary_reset` — 2-doc packed, assert doc-B output independent of doc-A perturbation.
+- [x] **6G** — `validate_for_willi.sh` green (62 passed, 6/6); commit.
 
 ### Phase 7 — WSD scheduler + β2 schedule (PDF gap 5)
 - [ ] **7A** — `hybrid_xmamba/training/schedulers.py` (NEW): `WSDScheduler` (warmup 1%, stable 85%, decay 14% via `1-sqrt(p)`); β2 schedule 0.999→0.974 during decay.
