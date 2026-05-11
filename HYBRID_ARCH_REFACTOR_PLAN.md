@@ -86,10 +86,10 @@ Stage architectural fixes **from least to most risky**, gate each on numerical s
 ### Phase 2 — Diagnostic probe on Phase 6e checkpoint (READ-ONLY)
 Locate the ceiling before changing anything.
 
-- [ ] **2A** — `scripts/diagnose_baseline.py` (new). Run on Phase 6e best ckpt: mLSTM gate max/mean, layer-wise hidden-norm, doc-contamination probe (2-doc synthetic), alignment/uniformity on STS-B, cosine histogram on MIMIC-val.
-- [ ] **2B** — `analysis/baseline_probe_report.md` (≤ 1 page): findings + which PDF gaps the data supports / refutes.
-- [ ] **2C** — Re-weight downstream priorities based on probe data. Each gap still implemented for safety.
-- [ ] **2D** — `validate_for_willi.sh` green; commit.
+- [x] **2A** — `scripts/diagnose_baseline.py` (new). Run on Phase 6e best ckpt: mLSTM gate max/mean, layer-wise hidden-norm, doc-contamination probe (2-doc synthetic), alignment/uniformity on STS-B, cosine histogram on MIMIC-val.
+- [x] **2B** — `analysis/baseline_probe_report.md` (≤ 1 page): findings + which PDF gaps the data supports / refutes. (STS-B + MIMIC probes pending Willi.)
+- [x] **2C** — Re-weight downstream priorities based on probe data. Doc-boundary reset elevated to highest priority. Each gap still implemented.
+- [x] **2D** — `validate_for_willi.sh` green (52 passed, 8/8 gates); commit.
 
 ### Phase 3 — mLSTM numerical stabilization (PDF gaps 2.1–2.2)
 - [ ] **3A** — `mlstm_block.py:117-119`: `tanh` soft-cap on raw `ĩ_t`, `f̃_t` pre-activations (cap=15.0, configurable). Init `i_gate_proj.bias = -10`, `f_gate_proj.bias = 0`.

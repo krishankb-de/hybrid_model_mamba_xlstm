@@ -1,6 +1,6 @@
 {
-  "current_phase": "phase1_bootstrap",
-  "last_updated": "2026-05-11T00:00:00+0000",
+  "current_phase": "phase2_diagnostic",
+  "last_updated": "2026-05-11T12:00:00+0000",
   "supersedes": "BIOMEDCLIP_KD_PLAN.md + biomedclip_kd_state.json (Phase 14 complete; best Phase 6e MIMIC 8.23% / Indiana 4.04% / cos 0.258 — ceiling structural per PDF analysis)",
   "primary_thesis": "PDF gaps 1-6 (layer ratio + mLSTM placement, exp-gate stabilization, HybridNorm, doc-boundary resets, WSD scheduler, freq-decoupled KD) are LM-architecture-level and were never touched by prior plans. Re-pretrain Stage 0 with all fixes; re-run joint contrastive with Phase 6e recipe held constant for attributable ablation.",
   "approved_plan": "/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md",
@@ -26,18 +26,38 @@
     "phase8_corpus": "PubMed (not WikiText) — distribution match + exercises doc-boundary reset"
   },
   "phase1": {
-    "status": "awaiting_commit",
+    "status": "complete",
     "tasks": {
       "1A_create_plan_md": "done",
       "1B_create_state_json": "done",
-      "1C_gitignore_allowlist": "done — !HYBRID_ARCH_REFACTOR_PLAN.md (line 89), !hybrid_arch_refactor_state.json (line 94)",
-      "1D_claude_md_repoint": "done — Session Bootstrap repointed; BIOMEDCLIP_KD reference kept as deprecated historical",
-      "1E_biomedclip_deprecation_banner": "done — 2026-05-11",
-      "1F_validate_for_willi": "done — 53 passed, 5 skipped, 6/6 gates green (no regression vs baseline)",
-      "1G_commit": "pending — awaiting user approval"
+      "1C_gitignore_allowlist": "done",
+      "1D_claude_md_repoint": "done",
+      "1E_biomedclip_deprecation_banner": "done",
+      "1F_validate_for_willi": "done — 53 passed, 6/6 gates green",
+      "1G_commit": "done — c735bb1"
     }
   },
-  "phase2": {"status": "pending", "goal": "Diagnose Phase 6e checkpoint: mLSTM gate health, layer norms, doc-contam probe, alignment/uniformity"},
+  "phase2": {
+    "status": "in_progress",
+    "goal": "Diagnose Phase 6e checkpoint: mLSTM gate health, layer norms, doc-contam probe, alignment/uniformity",
+    "tasks": {
+      "2A_diagnose_script": "done — scripts/diagnose_baseline.py; probes 1-3 verified locally",
+      "2B_probe_report": "done — analysis/baseline_probe_report.md; probes 4-5 pending Willi",
+      "2C_reweight_priorities": "done — doc-boundary reset elevated to highest priority",
+      "2D_validate_commit": "pending"
+    },
+    "findings": {
+      "mlstm_gate_layer2_i_max": 14.25,
+      "mlstm_gate_layer5_i_max": 8.37,
+      "hidden_norm_block0": 17.07,
+      "hidden_norm_block7": 59.21,
+      "norm_growth_ratio": 3.47,
+      "doc_contamination_mean_leak": 0.184,
+      "doc_contamination_verdict": "LEAK_PRESENT",
+      "stsb_pending": true,
+      "mimic_cosine_pending": true
+    }
+  },
   "phase3": {"status": "pending", "goal": "mLSTM stabilization: tanh soft-cap, bias=-10, LSE m_t stabilizer"},
   "phase4": {"status": "pending", "goal": "HybridNorm: Q/K/V + Δ/B/C pre-norm; FFN post-norm; first block pure pre-norm"},
   "phase5": {"status": "pending", "goal": "Layer pattern v2 (1:3 middle) / v3 (1:7 midpoint); Phase 8 picks winner"},
@@ -52,6 +72,7 @@
   "phase14": {"status": "pending", "goal": "Writeup + dissertation table + per-fix ablation"},
   "notes": [
     "2026-05-11: Phase 1 bootstrap started. Plan approved via /Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md. Refined remotely via Ultraplan; file:line refs verified against codebase (25/26 match; layer_pattern line corrected 8→11).",
-    "2026-05-11: Phase 1 tasks 1A–1F complete. HYBRID_ARCH_REFACTOR_PLAN.md + state JSON created; .gitignore + CLAUDE.md + BIOMEDCLIP_KD_PLAN.md updated. validate_for_willi.sh green (53 passed, 6/6 gates). Awaiting user approval to commit (1G)."
+    "2026-05-11: Phase 1 tasks 1A–1F complete. HYBRID_ARCH_REFACTOR_PLAN.md + state JSON created; .gitignore + CLAUDE.md + BIOMEDCLIP_KD_PLAN.md updated. validate_for_willi.sh green (53 passed, 6/6 gates). Awaiting user approval to commit (1G).",
+    "2026-05-11: Phase 2 started. scripts/diagnose_baseline.py + scripts/diagnose_baseline.sh created. Probes 1-3 run locally on output_willi_server/total_loss=2.6274.ckpt. Key findings: i_gate_raw max=14.25 (near 15.0 soft-cap limit); norm grows 17→59 across 8 blocks (3.5x); doc-contamination mean leak=18.4% CONFIRMED. analysis/baseline_probe_report.md written. Probes 4-5 (STS-B, MIMIC) pending Willi run. Doc-boundary reset elevated to highest priority."
   ]
 }
