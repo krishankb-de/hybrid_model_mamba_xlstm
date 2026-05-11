@@ -332,6 +332,13 @@ def main(cfg: DictConfig):
     if use_compile:
         print("Enabling torch.compile for optimized GPU kernels (Ampere+ detected)...")
     
+    # Phase 7 WSD wiring: pull optional scheduler knobs from cfg.model (cosine default).
+    _mcfg = cfg.model
+    scheduler_name = _mcfg.get("scheduler_name", "cosine") if hasattr(_mcfg, "get") else getattr(_mcfg, "scheduler_name", "cosine")
+    beta2_schedule = _mcfg.get("beta2_schedule", False) if hasattr(_mcfg, "get") else getattr(_mcfg, "beta2_schedule", False)
+    beta2_start = _mcfg.get("beta2_start", 0.999) if hasattr(_mcfg, "get") else getattr(_mcfg, "beta2_start", 0.999)
+    beta2_end = _mcfg.get("beta2_end", 0.974) if hasattr(_mcfg, "get") else getattr(_mcfg, "beta2_end", 0.974)
+
     lightning_module = HybridLightningModule(
         model=model,
         learning_rate=cfg.model.learning_rate,
@@ -340,6 +347,10 @@ def main(cfg: DictConfig):
         max_steps=cfg.model.max_steps,
         gradient_clip_val=cfg.model.gradient_clip_val,
         compile_model=use_compile,
+        scheduler_name=scheduler_name,
+        beta2_schedule=beta2_schedule,
+        beta2_start=beta2_start,
+        beta2_end=beta2_end,
     )
     
     # Setup callbacks

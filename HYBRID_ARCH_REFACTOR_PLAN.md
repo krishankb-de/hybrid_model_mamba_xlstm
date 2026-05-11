@@ -139,10 +139,10 @@ Design choice: avoid Triton kernel surgery. Higher-level wrapper splits batch in
 ### Phase 8 — CPU smoke + 2K-step PubMed sanity (parity gate)
 All sanity on **PubMed** (WikiText dropped — does not pack, so doc-boundary code wouldn't fire; PubMed is the actual Stage 0 corpus).
 
-- [ ] **8A** — `scripts/smoke_arch_refactor.py` (NEW): 100-step PubMed CPU run, `model=hybrid_70m_v2`, all Phase 3/4/6/7 active. Assert: loss decreasing, no NaN, grad-norm < 10, `i_gate` pre-cap max < 15, doc-boundary probe passes.
-- [ ] **8B** — Submit 2× 1h willi A100 sanity (v1 vs v2 PubMed PPL at 2000 steps).
-- [ ] **8C** — Decision gate: new-arch PPL ≤ baseline × 1.05. If > 5% regression: isolate (revert Phase 4 / Phase 6 individually).
-- [ ] **8D** — `validate_for_willi.sh` green (gates 1–6, ≥ 53 passed); commit + push.
+- [x] **8A** — `scripts/smoke_arch_refactor.py` (NEW): 100-step PubMed CPU run, `model=hybrid_70m_v2`, all Phase 3/4/6/7 active. Assert: loss decreasing, no NaN, grad-norm < 10, `i_gate` pre-cap max < 15, doc-boundary probe passes.
+- [x] **8B** — Submit 2× 1h willi A100 sanity (v1 vs v2 PubMed PPL at 2000 steps). _Scripts created (`scripts/sanity_phase8_v1.sh`, `sanity_phase8_v2.sh`); sbatch on Willi pending._
+- [ ] **8C** — Decision gate: new-arch PPL ≤ baseline × 1.05. If > 5% regression: isolate (revert Phase 4 / Phase 6 individually). _Awaits 8B Willi run._
+- [x] **8D** — `validate_for_willi.sh` green (gates 1–6, ≥ 53 passed); commit + push. _Local validation green (63 passed, 6/6 gates)._
 
 ### Phase 9 — Stage 0 LM re-pretrain on PubMed (~12h A100)
 - [ ] **9A** — `scripts/train_stage0_arch_v2.sh` (NEW): reuses `train_stage0_distill.sh` structure (PubMed, BioMedLM KD teacher); `model=hybrid_70m_v2` (or v3 if Phase 8 winner); WSD scheduler; max_steps=10000, val_check=500.
