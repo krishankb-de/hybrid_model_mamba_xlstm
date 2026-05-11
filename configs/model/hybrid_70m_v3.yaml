@@ -1,0 +1,58 @@
+# 70M hybrid v3 — layer pattern restructure (PDF gap 1)
+# 1:7 mLSTM:Mamba ratio, single midpoint (position 4 of 8).
+# Rationale: minimal mLSTM footprint to test whether one matrix-memory block
+# at midpoint suffices; downside-risk control vs v2 if v2 over-allocates mLSTM.
+# All other hyperparameters identical to hybrid_70m for attributable ablation.
+
+model_type: "hybrid_lm"
+
+# Architecture
+vocab_size: 50257
+dim: 512
+num_layers: 8
+layer_pattern: ["mamba", "mamba", "mamba", "mamba", "mlstm", "mamba", "mamba", "mamba"]
+
+# Mamba parameters
+state_size: 16
+conv_size: 4
+expand_factor: 2
+dt_rank: null
+use_fast_path: true
+
+# mLSTM parameters
+head_dim: 64
+num_heads: 8
+use_tfla: true
+proj_factor: 2
+
+# sLSTM parameters
+slstm_hidden_dim: 512
+slstm_num_heads: 4
+use_exponential_gate: true
+
+# Shared parameters
+norm_type: "rms"
+use_mlp: true
+mlp_ratio: 4.0
+
+# Training parameters
+max_position_embeddings: 1024
+dropout: 0.1
+initializer_range: 0.02
+
+# Generation parameters
+use_cache: true
+tie_word_embeddings: false
+
+use_gradient_checkpointing: false
+proj_head_dropout: 0.1
+pooling_strategy: attention
+
+# Optimization
+learning_rate: 6.0e-4
+weight_decay: 0.1
+warmup_steps: 1000
+max_steps: 50000
+gradient_clip_val: 1.0
+
+distill: null

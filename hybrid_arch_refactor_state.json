@@ -1,6 +1,6 @@
 {
-  "current_phase": "phase5_layer_pattern",
-  "last_updated": "2026-05-11T20:00:00+0000",
+  "current_phase": "phase6_doc_boundary_resets",
+  "last_updated": "2026-05-11T21:00:00+0000",
   "supersedes": "BIOMEDCLIP_KD_PLAN.md + biomedclip_kd_state.json (Phase 14 complete; best Phase 6e MIMIC 8.23% / Indiana 4.04% / cos 0.258 — ceiling structural per PDF analysis)",
   "primary_thesis": "PDF gaps 1-6 (layer ratio + mLSTM placement, exp-gate stabilization, HybridNorm, doc-boundary resets, WSD scheduler, freq-decoupled KD) are LM-architecture-level and were never touched by prior plans. Re-pretrain Stage 0 with all fixes; re-run joint contrastive with Phase 6e recipe held constant for attributable ablation.",
   "approved_plan": "/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md",
@@ -84,7 +84,17 @@
       "4I_validate_commit": "done — 58 passed (+1), 6/6 gates green"
     }
   },
-  "phase5": {"status": "pending", "goal": "Layer pattern v2 (1:3 middle) / v3 (1:7 midpoint); Phase 8 picks winner"},
+  "phase5": {
+    "status": "complete",
+    "goal": "Layer pattern v2 (1:3 middle) / v3 (1:7 midpoint); Phase 8 picks winner",
+    "tasks": {
+      "5A_v2_config": "done — configs/model/hybrid_70m_v2.yaml: [m,m,m,L,L,m,m,m]",
+      "5B_v3_config": "done — configs/model/hybrid_70m_v3.yaml: [m,m,m,m,L,m,m,m]",
+      "5C_parity_test_extend": "done — parametrize +hybrid_70m_v2, +hybrid_70m_v3",
+      "5D_param_count_check": "done — v2=83.14M (parity vs hybrid_70m), v3=82.47M (-0.8%, within 5% gate); no mlp_ratio change",
+      "5E_validate_commit": "pending commit"
+    }
+  },
   "phase6": {"status": "pending", "goal": "cu_seqlens doc-boundary reset; higher-level wrapper, no Triton surgery"},
   "phase7": {"status": "pending", "goal": "WSD scheduler (warmup 1%, stable 85%, sqrt-decay 14%); β2 schedule 0.999→0.974 during decay"},
   "phase8": {"status": "pending", "goal": "CPU smoke + 2K-step PubMed sanity; v1 vs v2 PPL; gate ≤ +5%"},
@@ -99,6 +109,7 @@
     "2026-05-11: Phase 1 tasks 1A–1F complete. HYBRID_ARCH_REFACTOR_PLAN.md + state JSON created; .gitignore + CLAUDE.md + BIOMEDCLIP_KD_PLAN.md updated. validate_for_willi.sh green (53 passed, 6/6 gates). Awaiting user approval to commit (1G).",
     "2026-05-11: Phase 2 started. scripts/diagnose_baseline.py + scripts/diagnose_baseline.sh created. Probes 1-3 run locally on output_willi_server/total_loss=2.6274.ckpt. Key findings: i_gate_raw max=14.25 (near 15.0 soft-cap limit); norm grows 17→59 across 8 blocks (3.5x); doc-contamination mean leak=18.4% CONFIRMED. analysis/baseline_probe_report.md written. Probes 4-5 (STS-B, MIMIC) pending Willi run. Doc-boundary reset elevated to highest priority.",
     "2026-05-11: Phase 2 complete (committed ff06611). Phase 3 started: mLSTM numerical stabilization. 3A: _tanh_soft_cap helper, i_gate capped pre-exp, f_gate capped pre-sigmoid, i_gate_proj.bias=-10; 3B: _slow_forward rewritten as sequential LSE recurrence (m_t running max, stabilised i/f gates, matrix C/n state); 3C: m_state carry added to TFLA inter-chunk loop; 3D: 3 HybridConfig knobs; 3E+3F: 4 new tests. validate_for_willi.sh 57 passed, 6/6 gates green. 3G commit pending.",
-    "2026-05-11: Phase 4 complete. HybridNorm topology gated by config.norm_topology='pre_rms'|'hybrid' (default pre_rms — opt-in to isolate ablation). mlstm_block: v_norm added; mamba_block: dt/B/C pre-norms before scan (dt pre-softplus). hybrid_block: is_first_block + norm_topology ctor args; FFN post-norm post-residual when hybrid&&!first (out=norm2(x+mlp(x))); first block stays pure pre-norm. create_hybrid_blocks threads norm_topology and is_first_block=(i==0). HybridConfig.norm_topology threaded through hybrid_lm. New test test_hybrid_norm_ffn_post_residual_block_ge_1 verifies post-residual via zeroed-mlp diff vs is_first=True. validate_for_willi.sh 58 passed (+1), 6/6 gates green."
+    "2026-05-11: Phase 4 complete. HybridNorm topology gated by config.norm_topology='pre_rms'|'hybrid' (default pre_rms — opt-in to isolate ablation). mlstm_block: v_norm added; mamba_block: dt/B/C pre-norms before scan (dt pre-softplus). hybrid_block: is_first_block + norm_topology ctor args; FFN post-norm post-residual when hybrid&&!first (out=norm2(x+mlp(x))); first block stays pure pre-norm. create_hybrid_blocks threads norm_topology and is_first_block=(i==0). HybridConfig.norm_topology threaded through hybrid_lm. New test test_hybrid_norm_ffn_post_residual_block_ge_1 verifies post-residual via zeroed-mlp diff vs is_first=True. validate_for_willi.sh 58 passed (+1), 6/6 gates green.",
+    "2026-05-11: Phase 5 complete. Layer-pattern restructure configs added: hybrid_70m_v2.yaml [m,m,m,L,L,m,m,m] (1:3 middle) and hybrid_70m_v3.yaml [m,m,m,m,L,m,m,m] (1:7 midpoint). All hyperparams identical to hybrid_70m (dim=512, num_layers=8, max_pos=1024, lr=6e-4) for attributable ablation. test_willi_parity parametrize extended +v2, +v3. Param counts: v2=83.14M (parity), v3=82.47M (-0.8%); both within 5% gate, no mlp_ratio adjustment. validate_for_willi.sh 60 passed (+2 from parametrize), 6/6 gates green. 5E commit pending."
   ]
 }

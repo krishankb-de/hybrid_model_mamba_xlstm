@@ -112,11 +112,11 @@ Locate the ceiling before changing anything.
 - [x] **4I** — `validate_for_willi.sh` green; commit.
 
 ### Phase 5 — Layer-pattern restructure (PDF gap 1)
-- [ ] **5A** — `configs/model/hybrid_70m_v2.yaml` (NEW): `[mamba, mamba, mamba, mlstm, mlstm, mamba, mamba, mamba]` (1:3 ratio, middle-placed).
-- [ ] **5B** — `configs/model/hybrid_70m_v3.yaml` (NEW): `[mamba, mamba, mamba, mamba, mlstm, mamba, mamba, mamba]` (1:7 ratio, single midpoint).
-- [ ] **5C** — `tests/test_willi_parity.py:145`: extend parametrize list with `hybrid_70m_v2`, `hybrid_70m_v3`.
-- [ ] **5D** — Print `model.get_num_params()` for v2, v3. Adjust `mlp_ratio` only if v3 drops > 5% below 70M target.
-- [ ] **5E** — `validate_for_willi.sh` green; commit.
+- [x] **5A** — `configs/model/hybrid_70m_v2.yaml` (NEW): `[mamba, mamba, mamba, mlstm, mlstm, mamba, mamba, mamba]` (1:3 ratio, middle-placed).
+- [x] **5B** — `configs/model/hybrid_70m_v3.yaml` (NEW): `[mamba, mamba, mamba, mamba, mlstm, mamba, mamba, mamba]` (1:7 ratio, single midpoint).
+- [x] **5C** — `tests/test_willi_parity.py:145`: extend parametrize list with `hybrid_70m_v2`, `hybrid_70m_v3`.
+- [x] **5D** — Param counts: hybrid_70m=83.14M, v2=83.14M (parity), v3=82.47M (−0.8%, within 5%). No `mlp_ratio` adjustment.
+- [x] **5E** — `validate_for_willi.sh` green (60 passed, 6/6 gates); commit pending.
 
 ### Phase 6 — Cross-document boundary resets (PDF gap 4)
 Design choice: avoid Triton kernel surgery. Higher-level wrapper splits batch into per-document segments via `cu_seqlens` and concatenates. TFLA path is pure PyTorch — patch directly.

@@ -143,6 +143,8 @@ def test_no_pep585_generics_in_annotations():
 @pytest.mark.willi_parity
 @pytest.mark.parametrize("model_name", [
     "hybrid_70m",
+    "hybrid_70m_v2",
+    "hybrid_70m_v3",
     "mamba_70m_baseline",
     "xlstm_70m_baseline",
 ])
