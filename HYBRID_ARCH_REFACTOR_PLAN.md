@@ -101,15 +101,15 @@ Locate the ceiling before changing anything.
 - [x] **3G** — `validate_for_willi.sh` green (57 passed, 6/6 gates); commit.
 
 ### Phase 4 — HybridNorm topology (PDF gap 3)
-- [ ] **4A** — `mlstm_block.py:103-110`: Q/K/V per-projection RMSNorm pre-mixer (extends existing `q_norm`/`k_norm` at line 68).
-- [ ] **4B** — `mamba_block.py:106-115`: Δ/B/C pre-norm before selective scan.
-- [ ] **4C** — `hybrid_block.py:38-105`: add `is_first_block` ctor arg.
-- [ ] **4D** — `hybrid_block.py:121-132` forward: FFN post-norm when `is_first_block=False`; pre-norm when `True`.
-- [ ] **4E** — `hybrid_block.py:177-188` `create_hybrid_blocks`: pass `is_first_block=(i==0)`; accept `norm_topology` kw.
-- [ ] **4F** — `hybrid_lm.py:97-119`: thread `norm_topology` to factory.
-- [ ] **4G** — `configuration_hybrid.py`: `norm_topology: str = "pre_rms"`.
-- [ ] **4H** — `tests/test_layers.py`: assert FFN normalizes post-residual for block ≥ 1.
-- [ ] **4I** — `validate_for_willi.sh` green; commit.
+- [x] **4A** — `mlstm_block.py:103-110`: Q/K/V per-projection RMSNorm pre-mixer (extends existing `q_norm`/`k_norm` at line 68).
+- [x] **4B** — `mamba_block.py:106-115`: Δ/B/C pre-norm before selective scan.
+- [x] **4C** — `hybrid_block.py:38-105`: add `is_first_block` ctor arg.
+- [x] **4D** — `hybrid_block.py:121-132` forward: FFN post-norm when `is_first_block=False`; pre-norm when `True`.
+- [x] **4E** — `hybrid_block.py:177-188` `create_hybrid_blocks`: pass `is_first_block=(i==0)`; accept `norm_topology` kw.
+- [x] **4F** — `hybrid_lm.py:97-119`: thread `norm_topology` to factory.
+- [x] **4G** — `configuration_hybrid.py`: `norm_topology: str = "pre_rms"`.
+- [x] **4H** — `tests/test_layers.py`: assert FFN normalizes post-residual for block ≥ 1.
+- [x] **4I** — `validate_for_willi.sh` green; commit.
 
 ### Phase 5 — Layer-pattern restructure (PDF gap 1)
 - [ ] **5A** — `configs/model/hybrid_70m_v2.yaml` (NEW): `[mamba, mamba, mamba, mlstm, mlstm, mamba, mamba, mamba]` (1:3 ratio, middle-placed).

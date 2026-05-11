@@ -34,6 +34,7 @@ class MambaBlock(nn.Module):
         expand_factor: int = 2,
         dt_rank: Optional[int] = None,
         use_fast_path: bool = True,
+        use_hybrid_norm: bool = False,
     ):
         super().__init__()
         self.dim = dim
@@ -42,6 +43,7 @@ class MambaBlock(nn.Module):
         self.expand_factor = expand_factor
         self.inner_dim = dim * expand_factor
         self.use_fast_path = use_fast_path
+        self.use_hybrid_norm = use_hybrid_norm
         
         # Determine dt_rank
         if dt_rank is None:
@@ -65,6 +67,16 @@ class MambaBlock(nn.Module):
         # SSM projections
         self.x_proj = nn.Linear(self.inner_dim, self.dt_rank + state_size * 2, bias=False)
         self.dt_proj = nn.Linear(self.dt_rank, self.inner_dim, bias=True)
+
+        # Phase 4B (HybridNorm): per-projection pre-norm on Δ/B/C before selective scan
+        if use_hybrid_norm:
+            self.dt_norm = RMSNorm(self.inner_dim)
+            self.B_norm = RMSNorm(state_size)
+            self.C_norm = RMSNorm(state_size)
+        else:
+            self.dt_norm = None
+            self.B_norm = None
+            self.C_norm = None
         
         # SSM parameters - A is state transition, D is skip connection
         A = torch.arange(1, state_size + 1, dtype=torch.float32).repeat(self.inner_dim, 1)
@@ -113,6 +125,11 @@ class MambaBlock(nn.Module):
         
         # dt projection and transformation
         dt = self.dt_proj(dt)  # (B, L, inner_dim)
+        # Phase 4B: pre-norm Δ/B/C before selective scan (HybridNorm)
+        if self.dt_norm is not None:
+            dt = self.dt_norm(dt)
+            B = self.B_norm(B)
+            C = self.C_norm(C)
         dt = F.softplus(dt)
         
         # Get A from log space

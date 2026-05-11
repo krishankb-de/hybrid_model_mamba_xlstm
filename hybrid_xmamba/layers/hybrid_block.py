@@ -42,12 +42,22 @@ class HybridBlock(nn.Module):
         norm_type: str = "rms",
         use_mlp: bool = True,
         mlp_ratio: float = 4.0,
+        norm_topology: str = "pre_rms",
+        is_first_block: bool = False,
         **layer_kwargs
     ):
         super().__init__()
         self.dim = dim
         self.layer_type = layer_type.lower()
         self.use_mlp = use_mlp
+        # Phase 4 HybridNorm: route per-projection norms in mixer + FFN post-norm post-residual
+        # for blocks >= 1. First block stays pure pre-norm to avoid early-training instability.
+        self.norm_topology = norm_topology
+        self.is_first_block = is_first_block
+        self._use_hybrid_norm = (norm_topology == "hybrid")
+        self._ffn_post_norm = self._use_hybrid_norm and not is_first_block
+        layer_kwargs = dict(layer_kwargs)
+        layer_kwargs["use_hybrid_norm"] = self._use_hybrid_norm
         
         # Pre-normalization for mixer
         if norm_type.lower() == "rms":
@@ -60,13 +70,14 @@ class HybridBlock(nn.Module):
         
         if self.layer_type == "mamba":
             # MambaBlock parameters
-            mamba_params = {"state_size", "conv_size", "expand_factor", "dt_rank", "use_fast_path"}
+            mamba_params = {"state_size", "conv_size", "expand_factor", "dt_rank", "use_fast_path", "use_hybrid_norm"}
             filtered_kwargs = {k: v for k, v in layer_kwargs.items() if k in mamba_params}
             self.mixer = MambaBlock(dim, **filtered_kwargs)
         elif self.layer_type == "mlstm":
             # mLSTMBlock parameters
             mlstm_params = {"head_dim", "num_heads", "use_tfla", "proj_factor",
-                            "gate_soft_cap", "input_gate_bias_init", "forget_gate_bias_init"}
+                            "gate_soft_cap", "input_gate_bias_init", "forget_gate_bias_init",
+                            "use_hybrid_norm"}
             filtered_kwargs = {k: v for k, v in layer_kwargs.items() if k in mlstm_params}
             self.mixer = mLSTMBlock(dim, **filtered_kwargs)
         elif self.layer_type == "slstm":
@@ -125,13 +136,18 @@ class HybridBlock(nn.Module):
         x = self.mixer(x, cache=cache)
         x = residual + x
         
-        # MLP with residual (if enabled)
+        # MLP with residual (if enabled).
+        # Phase 4D (HybridNorm): when enabled and not first block, FFN normalizes
+        # post-residual: x = norm2(x + mlp(x)). First block stays pure pre-norm.
         if self.use_mlp:
-            residual = x
-            x = self.norm2(x)
-            x = self.mlp(x)
-            x = residual + x
-        
+            if self._ffn_post_norm:
+                x = self.norm2(x + self.mlp(x))
+            else:
+                residual = x
+                x = self.norm2(x)
+                x = self.mlp(x)
+                x = residual + x
+
         return x
     
     def get_layer_info(self) -> dict:
@@ -152,6 +168,7 @@ def create_hybrid_blocks(
     dim: int,
     num_layers: int,
     layer_pattern: List[LayerType],
+    norm_topology: str = "pre_rms",
     **kwargs
 ) -> nn.ModuleList:
     """Factory function to create a sequence of hybrid blocks.
@@ -182,6 +199,8 @@ def create_hybrid_blocks(
         block = HybridBlock(
             dim=dim,
             layer_type=layer_type,
+            norm_topology=norm_topology,
+            is_first_block=(i == 0),
             **kwargs
         )
         blocks.append(block)

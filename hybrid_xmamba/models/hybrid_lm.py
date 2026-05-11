@@ -99,6 +99,7 @@ class HybridLanguageModel(nn.Module):
             num_layers=config.num_layers,
             layer_pattern=config.layer_pattern,
             norm_type=config.norm_type,
+            norm_topology=config.norm_topology,
             use_mlp=config.use_mlp,
             mlp_ratio=config.mlp_ratio,
             # Mamba params

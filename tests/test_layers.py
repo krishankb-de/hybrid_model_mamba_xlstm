@@ -166,14 +166,59 @@ class TestHybridBlock:
     def test_without_mlp(self):
         """Test without MLP."""
         batch_size, seq_len, dim = 2, 64, 256
-        
+
         block = HybridBlock(
             dim=dim,
             layer_type="mamba",
             use_mlp=False,
         )
-        
+
         x = torch.randn(batch_size, seq_len, dim)
         output = block(x)
-        
+
         assert output.shape == (batch_size, seq_len, dim)
+
+    def test_hybrid_norm_ffn_post_residual_block_ge_1(self):
+        """Phase 4D/4H: with norm_topology='hybrid' and is_first_block=False,
+        FFN normalizes post-residual: out = norm2(x_after_mixer + mlp(x_after_mixer)).
+
+        Verified by zeroing the mlp output projection so mlp(x)=0; the FFN sublayer
+        then reduces to norm2(x_after_mixer) in the hybrid path vs x_after_mixer in
+        the legacy pre-norm path. We assert the hybrid output equals norm2 of the
+        legacy output (which equals x_after_mixer).
+        """
+        torch.manual_seed(0)
+        batch_size, seq_len, dim = 2, 16, 64
+
+        def _build(is_first):
+            blk = HybridBlock(
+                dim=dim,
+                layer_type="mamba",
+                norm_topology="hybrid",
+                is_first_block=is_first,
+                use_mlp=True,
+                mlp_ratio=4.0,
+                state_size=8,
+            )
+            # Zero the final MLP linear so mlp(x) = 0
+            with torch.no_grad():
+                blk.mlp[-1].weight.zero_()
+            return blk
+
+        x = torch.randn(batch_size, seq_len, dim)
+
+        blk_nonfirst = _build(is_first=False)
+        blk_first = _build(is_first=True)
+        # Sync mixer/norm weights so x_after_mixer matches between the two blocks
+        blk_first.load_state_dict(blk_nonfirst.state_dict())
+
+        out_nonfirst = blk_nonfirst(x)
+        out_first = blk_first(x)
+
+        # First block: pre-norm path → out = x_after_mixer (mlp=0). Non-first hybrid:
+        # out = norm2(x_after_mixer). They must differ if norm2 is non-trivial scaling.
+        # Concretely: out_nonfirst == norm2(out_first).
+        expected = blk_nonfirst.norm2(out_first)
+        assert torch.allclose(out_nonfirst, expected, atol=1e-5), (
+            "FFN post-norm path must equal norm2(x + mlp(x)) for block >= 1 under hybrid topology"
+        )

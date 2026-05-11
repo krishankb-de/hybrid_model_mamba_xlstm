@@ -47,11 +47,13 @@ class mLSTMBlock(nn.Module):
         gate_soft_cap: float = 15.0,
         input_gate_bias_init: float = -10.0,
         forget_gate_bias_init: float = 0.0,
+        use_hybrid_norm: bool = False,
     ):
         super().__init__()
         self.dim = dim
         self.head_dim = head_dim
         self.gate_soft_cap = gate_soft_cap
+        self.use_hybrid_norm = use_hybrid_norm
 
         if num_heads is None:
             self.num_heads = max(1, dim // head_dim)
@@ -78,6 +80,11 @@ class mLSTMBlock(nn.Module):
         # Layer normalization for queries and keys
         self.q_norm = RMSNorm(head_dim)
         self.k_norm = RMSNorm(head_dim)
+        # Phase 4A (HybridNorm): per-projection V pre-mixer norm
+        if use_hybrid_norm:
+            self.v_norm = RMSNorm(head_dim)
+        else:
+            self.v_norm = None
 
         # Output projection
         self.out_proj = nn.Linear(self.inner_dim, dim, bias=False)
@@ -123,9 +130,11 @@ class mLSTMBlock(nn.Module):
         k = rearrange(k, 'b l (h d) -> b h l d', h=self.num_heads)
         v = rearrange(v, 'b l (h d) -> b h l d', h=self.num_heads)
 
-        # Normalize queries and keys
+        # Normalize queries and keys (and value when HybridNorm enabled)
         q = self.q_norm(q)
         k = self.k_norm(k)
+        if self.v_norm is not None:
+            v = self.v_norm(v)
 
         # --- Phase 3A: tanh soft-cap on raw pre-activations before exp/sigmoid ---
         # Bounds logits to (-cap, cap), preventing exp overflow and sigmoid saturation

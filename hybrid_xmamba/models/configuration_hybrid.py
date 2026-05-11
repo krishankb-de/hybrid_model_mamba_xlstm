@@ -75,6 +75,9 @@ class HybridConfig:
     
     # Shared parameters
     norm_type: str = "rms"
+    # Phase 4 (HybridNorm topology): "pre_rms" (legacy) or "hybrid"
+    # (Q/K/V + Δ/B/C pre-norm + FFN post-norm post-residual; first block stays pre-norm).
+    norm_topology: str = "pre_rms"
     use_mlp: bool = True
     mlp_ratio: float = 4.0
     
