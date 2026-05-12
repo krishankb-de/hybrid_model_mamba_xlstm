@@ -183,6 +183,13 @@ def test_hydra_config_resolves_70m_invariants(model_name: str):
     pat = list(m.get("layer_pattern", []))
     assert len(pat) > 0, f"{model_name}: layer_pattern is empty"
 
+    # Phase 4 HybridNorm: v2 must use 'hybrid' topology; others default pre_rms
+    if model_name == "hybrid_70m_v2":
+        topo = m.get("norm_topology", "pre_rms")
+        assert topo == "hybrid", (
+            f"hybrid_70m_v2: norm_topology={topo!r} — must be 'hybrid' (Phase 4)"
+        )
+
     # dataset max_length must not exceed model capacity
     d = cfg.dataset
     dataset_max = d.get("max_length", 1024)

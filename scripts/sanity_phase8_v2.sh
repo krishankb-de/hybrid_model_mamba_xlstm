@@ -1,18 +1,21 @@
 #!/bin/bash
 # Phase 8B — willi A100 sanity, v2 (hybrid_70m_v2, [m,m,m,L,L,m,m,m])
-# All Phase 3/4/6/7 active: mLSTM stabilization (cap=15, i_bias=-10),
-# HybridNorm, cu_seqlens doc-boundary reset (PubMed packing), WSD + β2 anneal.
+# All Phase 3/4/6/7 active. norm_topology=hybrid is now baked into
+# hybrid_70m_v2.yaml (no CLI override needed).
+#
+# OOM fix (Phase 8 retry): same as v1 — use_gradient_checkpointing=true +
+# batch_size=16/accumulate=8 to keep effective batch 128.
 #SBATCH --partition=mitarb
 #SBATCH --account=mitarb
 #SBATCH --gres=gpu:mitarb:1
 #SBATCH --mem=40G
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --job-name=phase8_sanity_v2
 #SBATCH --output=logs/%x_%j.log
 #SBATCH --error=logs/%x_%j.log
 
 set -euo pipefail
-echo "=== Phase 8B sanity: hybrid_70m_v2 — 2000 PubMed steps ==="
+echo "=== Phase 8B sanity (retry): hybrid_70m_v2 — 2000 PubMed steps ==="
 date; hostname
 
 cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm"
@@ -34,14 +37,14 @@ python scripts/train.py \
   trainer.accelerator=cuda \
   trainer.max_epochs=-1 \
   trainer.max_steps=2000 \
-  trainer.accumulate_grad_batches=4 \
+  trainer.accumulate_grad_batches=8 \
   trainer.val_check_interval=500 \
   trainer.log_every_n_steps=25 \
-  dataset.batch_size=32 \
-  dataset.eval_batch_size=32 \
+  dataset.batch_size=16 \
+  dataset.eval_batch_size=16 \
   dataset.max_length=512 \
   dataset.max_seq_length=512 \
-  dataset.num_workers=4 \
+  dataset.num_workers=2 \
   dataset.preprocessing_num_workers=4 \
   dataset.pin_memory=true \
   callbacks.checkpoint.every_n_train_steps=1000 \
@@ -52,7 +55,7 @@ python scripts/train.py \
   model.learning_rate=6.0e-4 \
   model.warmup_steps=20 \
   model.gradient_clip_val=1.0 \
-  model.norm_topology=hybrid \
+  model.use_gradient_checkpointing=true \
   +model.scheduler_name=wsd \
   +model.beta2_schedule=true \
   +model.beta2_start=0.999 \

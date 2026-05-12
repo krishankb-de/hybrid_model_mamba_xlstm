@@ -1,17 +1,23 @@
 #!/bin/bash
 # Phase 8B — willi A100 sanity, v1 (hybrid_70m, baseline pattern [m,m,L])
 # Same hyperparameters as v2 sanity to make PPL@2000 attributable to pattern alone.
+#
+# OOM fix (Phase 8 retry): _forward_segmented builds B×n_segs sub-forward computation
+# graphs per Mamba block. Without GC, all N_blocks graphs accumulate to ~15+ GB.
+# use_gradient_checkpointing=true wraps each HybridBlock in checkpoint(), reducing
+# live activations from O(N_blocks) to O(1). batch_size cut to 16 as safety margin.
+# Effective batch 128 preserved via accumulate_grad_batches=8.
 #SBATCH --partition=mitarb
 #SBATCH --account=mitarb
 #SBATCH --gres=gpu:mitarb:1
 #SBATCH --mem=40G
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --job-name=phase8_sanity_v1
 #SBATCH --output=logs/%x_%j.log
 #SBATCH --error=logs/%x_%j.log
 
 set -euo pipefail
-echo "=== Phase 8B sanity: hybrid_70m (v1) — 2000 PubMed steps ==="
+echo "=== Phase 8B sanity (retry): hybrid_70m (v1) — 2000 PubMed steps ==="
 date; hostname
 
 cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm"
@@ -33,14 +39,14 @@ python scripts/train.py \
   trainer.accelerator=cuda \
   trainer.max_epochs=-1 \
   trainer.max_steps=2000 \
-  trainer.accumulate_grad_batches=4 \
+  trainer.accumulate_grad_batches=8 \
   trainer.val_check_interval=500 \
   trainer.log_every_n_steps=25 \
-  dataset.batch_size=32 \
-  dataset.eval_batch_size=32 \
+  dataset.batch_size=16 \
+  dataset.eval_batch_size=16 \
   dataset.max_length=512 \
   dataset.max_seq_length=512 \
-  dataset.num_workers=4 \
+  dataset.num_workers=2 \
   dataset.preprocessing_num_workers=4 \
   dataset.pin_memory=true \
   callbacks.checkpoint.every_n_train_steps=1000 \
@@ -51,6 +57,7 @@ python scripts/train.py \
   model.learning_rate=6.0e-4 \
   model.warmup_steps=20 \
   model.gradient_clip_val=1.0 \
+  model.use_gradient_checkpointing=true \
   +model.scheduler_name=wsd \
   +model.beta2_schedule=true \
   +model.beta2_start=0.999 \

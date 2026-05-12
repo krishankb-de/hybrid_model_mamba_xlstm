@@ -47,6 +47,7 @@ tie_word_embeddings: false
 
 use_gradient_checkpointing: false
 proj_head_dropout: 0.1
+norm_topology: hybrid
 pooling_strategy: attention
 
 # Optimization
