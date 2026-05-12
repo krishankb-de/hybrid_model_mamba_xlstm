@@ -126,9 +126,6 @@ class DistillLightningModule(HybridLightningModule):
         """Include kd_projection in the optimizer alongside the student model."""
         from hybrid_xmamba.training.optimizer import get_parameter_groups
         from torch.optim import AdamW
-        from torch.optim.lr_scheduler import (
-            CosineAnnealingLR, LinearLR, SequentialLR,
-        )
 
         # Build param groups from student model (with weight decay splits)
         param_groups = get_parameter_groups(self.model, weight_decay=self.weight_decay)
@@ -143,7 +140,16 @@ class DistillLightningModule(HybridLightningModule):
             foreach=torch.cuda.is_available(),
         )
 
-        # Cosine decay + linear warmup (mirrors parent's default)
+        # Phase 7 WSD path: delegate to parent helper so β2 annealing metadata is set
+        if self.scheduler_name == "wsd":
+            sched = self._build_wsd_scheduler(optimizer)
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {"scheduler": sched, "interval": "step", "frequency": 1},
+            }
+
+        # Default: cosine decay + linear warmup
+        from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
         cosine = CosineAnnealingLR(
             optimizer,
             T_max=max(1, self.max_steps - self.warmup_steps),
@@ -456,6 +462,12 @@ def main(cfg: DictConfig):
     # ---------------------------------------------------------------------------
     # Lightning module
     # ---------------------------------------------------------------------------
+    _mcfg = cfg.model
+    _scheduler_name = _mcfg.get("scheduler_name", "cosine") if hasattr(_mcfg, "get") else getattr(_mcfg, "scheduler_name", "cosine")
+    _beta2_schedule = _mcfg.get("beta2_schedule", False) if hasattr(_mcfg, "get") else getattr(_mcfg, "beta2_schedule", False)
+    _beta2_start = _mcfg.get("beta2_start", 0.999) if hasattr(_mcfg, "get") else getattr(_mcfg, "beta2_start", 0.999)
+    _beta2_end = _mcfg.get("beta2_end", 0.974) if hasattr(_mcfg, "get") else getattr(_mcfg, "beta2_end", 0.974)
+
     lightning_module = DistillLightningModule(
         model=student,
         teacher=teacher,
@@ -468,6 +480,10 @@ def main(cfg: DictConfig):
         max_steps=cfg.trainer.max_steps,
         gradient_clip_val=cfg.model.gradient_clip_val,
         compile_model=cfg.trainer.get("compile", False),
+        scheduler_name=_scheduler_name,
+        beta2_schedule=_beta2_schedule,
+        beta2_start=_beta2_start,
+        beta2_end=_beta2_end,
     )
 
     # ---------------------------------------------------------------------------

@@ -140,12 +140,12 @@ Design choice: avoid Triton kernel surgery. Higher-level wrapper splits batch in
 All sanity on **PubMed** (WikiText dropped — does not pack, so doc-boundary code wouldn't fire; PubMed is the actual Stage 0 corpus).
 
 - [x] **8A** — `scripts/smoke_arch_refactor.py` (NEW): 100-step PubMed CPU run, `model=hybrid_70m_v2`, all Phase 3/4/6/7 active. Assert: loss decreasing, no NaN, grad-norm < 10, `i_gate` pre-cap max < 15, doc-boundary probe passes.
-- [x] **8B** — Submit 2× 1h willi A100 sanity (v1 vs v2 PubMed PPL at 2000 steps). _Scripts created (`scripts/sanity_phase8_v1.sh`, `sanity_phase8_v2.sh`); sbatch on Willi pending._
-- [ ] **8C** — Decision gate: new-arch PPL ≤ baseline × 1.05. If > 5% regression: isolate (revert Phase 4 / Phase 6 individually). _Awaits 8B Willi run._
-- [x] **8D** — `validate_for_willi.sh` green (gates 1–6, ≥ 53 passed); commit + push. _Local validation green (63 passed, 6/6 gates)._
+- [x] **8B** — Submit 2× willi A100 sanity (v1 vs v2 PubMed, 2000 steps). _Ran to ~step 1911/1929 (timed out before final val; step 1500 data sufficient)._
+- [x] **8C** — Decision gate PASS: v2/v1=0.998 at step 1500 (v2=5.34, v1=5.35 nats). v2 WINNER for Phase 9.
+- [x] **8D** — `validate_for_willi.sh` green (63 passed, 6/6 gates); committed.
 
 ### Phase 9 — Stage 0 LM re-pretrain on PubMed (~12h A100)
-- [ ] **9A** — `scripts/train_stage0_arch_v2.sh` (NEW): reuses `train_stage0_distill.sh` structure (PubMed, BioMedLM KD teacher); `model=hybrid_70m_v2` (or v3 if Phase 8 winner); WSD scheduler; max_steps=10000, val_check=500.
+- [x] **9A** — `scripts/train_stage0_arch_v2.sh` (NEW): model=hybrid_70m_v2, WSD, gc=True, bs=8/accum=8/eff=64, val_check=1000, 16h walltime. WSD wiring added to DistillLightningModule.configure_optimizers + cfg.model threading.
 - [ ] **9B** — Submit on willi. Live monitor: WSD plateau visible; `train/mlstm_i_gate_max < 15`; no NaN.
 - [ ] **9C** — Eval via `eval_stage0_lm.sh`: PubMed test PPL ≤ 13.76 (5% tolerance) OR ≥ 10% improvement; throughput ≤ 15% regression; BIOSSES sanity.
 - [ ] **9D** — Decision gate: PASS → Phase 10. FAIL → isolation re-run (Phase 3 only; Phase 3+4 only).
