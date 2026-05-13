@@ -1,6 +1,6 @@
 {
-  "current_phase": "phase9_awaiting_stage0_run",
-  "last_updated": "2026-05-12T12:30:00+0000",
+  "current_phase": "phase9D_isolation_rerun",
+  "last_updated": "2026-05-13T17:45:00+0000",
   "supersedes": "BIOMEDCLIP_KD_PLAN.md + biomedclip_kd_state.json (Phase 14 complete; best Phase 6e MIMIC 8.23% / Indiana 4.04% / cos 0.258 — ceiling structural per PDF analysis)",
   "primary_thesis": "PDF gaps 1-6 (layer ratio + mLSTM placement, exp-gate stabilization, HybridNorm, doc-boundary resets, WSD scheduler, freq-decoupled KD) are LM-architecture-level and were never touched by prior plans. Re-pretrain Stage 0 with all fixes; re-run joint contrastive with Phase 6e recipe held constant for attributable ablation.",
   "approved_plan": "/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md",
@@ -131,14 +131,17 @@
     }
   },
   "phase9": {
-    "status": "in_progress",
-    "goal": "Stage 0 re-pretrain on PubMed (10K steps, ~12h A100); PPL gate ≤ 13.76",
+    "status": "complete_gate_fail",
+    "goal": "Stage 0 re-pretrain on PubMed (50K steps, ~15.6h A100); PPL gate ≤ 13.76",
     "tasks": {
-      "9A_script": "done — scripts/train_stage0_arch_v2.sh: model=hybrid_70m_v2, 10K steps, WSD, gc=True, bs=8 accum=8 eff=64, val_check=1000, 16h walltime",
-      "9_distill_wsd_wire": "done — train_stage0_distill.py: DistillLightningModule.configure_optimizers now delegates to _build_wsd_scheduler when scheduler_name=wsd; scheduler kwargs threaded from cfg.model",
-      "9B_submit": "pending — sbatch scripts/train_stage0_arch_v2.sh on willi",
-      "9C_eval_gate": "pending — val/loss ≤ 2.622 (nats; PPL≤13.76) after run"
-    }
+      "9A_script": "done",
+      "9_distill_wsd_wire": "done",
+      "9B_submit": "done — job 1401, 50K steps, no NaN/OOM; SLURM killed final val at step ~45.6K",
+      "9C_eval_gate": "FAIL — val PPL=20.38, loss=3.014, BPB=4.35, throughput=53.6K tok/s@1024, VRAM=7.67GB; baseline PPL=13.10; gate 13.76 missed by 55.6%",
+      "9D_decision": "FAIL → Phase 9D isolation re-run: Phase3-only, then Phase3+4-only"
+    },
+    "best_checkpoint": "/scratch/bhushkri/hybrid_xmamba_a100_70m_40/phase9_stage0_arch_v2/checkpoints/stage0_kd-step=006000-val/loss=3.0399.ckpt",
+    "stripped_checkpoint": "outputs/hybrid_70m_stage0_kd_pubmed/checkpoints/stage0_model_only.pt"
   },
   "phase10": {"status": "pending", "goal": "Freq-decoupled KD: low-band MSE + high-band α=0.1 MSE + cos"},
   "phase11": {"status": "pending", "goal": "Joint contrastive on new backbone (Phase 6e recipe held constant)"},
@@ -156,6 +159,7 @@
     "2026-05-11: Phase 6 complete. cu_seqlens doc-boundary reset implemented via per-segment wrappers (no Triton kernel surgery, matching plan §122 design). train.py: tokenize_function appends eos_token_id per doc; group_texts emits cu_seqlens (per-position doc-id, list-of-ints) per chunk. lightning_module forwards cu_seqlens into model. hybrid_lm.forward + HybridBlock.forward + Mamba/mLSTM.forward all accept Optional[cu_seqlens]. MambaBlock._forward_segmented and mLSTMBlock._forward_segmented loop per (batch_row, segment) and call self.forward() recursively with cu_seqlens=None — guarantees fresh SSM/matrix state per doc. Plan task 6E (in-TFLA reset) implemented at the block-level wrapper instead; chunk-parallel TFLA makes in-kernel boundary handling fragile, and block-level wrapper is semantically equivalent. test_kernels.py: TestDocBoundaryReset (CPU-runnable) refactored module-level CUDA gate to class-level so doc-boundary asserts run in willi harness; both selective_scan + tfla pass the doc-A perturbation invariant. validate_for_willi.sh 62 passed (+2), 6/6 gates green.",
     "2026-05-11: Phase 8 scaffolding complete (awaits Willi sanity run). 8A: scripts/smoke_arch_refactor.py — small-dim (dim=64) hybrid_70m_v2-shape model + synthetic packed multi-doc batches; 5/5 smokes pass on CPU. Loss 4.8529 → 0.2660 across 100 steps, grad-norm peak 10.18 (post-clip 10.0), i_gate raw |max|=2.80 (cap=15), doc-boundary perturbation gives bit-identical doc-A logits (Δ=0.0), WSD/β2 shape sound. 8B: scripts/sanity_phase8_v{1,2}.sh — 2000-step PubMed sanity sbatch scripts for v1 baseline and v2 (+norm_topology=hybrid +scheduler_name=wsd +beta2_schedule=true). Discovered + fixed train.py gap: it never threaded WSD kwargs into HybridLightningModule (cosine hardcoded). Added scheduler_name/beta2_schedule/beta2_start/beta2_end pull from cfg.model via .get() with cosine/False defaults — opt-in for v2 sanity, no v1/baseline behavior change. validate_for_willi.sh green (63 passed, 6/6 gates). 8C decision gate (PPL @ 2000 ≤ baseline × 1.05) pending Willi run.",
     "2026-05-12: Phase 8 retries: first attempt OOMed (bs=32, segmented Mamba graphs filled 40GB); fixed with model.use_gradient_checkpointing=true + bs=16/accum=8. v2 Hydra key error fixed by adding norm_topology:hybrid to hybrid_70m_v2.yaml (struct-mode rejects CLI override of absent keys). Both retries ran to step ~1911/1929 before 2h walltime. 8C PASS: v1 val/loss=5.35, v2=5.34 at step 1500; ratio=0.998 (<<1.05 gate). v2 WINNER.",
+    "2026-05-13: Phase 9 complete (GATE FAIL). Job 1401 ran 50K steps, no errors. Final val PPL=20.38 (loss=3.014) vs baseline 13.10; 55.6% regression, gate 13.76 missed. eval_stage0_lm.sh fixed: model-config was hybrid_70m not hybrid_70m_v2 (layer swap bug); evaluate_lm.py fixed to load layer_pattern from yaml when --model-config given. Phase 9D isolation re-runs needed: Phase3-only then Phase3+4-only to identify load-bearing fix.",
     "2026-05-12: Phase 9 scaffold done. train_stage0_distill.py: DistillLightningModule.configure_optimizers updated to support WSD (delegates to _build_wsd_scheduler when scheduler_name=wsd, preserving kd_projection in optimizer); cfg.model scheduler kwargs threaded into module constructor. scripts/train_stage0_arch_v2.sh created: model=hybrid_70m_v2, distill=stage0_biomedlm, 10K steps, WSD+β2, gc=True, bs=8/accum=8/eff=64, val_check=1000, 16h walltime. validate_for_willi.sh green (63 passed, 6/6 gates)."
   ]
 }

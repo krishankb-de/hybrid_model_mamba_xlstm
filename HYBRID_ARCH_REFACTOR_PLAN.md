@@ -146,9 +146,9 @@ All sanity on **PubMed** (WikiText dropped — does not pack, so doc-boundary co
 
 ### Phase 9 — Stage 0 LM re-pretrain on PubMed (~12h A100)
 - [x] **9A** — `scripts/train_stage0_arch_v2.sh` (NEW): model=hybrid_70m_v2, WSD, gc=True, bs=8/accum=8/eff=64, val_check=1000, 16h walltime. WSD wiring added to DistillLightningModule.configure_optimizers + cfg.model threading.
-- [ ] **9B** — Submit on willi. Live monitor: WSD plateau visible; `train/mlstm_i_gate_max < 15`; no NaN.
-- [ ] **9C** — Eval via `eval_stage0_lm.sh`: PubMed test PPL ≤ 13.76 (5% tolerance) OR ≥ 10% improvement; throughput ≤ 15% regression; BIOSSES sanity.
-- [ ] **9D** — Decision gate: PASS → Phase 10. FAIL → isolation re-run (Phase 3 only; Phase 3+4 only).
+- [x] **9B** — Submit on willi. Ran 50K steps (~15.6h); no NaN, no OOM. WSD decay active from step ~42.5K; val/ppl 217→23.4 over run; SLURM walltime killed final val (job 1401).
+- [x] **9C** — Eval via `eval_stage0_lm.sh` (job 1405): PubMed val PPL=**20.38**, loss=3.014, BPB=4.35, throughput=53.6K tok/s@1024, peak VRAM=7.67GB. GATE MISS: 20.38 >> 13.76 (55.6% regression vs baseline 13.10). NOTE: eval used --split validation --max-length 512 vs baseline eval settings (may differ).
+- [x] **9D** — Decision gate: FAIL → isolation re-run triggered. Next: Phase 3-only re-run, then Phase 3+4-only re-run to identify load-bearing fix.
 
 ### Phase 10 — Advanced contrastive head (PDF gap 6)
 - [ ] **10A** — Verify `pooling_strategy: attention` active in `hybrid_70m_v2.yaml`; `AttentionPooling` (`hybrid_lm.py:313-349`) gets gradient.

@@ -30,6 +30,7 @@ use_exponential_gate: true
 
 # Shared parameters
 norm_type: "rms"
+norm_topology: pre_rms
 use_mlp: true
 mlp_ratio: 4.0
 
