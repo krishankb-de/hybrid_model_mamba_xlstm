@@ -80,7 +80,7 @@ echo ""
 
 python scripts/evaluate_lm.py \
     --checkpoint "${CHECKPOINT}" \
-    --model-config hybrid_70m \
+    --model-config hybrid_70m_v2 \
     --dataset pubmed \
     --split validation \
     --batch-size 16 \
