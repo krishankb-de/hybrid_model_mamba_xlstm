@@ -148,7 +148,15 @@ All sanity on **PubMed** (WikiText dropped — does not pack, so doc-boundary co
 - [x] **9A** — `scripts/train_stage0_arch_v2.sh` (NEW): model=hybrid_70m_v2, WSD, gc=True, bs=8/accum=8/eff=64, val_check=1000, 16h walltime. WSD wiring added to DistillLightningModule.configure_optimizers + cfg.model threading.
 - [x] **9B** — Submit on willi. Ran 50K steps (~15.6h); no NaN, no OOM. WSD decay active from step ~42.5K; val/ppl 217→23.4 over run; SLURM walltime killed final val (job 1401).
 - [x] **9C** — Eval via `eval_stage0_lm.sh` (job 1405): PubMed val PPL=**20.38**, loss=3.014, BPB=4.35, throughput=53.6K tok/s@1024, peak VRAM=7.67GB. GATE MISS: 20.38 >> 13.76 (55.6% regression vs baseline 13.10). NOTE: eval used --split validation --max-length 512 vs baseline eval settings (may differ).
-- [x] **9D** — Decision gate: FAIL → isolation re-run triggered. Next: Phase 3-only re-run, then Phase 3+4-only re-run to identify load-bearing fix.
+- [x] **9D** — Decision gate: FAIL → isolation re-runs launched and cancelled early (see findings below).
+
+**Phase 9D Isolation findings (2026-05-14):**
+- Isolation A (p3only, job 1408): `model=hybrid_70m`, `norm_topology=pre_rms`. Cancelled at step ~6.5K/50K. Val PPL 60.7 at step 6K vs Phase 9's 53.6 — consistently WORSE at every checkpoint.
+- Isolation B (p3p4, job 1409): `model=hybrid_70m`, `norm_topology=hybrid`. Cancelled at step ~6K/50K. Val PPL 60.7 — **bit-for-bit identical to Isolation A**; HybridNorm had zero measurable effect.
+- **Key finding**: both isolation runs tracked WORSE than Phase 9 (v2 all-fixes). The v2 layer pattern (Phase 5, mlstm at 3,4) actually helps early training. Phase 4+5 did NOT cause the regression.
+- **Root cause unresolved**: PPL 20.38 vs baseline 13.10 gap is not from Phase 4 or 5. Leading hypotheses: (1) baseline 13.10 was evaluated with different settings (test split / max_length=1024 / no-KD); (2) KD alpha=0.5 too strong; (3) WSD warmup 500 too short.
+- **Unresolved question before next A100 spend**: verify baseline eval settings. If baseline used `--split test --max-length 1024` or was pure-CE (no KD), the gate 13.76 is an apples-to-oranges comparison and Phase 9's checkpoint may be viable for Phase 10/11.
+- **A100 budget consumed so far**: ~21.6h of 60h (Phase 8: 2h, Phase 9: 15.6h, Iso A+B: 4h cancelled early).
 
 ### Phase 10 — Advanced contrastive head (PDF gap 6)
 - [ ] **10A** — Verify `pooling_strategy: attention` active in `hybrid_70m_v2.yaml`; `AttentionPooling` (`hybrid_lm.py:313-349`) gets gradient.

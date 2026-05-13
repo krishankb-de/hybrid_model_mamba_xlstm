@@ -1,6 +1,6 @@
 {
-  "current_phase": "phase9D_isolation_rerun",
-  "last_updated": "2026-05-13T17:45:00+0000",
+  "current_phase": "phase9D_root_cause_unresolved_pending_baseline_audit",
+  "last_updated": "2026-05-14T00:00:00+0000",
   "supersedes": "BIOMEDCLIP_KD_PLAN.md + biomedclip_kd_state.json (Phase 14 complete; best Phase 6e MIMIC 8.23% / Indiana 4.04% / cos 0.258 — ceiling structural per PDF analysis)",
   "primary_thesis": "PDF gaps 1-6 (layer ratio + mLSTM placement, exp-gate stabilization, HybridNorm, doc-boundary resets, WSD scheduler, freq-decoupled KD) are LM-architecture-level and were never touched by prior plans. Re-pretrain Stage 0 with all fixes; re-run joint contrastive with Phase 6e recipe held constant for attributable ablation.",
   "approved_plan": "/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md",
@@ -11,11 +11,17 @@
   },
   "budget_hours_a100": {
     "total": 60,
-    "phase8_sanity": 2,
-    "phase9_stage0_pretrain": 12,
+    "used_actual": 21.6,
+    "remaining": 38.4,
+    "breakdown_actual": {
+      "phase8_sanity": 2.0,
+      "phase9_stage0_pretrain": 15.6,
+      "phase9D_iso_A_cancelled": 2.0,
+      "phase9D_iso_B_cancelled": 2.0
+    },
     "phase11_joint_contrastive": 12,
     "phase13_eval": 2,
-    "subtotal_mandatory": 28,
+    "subtotal_mandatory_remaining": 14,
     "phase12_escalation_conditional": 12,
     "phase13_ablation_conditional": 20
   },
@@ -23,7 +29,13 @@
     "stage0_corpus": "PubMed only — matches BiomedCLIP/PubMedBERT/BioMedLM; MIMIC reports Stage-2-only",
     "ppl_regression_tolerance": "+5% vs baseline (PPL ≤ 13.76; baseline 13.10)",
     "hymba_intra_layer_fusion": "deferred to follow-up plan",
-    "phase8_corpus": "PubMed (not WikiText) — distribution match + exercises doc-boundary reset"
+    "phase8_corpus": "PubMed (not WikiText) — distribution match + exercises doc-boundary reset",
+    "isolation_finding_2026_05_14": "Phase 4 (HybridNorm) and Phase 5 (v2 layer pattern) did NOT cause the Phase 9 PPL regression. Both isolation runs (p3only, p3p4) tracked identically and worse than Phase 9 at every step — v2 pattern actually helps early training. Root cause unresolved."
+  },
+  "open_questions": {
+    "baseline_eval_settings": "Was baseline PPL 13.10 measured on test split + max_length=1024? Phase 9 eval used validation + max_length=512. Apples-to-oranges comparison may invalidate the gate.",
+    "kd_alpha_strength": "KD alpha=0.5 may be too strong — student pulled toward 2.7B BioMedLM teacher instead of optimizing CE. Pure CE or alpha=0.1 run would isolate this.",
+    "wsd_warmup": "Phase 9 used warmup_steps=500 for 50K total (1%). Isolation scripts fixed this. Original baseline may have used 1000 warmup steps with cosine — scheduler difference may account for ~1-2 PPL."
   },
   "phase1": {
     "status": "complete",
@@ -143,6 +155,25 @@
     "best_checkpoint": "/scratch/bhushkri/hybrid_xmamba_a100_70m_40/phase9_stage0_arch_v2/checkpoints/stage0_kd-step=006000-val/loss=3.0399.ckpt",
     "stripped_checkpoint": "outputs/hybrid_70m_stage0_kd_pubmed/checkpoints/stage0_model_only.pt"
   },
+  "phase9D_isolation": {
+    "status": "complete_both_cancelled_early",
+    "iso_A_p3only": {
+      "job": 1408,
+      "config": "model=hybrid_70m, norm_topology=pre_rms, WSD, BioMedLM KD",
+      "cancelled_at_step": 6534,
+      "val_ppl_at_6k": 60.7,
+      "phase9_ppl_at_6k": 53.6,
+      "verdict": "FAIL (predicted) — worse than Phase 9 at all checkpoints; continuing 50K would confirm gate miss"
+    },
+    "iso_B_p3p4": {
+      "job": 1409,
+      "config": "model=hybrid_70m, norm_topology=hybrid, WSD, BioMedLM KD",
+      "cancelled_at_step": 6009,
+      "val_ppl_at_6k": 60.7,
+      "verdict": "FAIL (predicted) — identical trajectory to Iso A; HybridNorm had zero measurable effect at this scale"
+    },
+    "conclusion": "Phase 4+5 not responsible for regression. Root cause unresolved — see open_questions."
+  },
   "phase10": {"status": "pending", "goal": "Freq-decoupled KD: low-band MSE + high-band α=0.1 MSE + cos"},
   "phase11": {"status": "pending", "goal": "Joint contrastive on new backbone (Phase 6e recipe held constant)"},
   "phase12": {"status": "pending", "goal": "Decision gate: stretch/target/floor/missed branches"},
@@ -159,6 +190,7 @@
     "2026-05-11: Phase 6 complete. cu_seqlens doc-boundary reset implemented via per-segment wrappers (no Triton kernel surgery, matching plan §122 design). train.py: tokenize_function appends eos_token_id per doc; group_texts emits cu_seqlens (per-position doc-id, list-of-ints) per chunk. lightning_module forwards cu_seqlens into model. hybrid_lm.forward + HybridBlock.forward + Mamba/mLSTM.forward all accept Optional[cu_seqlens]. MambaBlock._forward_segmented and mLSTMBlock._forward_segmented loop per (batch_row, segment) and call self.forward() recursively with cu_seqlens=None — guarantees fresh SSM/matrix state per doc. Plan task 6E (in-TFLA reset) implemented at the block-level wrapper instead; chunk-parallel TFLA makes in-kernel boundary handling fragile, and block-level wrapper is semantically equivalent. test_kernels.py: TestDocBoundaryReset (CPU-runnable) refactored module-level CUDA gate to class-level so doc-boundary asserts run in willi harness; both selective_scan + tfla pass the doc-A perturbation invariant. validate_for_willi.sh 62 passed (+2), 6/6 gates green.",
     "2026-05-11: Phase 8 scaffolding complete (awaits Willi sanity run). 8A: scripts/smoke_arch_refactor.py — small-dim (dim=64) hybrid_70m_v2-shape model + synthetic packed multi-doc batches; 5/5 smokes pass on CPU. Loss 4.8529 → 0.2660 across 100 steps, grad-norm peak 10.18 (post-clip 10.0), i_gate raw |max|=2.80 (cap=15), doc-boundary perturbation gives bit-identical doc-A logits (Δ=0.0), WSD/β2 shape sound. 8B: scripts/sanity_phase8_v{1,2}.sh — 2000-step PubMed sanity sbatch scripts for v1 baseline and v2 (+norm_topology=hybrid +scheduler_name=wsd +beta2_schedule=true). Discovered + fixed train.py gap: it never threaded WSD kwargs into HybridLightningModule (cosine hardcoded). Added scheduler_name/beta2_schedule/beta2_start/beta2_end pull from cfg.model via .get() with cosine/False defaults — opt-in for v2 sanity, no v1/baseline behavior change. validate_for_willi.sh green (63 passed, 6/6 gates). 8C decision gate (PPL @ 2000 ≤ baseline × 1.05) pending Willi run.",
     "2026-05-12: Phase 8 retries: first attempt OOMed (bs=32, segmented Mamba graphs filled 40GB); fixed with model.use_gradient_checkpointing=true + bs=16/accum=8. v2 Hydra key error fixed by adding norm_topology:hybrid to hybrid_70m_v2.yaml (struct-mode rejects CLI override of absent keys). Both retries ran to step ~1911/1929 before 2h walltime. 8C PASS: v1 val/loss=5.35, v2=5.34 at step 1500; ratio=0.998 (<<1.05 gate). v2 WINNER.",
+    "2026-05-14: Phase 9D isolation runs complete (both cancelled early). Iso A (p3only, job 1408) and Iso B (p3p4, job 1409) both showed identical val PPL 60.7 at step 6K — HybridNorm (Phase 4) made zero difference; both tracked WORSE than Phase 9 (53.6), meaning the v2 layer pattern (Phase 5) actually helps. Root cause of PPL regression (20.38 vs 13.10) NOT Phase 4 or 5. Leading hypothesis: baseline eval settings differ (test split vs validation, max_length=1024 vs 512) or KD alpha=0.5 too strong. Must audit baseline eval settings before more A100 spend. A100 used: ~21.6h / 60h.",
     "2026-05-13: Phase 9 complete (GATE FAIL). Job 1401 ran 50K steps, no errors. Final val PPL=20.38 (loss=3.014) vs baseline 13.10; 55.6% regression, gate 13.76 missed. eval_stage0_lm.sh fixed: model-config was hybrid_70m not hybrid_70m_v2 (layer swap bug); evaluate_lm.py fixed to load layer_pattern from yaml when --model-config given. Phase 9D isolation re-runs needed: Phase3-only then Phase3+4-only to identify load-bearing fix.",
     "2026-05-12: Phase 9 scaffold done. train_stage0_distill.py: DistillLightningModule.configure_optimizers updated to support WSD (delegates to _build_wsd_scheduler when scheduler_name=wsd, preserving kd_projection in optimizer); cfg.model scheduler kwargs threaded into module constructor. scripts/train_stage0_arch_v2.sh created: model=hybrid_70m_v2, distill=stage0_biomedlm, 10K steps, WSD+β2, gc=True, bs=8/accum=8/eff=64, val_check=1000, 16h walltime. validate_for_willi.sh green (63 passed, 6/6 gates)."
   ]
