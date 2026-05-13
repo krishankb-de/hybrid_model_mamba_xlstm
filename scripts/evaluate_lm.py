@@ -400,10 +400,19 @@ def main():
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
-    # Parse layer pattern if provided
+    # Parse layer pattern if provided; fall back to loading from model config yaml
     layer_pattern_override = None
     if args.layer_pattern:
         layer_pattern_override = [x.strip() for x in args.layer_pattern.split(",")]
+    elif args.model_config:
+        import pathlib, yaml as _yaml
+        cfg_path = pathlib.Path(__file__).parent.parent / "configs" / "model" / f"{args.model_config}.yaml"
+        if cfg_path.exists():
+            with open(cfg_path) as _f:
+                _cfg = _yaml.safe_load(_f)
+            if "layer_pattern" in _cfg:
+                layer_pattern_override = _cfg["layer_pattern"]
+                print(f"  Layer pattern from {args.model_config}.yaml: {layer_pattern_override}")
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print("Device: " + str(device))
