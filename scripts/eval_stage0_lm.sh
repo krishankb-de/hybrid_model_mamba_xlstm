@@ -58,15 +58,15 @@ echo ""
 
 nvidia-smi
 
-CHECKPOINT="./outputs/hybrid_70m_stage0_kd_pubmed/checkpoints/stage0_model_only.pt"
-OUTPUT_DIR="./outputs/hybrid_70m_stage0_kd_pubmed/eval_results"
+CHECKPOINT="./outputs/phase9_stage0_arch_v2/checkpoints/stage0_v2_model_only.pt"
+OUTPUT_DIR="./outputs/phase9_stage0_arch_v2/eval_results"
 
 if [ ! -f "${CHECKPOINT}" ]; then
     echo "ERROR: Checkpoint not found at ${CHECKPOINT}"
     echo "Run the extraction first (on login node, CPU-only, takes ~30s):"
     echo "  python -c \""
     echo "  import torch"
-    echo "  ckpt = torch.load('outputs/hybrid_70m_stage0_kd_pubmed/checkpoints/last.ckpt',"
+    echo "  ckpt = torch.load('/scratch/bhushkri/hybrid_xmamba_a100_70m_40/phase9_stage0_arch_v2/checkpoints/<best-val-loss>.ckpt',"
     echo "                     map_location='cpu', weights_only=False)"
     echo "  state = {k[len('model.'):]: v for k, v in ckpt['state_dict'].items()"
     echo "           if k.startswith('model.')}"

@@ -2,7 +2,7 @@
 
 > Supersedes `BIOMEDCLIP_KD_PLAN.md` + `biomedclip_kd_state.json`. Resumable. Read this file + `hybrid_arch_refactor_state.json` (gitignored) at session start.
 >
-> **Current phase: Phase 1 — bootstrap.** Approved plan archived at `/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md`.
+> **Current phase: Phase 9E — apples-to-apples re-eval of v2 checkpoint.** Approved plan archived at `/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md`; Phase 9 remediation plan at `/Users/krish/.claude/plans/refer-to-the-plan-fluffy-sun.md`.
 
 ## Experiment history
 
@@ -154,9 +154,34 @@ All sanity on **PubMed** (WikiText dropped — does not pack, so doc-boundary co
 - Isolation A (p3only, job 1408): `model=hybrid_70m`, `norm_topology=pre_rms`. Cancelled at step ~6.5K/50K. Val PPL 60.7 at step 6K vs Phase 9's 53.6 — consistently WORSE at every checkpoint.
 - Isolation B (p3p4, job 1409): `model=hybrid_70m`, `norm_topology=hybrid`. Cancelled at step ~6K/50K. Val PPL 60.7 — **bit-for-bit identical to Isolation A**; HybridNorm had zero measurable effect.
 - **Key finding**: both isolation runs tracked WORSE than Phase 9 (v2 all-fixes). The v2 layer pattern (Phase 5, mlstm at 3,4) actually helps early training. Phase 4+5 did NOT cause the regression.
-- **Root cause unresolved**: PPL 20.38 vs baseline 13.10 gap is not from Phase 4 or 5. Leading hypotheses: (1) baseline 13.10 was evaluated with different settings (test split / max_length=1024 / no-KD); (2) KD alpha=0.5 too strong; (3) WSD warmup 500 too short.
-- **Unresolved question before next A100 spend**: verify baseline eval settings. If baseline used `--split test --max-length 1024` or was pure-CE (no KD), the gate 13.76 is an apples-to-oranges comparison and Phase 9's checkpoint may be viable for Phase 10/11.
-- **A100 budget consumed so far**: ~21.6h of 60h (Phase 8: 2h, Phase 9: 15.6h, Iso A+B: 4h cancelled early).
+
+**Phase 9 root cause — re-classified (2026-05-14):**
+- Original diagnosis ("Phase 4/5 regression") REFUTED by Phase 9D isolation.
+- New diagnosis: **eval-protocol drift + short WSD warmup**.
+  1. `scripts/eval_stage0_lm.sh:61` still pointed at the v1 baseline checkpoint (`outputs/hybrid_70m_stage0_kd_pubmed/checkpoints/stage0_model_only.pt`) while lines 83-84 pass `--model-config hybrid_70m_v2 --layer-pattern <v2>` → v2 layer pattern forced onto v1 weights → state-dict slots silently mismap. Latent bug.
+  2. `scripts/evaluate_lm.py:load_model_from_checkpoint` built `HybridConfig` without `norm_topology`, defaulting to `pre_rms`. v2 checkpoint was trained with `norm_topology=hybrid` → silently dropped `v_norm`/`dt_norm`/`B_norm`/`C_norm` weights and used pre-norm FFN forward vs trained post-residual FFN. **Same weights, different forward → wrong PPL.**
+  3. `WSDScheduler` (`schedulers.py:45-87`) computes warmup as 1% of `max_steps` (= 500 for Phase 9), ignoring `model.warmup_steps`. Baseline 13.10 run used cosine warmup=1000 absolute. `lightning_module.py:_build_wsd_scheduler:249-255` doesn't plumb `self.warmup_steps` to `WSDScheduler`.
+- **The "PPL 20.38 gate fail"** came from training-time `val_loss=3.04` at step 6K (pure CE, verified `lightning_module.py:113-138`), comparable in *kind* to baseline eval CE but on a different val sample and an arch-mismatched load path.
+
+### Phase 9E — apples-to-apples re-eval of v2 checkpoint (~0.5h A100) ⏳ IN PROGRESS
+Plan: `/Users/krish/.claude/plans/refer-to-the-plan-fluffy-sun.md`. Gate: PPL ≤ 13.76.
+
+- [x] **9E-1** — `scripts/evaluate_lm.py`: add `--norm-topology` CLI; read `norm_topology` from `configs/model/<name>.yaml`; thread through `load_model_from_checkpoint` → `HybridConfig(...)`. (Defaults verified: only `norm_topology` was missing; `dropout` drift is inert in `model.eval()`.)
+- [x] **9E-2** — `scripts/eval_stage0_lm.sh:61-62`: repoint `CHECKPOINT` and `OUTPUT_DIR` to `outputs/phase9_stage0_arch_v2/checkpoints/stage0_v2_model_only.pt` and `outputs/phase9_stage0_arch_v2/eval_results`.
+- [ ] **9E-3** — On willi login node: list `/scratch/bhushkri/hybrid_xmamba_a100_70m_40/phase9_stage0_arch_v2/checkpoints/`, pick lowest `val/loss=*` filename (prefer over step-6K), extract `model.` prefix → `outputs/phase9_stage0_arch_v2/checkpoints/stage0_v2_model_only.pt`.
+- [ ] **9E-4** — `bash scripts/validate_for_willi.sh` green → `sbatch scripts/eval_stage0_lm.sh` on willi.
+- [ ] **9E-5** — Decision gate: PPL ≤ 13.76 → mark Phase 9 PASS, skip 9F, proceed to Phase 10. PPL > 13.76 → 9F.
+- [ ] **9E-6** — Verification: log must show `Norm topology: hybrid`, `Layer pattern from hybrid_70m_v2.yaml: [...]`, and `Weights loaded successfully (exact match).` (no silent v_norm/dt_norm drops).
+
+### Phase 9F — re-train Stage 0 v2 with corrected warmup (~13h A100, CONDITIONAL on 9E miss)
+- [ ] **9F-1** — `hybrid_xmamba/training/schedulers.py`: add `warmup_steps: Optional[int] = None` kwarg to `WSDScheduler.__init__` that overrides the 1% rule when set.
+- [ ] **9F-2** — `hybrid_xmamba/training/lightning_module.py:249-255`: plumb `self.warmup_steps` to `WSDScheduler(...)`.
+- [ ] **9F-3** — `tests/test_willi_parity.py`: add WSD absolute-warmup-override test (max_steps=50K, warmup_steps=1000 → `sched.warmup_steps==1000`).
+- [ ] **9F-4** — `scripts/train_stage0_arch_v2.sh:88`: `model.warmup_steps=1000` (was 100). Step count: 50K default; bump to 75K only if 9E missed by >2 PPL.
+- [ ] **9F-5** — `bash scripts/validate_for_willi.sh` green → `sbatch` on willi.
+- [ ] **9F-6** — Re-run Phase 9E against new final checkpoint. Gate PPL ≤ 13.76.
+
+- **A100 budget consumed so far**: ~21.6h of 60h (Phase 8: 2h, Phase 9: 15.6h, Iso A+B: 4h cancelled early). 9E adds ~0.5h; 9F adds ~13h (conditional).
 
 ### Phase 10 — Advanced contrastive head (PDF gap 6)
 - [ ] **10A** — Verify `pooling_strategy: attention` active in `hybrid_70m_v2.yaml`; `AttentionPooling` (`hybrid_lm.py:313-349`) gets gradient.
@@ -193,10 +218,14 @@ All sanity on **PubMed** (WikiText dropped — does not pack, so doc-boundary co
 | Phase | Hours | Notes |
 |---|---|---|
 | 8 | 2 | v1 vs v2 PubMed PPL sanity |
-| 9 | 12 | Stage 0 LM re-pretrain |
+| 9 | 15.6 | Stage 0 LM re-pretrain (actual; budgeted 12) |
+| 9D iso (cancelled) | 4 | Isolation A+B, cancelled early |
+| 9E | 0.5 | Apples-to-apples re-eval (norm_topology fix) |
+| 9F (cond.) | 13 | Re-train w/ warmup_steps=1000 if 9E misses |
 | 11 | 12 | Joint contrastive |
 | 13 | 2 | External eval |
-| **Mandatory** | **28h** | |
+| **Mandatory if 9E PASS** | **34.1h used** | |
+| **Mandatory if 9E FAIL** | **47.1h** | |
 | 12 (cond.) | 12 | Escalation if floor-only |
 | 13 ablation | 20 | 2 partial-fix Stage 0 reruns |
 | **Total** | **60h** | |
@@ -249,3 +278,4 @@ bash scripts/validate_for_willi.sh
 - **PPL regression tolerance**: ≤ +5% vs current Stage 0 (≤ 13.76 absolute, baseline 13.10).
 - **No Hymba intra-layer parallel fusion** (user-deferred to follow-up plan).
 - **Phase 8 corpus**: PubMed (not WikiText) — distribution match with Phase 9 + exercises Phase 6 doc-boundary reset code path.
+- **Eval-protocol invariant (added 2026-05-14)**: every Stage 0 gate comparison MUST use `scripts/eval_stage0_lm.sh` on a stripped `*_model_only.pt`, PubMed validation, 1000 samples (hardcoded in `evaluate_lm.py:prepare_test_data:80-122`), `--max-length 512`, `--batch-size 16`, against a `HybridConfig` built with the same `norm_topology` as training (Phase 9E fix). Training-time `val_loss` is NOT a gate substitute — sample/packing differ.

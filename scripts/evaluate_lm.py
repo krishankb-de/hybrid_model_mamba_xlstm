@@ -291,7 +291,8 @@ def infer_config_from_state_dict(state_dict, layer_pattern_override=None):
     return dim, num_layers, layer_pattern
 
 def load_model_from_checkpoint(checkpoint_path, device="cuda",
-                                layer_pattern_override=None, max_length=1024):
+                                layer_pattern_override=None, max_length=1024,
+                                norm_topology="pre_rms"):
     """Load a trained model from a PyTorch Lightning checkpoint.
 
     Correctly handles:
@@ -324,6 +325,7 @@ def load_model_from_checkpoint(checkpoint_path, device="cuda",
     )
     print("  Config used: dim={}, num_layers={}, layer_pattern={}".format(
         dim, num_layers, layer_pattern))
+    print("  Norm topology: {}".format(norm_topology))
 
     # ------------------------------------------------------------------
     # Step 3: build config matching training
@@ -343,6 +345,7 @@ def load_model_from_checkpoint(checkpoint_path, device="cuda",
         slstm_hidden_dim=dim,
         slstm_num_heads=4,
         norm_type="rms",
+        norm_topology=norm_topology,
         use_mlp=True,
         mlp_ratio=4.0,
         dropout=0.0,
@@ -398,21 +401,32 @@ def main():
     parser.add_argument("--throughput", action="store_true")
     parser.add_argument("--generate", action="store_true")
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--norm-topology", type=str, default=None,
+                        choices=["pre_rms", "hybrid"],
+                        help="Norm topology — must match training. If omitted, "
+                             "read from configs/model/<model_config>.yaml "
+                             "(default 'pre_rms' if not in yaml).")
     args = parser.parse_args()
 
     # Parse layer pattern if provided; fall back to loading from model config yaml
     layer_pattern_override = None
-    if args.layer_pattern:
-        layer_pattern_override = [x.strip() for x in args.layer_pattern.split(",")]
-    elif args.model_config:
+    norm_topology = args.norm_topology
+    if args.model_config:
         import pathlib, yaml as _yaml
         cfg_path = pathlib.Path(__file__).parent.parent / "configs" / "model" / f"{args.model_config}.yaml"
         if cfg_path.exists():
             with open(cfg_path) as _f:
                 _cfg = _yaml.safe_load(_f)
-            if "layer_pattern" in _cfg:
+            if args.layer_pattern is None and "layer_pattern" in _cfg:
                 layer_pattern_override = _cfg["layer_pattern"]
                 print(f"  Layer pattern from {args.model_config}.yaml: {layer_pattern_override}")
+            if norm_topology is None and "norm_topology" in _cfg:
+                norm_topology = _cfg["norm_topology"]
+                print(f"  Norm topology from {args.model_config}.yaml: {norm_topology}")
+    if args.layer_pattern:
+        layer_pattern_override = [x.strip() for x in args.layer_pattern.split(",")]
+    if norm_topology is None:
+        norm_topology = "pre_rms"
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print("Device: " + str(device))
@@ -424,6 +438,7 @@ def main():
         args.checkpoint, device,
         layer_pattern_override=layer_pattern_override,
         max_length=args.max_length,
+        norm_topology=norm_topology,
     )
 
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
