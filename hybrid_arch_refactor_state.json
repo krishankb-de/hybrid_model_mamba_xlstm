@@ -1,6 +1,6 @@
 {
-  "current_phase": "phase9E_eval_v2_checkpoint",
-  "last_updated": "2026-05-14T12:00:00+0000",
+  "current_phase": "phase9F_fix_threading_and_retrain",
+  "last_updated": "2026-05-14T13:00:00+0000",
   "supersedes": "BIOMEDCLIP_KD_PLAN.md + biomedclip_kd_state.json (Phase 14 complete; best Phase 6e MIMIC 8.23% / Indiana 4.04% / cos 0.258 — ceiling structural per PDF analysis)",
   "primary_thesis": "PDF gaps 1-6 (layer ratio + mLSTM placement, exp-gate stabilization, HybridNorm, doc-boundary resets, WSD scheduler, freq-decoupled KD) are LM-architecture-level and were never touched by prior plans. Re-pretrain Stage 0 with all fixes; re-run joint contrastive with Phase 6e recipe held constant for attributable ablation.",
   "approved_plan": "/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md",
@@ -35,9 +35,9 @@
     "eval_protocol_invariant_2026_05_14": "Every Stage 0 gate comparison must use scripts/eval_stage0_lm.sh on a stripped *_model_only.pt, PubMed validation, 1000 samples (hardcoded evaluate_lm.py:prepare_test_data:80-122), --max-length 512, --batch-size 16, against a HybridConfig built with the same norm_topology as training. Training-time val_loss is NOT a gate substitute."
   },
   "open_questions": {
-    "phase9e_ppl_result": "Awaiting sbatch on willi. Gate PPL ≤ 13.76 after norm_topology fix + v2 ckpt re-eval.",
-    "phase9f_step_count": "If 9E fails by ≤2 PPL → keep max_steps=50K + warmup=1000. If 9E fails by >2 PPL → bump to 75K (~17h walltime). Decide post-9E.",
-    "kd_alpha_strength": "KD alpha=0.5 may still be too strong — student pulled toward 2.7B BioMedLM teacher. Defer ablation to Phase 9F or Phase 13."
+    "phase9f_step_count": "9E missed gate by 6.6 PPL (20.38 vs 13.76). Hypothesis: dominant cause is undertraining + HybridNorm-inactive. Try 50K + warmup=1000 + HybridNorm-on first; if still misses → 75K. Don't preemptively bump.",
+    "hybridnorm_contribution": "Unknown — never validated in training. Phase 9F is the first real test. If 9F still misses by ≥3 PPL with HybridNorm now active, suspect interaction with WSD/KD.",
+    "kd_alpha_strength": "KD alpha=0.5 may still be too strong. Defer ablation to post-9F if needed."
   },
   "phase1": {
     "status": "complete",
@@ -177,27 +177,47 @@
     "conclusion": "Phase 4+5 not responsible for regression. Root cause unresolved — see open_questions."
   },
   "phase9E": {
-    "status": "in_progress",
-    "goal": "Apples-to-apples re-eval of v2 checkpoint with norm_topology=hybrid fix. Gate PPL ≤ 13.76.",
+    "status": "complete_gate_fail_and_bug2_surfaced",
+    "goal": "Apples-to-apples re-eval of v2 checkpoint. Gate PPL ≤ 13.76.",
+    "result": {
+      "true_v2_ppl": 20.38,
+      "gate": 13.76,
+      "verdict": "FAIL by 48%; 2nd bug uncovered",
+      "eval_job_with_yaml_hybrid": "1411 — PPL 116069, 20 missing keys (dt_norm/B_norm/C_norm × 6 mamba + v_norm × 2 mlstm), model built +6464 params (random HybridNorm tensors)",
+      "eval_job_with_pre_rms_override": "1413 — PPL 20.38, exact-match weight load, 83139328 params"
+    },
     "tasks": {
-      "9E-1_evaluate_lm_norm_topology": "done — scripts/evaluate_lm.py: --norm-topology CLI flag added; reads norm_topology from configs/model/<name>.yaml; threaded through load_model_from_checkpoint → HybridConfig.",
-      "9E-2_eval_script_repoint": "done — scripts/eval_stage0_lm.sh:61-62 repointed to outputs/phase9_stage0_arch_v2/checkpoints/stage0_v2_model_only.pt and outputs/phase9_stage0_arch_v2/eval_results.",
-      "9E-3_extract_v2_ckpt_on_willi": "pending — on willi login node, list /scratch/.../phase9_stage0_arch_v2/checkpoints/, pick lowest val/loss=*, strip model. prefix.",
-      "9E-4_validate_and_sbatch": "pending — bash scripts/validate_for_willi.sh → sbatch scripts/eval_stage0_lm.sh.",
-      "9E-5_decision_gate": "pending — PPL ≤ 13.76 → Phase 9 PASS, skip 9F. PPL > 13.76 → Phase 9F.",
-      "9E-6_log_verification": "pending — log must show 'Norm topology: hybrid', 'Layer pattern from hybrid_70m_v2.yaml: [...]', 'Weights loaded successfully (exact match).'"
-    }
+      "9E-1_evaluate_lm_norm_topology": "done",
+      "9E-2_eval_script_repoint": "done",
+      "9E-3_extract_v2_ckpt_on_willi": "done — stage0_kd-step=006000-val/loss=3.0399.ckpt extracted to outputs/phase9_stage0_arch_v2/checkpoints/stage0_v2_model_only.pt",
+      "9E-4_validate_and_sbatch": "done — jobs 1411, 1412, 1413",
+      "9E-5_decision_gate": "done — gate FAIL, proceed to 9F",
+      "9E-6_log_verification": "done — final job 1413 shows Norm topology: pre_rms, exact-match load, 20.38 PPL"
+    },
+    "conclusions": [
+      "v2 model trained as 'v2 layer pattern + cu_seqlens + WSD + mLSTM stabilization' with HybridNorm SILENTLY INACTIVE despite hybrid_70m_v2.yaml:50 specifying norm_topology=hybrid.",
+      "Real ~55% PPL regression vs baseline (13.10) likely dominated by undertraining: Phase 9 = 50K steps from scratch + WSD warmup=500; baseline = ~117K cumulative + cosine warmup=1000.",
+      "Phase 9D Isolation A (pre_rms) and B (+model.norm_topology=hybrid) being bit-identical at step 6K (60.7 PPL) is retroactively explained by the same config-threading bug — both ran effectively pre_rms."
+    ]
   },
   "phase9F": {
-    "status": "pending_conditional_on_9E_miss",
-    "goal": "Re-train Stage 0 v2 with warmup_steps=1000 absolute (overrides WSD 1% rule). Gate PPL ≤ 13.76.",
+    "status": "next",
+    "goal": "Fix config-threading bug for norm_topology + add WSD warmup_steps override + retrain Stage 0 v2 (50K steps, warmup=1000, norm_topology=hybrid actually active). Gate PPL ≤ 13.76.",
+    "bug2_root_cause": {
+      "primary": "scripts/train_stage0_distill.py:380-404 — HybridConfig(...) built from explicit cfg.model.* list; norm_topology NOT in list → silently dropped.",
+      "secondary": "scripts/train.py:274-298 — same omission (Phase 8 sanity path).",
+      "also_dropped_but_inert_for_stage0": ["use_gradient_checkpointing (Stage 0 uses bs=8 anyway)", "pooling_strategy (contrastive only)", "proj_head_dropout (contrastive only)"],
+      "validated_path": "scripts/smoke_arch_refactor.py:76 builds HybridConfig directly with norm_topology=hybrid — the only path that ever exercised HybridNorm."
+    },
     "tasks": {
-      "9F-1_wsd_warmup_override": "pending — schedulers.py: add warmup_steps: Optional[int] kwarg to WSDScheduler.__init__.",
-      "9F-2_lightning_plumb": "pending — lightning_module.py:249-255: plumb self.warmup_steps to WSDScheduler.",
-      "9F-3_parity_test": "pending — tests/test_willi_parity.py: WSD absolute-warmup-override case.",
-      "9F-4_script_edit": "pending — scripts/train_stage0_arch_v2.sh:88: model.warmup_steps=1000.",
-      "9F-5_submit": "pending — bash scripts/validate_for_willi.sh → sbatch.",
-      "9F-6_post_train_eval": "pending — extract final ckpt → re-run Phase 9E gate."
+      "9F-1_distill_threading": "pending — scripts/train_stage0_distill.py: add norm_topology=cfg.model.get('norm_topology', 'pre_rms') to HybridConfig call",
+      "9F-2_train_py_threading": "pending — scripts/train.py: same one-line addition",
+      "9F-3_wsd_warmup_override": "pending — schedulers.py: add warmup_steps: Optional[int] kwarg to WSDScheduler.__init__",
+      "9F-4_lightning_plumb": "pending — lightning_module.py:249-255: plumb self.warmup_steps to WSDScheduler",
+      "9F-5_parity_tests": "pending — test_norm_topology_threaded_to_hybridconfig + extend test_wsd_scheduler_shape with absolute-warmup case",
+      "9F-6_script_edit": "pending — train_stage0_arch_v2.sh:88: model.warmup_steps=100→1000; keep max_steps=50000",
+      "9F-7_validate_and_sbatch": "pending — pre-sbatch: --cfg job grep must show norm_topology=hybrid, warmup_steps=1000",
+      "9F-8_post_train_eval": "pending — extract final ckpt → re-run eval (drop --norm-topology override, yaml wins). Gate PPL ≤ 13.76, 0 missing/unexpected keys"
     }
   },
   "phase10": {"status": "pending", "goal": "Freq-decoupled KD: low-band MSE + high-band α=0.1 MSE + cos"},
@@ -220,6 +240,8 @@
     "2026-05-13: Phase 9 complete (GATE FAIL). Job 1401 ran 50K steps, no errors. Final val PPL=20.38 (loss=3.014) vs baseline 13.10; 55.6% regression, gate 13.76 missed. eval_stage0_lm.sh fixed: model-config was hybrid_70m not hybrid_70m_v2 (layer swap bug); evaluate_lm.py fixed to load layer_pattern from yaml when --model-config given. Phase 9D isolation re-runs needed: Phase3-only then Phase3+4-only to identify load-bearing fix.",
     "2026-05-12: Phase 9 scaffold done. train_stage0_distill.py: DistillLightningModule.configure_optimizers updated to support WSD (delegates to _build_wsd_scheduler when scheduler_name=wsd, preserving kd_projection in optimizer); cfg.model scheduler kwargs threaded into module constructor. scripts/train_stage0_arch_v2.sh created: model=hybrid_70m_v2, distill=stage0_biomedlm, 10K steps, WSD+β2, gc=True, bs=8/accum=8/eff=64, val_check=1000, 16h walltime. validate_for_willi.sh green (63 passed, 6/6 gates).",
     "2026-05-14: Phase 9 root cause RE-CLASSIFIED from 'unresolved (not Phase 4/5)' to 'eval-protocol drift + short WSD warmup'. Audit found: (1) eval_stage0_lm.sh:61 pointed at v1 ckpt while CLI forced v2 layer pattern → silent state-dict mismap; (2) evaluate_lm.py:load_model_from_checkpoint built HybridConfig without norm_topology → v2 ckpt (trained with norm_topology=hybrid) loaded against pre_rms config → v_norm/dt_norm/B_norm/C_norm dropped + wrong FFN forward; (3) WSDScheduler ignores model.warmup_steps, uses 1% of max_steps (=500 vs baseline 1000). Plan-of-record: /Users/krish/.claude/plans/refer-to-the-plan-fluffy-sun.md. Phase 9E (re-eval, ~0.5h) in progress; 9F (re-train w/ warmup=1000, ~13h) conditional.",
-    "2026-05-14: Phase 9E-1/9E-2 done locally. evaluate_lm.py now accepts --norm-topology CLI + reads norm_topology from configs/model/<name>.yaml + threads through load_model_from_checkpoint → HybridConfig (prints 'Norm topology: <value>'). eval_stage0_lm.sh:61-62 repointed to outputs/phase9_stage0_arch_v2/checkpoints/stage0_v2_model_only.pt. Defaults verified: only norm_topology was missing from evaluate_lm.py HybridConfig call; dropout=0.0 drift is inert under model.eval(). Next: extract v2 ckpt on willi, sbatch eval."
+    "2026-05-14: Phase 9E-1/9E-2 done locally. evaluate_lm.py now accepts --norm-topology CLI + reads norm_topology from configs/model/<name>.yaml + threads through load_model_from_checkpoint → HybridConfig (prints 'Norm topology: <value>'). eval_stage0_lm.sh:61-62 repointed to outputs/phase9_stage0_arch_v2/checkpoints/stage0_v2_model_only.pt. Defaults verified: only norm_topology was missing from evaluate_lm.py HybridConfig call; dropout=0.0 drift is inert under model.eval(). Next: extract v2 ckpt on willi, sbatch eval.",
+    "2026-05-14: Phase 9E complete (3 eval jobs on willi). Job 1411 (yaml→norm_topology=hybrid): PPL 116069, 20 missing keys (dt_norm/B_norm/C_norm × 6 mamba + v_norm × 2 mlstm), model loaded +6464 params (random-init HybridNorm tensors). Revealed Bug #2: training silently dropped norm_topology. Job 1413 (--norm-topology pre_rms override): PPL 20.38, exact-match weight load, 83139328 params — true v2 PPL. Gate FAIL by 48%. Phase 9D Isolation A==B identical PPL retroactively explained: both ran with pre_rms because +model.norm_topology=hybrid CLI override never reached HybridConfig either.",
+    "2026-05-14: Bug #2 root cause confirmed in scripts/train_stage0_distill.py:380-404 — HybridConfig(...) built from explicit cfg.model.* arg list; norm_topology NOT in the list → silently dropped during training. Same omission in scripts/train.py:274-298 (Phase 8 sanity path). Smoke (smoke_arch_refactor.py:76) builds HybridConfig directly with norm_topology='hybrid' — only path that ever exercised HybridNorm in this repo. Phase 9F: fix threading + WSD warmup override + retrain 50K w/ warmup=1000."
   ]
 }

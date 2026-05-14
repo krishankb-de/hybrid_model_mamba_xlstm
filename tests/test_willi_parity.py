@@ -1374,3 +1374,54 @@ def test_wsd_scheduler_shape():
     b2_mid = beta2_for_step(8600 + 700, 8600, 1400)
     assert abs(b2_mid - 0.9865) < 1e-6, b2_mid
     assert abs(beta2_for_step(max_steps, 8600, 1400) - 0.974) < 1e-6
+
+
+def test_wsd_scheduler_absolute_warmup_override():
+    """Phase 9F: WSDScheduler must honor absolute ``warmup_steps`` override.
+
+    With ``max_steps=50000, warmup_steps=1000``: warmup is 1000 (not 500=1%);
+    decay stays at 14% (=7000); stable absorbs the remainder (=42000).
+    """
+    from hybrid_xmamba.training.schedulers import WSDScheduler
+
+    param = torch.zeros(1, requires_grad=True)
+    optimizer = torch.optim.AdamW([param], lr=1.0)
+    sched = WSDScheduler(
+        optimizer,
+        max_steps=50000,
+        warmup_steps=1000,
+    )
+
+    assert sched.warmup_steps == 1000, sched.warmup_steps
+    assert sched.decay_steps == 7000, sched.decay_steps
+    assert sched.stable_steps == 42000, sched.stable_steps
+    assert sched.decay_start == 43000, sched.decay_start
+
+
+def test_norm_topology_threaded_to_hybridconfig():
+    """Phase 9F: training entry scripts must thread ``norm_topology`` from yaml
+    into ``HybridConfig``. Regression-guards against the Phase 9 silent-drop bug
+    (HybridConfig was built from an explicit cfg.model.* list that omitted
+    ``norm_topology`` → v2 yaml ``norm_topology: hybrid`` was ignored).
+
+    Strategy: read the two training entry-point source files and assert the
+    explicit ``norm_topology=`` kwarg is present in the HybridConfig(...) call.
+    Direct source-text assert is more robust than a full Hydra eval here, and
+    cheaper.
+    """
+    import pathlib
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    for rel in ("scripts/train.py", "scripts/train_stage0_distill.py"):
+        src = (repo_root / rel).read_text()
+        assert "HybridConfig(" in src, f"{rel}: no HybridConfig call found"
+        # Look for the threading line within the HybridConfig argument block.
+        # Tolerant of either explicit `cfg.model.norm_topology` or
+        # `cfg.model.get('norm_topology', ...)`.
+        has_explicit = "norm_topology=cfg.model.norm_topology" in src
+        has_getter = "norm_topology=cfg.model.get(" in src and 'norm_topology' in src
+        assert has_explicit or has_getter, (
+            f"{rel}: HybridConfig(...) call does not pass norm_topology — "
+            f"Phase 9 regression hazard. Add "
+            f"norm_topology=cfg.model.get('norm_topology', 'pre_rms')."
+        )

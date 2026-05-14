@@ -10,7 +10,7 @@ training loop on each step.
 """
 
 import math
-from typing import Tuple
+from typing import Optional, Tuple
 
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
@@ -57,6 +57,7 @@ class WSDScheduler(LambdaLR):
         decay_ratio: float = 0.14,
         min_lr_ratio: float = 0.0,
         warmup_start_factor: float = 0.01,
+        warmup_steps: Optional[int] = None,
         last_epoch: int = -1,
     ):
         total = warmup_ratio + stable_ratio + decay_ratio
@@ -66,10 +67,16 @@ class WSDScheduler(LambdaLR):
         assert max_steps > 0, "max_steps must be positive"
 
         self.max_steps = max_steps
-        self.warmup_steps = int(round(max_steps * warmup_ratio))
-        self.stable_steps = int(round(max_steps * stable_ratio))
-        # Absorb rounding drift into the decay phase
-        self.decay_steps = max(0, max_steps - self.warmup_steps - self.stable_steps)
+        if warmup_steps is not None:
+            # Absolute warmup override: preserve decay_ratio, absorb remainder into stable.
+            self.warmup_steps = int(warmup_steps)
+            self.decay_steps = int(round(max_steps * decay_ratio))
+            self.stable_steps = max(0, max_steps - self.warmup_steps - self.decay_steps)
+        else:
+            self.warmup_steps = int(round(max_steps * warmup_ratio))
+            self.stable_steps = int(round(max_steps * stable_ratio))
+            # Absorb rounding drift into the decay phase
+            self.decay_steps = max(0, max_steps - self.warmup_steps - self.stable_steps)
         self.decay_start = self.warmup_steps + self.stable_steps
         self.min_lr_ratio = min_lr_ratio
         self.warmup_start_factor = warmup_start_factor

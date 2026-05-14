@@ -247,9 +247,19 @@ class HybridLightningModule(pl.LightningModule):
     # WSD helpers
     # ------------------------------------------------------------------
     def _build_wsd_scheduler(self, optimizer: Optimizer):
-        """Construct a WSDScheduler and record decay-phase metadata for β2."""
+        """Construct a WSDScheduler and record decay-phase metadata for β2.
+
+        If ``self.warmup_steps`` is set (>0), it overrides WSD's 1%-of-max_steps
+        rule with an absolute warmup count — matches cosine-scheduler behaviour
+        and lets callers tune warmup independently of total step count.
+        """
         from hybrid_xmamba.training.schedulers import WSDScheduler
-        sched = WSDScheduler(optimizer, max_steps=self.max_steps)
+        abs_warmup = int(self.warmup_steps) if self.warmup_steps else None
+        sched = WSDScheduler(
+            optimizer,
+            max_steps=self.max_steps,
+            warmup_steps=abs_warmup,
+        )
         self._wsd_decay_start = sched.decay_start
         self._wsd_decay_steps = sched.decay_steps
         return sched

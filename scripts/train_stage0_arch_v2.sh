@@ -66,7 +66,7 @@ python scripts/train_stage0_distill.py \
   distill=stage0_biomedlm \
   trainer.accelerator=cuda \
   trainer.max_epochs=-1 \
-  trainer.max_steps=10000 \
+  trainer.max_steps=50000 \
   trainer.accumulate_grad_batches=8 \
   trainer.val_check_interval=1000 \
   trainer.log_every_n_steps=25 \
@@ -85,7 +85,7 @@ python scripts/train_stage0_distill.py \
   output_dir=./outputs/phase9_stage0_arch_v2 \
   wandb.enabled=false \
   model.learning_rate=6.0e-4 \
-  model.warmup_steps=100 \
+  model.warmup_steps=1000 \
   model.gradient_clip_val=1.0 \
   model.use_gradient_checkpointing=true \
   +model.scheduler_name=wsd \

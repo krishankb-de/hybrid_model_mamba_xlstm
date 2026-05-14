@@ -2,7 +2,7 @@
 
 > Supersedes `BIOMEDCLIP_KD_PLAN.md` + `biomedclip_kd_state.json`. Resumable. Read this file + `hybrid_arch_refactor_state.json` (gitignored) at session start.
 >
-> **Current phase: Phase 9E — apples-to-apples re-eval of v2 checkpoint.** Approved plan archived at `/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md`; Phase 9 remediation plan at `/Users/krish/.claude/plans/refer-to-the-plan-fluffy-sun.md`.
+> **Current phase: Phase 9F — fix config-threading bug + WSD warmup override, retrain Stage 0 v2.** Phase 9E complete (PPL 20.38, gate FAIL; 2nd bug surfaced — training silently drops `norm_topology` from yaml). Plans: `/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md` (master), `/Users/krish/.claude/plans/refer-to-the-plan-fluffy-sun.md` (9E/9F remediation).
 
 ## Experiment history
 
@@ -163,23 +163,35 @@ All sanity on **PubMed** (WikiText dropped — does not pack, so doc-boundary co
   3. `WSDScheduler` (`schedulers.py:45-87`) computes warmup as 1% of `max_steps` (= 500 for Phase 9), ignoring `model.warmup_steps`. Baseline 13.10 run used cosine warmup=1000 absolute. `lightning_module.py:_build_wsd_scheduler:249-255` doesn't plumb `self.warmup_steps` to `WSDScheduler`.
 - **The "PPL 20.38 gate fail"** came from training-time `val_loss=3.04` at step 6K (pure CE, verified `lightning_module.py:113-138`), comparable in *kind* to baseline eval CE but on a different val sample and an arch-mismatched load path.
 
-### Phase 9E — apples-to-apples re-eval of v2 checkpoint (~0.5h A100) ⏳ IN PROGRESS
-Plan: `/Users/krish/.claude/plans/refer-to-the-plan-fluffy-sun.md`. Gate: PPL ≤ 13.76.
+### Phase 9E — apples-to-apples re-eval of v2 checkpoint (~0.5h A100) ✅ COMPLETE — GATE FAIL + 2ND BUG SURFACED
+Plan: `/Users/krish/.claude/plans/refer-to-the-plan-fluffy-sun.md`. Gate: PPL ≤ 13.76. **Result: PPL 20.38 (gate missed by 48%).**
 
-- [x] **9E-1** — `scripts/evaluate_lm.py`: add `--norm-topology` CLI; read `norm_topology` from `configs/model/<name>.yaml`; thread through `load_model_from_checkpoint` → `HybridConfig(...)`. (Defaults verified: only `norm_topology` was missing; `dropout` drift is inert in `model.eval()`.)
-- [x] **9E-2** — `scripts/eval_stage0_lm.sh:61-62`: repoint `CHECKPOINT` and `OUTPUT_DIR` to `outputs/phase9_stage0_arch_v2/checkpoints/stage0_v2_model_only.pt` and `outputs/phase9_stage0_arch_v2/eval_results`.
-- [ ] **9E-3** — On willi login node: list `/scratch/bhushkri/hybrid_xmamba_a100_70m_40/phase9_stage0_arch_v2/checkpoints/`, pick lowest `val/loss=*` filename (prefer over step-6K), extract `model.` prefix → `outputs/phase9_stage0_arch_v2/checkpoints/stage0_v2_model_only.pt`.
-- [ ] **9E-4** — `bash scripts/validate_for_willi.sh` green → `sbatch scripts/eval_stage0_lm.sh` on willi.
-- [ ] **9E-5** — Decision gate: PPL ≤ 13.76 → mark Phase 9 PASS, skip 9F, proceed to Phase 10. PPL > 13.76 → 9F.
-- [ ] **9E-6** — Verification: log must show `Norm topology: hybrid`, `Layer pattern from hybrid_70m_v2.yaml: [...]`, and `Weights loaded successfully (exact match).` (no silent v_norm/dt_norm drops).
+- [x] **9E-1** — `scripts/evaluate_lm.py`: added `--norm-topology` CLI; reads `norm_topology` from `configs/model/<name>.yaml`; threads through `load_model_from_checkpoint` → `HybridConfig(...)`.
+- [x] **9E-2** — `scripts/eval_stage0_lm.sh:61-62`: repointed `CHECKPOINT` and `OUTPUT_DIR` to v2 paths.
+- [x] **9E-3** — v2 step-6K checkpoint extracted on willi (`stage0_kd-step=006000-val/loss=3.0399.ckpt` → `outputs/phase9_stage0_arch_v2/checkpoints/stage0_v2_model_only.pt`).
+- [x] **9E-4** — `sbatch scripts/eval_stage0_lm.sh` ran (jobs 1411, 1412, 1413).
+- [x] **9E-5** — First eval (job 1411, yaml→`norm_topology=hybrid`): **PPL 116,069**, 20 missing keys (`dt_norm`, `B_norm`, `C_norm` × 6 mamba + `v_norm` × 2 mlstm = 20). Model built +6,464 params (random HybridNorm tensors). Revealed Bug #2: training silently dropped `norm_topology`.
+- [x] **9E-6** — Second eval (job 1413, `--norm-topology pre_rms` CLI override): **PPL 20.38**, exact-match weight load, 83,139,328 params. This is the TRUE PPL of the v2 model as actually trained.
 
-### Phase 9F — re-train Stage 0 v2 with corrected warmup (~13h A100, CONDITIONAL on 9E miss)
-- [ ] **9F-1** — `hybrid_xmamba/training/schedulers.py`: add `warmup_steps: Optional[int] = None` kwarg to `WSDScheduler.__init__` that overrides the 1% rule when set.
-- [ ] **9F-2** — `hybrid_xmamba/training/lightning_module.py:249-255`: plumb `self.warmup_steps` to `WSDScheduler(...)`.
-- [ ] **9F-3** — `tests/test_willi_parity.py`: add WSD absolute-warmup-override test (max_steps=50K, warmup_steps=1000 → `sched.warmup_steps==1000`).
-- [ ] **9F-4** — `scripts/train_stage0_arch_v2.sh:88`: `model.warmup_steps=1000` (was 100). Step count: 50K default; bump to 75K only if 9E missed by >2 PPL.
-- [ ] **9F-5** — `bash scripts/validate_for_willi.sh` green → `sbatch` on willi.
-- [ ] **9F-6** — Re-run Phase 9E against new final checkpoint. Gate PPL ≤ 13.76.
+**Phase 9E conclusions:**
+- The v2 checkpoint trained as "v2 layer pattern + cu_seqlens + WSD + mLSTM stabilization" with HybridNorm **silently inactive** (despite `hybrid_70m_v2.yaml:50` specifying `norm_topology: hybrid`).
+- PPL 20.38 vs baseline 13.10: real ~55% regression. Most of it is undertraining (50K steps + warmup=500 vs baseline's 117K cumulative + warmup=1000); the HybridNorm contribution to PPL is unknown (never been validated in training).
+- Retroactively explains Phase 9D Isolation A (`pre_rms`) and B (`+model.norm_topology=hybrid`) producing bit-identical 60.7 PPL at step 6K — CLI override was being silently dropped, both runs were effectively the same `pre_rms` config.
+
+**Bug #2 (config-threading) — root cause at line refs:**
+- `scripts/train_stage0_distill.py:380-404` — `HybridConfig(...)` built explicitly from `cfg.model.*` fields; `norm_topology` (and `use_gradient_checkpointing`, `pooling_strategy`, `proj_head_dropout`) NOT in the argument list → silently dropped. For Stage 0, only `norm_topology` is load-bearing.
+- `scripts/train.py:274-298` — same omission for the non-distill training path (Phase 8 sanity).
+- The `smoke_arch_refactor.py:76` builds `HybridConfig` directly with `norm_topology="hybrid"` → smoke is the ONLY path where HybridNorm was exercised. Production training never was.
+
+### Phase 9F — fix config-threading + WSD warmup, retrain Stage 0 v2 (~13h A100) ⏳ NEXT
+- [ ] **9F-1** — `scripts/train_stage0_distill.py:380-404`: add `norm_topology=cfg.model.get("norm_topology", "pre_rms")` to the `HybridConfig(...)` call.
+- [ ] **9F-2** — `scripts/train.py:274-298`: same one-line addition for parity.
+- [ ] **9F-3** — `hybrid_xmamba/training/schedulers.py`: add `warmup_steps: Optional[int] = None` kwarg to `WSDScheduler.__init__` that overrides the 1% rule when set (use `Optional[int]` not `int | None` per willi-parity).
+- [ ] **9F-4** — `hybrid_xmamba/training/lightning_module.py:249-255`: plumb `self.warmup_steps` to `WSDScheduler(...)`.
+- [ ] **9F-5** — `tests/test_willi_parity.py`: add `test_norm_topology_threaded_to_hybridconfig` (parity-style: build OmegaConf with `norm_topology=hybrid`, call the train path's HybridConfig builder, assert `cfg.norm_topology == "hybrid"`). Add WSD absolute-warmup-override case to `test_wsd_scheduler_shape` (max_steps=50K, warmup_steps=1000 → `sched.warmup_steps==1000`).
+- [ ] **9F-6** — `scripts/train_stage0_arch_v2.sh:88`: change `model.warmup_steps=100` → `model.warmup_steps=1000`. Keep `trainer.max_steps=50000`. Add `+model.norm_topology=hybrid` to the Hydra overrides if not redundant with yaml after fix.
+- [ ] **9F-7** — `bash scripts/validate_for_willi.sh` green → `sbatch` on willi. Pre-sbatch sanity: `python scripts/train_stage0_distill.py --cfg job model=hybrid_70m_v2 ... | grep -E "warmup_steps|max_steps|norm_topology"` must show `warmup_steps: 1000, max_steps: 50000, norm_topology: hybrid` in resolved config AND a log line from training that confirms HybridConfig got `norm_topology=hybrid`.
+- [ ] **9F-8** — Extract final v2 ckpt → re-run `eval_stage0_lm.sh` (drop the `--norm-topology pre_rms` override; yaml lookup wins). Gate PPL ≤ 13.76. Verify log: `Norm topology from hybrid_70m_v2.yaml: hybrid`, `Weights loaded successfully (exact match)` (0 missing/unexpected — checkpoint NOW contains the 20 norm weights).
 
 - **A100 budget consumed so far**: ~21.6h of 60h (Phase 8: 2h, Phase 9: 15.6h, Iso A+B: 4h cancelled early). 9E adds ~0.5h; 9F adds ~13h (conditional).
 

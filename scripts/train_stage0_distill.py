@@ -395,6 +395,7 @@ def main(cfg: DictConfig):
         slstm_num_heads=cfg.model.slstm_num_heads,
         use_exponential_gate=cfg.model.use_exponential_gate,
         norm_type=cfg.model.norm_type,
+        norm_topology=cfg.model.get("norm_topology", "pre_rms"),
         use_mlp=cfg.model.use_mlp,
         mlp_ratio=cfg.model.mlp_ratio,
         max_position_embeddings=cfg.model.max_position_embeddings,
