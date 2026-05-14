@@ -1,6 +1,6 @@
 {
   "current_phase": "phase9F_fix_threading_and_retrain",
-  "last_updated": "2026-05-14T13:00:00+0000",
+  "last_updated": "2026-05-14T16:30:00+0000",
   "supersedes": "BIOMEDCLIP_KD_PLAN.md + biomedclip_kd_state.json (Phase 14 complete; best Phase 6e MIMIC 8.23% / Indiana 4.04% / cos 0.258 — ceiling structural per PDF analysis)",
   "primary_thesis": "PDF gaps 1-6 (layer ratio + mLSTM placement, exp-gate stabilization, HybridNorm, doc-boundary resets, WSD scheduler, freq-decoupled KD) are LM-architecture-level and were never touched by prior plans. Re-pretrain Stage 0 with all fixes; re-run joint contrastive with Phase 6e recipe held constant for attributable ablation.",
   "approved_plan": "/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md",
@@ -37,7 +37,19 @@
   "open_questions": {
     "phase9f_step_count": "9E missed gate by 6.6 PPL (20.38 vs 13.76). Hypothesis: dominant cause is undertraining + HybridNorm-inactive. Try 50K + warmup=1000 + HybridNorm-on first; if still misses → 75K. Don't preemptively bump.",
     "hybridnorm_contribution": "Unknown — never validated in training. Phase 9F is the first real test. If 9F still misses by ≥3 PPL with HybridNorm now active, suspect interaction with WSD/KD.",
-    "kd_alpha_strength": "KD alpha=0.5 may still be too strong. Defer ablation to post-9F if needed."
+    "kd_alpha_strength": "KD alpha=0.5 may still be too strong. Defer ablation to post-9F if needed.",
+    "vit_unfreeze_sweep": "Phase 11 v2 uses vit_unfreeze_blocks=2; sweep {0,2,4} deferred to Phase 12 if floor-only (~36h A100).",
+    "layernorm_mode_flip_risk": "lightning_module.py:430 calls self.image_encoder.train() on whole encoder when vit_unfreeze_blocks>0. May flip frozen-block LayerNorm/Dropout to train mode. Verified at sub-plan shimmering-falcon sub-step 3C; conditional 3F selective .eval() remediation if invariant fails."
+  },
+  "supervisor_verification_2026_05_14": {
+    "sub_plan_path": "/Users/krish/.claude/plans/refer-to-the-plan-shimmering-falcon.md",
+    "verdict": "Steps 1-5 already implemented in codebase (Phase 6e plateau 8.23% was reached WITH BiomedCLIP-text KD active). Only Step 6 (vit_unfreeze=2) is new; folded into Phase 10 task 10F + Phase 11 config_overrides. No interruption to Phase 9F.",
+    "step1_load_biomedclip_text_teacher": {"status": "already_implemented", "evidence": "hybrid_xmamba/training/lightning_module.py:754-768 (_load_biomedclip_text_teacher); commit f9e793b (2026-05-04)"},
+    "step2_kd_loss_against_biomedclip_text": {"status": "already_implemented_inline", "evidence": "lightning_module.py:1047-1056 in _joint_step; teacher.encode_text(t_ids); 1-cos_per_sample.mean()"},
+    "step3_raw_text_in_dataset": {"status": "unnecessary", "evidence": "scripts/train_contrastive.py:376-420 pre-tokenizes with open_clip.get_tokenizer; supervisor's snippet used PubMedBERT HF tokenizer (wrong tokenizer for BiomedCLIP text tower)"},
+    "step4_swap_kd_call": {"status": "already_implemented_via_config", "evidence": "train_contrastive.py:656-668 dispatches on cfg.distill.teacher=='biomedclip_text'; configs/distill/biomedclip_kd_joint.yaml:19; Phase 6e job 1354 log confirms"},
+    "step5_alpha_kd_0_5": {"status": "regression_vs_current_schedule", "evidence": "biomedclip_kd_joint.yaml:28-30 already runs alpha_kd_warmup=1.0→alpha_kd_post=0.3 (lightning_module.py:1058-1067); flat 0.5 destroys early-strong/late-soft tradeoff; deferred to Phase 12 ablation"},
+    "step6_vit_unfreeze_2_blocks_lr_1e6": {"status": "NEW_to_implement_as_task_10F", "evidence": "lightning_module.py:802 (ctor default=0), :424-436 (unfreeze code), :441-457 (_get_vit_blocks), :892-902 (4th param group); never enabled in any production config"}
   },
   "phase1": {
     "status": "complete",
@@ -220,8 +232,38 @@
       "9F-8_post_train_eval": "pending — extract final ckpt → re-run eval (drop --norm-topology override, yaml wins). Gate PPL ≤ 13.76, 0 missing/unexpected keys"
     }
   },
-  "phase10": {"status": "pending", "goal": "Freq-decoupled KD: low-band MSE + high-band α=0.1 MSE + cos"},
-  "phase11": {"status": "pending", "goal": "Joint contrastive on new backbone (Phase 6e recipe held constant)"},
+  "phase10": {
+    "status": "pending",
+    "goal": "Freq-decoupled KD: low-band MSE + high-band α=0.1 MSE + cos; v2 distill yaml also enables ViT-unfreeze=2 (task 10F)",
+    "tasks": {
+      "10A_attention_pooling_verify": "pending",
+      "10B_freq_decoupled_kd_loss": "pending",
+      "10C_biomedclip_kd_joint_v2_yaml_freq_kd_keys": "pending",
+      "10D_freq_kd_tests": "pending",
+      "10E_validate_commit": "pending",
+      "10F_vit_unfreeze_joint_v2_yaml": "pending — add vit_unfreeze_blocks=2, vit_lr=1e-6 to v2 yaml; smoke Test 5 (4-group optimizer, LayerNorm-mode invariant); conditional 10F-2 selective .eval() if invariant fails"
+    }
+  },
+  "phase11": {
+    "status": "pending",
+    "goal": "Joint contrastive on new backbone (Phase 6e recipe held constant; +Phase 10C freq-KD; +Phase 10F vit_unfreeze=2)",
+    "config_overrides": {
+      "distill_config": "biomedclip_kd_joint_v2",
+      "vit_unfreeze_blocks": 2,
+      "vit_lr": 1.0e-6,
+      "alpha_kd_warmup": 1.0,
+      "alpha_kd_post": 0.3,
+      "freeze_text_encoder_steps": 1000,
+      "moco_queue_size": 0,
+      "teacher": "biomedclip_text"
+    },
+    "kill_gates": {
+      "cos_text_teacher_at_1k": ">= 0.85",
+      "val_clip_loss_at_1k": "< 3.0",
+      "mimic_r10_at_3k": ">= 0.0823",
+      "vit_lr_actual_every_100_steps": "1e-6 ± 1e-9"
+    }
+  },
   "phase12": {"status": "pending", "goal": "Decision gate: stretch/target/floor/missed branches"},
   "phase13": {"status": "pending", "goal": "Full eval: Indiana + MIMIC + STS + BEIR (stretch only)"},
   "phase14": {"status": "pending", "goal": "Writeup + dissertation table + per-fix ablation"},
@@ -242,6 +284,7 @@
     "2026-05-14: Phase 9 root cause RE-CLASSIFIED from 'unresolved (not Phase 4/5)' to 'eval-protocol drift + short WSD warmup'. Audit found: (1) eval_stage0_lm.sh:61 pointed at v1 ckpt while CLI forced v2 layer pattern → silent state-dict mismap; (2) evaluate_lm.py:load_model_from_checkpoint built HybridConfig without norm_topology → v2 ckpt (trained with norm_topology=hybrid) loaded against pre_rms config → v_norm/dt_norm/B_norm/C_norm dropped + wrong FFN forward; (3) WSDScheduler ignores model.warmup_steps, uses 1% of max_steps (=500 vs baseline 1000). Plan-of-record: /Users/krish/.claude/plans/refer-to-the-plan-fluffy-sun.md. Phase 9E (re-eval, ~0.5h) in progress; 9F (re-train w/ warmup=1000, ~13h) conditional.",
     "2026-05-14: Phase 9E-1/9E-2 done locally. evaluate_lm.py now accepts --norm-topology CLI + reads norm_topology from configs/model/<name>.yaml + threads through load_model_from_checkpoint → HybridConfig (prints 'Norm topology: <value>'). eval_stage0_lm.sh:61-62 repointed to outputs/phase9_stage0_arch_v2/checkpoints/stage0_v2_model_only.pt. Defaults verified: only norm_topology was missing from evaluate_lm.py HybridConfig call; dropout=0.0 drift is inert under model.eval(). Next: extract v2 ckpt on willi, sbatch eval.",
     "2026-05-14: Phase 9E complete (3 eval jobs on willi). Job 1411 (yaml→norm_topology=hybrid): PPL 116069, 20 missing keys (dt_norm/B_norm/C_norm × 6 mamba + v_norm × 2 mlstm), model loaded +6464 params (random-init HybridNorm tensors). Revealed Bug #2: training silently dropped norm_topology. Job 1413 (--norm-topology pre_rms override): PPL 20.38, exact-match weight load, 83139328 params — true v2 PPL. Gate FAIL by 48%. Phase 9D Isolation A==B identical PPL retroactively explained: both ran with pre_rms because +model.norm_topology=hybrid CLI override never reached HybridConfig either.",
-    "2026-05-14: Bug #2 root cause confirmed in scripts/train_stage0_distill.py:380-404 — HybridConfig(...) built from explicit cfg.model.* arg list; norm_topology NOT in the list → silently dropped during training. Same omission in scripts/train.py:274-298 (Phase 8 sanity path). Smoke (smoke_arch_refactor.py:76) builds HybridConfig directly with norm_topology='hybrid' — only path that ever exercised HybridNorm in this repo. Phase 9F: fix threading + WSD warmup override + retrain 50K w/ warmup=1000."
+    "2026-05-14: Bug #2 root cause confirmed in scripts/train_stage0_distill.py:380-404 — HybridConfig(...) built from explicit cfg.model.* arg list; norm_topology NOT in the list → silently dropped during training. Same omission in scripts/train.py:274-298 (Phase 8 sanity path). Smoke (smoke_arch_refactor.py:76) builds HybridConfig directly with norm_topology='hybrid' — only path that ever exercised HybridNorm in this repo. Phase 9F: fix threading + WSD warmup override + retrain 50K w/ warmup=1000.",
+    "2026-05-14: Supervisor proposed BiomedCLIP-text KD swap + ViT unfreeze. Audit (sub-plan /Users/krish/.claude/plans/refer-to-the-plan-shimmering-falcon.md): steps 1-5 already in codebase (Phase 6e ran with BiomedCLIP-text KD; that's the recipe that hit the 8.23% ceiling — see BIOMEDCLIP_KD_PLAN.md:22,252-307 and output_willi_server/biomedclip_kd_phase6e_1354.log). Only step 6 (vit_unfreeze=2, vit_lr=1e-6) is genuinely new. Folded into Phase 10 (task 10F: extend biomedclip_kd_joint_v2.yaml + smoke Test 5 with LayerNorm-mode invariant + conditional selective .eval() remediation) and Phase 11 (config_overrides + 11D pre-sbatch sanity + new ViT-LR kill gate). α_kd schedule held at 1.0→0.3 (flat-0.5 deferred to P12). vit_unfreeze sweep {0,2,4} deferred to P12. No interruption to Phase 9F."
   ]
 }

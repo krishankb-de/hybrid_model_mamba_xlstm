@@ -65,7 +65,7 @@ Stage architectural fixes **from least to most risky**, gate each on numerical s
 | `scripts/smoke_arch_refactor.py` (NEW) | 8 | 100-step PubMed CPU smoke + 2K-step A100 sanity |
 | `scripts/train_stage0_arch_v2.sh` (NEW) | 9 | Stage 0 re-pretrain wrapper |
 | `hybrid_xmamba/training/lightning_module.py:976-978` | 10 | Freq-decoupled KD |
-| `configs/distill/biomedclip_kd_joint_v2.yaml` (NEW) | 10 | v2 distill config |
+| `configs/distill/biomedclip_kd_joint_v2.yaml` (NEW) | 10 | v2 distill config (freq-KD + ViT-unfreeze=2 per supervisor-proposal Step 6) |
 | `scripts/train_biomedclip_kd_phase15.sh` (NEW) | 11 | Joint contrastive on new backbone |
 | `scripts/eval_biomedclip_kd_phase15.sh` (NEW) | 11 | Eval wrapper |
 | `tests/test_layers.py`, `test_kernels.py`, `test_willi_parity.py` | 3–7, 10 | New assertions per phase |
@@ -201,11 +201,13 @@ Plan: `/Users/krish/.claude/plans/refer-to-the-plan-fluffy-sun.md`. Gate: PPL �
 - [ ] **10C** — `configs/distill/biomedclip_kd_joint_v2.yaml` (NEW): clone of v1 + `freq_kd: true`, `freq_kd_low_bins: 32`, `freq_kd_alpha_high: 0.1`. Keep Phase 6e settings (K=0, freeze=1000, α_warmup=1.0, α_post=0.3).
 - [ ] **10D** — `tests/test_willi_parity.py`: `test_freq_decoupled_kd_loss_finite`, `test_joint_module_v2_config`.
 - [ ] **10E** — `validate_for_willi.sh` green; commit.
+- [ ] **10F** — `configs/distill/biomedclip_kd_joint_v2.yaml`: add `vit_unfreeze_blocks: 2`, `vit_lr: 1.0e-6` (supervisor-proposal Step 6 — the only genuinely-new lever; see "Supervisor proposal — verification" §). Test: `test_biomedclip_kd_joint_v2_config_vit_unfreeze_present` (assert yaml has both keys at correct values). Smoke: extend `scripts/smoke_test_joint.py` Test 5 — assert 4-group optimizer, ViT group params == last 2 `resblocks`, `lr == 1e-6`, all 2-block params `requires_grad=True`, frozen blocks remain `.training == False` (LayerNorm-mode invariant). If smoke fails the LayerNorm assertion: conditional sub-step 10F-2 — replace `lightning_module.py:430`'s blanket `self.image_encoder.train()` with selective `.eval()` on whole encoder + `.train()` on last `vit_unfreeze_blocks` only; add `on_train_epoch_start` re-assert; new test `test_vit_unfreeze_only_unfrozen_blocks_in_train_mode`.
 
 ### Phase 11 — Joint contrastive re-run on new backbone (~12h A100)
 - [ ] **11A** — `scripts/train_biomedclip_kd_phase15.sh` (NEW): init from Phase 9 Stage 0; `distill=biomedclip_kd_joint_v2`; `model=hybrid_70m_v2`; MIMIC-CXR data path same as Phase 6e.
-- [ ] **11B** — Submit. Kill gates: `cos_text_teacher` → ≥ 0.85 by step 1000; val/clip_loss at step 1000 < 3.0; MIMIC R@10 by step 3000 ≥ 8.23%.
+- [ ] **11B** — Submit. Kill gates: `cos_text_teacher` → ≥ 0.85 by step 1000; val/clip_loss at step 1000 < 3.0; MIMIC R@10 by step 3000 ≥ 8.23%. New ViT-specific kill gate: log `optimizer.param_groups[-1]['lr']` every 100 steps — assert `1e-6 ± 1e-9` (catches accidental LR override on the ViT group).
 - [ ] **11C** — `scripts/eval_biomedclip_kd_phase15.sh` (NEW): MIMIC + Indiana + STS-B + BIOSSES on best ckpt.
+- [ ] **11D** — Pre-sbatch sanity (10F gate): `python scripts/train_contrastive.py --cfg job model=hybrid_70m_v2 distill=biomedclip_kd_joint_v2 ... | grep -E "vit_unfreeze_blocks|vit_lr"` must print `vit_unfreeze_blocks: 2`, `vit_lr: 1.0e-06`. Then `--max-steps 100` smoke on willi — stdout must include `✓ Unfreezing last 2 ViT blocks (...M params, lr=1e-06)` (from `lightning_module.py:432-433`). If Hydra struct mode drops keys, add `+model.vit_unfreeze_blocks=2 +model.vit_lr=1e-6` to the sbatch CLI (same gotcha that bit Phase 8 `norm_topology`).
 
 ### Phase 12 — Decision gate
 - [ ] **12A** — Stretch hit (MIMIC ≥ 12% AND Indiana ≥ 6%) → Phase 13.
@@ -275,6 +277,19 @@ bash scripts/validate_for_willi.sh
 - 5b → never seed a queue with random vectors → Phase 6 boundary reset uses zero (semantic blank), not random.
 - JOINT Phase 2 applied PDF gaps 3/4 (img_proj MLP, attention pooling, logit_scale clamp). Gaps 1, 2, 5, 6 untouched — exactly this plan's targets.
 
+## Supervisor proposal — verification (2026-05-14)
+
+Supervisor proposed switching the joint-contrastive KD teacher PubMedBERT → BiomedCLIP-text + unfreezing the last 2 ViT blocks. Audit result: **Steps 1–5 are already implemented** (Phase 6e's 8.23% MIMIC R@10 ceiling was reached *with* BiomedCLIP-text KD active, not PubMedBERT). Only Step 6 (ViT unfreeze) is genuinely new — scaffolding exists (`vit_unfreeze_blocks` ctor kwarg, 4th param-group, `_get_vit_blocks` helper) but `=0` in every production config. Folded into Phase 10/11 as task `10F`. Detailed sub-plan: `/Users/krish/.claude/plans/refer-to-the-plan-shimmering-falcon.md`.
+
+| Supervisor step | Status | Evidence |
+|---|---|---|
+| 1. Load BiomedCLIP text encoder as KD teacher | Already implemented | `hybrid_xmamba/training/lightning_module.py:754-768` — `_load_biomedclip_text_teacher()` returns frozen `open_clip` CLIP wrapper exposing `.encode_text()`. Added commit `f9e793b` (2026-05-04). |
+| 2. Replace `_kd_loss` to align to BiomedCLIP text output | Already implemented (inline) | `lightning_module.py:1047-1056` (`_joint_step`): `t_emb = self.teacher.encode_text(t_ids); l_kd = (1.0 - cos_per_sample).mean()`. |
+| 3. Return raw text in dataset for re-tokenization | Unnecessary | `scripts/train_contrastive.py:376-420` pre-tokenizes with `open_clip.get_tokenizer(...)` into `teacher_input_ids` (lines 398-401). Supervisor's snippet used PubMedBERT's HF tokenizer — that would be wrong tokenizer for BiomedCLIP's text tower. |
+| 4. Swap PubMedBERT KD call → BiomedCLIP KD call | Already in place via config dispatch | `train_contrastive.py:656-668` dispatches on `cfg.distill.teacher == "biomedclip_text"`. `configs/distill/biomedclip_kd_joint.yaml:19` sets `teacher: "biomedclip_text"`. Phase 6e job 1354 (MIMIC R@10 8.23%) used exactly this config (`output_willi_server/biomedclip_kd_phase6e_1354.log`). |
+| 5. Set `alpha_kd: 0.5` | Regression vs current schedule | `biomedclip_kd_joint.yaml:28-30` already uses `alpha_kd_warmup: 1.0 → alpha_kd_post: 0.3` schedule (`lightning_module.py:1058-1067`). Phase 11 v2 keeps the schedule unchanged for clean attribution against Phase 6e. Flat α=0.5 deferred to Phase 12 if v2 misses floor. |
+| 6. Unfreeze last 2 ViT blocks at `lr=1e-6` | **NEW — to implement (10F)** | `lightning_module.py:802` (`vit_unfreeze_blocks: int = 0` ctor default), `:424-436` (unfreeze code), `:441-457` (`_get_vit_blocks`), `:892-902` (4th param group at `vit_lr`). Plumbed via `train_contrastive.py` (`cfg.model.get("vit_unfreeze_blocks", 0)`). Never enabled in production — `biomedclip_kd_joint.yaml` doesn't set the key. |
+
 ## Open questions
 
 - Phase 5 v2 vs v3: resolved by Phase 8 PPL measurement.
@@ -282,6 +297,9 @@ bash scripts/validate_for_willi.sh
 - SCCM/KDSP: deferred to Phase 12 conditional, keeping Phase 11 attributable.
 - Per-fix ablation in Phase 13: 2 partial reruns or skip — decide after Phase 11 verdict + budget.
 - `f_gate_proj.bias` init = 0 (current) vs +3 (classic LSTM): keep 0 unless Phase 8 PPL regresses.
+- ViT-unfreeze count for Phase 11 v2: **2** (per supervisor + sub-plan `shimmering-falcon`); sweep `{0, 2, 4}` deferred to Phase 12 escalation if floor-only.
+- α_kd flat=0.5 (supervisor) vs scheduled `1.0→0.3` (Phase 6e): keep scheduled for Phase 11 v2 (clean attribution); flat-0.5 ablation deferred to Phase 12 if v2 misses floor.
+- `image_encoder.train()` LayerNorm-mode flip when `vit_unfreeze_blocks > 0` (`lightning_module.py:430`): may shift frozen-block LayerNorm/Dropout activation statistics. Verified at sub-plan sub-step 3C; conditional remediation in 3F.
 
 ## Resolved decisions
 
