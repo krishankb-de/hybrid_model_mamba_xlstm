@@ -1,6 +1,6 @@
 {
   "current_phase": "phase9F_fix_threading_and_retrain",
-  "last_updated": "2026-05-14T16:30:00+0000",
+  "last_updated": "2026-06-06T00:00:00+0000",
   "supersedes": "BIOMEDCLIP_KD_PLAN.md + biomedclip_kd_state.json (Phase 14 complete; best Phase 6e MIMIC 8.23% / Indiana 4.04% / cos 0.258 — ceiling structural per PDF analysis)",
   "primary_thesis": "PDF gaps 1-6 (layer ratio + mLSTM placement, exp-gate stabilization, HybridNorm, doc-boundary resets, WSD scheduler, freq-decoupled KD) are LM-architecture-level and were never touched by prior plans. Re-pretrain Stage 0 with all fixes; re-run joint contrastive with Phase 6e recipe held constant for attributable ablation.",
   "approved_plan": "/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md",
@@ -213,7 +213,7 @@
     ]
   },
   "phase9F": {
-    "status": "next",
+    "status": "in_progress",
     "goal": "Fix config-threading bug for norm_topology + add WSD warmup_steps override + retrain Stage 0 v2 (50K steps, warmup=1000, norm_topology=hybrid actually active). Gate PPL ≤ 13.76.",
     "bug2_root_cause": {
       "primary": "scripts/train_stage0_distill.py:380-404 — HybridConfig(...) built from explicit cfg.model.* list; norm_topology NOT in list → silently dropped.",
@@ -222,13 +222,13 @@
       "validated_path": "scripts/smoke_arch_refactor.py:76 builds HybridConfig directly with norm_topology=hybrid — the only path that ever exercised HybridNorm."
     },
     "tasks": {
-      "9F-1_distill_threading": "pending — scripts/train_stage0_distill.py: add norm_topology=cfg.model.get('norm_topology', 'pre_rms') to HybridConfig call",
-      "9F-2_train_py_threading": "pending — scripts/train.py: same one-line addition",
-      "9F-3_wsd_warmup_override": "pending — schedulers.py: add warmup_steps: Optional[int] kwarg to WSDScheduler.__init__",
-      "9F-4_lightning_plumb": "pending — lightning_module.py:249-255: plumb self.warmup_steps to WSDScheduler",
-      "9F-5_parity_tests": "pending — test_norm_topology_threaded_to_hybridconfig + extend test_wsd_scheduler_shape with absolute-warmup case",
-      "9F-6_script_edit": "pending — train_stage0_arch_v2.sh:88: model.warmup_steps=100→1000; keep max_steps=50000",
-      "9F-7_validate_and_sbatch": "pending — pre-sbatch: --cfg job grep must show norm_topology=hybrid, warmup_steps=1000",
+      "9F-1_distill_threading": "done — norm_topology=cfg.model.get('norm_topology', 'pre_rms') in HybridConfig call (commit 9e8fd31)",
+      "9F-2_train_py_threading": "done — same one-line addition in train.py (commit 9e8fd31)",
+      "9F-3_wsd_warmup_override": "done — warmup_steps: Optional[int] = None kwarg added to WSDScheduler.__init__ (commit 9e8fd31)",
+      "9F-4_lightning_plumb": "done — _build_wsd_scheduler plumbs self.warmup_steps as abs_warmup to WSDScheduler (commit 9e8fd31)",
+      "9F-5_parity_tests": "done — test_wsd_scheduler_absolute_warmup_override + test_norm_topology_threaded_to_hybridconfig (commit 9e8fd31); 65 passed 6/6 gates green",
+      "9F-6_script_edit": "done — train_stage0_arch_v2.sh model.warmup_steps=1000 (commit 9e8fd31)",
+      "9F-7_validate_and_sbatch": "done locally — validate_for_willi.sh 65 passed 6/6 gates; --cfg job grep confirms norm_topology=hybrid, warmup_steps=1000, max_steps=50000, scheduler_name=wsd. sbatch pending push.",
       "9F-8_post_train_eval": "pending — extract final ckpt → re-run eval (drop --norm-topology override, yaml wins). Gate PPL ≤ 13.76, 0 missing/unexpected keys"
     }
   },
@@ -285,6 +285,7 @@
     "2026-05-14: Phase 9E-1/9E-2 done locally. evaluate_lm.py now accepts --norm-topology CLI + reads norm_topology from configs/model/<name>.yaml + threads through load_model_from_checkpoint → HybridConfig (prints 'Norm topology: <value>'). eval_stage0_lm.sh:61-62 repointed to outputs/phase9_stage0_arch_v2/checkpoints/stage0_v2_model_only.pt. Defaults verified: only norm_topology was missing from evaluate_lm.py HybridConfig call; dropout=0.0 drift is inert under model.eval(). Next: extract v2 ckpt on willi, sbatch eval.",
     "2026-05-14: Phase 9E complete (3 eval jobs on willi). Job 1411 (yaml→norm_topology=hybrid): PPL 116069, 20 missing keys (dt_norm/B_norm/C_norm × 6 mamba + v_norm × 2 mlstm), model loaded +6464 params (random-init HybridNorm tensors). Revealed Bug #2: training silently dropped norm_topology. Job 1413 (--norm-topology pre_rms override): PPL 20.38, exact-match weight load, 83139328 params — true v2 PPL. Gate FAIL by 48%. Phase 9D Isolation A==B identical PPL retroactively explained: both ran with pre_rms because +model.norm_topology=hybrid CLI override never reached HybridConfig either.",
     "2026-05-14: Bug #2 root cause confirmed in scripts/train_stage0_distill.py:380-404 — HybridConfig(...) built from explicit cfg.model.* arg list; norm_topology NOT in the list → silently dropped during training. Same omission in scripts/train.py:274-298 (Phase 8 sanity path). Smoke (smoke_arch_refactor.py:76) builds HybridConfig directly with norm_topology='hybrid' — only path that ever exercised HybridNorm in this repo. Phase 9F: fix threading + WSD warmup override + retrain 50K w/ warmup=1000.",
-    "2026-05-14: Supervisor proposed BiomedCLIP-text KD swap + ViT unfreeze. Audit (sub-plan /Users/krish/.claude/plans/refer-to-the-plan-shimmering-falcon.md): steps 1-5 already in codebase (Phase 6e ran with BiomedCLIP-text KD; that's the recipe that hit the 8.23% ceiling — see BIOMEDCLIP_KD_PLAN.md:22,252-307 and output_willi_server/biomedclip_kd_phase6e_1354.log). Only step 6 (vit_unfreeze=2, vit_lr=1e-6) is genuinely new. Folded into Phase 10 (task 10F: extend biomedclip_kd_joint_v2.yaml + smoke Test 5 with LayerNorm-mode invariant + conditional selective .eval() remediation) and Phase 11 (config_overrides + 11D pre-sbatch sanity + new ViT-LR kill gate). α_kd schedule held at 1.0→0.3 (flat-0.5 deferred to P12). vit_unfreeze sweep {0,2,4} deferred to P12. No interruption to Phase 9F."
+    "2026-05-14: Supervisor proposed BiomedCLIP-text KD swap + ViT unfreeze. Audit (sub-plan /Users/krish/.claude/plans/refer-to-the-plan-shimmering-falcon.md): steps 1-5 already in codebase (Phase 6e ran with BiomedCLIP-text KD; that's the recipe that hit the 8.23% ceiling — see BIOMEDCLIP_KD_PLAN.md:22,252-307 and output_willi_server/biomedclip_kd_phase6e_1354.log). Only step 6 (vit_unfreeze=2, vit_lr=1e-6) is genuinely new. Folded into Phase 10 (task 10F: extend biomedclip_kd_joint_v2.yaml + smoke Test 5 with LayerNorm-mode invariant + conditional selective .eval() remediation) and Phase 11 (config_overrides + 11D pre-sbatch sanity + new ViT-LR kill gate). α_kd schedule held at 1.0→0.3 (flat-0.5 deferred to P12). vit_unfreeze sweep {0,2,4} deferred to P12. No interruption to Phase 9F.",
+    "2026-06-06: Phase 9F tasks 9F-1 through 9F-7 confirmed complete (already committed in 9e8fd31). validate_for_willi.sh 65 passed 6/6 gates green. --cfg job grep confirmed norm_topology=hybrid, warmup_steps=1000, max_steps=50000, scheduler_name=wsd. Ready to push + sbatch train_stage0_arch_v2.sh on willi. 9F-8 (post-train eval) pending."
   ]
 }
