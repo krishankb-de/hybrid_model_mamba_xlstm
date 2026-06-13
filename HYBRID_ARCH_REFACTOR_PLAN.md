@@ -193,7 +193,6 @@ Plan: `/Users/krish/.claude/plans/refer-to-the-plan-fluffy-sun.md`. Gate: PPL �
 - [ ] **9F-7** — `bash scripts/validate_for_willi.sh` green → `sbatch` on willi. Pre-sbatch sanity: `python scripts/train_stage0_distill.py --cfg job model=hybrid_70m_v2 ... | grep -E "warmup_steps|max_steps|norm_topology"` must show `warmup_steps: 1000, max_steps: 50000, norm_topology: hybrid` in resolved config AND a log line from training that confirms HybridConfig got `norm_topology=hybrid`.
 - [ ] **9F-8** — Extract final v2 ckpt → re-run `eval_stage0_lm.sh` (drop the `--norm-topology pre_rms` override; yaml lookup wins). Gate PPL ≤ 13.76. Verify log: `Norm topology from hybrid_70m_v2.yaml: hybrid`, `Weights loaded successfully (exact match)` (0 missing/unexpected — checkpoint NOW contains the 20 norm weights).
 
-- **A100 budget consumed so far**: ~21.6h of 60h (Phase 8: 2h, Phase 9: 15.6h, Iso A+B: 4h cancelled early). 9E adds ~0.5h; 9F adds ~13h (conditional).
 
 ### Phase 10 — Advanced contrastive head (PDF gap 6)
 - [ ] **10A** — Verify `pooling_strategy: attention` active in `hybrid_70m_v2.yaml`; `AttentionPooling` (`hybrid_lm.py:313-349`) gets gradient.
@@ -227,24 +226,11 @@ Plan: `/Users/krish/.claude/plans/refer-to-the-plan-fluffy-sun.md`. Gate: PPL �
 - [ ] **14B** — Dissertation table & ablation paragraph; honest reporting of failed paths.
 - [ ] **14C** — Reaffirm deprecation banner on `BIOMEDCLIP_KD_PLAN.md`.
 
-## A100 budget (60h total)
+## A100 compute (no budget constraint)
 
-| Phase | Hours | Notes |
-|---|---|---|
-| 8 | 2 | v1 vs v2 PubMed PPL sanity |
-| 9 | 15.6 | Stage 0 LM re-pretrain (actual; budgeted 12) |
-| 9D iso (cancelled) | 4 | Isolation A+B, cancelled early |
-| 9E | 0.5 | Apples-to-apples re-eval (norm_topology fix) |
-| 9F (cond.) | 13 | Re-train w/ warmup_steps=1000 if 9E misses |
-| 11 | 12 | Joint contrastive |
-| 13 | 2 | External eval |
-| **Mandatory if 9E PASS** | **34.1h used** | |
-| **Mandatory if 9E FAIL** | **47.1h** | |
-| 12 (cond.) | 12 | Escalation if floor-only |
-| 13 ablation | 20 | 2 partial-fix Stage 0 reruns |
-| **Total** | **60h** | |
+There is **no A100 budget cap** (removed 2026-06-13). Run each phase to completion as needed; do not gate decisions on compute hours. Rough per-phase runtimes are kept in the phase headers as planning estimates only.
 
-Branch policy: **stretch** → skip 12, full ablation; **target** → 12h escalation + 1 ablation; **floor only** → all 32h on 12 + 1 isolation.
+Branch policy (quality-driven, not budget-driven): **stretch** → skip 12, full ablation; **target** → escalation + 1 ablation; **floor only** → full escalation + isolation.
 
 ## Verification
 
@@ -295,7 +281,7 @@ Supervisor proposed switching the joint-contrastive KD teacher PubMedBERT → Bi
 - Phase 5 v2 vs v3: resolved by Phase 8 PPL measurement.
 - WSD stable-phase length: default 85%; tune in Phase 7 if Phase 9 stalls.
 - SCCM/KDSP: deferred to Phase 12 conditional, keeping Phase 11 attributable.
-- Per-fix ablation in Phase 13: 2 partial reruns or skip — decide after Phase 11 verdict + budget.
+- Per-fix ablation in Phase 13: 2 partial reruns or skip — decide after Phase 11 verdict.
 - `f_gate_proj.bias` init = 0 (current) vs +3 (classic LSTM): keep 0 unless Phase 8 PPL regresses.
 - ViT-unfreeze count for Phase 11 v2: **2** (per supervisor + sub-plan `shimmering-falcon`); sweep `{0, 2, 4}` deferred to Phase 12 escalation if floor-only.
 - α_kd flat=0.5 (supervisor) vs scheduled `1.0→0.3` (Phase 6e): keep scheduled for Phase 11 v2 (clean attribution); flat-0.5 ablation deferred to Phase 12 if v2 misses floor.
@@ -303,7 +289,7 @@ Supervisor proposed switching the joint-contrastive KD teacher PubMedBERT → Bi
 
 ## Resolved decisions
 
-- **A100 budget**: 60h total.
+- **A100 budget**: none — removed 2026-06-13. Run phases to completion; do not gate decisions on compute hours.
 - **Stage 0 corpus**: PubMed only — matches BiomedCLIP/PubMedBERT/BioMedLM standard. Keeps eval clean; MIMIC report text stays Stage-2-only.
 - **PPL regression tolerance**: ≤ +5% vs current Stage 0 (≤ 13.76 absolute, baseline 13.10).
 - **No Hymba intra-layer parallel fusion** (user-deferred to follow-up plan).

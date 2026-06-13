@@ -1,6 +1,6 @@
 {
   "current_phase": "phase9F_fix_threading_and_retrain",
-  "last_updated": "2026-06-06T00:00:00+0000",
+  "last_updated": "2026-06-13T00:00:00+0000",
   "supersedes": "BIOMEDCLIP_KD_PLAN.md + biomedclip_kd_state.json (Phase 14 complete; best Phase 6e MIMIC 8.23% / Indiana 4.04% / cos 0.258 — ceiling structural per PDF analysis)",
   "primary_thesis": "PDF gaps 1-6 (layer ratio + mLSTM placement, exp-gate stabilization, HybridNorm, doc-boundary resets, WSD scheduler, freq-decoupled KD) are LM-architecture-level and were never touched by prior plans. Re-pretrain Stage 0 with all fixes; re-run joint contrastive with Phase 6e recipe held constant for attributable ablation.",
   "approved_plan": "/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md",
@@ -9,22 +9,7 @@
     "target": {"MIMIC_i2t_R10": 0.0999, "Indiana_i2t_R10": 0.055, "rule": "Phase 5c parity + cross-domain uplift"},
     "stretch": {"MIMIC_i2t_R10": 0.12, "Indiana_i2t_R10": 0.06, "rule": "breaks ceiling; dissertation headline"}
   },
-  "budget_hours_a100": {
-    "total": 60,
-    "used_actual": 21.6,
-    "remaining": 38.4,
-    "breakdown_actual": {
-      "phase8_sanity": 2.0,
-      "phase9_stage0_pretrain": 15.6,
-      "phase9D_iso_A_cancelled": 2.0,
-      "phase9D_iso_B_cancelled": 2.0
-    },
-    "phase11_joint_contrastive": 12,
-    "phase13_eval": 2,
-    "subtotal_mandatory_remaining": 14,
-    "phase12_escalation_conditional": 12,
-    "phase13_ablation_conditional": 20
-  },
+  "budget_hours_a100": "REMOVED 2026-06-13 — no A100 budget constraint. Run phases to completion as needed; do not gate decisions on compute hours.",
   "resolved_decisions": {
     "stage0_corpus": "PubMed only — matches BiomedCLIP/PubMedBERT/BioMedLM; MIMIC reports Stage-2-only",
     "ppl_regression_tolerance": "+5% vs baseline (PPL ≤ 13.76; baseline 13.10)",
@@ -38,7 +23,7 @@
     "phase9f_step_count": "9E missed gate by 6.6 PPL (20.38 vs 13.76). Hypothesis: dominant cause is undertraining + HybridNorm-inactive. Try 50K + warmup=1000 + HybridNorm-on first; if still misses → 75K. Don't preemptively bump.",
     "hybridnorm_contribution": "Unknown — never validated in training. Phase 9F is the first real test. If 9F still misses by ≥3 PPL with HybridNorm now active, suspect interaction with WSD/KD.",
     "kd_alpha_strength": "KD alpha=0.5 may still be too strong. Defer ablation to post-9F if needed.",
-    "vit_unfreeze_sweep": "Phase 11 v2 uses vit_unfreeze_blocks=2; sweep {0,2,4} deferred to Phase 12 if floor-only (~36h A100).",
+    "vit_unfreeze_sweep": "Phase 11 v2 uses vit_unfreeze_blocks=2; sweep {0,2,4} deferred to Phase 12 if floor-only.",
     "layernorm_mode_flip_risk": "lightning_module.py:430 calls self.image_encoder.train() on whole encoder when vit_unfreeze_blocks>0. May flip frozen-block LayerNorm/Dropout to train mode. Verified at sub-plan shimmering-falcon sub-step 3C; conditional 3F selective .eval() remediation if invariant fails."
   },
   "supervisor_verification_2026_05_14": {
@@ -228,8 +213,17 @@
       "9F-4_lightning_plumb": "done — _build_wsd_scheduler plumbs self.warmup_steps as abs_warmup to WSDScheduler (commit 9e8fd31)",
       "9F-5_parity_tests": "done — test_wsd_scheduler_absolute_warmup_override + test_norm_topology_threaded_to_hybridconfig (commit 9e8fd31); 65 passed 6/6 gates green",
       "9F-6_script_edit": "done — train_stage0_arch_v2.sh model.warmup_steps=1000 (commit 9e8fd31)",
-      "9F-7_validate_and_sbatch": "done locally — validate_for_willi.sh 65 passed 6/6 gates; --cfg job grep confirms norm_topology=hybrid, warmup_steps=1000, max_steps=50000, scheduler_name=wsd. sbatch pending push.",
-      "9F-8_post_train_eval": "pending — extract final ckpt → re-run eval (drop --norm-topology override, yaml wins). Gate PPL ≤ 13.76, 0 missing/unexpected keys"
+      "9F-7_validate_and_sbatch": "done — job 1884 submitted on willi. Log confirms norm_topology=hybrid (line 148), warmup_steps=1000 (152), scheduler_name=wsd (156). HybridNorm genuinely active in training for the first time.",
+      "9F-8_post_train_eval": "in_progress — eval job 1894 CONFIRMED training fix worked (ckpt now has all 20 HybridNorm weights). BUT eval misconfigured: eval_stage0_lm.sh:85 still had leftover --norm-topology pre_rms override from 9E debugging → built pre_rms model → 20 trained HybridNorm weights dropped as 'unexpected' + wrong FFN forward → garbage PPL 141.28. FIXED: removed line 85 override so yaml lookup (hybrid_70m_v2.yaml:50 norm_topology=hybrid) wins. Re-run eval (no re-extraction needed; ckpt is fine). Expected ~20-23 PPL exact-match."
+    },
+    "job_1884_result": {
+      "status": "CANCELLED at 16h walltime (2026-06-13T07:23:22), reached ~step 50K, final full val completed",
+      "final_train_val_perplexity": 23.0,
+      "final_train_val_loss": 3.03,
+      "trajectory": "51.6 -> 33.0 -> 27.0 -> 24.0 -> 23.0; STILL descending at end (~0.1/interval), not converged",
+      "vs_phase9_job1401": "23.0 vs 23.4 train-val (HybridNorm ON vs OFF) = ~2% improvement, negligible",
+      "verdict": "Config fixes confirmed working but PPL-neutral. Gate eval expected ~20 (FAIL vs 13.76). Dominant cause = UNDERTRAINING (50K from scratch vs baseline ~117K cumulative), NOT architecture or the 2 config bugs.",
+      "open_decision": "No budget constraint (removed 2026-06-13). Recommended path: (1) re-verify baseline 13.10 was measured under the now-locked eval protocol — gate may be confounded since baseline predates the 2026-05-14 invariant; (2) since curve was still descending at 50K, extend Stage 0 to ~100-120K steps to fairly match the baseline and give the gate a real shot. Proceeding to Phase 11 on the undertrained 50K backbone is the fallback only if extending still misses."
     }
   },
   "phase10": {
@@ -286,6 +280,9 @@
     "2026-05-14: Phase 9E complete (3 eval jobs on willi). Job 1411 (yaml→norm_topology=hybrid): PPL 116069, 20 missing keys (dt_norm/B_norm/C_norm × 6 mamba + v_norm × 2 mlstm), model loaded +6464 params (random-init HybridNorm tensors). Revealed Bug #2: training silently dropped norm_topology. Job 1413 (--norm-topology pre_rms override): PPL 20.38, exact-match weight load, 83139328 params — true v2 PPL. Gate FAIL by 48%. Phase 9D Isolation A==B identical PPL retroactively explained: both ran with pre_rms because +model.norm_topology=hybrid CLI override never reached HybridConfig either.",
     "2026-05-14: Bug #2 root cause confirmed in scripts/train_stage0_distill.py:380-404 — HybridConfig(...) built from explicit cfg.model.* arg list; norm_topology NOT in the list → silently dropped during training. Same omission in scripts/train.py:274-298 (Phase 8 sanity path). Smoke (smoke_arch_refactor.py:76) builds HybridConfig directly with norm_topology='hybrid' — only path that ever exercised HybridNorm in this repo. Phase 9F: fix threading + WSD warmup override + retrain 50K w/ warmup=1000.",
     "2026-05-14: Supervisor proposed BiomedCLIP-text KD swap + ViT unfreeze. Audit (sub-plan /Users/krish/.claude/plans/refer-to-the-plan-shimmering-falcon.md): steps 1-5 already in codebase (Phase 6e ran with BiomedCLIP-text KD; that's the recipe that hit the 8.23% ceiling — see BIOMEDCLIP_KD_PLAN.md:22,252-307 and output_willi_server/biomedclip_kd_phase6e_1354.log). Only step 6 (vit_unfreeze=2, vit_lr=1e-6) is genuinely new. Folded into Phase 10 (task 10F: extend biomedclip_kd_joint_v2.yaml + smoke Test 5 with LayerNorm-mode invariant + conditional selective .eval() remediation) and Phase 11 (config_overrides + 11D pre-sbatch sanity + new ViT-LR kill gate). α_kd schedule held at 1.0→0.3 (flat-0.5 deferred to P12). vit_unfreeze sweep {0,2,4} deferred to P12. No interruption to Phase 9F.",
-    "2026-06-06: Phase 9F tasks 9F-1 through 9F-7 confirmed complete (already committed in 9e8fd31). validate_for_willi.sh 65 passed 6/6 gates green. --cfg job grep confirmed norm_topology=hybrid, warmup_steps=1000, max_steps=50000, scheduler_name=wsd. Ready to push + sbatch train_stage0_arch_v2.sh on willi. 9F-8 (post-train eval) pending."
+    "2026-06-06: Phase 9F tasks 9F-1 through 9F-7 confirmed complete (already committed in 9e8fd31). validate_for_willi.sh 65 passed 6/6 gates green. --cfg job grep confirmed norm_topology=hybrid, warmup_steps=1000, max_steps=50000, scheduler_name=wsd. Ready to push + sbatch train_stage0_arch_v2.sh on willi. 9F-8 (post-train eval) pending.",
+    "2026-06-13: Phase 9F job 1884 ran on willi with config CORRECT for the first time (norm_topology=hybrid line 148, warmup_steps=1000 line 152, scheduler_name=wsd line 156 — HybridNorm genuinely active in training). CANCELLED at 16h walltime ~step 50K; final full val completed: train-val perplexity=23.0, loss=3.03. Trajectory 51.6->33->27->24->23, STILL descending (not converged). vs Phase 9 job 1401 (HybridNorm OFF): 23.0 vs 23.4 = ~2% gain, negligible. Verdict: config fixes work but PPL-neutral; gate eval expected ~20 (FAIL vs 13.76); dominant cause = UNDERTRAINING (50K from scratch vs baseline ~117K cumulative), confirmed by still-descending curve. Next: 9F-8 gate eval for authoritative number + exact-match load verify; then re-verify baseline 13.10 protocol + extend Stage 0 to ~110K.",
+    "2026-06-13: A100 budget constraint REMOVED entirely per user. Deleted budget_hours_a100 block + budget table in plan + budget-gated decision framing. No compute-hour gating on any phase going forward; run phases to completion. Rough per-phase runtime estimates kept as informational only.",
+    "2026-06-13: Eval job 1894 PROVED the 9F training fix worked — last.ckpt from job 1884 contains all 20 HybridNorm weights (dt_norm/B_norm/C_norm x6 mamba + v_norm x2 mlstm). But eval reported PPL 141.28 (garbage) because eval_stage0_lm.sh:85 still carried a leftover '--norm-topology pre_rms' override from 9E debugging → eval built a pre_rms model → dropped the 20 trained weights ('20 unexpected keys ignored') + ran wrong FFN forward. This is the MIRROR of the 9E bug (then: ckpt lacked weights, eval tried hybrid; now: ckpt has weights, eval forced pre_rms). FIX: removed eval_stage0_lm.sh:85. Re-run eval (ckpt unchanged); expect exact-match load (0 unexpected) + true PPL ~20-23. Then proceed to extended 120K retrain (train_stage0_arch_v2_ext.sh) for the real undertraining fix."
   ]
 }

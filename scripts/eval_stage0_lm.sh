@@ -82,7 +82,6 @@ python scripts/evaluate_lm.py \
     --checkpoint "${CHECKPOINT}" \
     --model-config hybrid_70m_v2 \
     --layer-pattern "mamba,mamba,mamba,mlstm,mlstm,mamba,mamba,mamba" \
-    --norm-topology pre_rms \
     --dataset pubmed \
     --split validation \
     --batch-size 16 \
