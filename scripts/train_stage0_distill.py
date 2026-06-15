@@ -547,7 +547,24 @@ def main(cfg: DictConfig):
     resume_ckpt = cfg.get("resume_from_checkpoint", None)
     if resume_ckpt:
         print(f"Resuming from checkpoint: {resume_ckpt}")
-    trainer.fit(lightning_module, train_loader, val_loader, ckpt_path=resume_ckpt)
+        # The full Lightning ckpt embeds the frozen BioMedLM teacher (a GPT2LMHeadModel
+        # object), which PyTorch 2.6+ refuses to unpickle under the new weights_only=True
+        # default. The checkpoint is our own (trusted), so load with weights_only=False.
+        try:
+            trainer.fit(
+                lightning_module, train_loader, val_loader,
+                ckpt_path=resume_ckpt, weights_only=False,
+            )
+        except TypeError:
+            # Older Lightning without a weights_only kwarg: allowlist the teacher class.
+            import torch.serialization as _ts
+            from transformers.models.gpt2.modeling_gpt2 import GPT2LMHeadModel as _G
+            _ts.add_safe_globals([_G])
+            trainer.fit(
+                lightning_module, train_loader, val_loader, ckpt_path=resume_ckpt,
+            )
+    else:
+        trainer.fit(lightning_module, train_loader, val_loader)
     print("\nStage 0 distillation complete.")
     print(f"Checkpoint saved to: {cfg.checkpoint_dir}")
 
