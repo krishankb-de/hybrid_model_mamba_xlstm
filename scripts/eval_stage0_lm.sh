@@ -58,8 +58,8 @@ echo ""
 
 nvidia-smi
 
-CHECKPOINT="./outputs/phase9_stage0_arch_v2/checkpoints/stage0_v2_model_only.pt"
-OUTPUT_DIR="./outputs/phase9_stage0_arch_v2/eval_results"
+CHECKPOINT="./outputs/phase9_stage0_arch_v2_ext/checkpoints/stage0_v2_model_only.pt"
+OUTPUT_DIR="./outputs/phase9_stage0_arch_v2_ext/eval_results"
 
 if [ ! -f "${CHECKPOINT}" ]; then
     echo "ERROR: Checkpoint not found at ${CHECKPOINT}"
