@@ -1425,3 +1425,23 @@ def test_norm_topology_threaded_to_hybridconfig():
             f"Phase 9 regression hazard. Add "
             f"norm_topology=cfg.model.get('norm_topology', 'pre_rms')."
         )
+
+
+def test_resume_from_checkpoint_wired_to_trainer_fit():
+    """Phase 9-EXT: train_stage0_distill.py must pass an optional resume ckpt to
+    trainer.fit(ckpt_path=...) so a walltime-killed run can continue from last.ckpt
+    (the 120K WSD run died at step 22K; resume + recalibrated max_steps fires the
+    decay it never reached). Guard the wiring against accidental removal.
+    """
+    import pathlib
+
+    src = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "scripts" / "train_stage0_distill.py"
+    ).read_text()
+    assert 'cfg.get("resume_from_checkpoint"' in src, (
+        "train_stage0_distill.py: resume_from_checkpoint not read from cfg"
+    )
+    assert "ckpt_path=" in src, (
+        "train_stage0_distill.py: trainer.fit must receive ckpt_path= for resume"
+    )

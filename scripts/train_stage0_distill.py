@@ -540,7 +540,14 @@ def main(cfg: DictConfig):
 
     print(f"\nStarting Stage 0 distillation (alpha={distill_cfg.alpha}, hidden-state KD)")
     print(f"Output: {cfg.output_dir}")
-    trainer.fit(lightning_module, train_loader, val_loader)
+    # Optional resume: restores model/optimizer/global_step from a full Lightning
+    # .ckpt. The WSDScheduler is rebuilt from the (possibly new) cfg.trainer.max_steps
+    # in configure_optimizers, so the decay phase re-anchors to the new total — this
+    # lets a resumed run anneal the LR even if the original run never reached decay.
+    resume_ckpt = cfg.get("resume_from_checkpoint", None)
+    if resume_ckpt:
+        print(f"Resuming from checkpoint: {resume_ckpt}")
+    trainer.fit(lightning_module, train_loader, val_loader, ckpt_path=resume_ckpt)
     print("\nStage 0 distillation complete.")
     print(f"Checkpoint saved to: {cfg.checkpoint_dir}")
 
