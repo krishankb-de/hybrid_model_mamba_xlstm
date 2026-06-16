@@ -1,5 +1,5 @@
 {
-  "current_phase": "phase9_ext_extended_stage0_retrain_120k",
+  "current_phase": "phase10_advanced_contrastive_head",
   "last_updated": "2026-06-13T00:00:00+0000",
   "supersedes": "BIOMEDCLIP_KD_PLAN.md + biomedclip_kd_state.json (Phase 14 complete; best Phase 6e MIMIC 8.23% / Indiana 4.04% / cos 0.258 — ceiling structural per PDF analysis)",
   "primary_thesis": "PDF gaps 1-6 (layer ratio + mLSTM placement, exp-gate stabilization, HybridNorm, doc-boundary resets, WSD scheduler, freq-decoupled KD) are LM-architecture-level and were never touched by prior plans. Re-pretrain Stage 0 with all fixes; re-run joint contrastive with Phase 6e recipe held constant for attributable ablation.",
@@ -227,15 +227,17 @@
     }
   },
   "phase10": {
-    "status": "pending",
+    "status": "complete_pending_commit",
     "goal": "Freq-decoupled KD: low-band MSE + high-band α=0.1 MSE + cos; v2 distill yaml also enables ViT-unfreeze=2 (task 10F)",
     "tasks": {
-      "10A_attention_pooling_verify": "pending",
-      "10B_freq_decoupled_kd_loss": "pending",
-      "10C_biomedclip_kd_joint_v2_yaml_freq_kd_keys": "pending",
-      "10D_freq_kd_tests": "pending",
-      "10E_validate_commit": "pending",
-      "10F_vit_unfreeze_joint_v2_yaml": "pending — add vit_unfreeze_blocks=2, vit_lr=1e-6 to v2 yaml; smoke Test 5 (4-group optimizer, LayerNorm-mode invariant); conditional 10F-2 selective .eval() if invariant fails"
+      "10A_attention_pooling_verify": "done — pooling_strategy: attention already in hybrid_70m_v2.yaml:51; threaded via train_contrastive HybridConfig (pooling_strategy kwarg).",
+      "10B_freq_decoupled_kd_loss": "done — JointMultiTaskLightningModule._joint_step: when freq_kd, rFFT z_text/t_emb along feature axis; l_kd = low_mse(first N bins) + alpha_high*high_mse + 0.5*(1-cos). ctor kwargs freq_kd/freq_kd_low_bins/freq_kd_alpha_high.",
+      "10C_biomedclip_kd_joint_v2_yaml_freq_kd_keys": "done — configs/distill/biomedclip_kd_joint_v2.yaml: clone of biomedclip_kd_joint + freq_kd=true/low_bins=32/alpha_high=0.1 + moco_queue_size=0 (Phase 6e recipe held) + vit_unfreeze_blocks=2/vit_lr=1e-6.",
+      "10D_freq_kd_tests": "done — test_biomedclip_kd_joint_v2_config_present, test_freq_decoupled_kd_threaded, test_freq_decoupled_kd_loss_finite; norm_topology parity test extended to train_contrastive.py. validate_for_willi 70 passed 6/6 gates.",
+      "10E_validate_commit": "validate done (70 passed 6/6); commit pending",
+      "10F_vit_unfreeze_joint_v2_yaml": "done (config + threading) — vit_unfreeze_blocks=2/vit_lr=1e-6 in v2 distill yaml; train_contrastive now reads them from distill_cfg (fallback cfg.model). Scaffolding in lightning_module (ctor 327-328, unfreeze 425-435, 4th param group) unchanged. SMOKE (4-group optimizer + LayerNorm-mode invariant) deferred to willi-side Phase 11D (needs BiomedCLIP load, not CPU-offline).",
+      "BUGFIX_norm_topology_train_contrastive": "done — train_contrastive.py:588 HybridConfig was missing norm_topology (Bug #2 here too) → would silently drop the 20 v2 HybridNorm weights into a pre_rms model + wrong FFN forward, corrupting the contrastive backbone. Fixed: norm_topology=cfg.model.get('norm_topology','pre_rms'). Parity test extended.",
+      "PHASE11_LAUNCHER": "done — scripts/train_biomedclip_kd_phase15.sh: model=hybrid_70m_v2, +distill=biomedclip_kd_joint_v2, lm_checkpoint=ext 40K stripped pt, Phase 6e recipe (5000 steps, bs=32, val 250)."
     }
   },
   "phase11": {
@@ -287,6 +289,8 @@
     "2026-06-13: Phase 9F COMPLETE. Eval job 1895 (override removed): Norm topology from yaml=hybrid, EXACT-MATCH LOAD (0 missing/0 unexpected), PPL=20.38, loss=3.0148, BPB=4.3494. The 9F config-threading bug is fully fixed and verified. CRITICAL FINDING: 20.38 == job 1401 PPL (HybridNorm was inactive there) → HybridNorm contributes ZERO to PPL at 70M/50K scale; the 20.38-vs-13.76 gate miss is 100% undertraining. NEXT: launch train_stage0_arch_v2_ext.sh (120K steps). eval_stage0_lm.sh now reads norm_topology from yaml (no override).",
     "2026-06-14: Phase 9-EXT job 1896 (max_steps=120000) CANCELLED at 36h walltime, reached only global_step=22000 (~18% of target). Throughput ~611 opt-steps/h → 120K would need ~8 days, infeasible in one block. val/perplexity descended 27.2→18.70, still descending, NO plateau. KEY: WSD decay (scheduled step ~103200) NEVER fired — LR stuck at full 6e-4 the whole run; max_steps=120000 was mis-calibrated vs achievable throughput. No NaN/OOM/errors; training healthy.",
     "2026-06-15: Eval of ext step-22K checkpoint (job 1906): EXACT-MATCH, hybrid, PPL=16.62, loss=2.8108, BPB=4.0551. Progression now clear: 20.38 (~8K, no decay) → 16.62 (22K, no decay); baseline 13.10 (~117K, with decay); gate 13.76. Undertraining CONFIRMED; two unused levers remain (more steps + LR anneal). DECISION: resume from 22K rather than fresh re-run (preserves the 16.62 checkpoint). Wired ckpt_path resume in train_stage0_distill.py (trainer.fit(ckpt_path=cfg.get('resume_from_checkpoint'))); WSDScheduler rebuilds from new cfg.trainer.max_steps in configure_optimizers so decay re-anchors correctly on resume. New script train_stage0_arch_v2_resume.sh: resume last.ckpt → max_steps=40000 (decay fires step 34400→40000), ~30h. New parity test test_resume_from_checkpoint_wired_to_trainer_fit; validate_for_willi.sh 66 passed 6/6 green. NEXT: git pull on willi + sbatch train_stage0_arch_v2_resume.sh.",
-    "2026-06-15: Resume job (1908?) FAILED at ckpt load: PyTorch 2.8 weights_only=True default refused to unpickle the embedded BioMedLM teacher (GPT2LMHeadModel global) in last.ckpt (save_hyperparameters already ignores teacher, so the class ref is pickled elsewhere — a callback/buffer). FIX: trainer.fit(..., ckpt_path=resume_ckpt, weights_only=False) when resuming (trusted self-made ckpt), with TypeError fallback to add_safe_globals([GPT2LMHeadModel]) for older Lightning. validate_for_willi.sh green. NEXT: git pull on willi + re-sbatch train_stage0_arch_v2_resume.sh."
+    "2026-06-15: Resume job (1908?) FAILED at ckpt load: PyTorch 2.8 weights_only=True default refused to unpickle the embedded BioMedLM teacher (GPT2LMHeadModel global) in last.ckpt (save_hyperparameters already ignores teacher, so the class ref is pickled elsewhere — a callback/buffer). FIX: trainer.fit(..., ckpt_path=resume_ckpt, weights_only=False) when resuming (trusted self-made ckpt), with TypeError fallback to add_safe_globals([GPT2LMHeadModel]) for older Lightning. validate_for_willi.sh green. NEXT: git pull on willi + re-sbatch train_stage0_arch_v2_resume.sh.",
+    "2026-06-16: Resume job 1908 COMPLETED cleanly (first fully-finished Stage 0 run) — `Trainer.fit stopped: max_steps=40000 reached`. Resumed from 22K, trained 22K→40K with WSD decay (34.4K→40K). Final training-val perplexity 17.40 (decay moved it only ~18.0→17.4 — diminishing returns confirmed). Stage 0 progression: 20.38 (~8K) → 16.62 (22K) → ~15.5 expected (40K). Step count EXHAUSTED; residual gap to baseline 13.10 is the alpha=0.5 hidden-state-cosine KD weight (train_stage0_distill.py:219-226: total=(1-alpha)*CE + alpha*(1-cos(proj(student_hidden),BioMedLM_hidden))), not undertraining. Best Stage 0 backbone = outputs/phase9_stage0_arch_v2_ext/checkpoints/last.ckpt (step 40000).",
+    "2026-06-16: DECISION (user): PROCEED TO CONTRASTIVE (Phase 10/11). PPL gate 13.76 reclassified as INFORMATIONAL — the refactor's real target is MIMIC/Indiana retrieval, not LM PPL. A v2 backbone at ~15.5 PPL that beats the Phase 6e 8.23% retrieval ceiling is the win. KD-alpha ablation deferred (lowering KD risks the biomedical knowledge transfer that helps retrieval). current_phase -> phase10. Stage 0 init checkpoint for Phase 11 = phase9_stage0_arch_v2_ext last.ckpt (40K)."
   ]
 }

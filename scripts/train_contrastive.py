@@ -603,6 +603,10 @@ def main(cfg: DictConfig):
         slstm_num_heads=cfg.model.slstm_num_heads,
         use_exponential_gate=cfg.model.use_exponential_gate,
         norm_type=cfg.model.norm_type,
+        # Bug #2 (Phase 9F) also applies here: without threading norm_topology the
+        # contrastive model defaults to pre_rms and silently drops the 20 HybridNorm
+        # weights when loading a v2 Stage 0 checkpoint → wrong FFN forward. Thread it.
+        norm_topology=cfg.model.get("norm_topology", "pre_rms"),
         use_mlp=cfg.model.use_mlp,
         mlp_ratio=cfg.model.mlp_ratio,
         max_position_embeddings=cfg.model.max_position_embeddings,
@@ -706,10 +710,18 @@ def main(cfg: DictConfig):
             max_steps=cfg.trainer.max_steps,
             gradient_clip_val=cfg.model.gradient_clip_val,
             freeze_text_encoder_steps=int(distill_cfg.get("freeze_text_encoder_steps", 500)),
-            vit_unfreeze_blocks=int(cfg.model.get("vit_unfreeze_blocks", 0)),
-            vit_lr=float(cfg.model.get("vit_lr", 1e-6)),
+            # Phase 10F: prefer the distill yaml (where the v2 recipe lives);
+            # fall back to cfg.model for backward compatibility.
+            vit_unfreeze_blocks=int(
+                distill_cfg.get("vit_unfreeze_blocks", cfg.model.get("vit_unfreeze_blocks", 0))
+            ),
+            vit_lr=float(distill_cfg.get("vit_lr", cfg.model.get("vit_lr", 1e-6))),
             moco_queue_size=int(distill_cfg.get("moco_queue_size", 0)),
             moco_momentum=float(distill_cfg.get("moco_momentum", 0.999)),
+            # Phase 10B: frequency-decoupled KD.
+            freq_kd=bool(distill_cfg.get("freq_kd", False)),
+            freq_kd_low_bins=int(distill_cfg.get("freq_kd_low_bins", 32)),
+            freq_kd_alpha_high=float(distill_cfg.get("freq_kd_alpha_high", 0.1)),
         )
         print(
             f"JointMultiTaskLightningModule: "

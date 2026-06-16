@@ -1,0 +1,53 @@
+# BiomedCLIP-text-KD joint config — v2 (Phase 10/11 of HYBRID_ARCH_REFACTOR_PLAN).
+#
+# Clone of biomedclip_kd_joint.yaml (the Phase 6e recipe that hit MIMIC R@10
+# 8.23%) held CONSTANT for attributable comparison, with three deltas:
+#   (1) freq-decoupled KD (Phase 10B) — opt-in, decomposes the z_text↔t_emb
+#       distillation into a low-frequency band (coarse semantics, full weight)
+#       and a high-frequency band (fine detail, down-weighted) plus the cosine
+#       term. Goal: let KD transfer global semantic structure without forcing
+#       the student to match teacher high-frequency noise.
+#   (2) ViT-unfreeze (Phase 10F / supervisor Step 6) — unfreeze last 2 BiomedCLIP
+#       image blocks at a tiny LR so the image tower adapts slightly to CXR.
+#   (3) moco_queue_size: 0 — Phase 6e recipe (K=256 in v1 yaml was Phase 6f;
+#       lessons-learned: queue post-KD-warmup is harmful → hold at 0 for clean
+#       attribution vs Phase 6e's 8.23% ceiling).
+#
+# Everything else (teacher, α_kd schedule 1.0→0.3, freeze=1000, LRs) is identical
+# to biomedclip_kd_joint.yaml so any retrieval uplift is attributable to the new
+# v2 backbone + these three deltas, not a different contrastive recipe.
+
+teacher: "biomedclip_text"
+
+# Joint loss weights (unchanged from Phase 6e).
+alpha_kd: 0.3
+alpha_kd_warmup: 1.0
+alpha_kd_post: 0.3
+beta_clip: 1.0
+gamma_simcse: 0.1
+
+# --- Phase 10B: frequency-decoupled KD --------------------------------------
+# When freq_kd=true, L_KD = λ_low·MSE(low_band) + α_high·MSE(high_band)
+#                            + 0.5·(1 - cos(z_text, t_emb))
+# computed via rFFT along the 512-d embedding feature axis.
+freq_kd: true
+freq_kd_low_bins: 32       # first 32 rFFT bins = low-frequency (coarse) band
+freq_kd_alpha_high: 0.1    # down-weight high-frequency (fine-detail) band
+
+# Per-group learning rates (unchanged).
+backbone_lr: 1.0e-5
+head_lr: 3.0e-4
+
+# Backbone freeze during head warm-up (unchanged from Phase 6e).
+freeze_text_encoder_steps: 1000
+
+# --- Phase 6e recipe: NO MoCo queue (held constant for attribution) ---------
+moco_queue_size: 0
+moco_momentum: 0.999
+
+# --- Phase 10F / supervisor Step 6: ViT unfreeze ----------------------------
+# Unfreeze the last 2 BiomedCLIP image-tower blocks at a tiny LR. Scaffolding
+# exists in lightning_module.py (vit_unfreeze_blocks ctor kwarg, 4th param
+# group, _get_vit_blocks). Never enabled in any production config until now.
+vit_unfreeze_blocks: 2
+vit_lr: 1.0e-6

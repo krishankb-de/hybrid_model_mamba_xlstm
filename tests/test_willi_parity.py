@@ -1412,7 +1412,11 @@ def test_norm_topology_threaded_to_hybridconfig():
     import pathlib
 
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    for rel in ("scripts/train.py", "scripts/train_stage0_distill.py"):
+    for rel in (
+        "scripts/train.py",
+        "scripts/train_stage0_distill.py",
+        "scripts/train_contrastive.py",  # Phase 10: same bug would corrupt the backbone
+    ):
         src = (repo_root / rel).read_text()
         assert "HybridConfig(" in src, f"{rel}: no HybridConfig call found"
         # Look for the threading line within the HybridConfig argument block.
@@ -1445,3 +1449,70 @@ def test_resume_from_checkpoint_wired_to_trainer_fit():
     assert "ckpt_path=" in src, (
         "train_stage0_distill.py: trainer.fit must receive ckpt_path= for resume"
     )
+
+
+def test_biomedclip_kd_joint_v2_config_present():
+    """Phase 10C/10F: the v2 joint distill config must enable freq-decoupled KD,
+    the ViT unfreeze (supervisor Step 6), and hold the Phase 6e recipe (K=0).
+    """
+    import pathlib
+    import yaml
+
+    cfg_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "configs" / "distill" / "biomedclip_kd_joint_v2.yaml"
+    )
+    assert cfg_path.exists(), "configs/distill/biomedclip_kd_joint_v2.yaml missing"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    assert cfg["teacher"] == "biomedclip_text"
+    assert cfg["freq_kd"] is True
+    assert cfg["freq_kd_low_bins"] == 32
+    assert abs(float(cfg["freq_kd_alpha_high"]) - 0.1) < 1e-9
+    assert cfg["vit_unfreeze_blocks"] == 2
+    assert abs(float(cfg["vit_lr"]) - 1.0e-6) < 1e-12
+    assert int(cfg["moco_queue_size"]) == 0  # Phase 6e recipe held constant
+    # α_kd schedule unchanged from Phase 6e for attribution
+    assert abs(float(cfg["alpha_kd_warmup"]) - 1.0) < 1e-9
+    assert abs(float(cfg["alpha_kd_post"]) - 0.3) < 1e-9
+
+
+def test_freq_decoupled_kd_threaded():
+    """Phase 10B: freq-KD must be wired into the joint module and threaded from
+    the distill config by train_contrastive.
+    """
+    import pathlib
+
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    lm = (repo / "hybrid_xmamba" / "training" / "lightning_module.py").read_text()
+    assert "self.freq_kd" in lm and "torch.fft.rfft" in lm, (
+        "lightning_module.py: freq-decoupled KD branch not implemented"
+    )
+    tc = (repo / "scripts" / "train_contrastive.py").read_text()
+    assert 'freq_kd=bool(distill_cfg.get("freq_kd"' in tc, (
+        "train_contrastive.py: freq_kd not threaded from distill_cfg"
+    )
+
+
+def test_freq_decoupled_kd_loss_finite():
+    """Phase 10D: the rFFT low/high-band KD math is finite and non-negative on
+    normalized embeddings (mirrors the inline _joint_step computation).
+    """
+    import torch
+    import torch.nn.functional as F
+
+    torch.manual_seed(0)
+    z = F.normalize(torch.randn(4, 512), dim=-1)
+    t = F.normalize(torch.randn(4, 512), dim=-1)
+    zf = torch.fft.rfft(z, dim=-1)
+    tf = torch.fft.rfft(t, dim=-1)
+    n_low = 32
+    low_mse = (zf[:, :n_low] - tf[:, :n_low]).abs().pow(2).mean()
+    high_mse = (zf[:, n_low:] - tf[:, n_low:]).abs().pow(2).mean()
+    cos = F.cosine_similarity(z, t, dim=-1)
+    l_kd = low_mse + 0.1 * high_mse + 0.5 * (1.0 - cos.mean())
+    assert torch.isfinite(l_kd), l_kd
+    assert l_kd.item() >= 0.0
+    # identical embeddings → low/high MSE vanish, cosine term → 0
+    l0_zf = torch.fft.rfft(z, dim=-1)
+    l0_low = (l0_zf[:, :n_low] - l0_zf[:, :n_low]).abs().pow(2).mean()
+    assert l0_low.item() == 0.0

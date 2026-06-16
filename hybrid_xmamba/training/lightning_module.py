@@ -803,6 +803,9 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         vit_lr: float = 1e-6,
         moco_queue_size: int = 0,
         moco_momentum: float = 0.999,
+        freq_kd: bool = False,
+        freq_kd_low_bins: int = 32,
+        freq_kd_alpha_high: float = 0.1,
         scheduler_name: str = "cosine",
         beta2_schedule: bool = False,
     ):
@@ -836,6 +839,10 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         self.gamma_simcse = gamma_simcse
         self.backbone_lr = backbone_lr
         self.head_lr = head_lr
+        # Phase 10B: frequency-decoupled KD on the z_text↔t_emb distillation.
+        self.freq_kd = bool(freq_kd)
+        self.freq_kd_low_bins = int(freq_kd_low_bins)
+        self.freq_kd_alpha_high = float(freq_kd_alpha_high)
 
         # Phase 8: distill_proj deleted. KD applies directly on z_text vs the
         # 512-d BiomedCLIP joint embedding (same dim as student projection_head),
@@ -1051,9 +1058,30 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
             with torch.no_grad():
                 t_emb = self.teacher.encode_text(t_ids)  # (B, 512)
                 t_emb = F.normalize(t_emb.float(), dim=-1)
-            cos_per_sample = F.cosine_similarity(z_text.float(), t_emb, dim=-1)
-            l_kd = (1.0 - cos_per_sample).mean()
+            zt = F.normalize(z_text.float(), dim=-1)
+            cos_per_sample = F.cosine_similarity(zt, t_emb, dim=-1)
             cos_text_teacher = cos_per_sample.detach().mean()
+            if self.freq_kd:
+                # Phase 10B: decompose the 512-d embeddings along the feature
+                # axis via rFFT, then distill low-frequency (coarse semantic)
+                # structure at full weight and high-frequency (fine detail) at a
+                # reduced weight, plus the cosine alignment term. Lets KD transfer
+                # global structure without forcing a match to teacher hf noise.
+                zf = torch.fft.rfft(zt, dim=-1)
+                tf = torch.fft.rfft(t_emb, dim=-1)
+                n_low = min(self.freq_kd_low_bins, zf.shape[-1])
+                low_mse = (zf[:, :n_low] - tf[:, :n_low]).abs().pow(2).mean()
+                if n_low < zf.shape[-1]:
+                    high_mse = (zf[:, n_low:] - tf[:, n_low:]).abs().pow(2).mean()
+                else:
+                    high_mse = torch.zeros((), device=zt.device)
+                l_kd = (
+                    low_mse
+                    + self.freq_kd_alpha_high * high_mse
+                    + 0.5 * (1.0 - cos_per_sample.mean())
+                )
+            else:
+                l_kd = (1.0 - cos_per_sample).mean()
 
         # Phase 10: α_kd schedule. During the gated warmup (CLIP off), KD
         # owns the gradient — boost α_kd_warmup to drive z_text into BCT
