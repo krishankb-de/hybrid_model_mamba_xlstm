@@ -177,7 +177,7 @@ def load_models(checkpoint_path: str, device: str):
     print(f"Loading checkpoint: {checkpoint_path}")
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     raw = ckpt.get("state_dict", ckpt)
-    text_state, img_proj_state, _ = _strip_model_prefix(raw)
+    text_state, img_proj_state, img_enc_state = _strip_model_prefix(raw)
 
     if not text_state:
         raise RuntimeError(
@@ -199,8 +199,19 @@ def load_models(checkpoint_path: str, device: str):
         img_proj = None
         print("  ✓ img_proj: None (Phase 8+ checkpoint — BiomedCLIP visual already in joint space)")
 
-    print("  Loading BiomedCLIP image encoder (fresh) ...")
+    print("  Loading BiomedCLIP image encoder ...")
     image_enc = load_image_encoder(device)
+    # CRITICAL: if the checkpoint fine-tuned the image tower (vit_unfreeze_blocks>0,
+    # Phase 10F), the text encoder was aligned to the FINE-TUNED image space. Loading
+    # a fresh BiomedCLIP visual here would mismatch that space and tank retrieval
+    # (this caused MIMIC i2t to read 1.89% vs 11.2% in-training). Load the saved
+    # image_encoder.* weights so the eval image tower matches training.
+    if img_enc_state:
+        missing, unexpected = image_enc.load_state_dict(img_enc_state, strict=False)
+        print(f"  ✓ Loaded fine-tuned image encoder from checkpoint "
+              f"({len(img_enc_state)} keys; missing={len(missing)}, unexpected={len(unexpected)})")
+    else:
+        print("  ✓ image encoder: fresh BiomedCLIP (no fine-tuned image_encoder.* in checkpoint)")
 
     return text_enc, img_proj, image_enc
 
