@@ -96,11 +96,28 @@ def load_text_encoder(text_state: Dict, device: str) -> HybridTextEncoder:
          if "token_embedding.weight" in k),
         512,
     )
+    # Auto-detect architecture from the checkpoint so v1 AND v2 load exact-match.
+    # (Hardcoding [mamba,mamba,mlstm]+pre_rms silently mismapped the v2 backbone:
+    #  wrong layer pattern + dropped HybridNorm weights → wrong retrieval numbers.)
+    #   - per-layer type: mamba blocks carry a mixer.A_log; mLSTM blocks do not.
+    #   - norm topology: HybridNorm adds dt_norm/B_norm/C_norm (mamba) + v_norm (mlstm).
+    layer_pattern = []
+    for i in range(num_layers):
+        mixer_keys = [k for k in text_state if f"lm.layers.{i}.mixer." in k]
+        is_mamba = any("A_log" in k or "conv1d" in k for k in mixer_keys)
+        layer_pattern.append("mamba" if is_mamba else "mlstm")
+    norm_topology = "hybrid" if any(
+        (".dt_norm." in k or ".v_norm." in k or ".B_norm." in k or ".C_norm." in k)
+        for k in text_state
+    ) else "pre_rms"
+    print(f"  [text encoder] detected layer_pattern={layer_pattern}, "
+          f"norm_topology={norm_topology}")
     cfg = HybridConfig(
         vocab_size=50257,
         dim=dim,
         num_layers=num_layers,
-        layer_pattern=["mamba", "mamba", "mlstm"],
+        layer_pattern=layer_pattern,
+        norm_topology=norm_topology,
         max_position_embeddings=1024,
         pooling_strategy="attention",
     )
