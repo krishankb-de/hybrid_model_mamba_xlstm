@@ -5,9 +5,22 @@
   "primary_thesis": "PDF gaps 1-6 (layer ratio + mLSTM placement, exp-gate stabilization, HybridNorm, doc-boundary resets, WSD scheduler, freq-decoupled KD) are LM-architecture-level and were never touched by prior plans. Re-pretrain Stage 0 with all fixes; re-run joint contrastive with Phase 6e recipe held constant for attributable ablation.",
   "approved_plan": "/Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md",
   "success_bar": {
-    "floor": {"MIMIC_i2t_R10": 0.0823, "Indiana_i2t_R10": 0.0404, "paired_cos": 0.258, "rule": "no regression vs Phase 6e; abort if missed"},
-    "target": {"MIMIC_i2t_R10": 0.0999, "Indiana_i2t_R10": 0.055, "rule": "Phase 5c parity + cross-domain uplift"},
-    "stretch": {"MIMIC_i2t_R10": 0.12, "Indiana_i2t_R10": 0.06, "rule": "breaks ceiling; dissertation headline"}
+    "floor": {
+      "MIMIC_i2t_R10": 0.0823,
+      "Indiana_i2t_R10": 0.0404,
+      "paired_cos": 0.258,
+      "rule": "no regression vs Phase 6e; abort if missed"
+    },
+    "target": {
+      "MIMIC_i2t_R10": 0.0999,
+      "Indiana_i2t_R10": 0.055,
+      "rule": "Phase 5c parity + cross-domain uplift"
+    },
+    "stretch": {
+      "MIMIC_i2t_R10": 0.12,
+      "Indiana_i2t_R10": 0.06,
+      "rule": "breaks ceiling; dissertation headline"
+    }
   },
   "budget_hours_a100": "REMOVED 2026-06-13 — no A100 budget constraint. Run phases to completion as needed; do not gate decisions on compute hours.",
   "resolved_decisions": {
@@ -29,12 +42,30 @@
   "supervisor_verification_2026_05_14": {
     "sub_plan_path": "/Users/krish/.claude/plans/refer-to-the-plan-shimmering-falcon.md",
     "verdict": "Steps 1-5 already implemented in codebase (Phase 6e plateau 8.23% was reached WITH BiomedCLIP-text KD active). Only Step 6 (vit_unfreeze=2) is new; folded into Phase 10 task 10F + Phase 11 config_overrides. No interruption to Phase 9F.",
-    "step1_load_biomedclip_text_teacher": {"status": "already_implemented", "evidence": "hybrid_xmamba/training/lightning_module.py:754-768 (_load_biomedclip_text_teacher); commit f9e793b (2026-05-04)"},
-    "step2_kd_loss_against_biomedclip_text": {"status": "already_implemented_inline", "evidence": "lightning_module.py:1047-1056 in _joint_step; teacher.encode_text(t_ids); 1-cos_per_sample.mean()"},
-    "step3_raw_text_in_dataset": {"status": "unnecessary", "evidence": "scripts/train_contrastive.py:376-420 pre-tokenizes with open_clip.get_tokenizer; supervisor's snippet used PubMedBERT HF tokenizer (wrong tokenizer for BiomedCLIP text tower)"},
-    "step4_swap_kd_call": {"status": "already_implemented_via_config", "evidence": "train_contrastive.py:656-668 dispatches on cfg.distill.teacher=='biomedclip_text'; configs/distill/biomedclip_kd_joint.yaml:19; Phase 6e job 1354 log confirms"},
-    "step5_alpha_kd_0_5": {"status": "regression_vs_current_schedule", "evidence": "biomedclip_kd_joint.yaml:28-30 already runs alpha_kd_warmup=1.0→alpha_kd_post=0.3 (lightning_module.py:1058-1067); flat 0.5 destroys early-strong/late-soft tradeoff; deferred to Phase 12 ablation"},
-    "step6_vit_unfreeze_2_blocks_lr_1e6": {"status": "NEW_to_implement_as_task_10F", "evidence": "lightning_module.py:802 (ctor default=0), :424-436 (unfreeze code), :441-457 (_get_vit_blocks), :892-902 (4th param group); never enabled in any production config"}
+    "step1_load_biomedclip_text_teacher": {
+      "status": "already_implemented",
+      "evidence": "hybrid_xmamba/training/lightning_module.py:754-768 (_load_biomedclip_text_teacher); commit f9e793b (2026-05-04)"
+    },
+    "step2_kd_loss_against_biomedclip_text": {
+      "status": "already_implemented_inline",
+      "evidence": "lightning_module.py:1047-1056 in _joint_step; teacher.encode_text(t_ids); 1-cos_per_sample.mean()"
+    },
+    "step3_raw_text_in_dataset": {
+      "status": "unnecessary",
+      "evidence": "scripts/train_contrastive.py:376-420 pre-tokenizes with open_clip.get_tokenizer; supervisor's snippet used PubMedBERT HF tokenizer (wrong tokenizer for BiomedCLIP text tower)"
+    },
+    "step4_swap_kd_call": {
+      "status": "already_implemented_via_config",
+      "evidence": "train_contrastive.py:656-668 dispatches on cfg.distill.teacher=='biomedclip_text'; configs/distill/biomedclip_kd_joint.yaml:19; Phase 6e job 1354 log confirms"
+    },
+    "step5_alpha_kd_0_5": {
+      "status": "regression_vs_current_schedule",
+      "evidence": "biomedclip_kd_joint.yaml:28-30 already runs alpha_kd_warmup=1.0→alpha_kd_post=0.3 (lightning_module.py:1058-1067); flat 0.5 destroys early-strong/late-soft tradeoff; deferred to Phase 12 ablation"
+    },
+    "step6_vit_unfreeze_2_blocks_lr_1e6": {
+      "status": "NEW_to_implement_as_task_10F",
+      "evidence": "lightning_module.py:802 (ctor default=0), :424-436 (unfreeze code), :441-457 (_get_vit_blocks), :892-902 (4th param group); never enabled in any production config"
+    }
   },
   "phase1": {
     "status": "complete",
@@ -203,7 +234,11 @@
     "bug2_root_cause": {
       "primary": "scripts/train_stage0_distill.py:380-404 — HybridConfig(...) built from explicit cfg.model.* list; norm_topology NOT in list → silently dropped.",
       "secondary": "scripts/train.py:274-298 — same omission (Phase 8 sanity path).",
-      "also_dropped_but_inert_for_stage0": ["use_gradient_checkpointing (Stage 0 uses bs=8 anyway)", "pooling_strategy (contrastive only)", "proj_head_dropout (contrastive only)"],
+      "also_dropped_but_inert_for_stage0": [
+        "use_gradient_checkpointing (Stage 0 uses bs=8 anyway)",
+        "pooling_strategy (contrastive only)",
+        "proj_head_dropout (contrastive only)"
+      ],
       "validated_path": "scripts/smoke_arch_refactor.py:76 builds HybridConfig directly with norm_topology=hybrid — the only path that ever exercised HybridNorm."
     },
     "tasks": {
@@ -246,7 +281,7 @@
     "config_overrides": {
       "distill_config": "biomedclip_kd_joint_v2",
       "vit_unfreeze_blocks": 2,
-      "vit_lr": 1.0e-6,
+      "vit_lr": 1e-06,
       "alpha_kd_warmup": 1.0,
       "alpha_kd_post": 0.3,
       "freeze_text_encoder_steps": 1000,
@@ -260,9 +295,18 @@
       "vit_lr_actual_every_100_steps": "1e-6 ± 1e-9"
     }
   },
-  "phase12": {"status": "pending", "goal": "Decision gate: stretch/target/floor/missed branches"},
-  "phase13": {"status": "pending", "goal": "Full eval: Indiana + MIMIC + STS + BEIR (stretch only)"},
-  "phase14": {"status": "pending", "goal": "Writeup + dissertation table + per-fix ablation"},
+  "phase12": {
+    "status": "pending",
+    "goal": "Decision gate: stretch/target/floor/missed branches"
+  },
+  "phase13": {
+    "status": "pending",
+    "goal": "Full eval: Indiana + MIMIC + STS + BEIR (stretch only)"
+  },
+  "phase14": {
+    "status": "pending",
+    "goal": "Writeup + dissertation table + per-fix ablation"
+  },
   "notes": [
     "2026-05-11: Phase 1 bootstrap started. Plan approved via /Users/krish/.claude/plans/refer-to-the-plan-mellow-peacock.md. Refined remotely via Ultraplan; file:line refs verified against codebase (25/26 match; layer_pattern line corrected 8→11).",
     "2026-05-11: Phase 1 tasks 1A–1F complete. HYBRID_ARCH_REFACTOR_PLAN.md + state JSON created; .gitignore + CLAUDE.md + BIOMEDCLIP_KD_PLAN.md updated. validate_for_willi.sh green (53 passed, 6/6 gates). Awaiting user approval to commit (1G).",
@@ -298,6 +342,7 @@
     "2026-06-17: EVAL BUG found + fixed (do NOT trust eval jobs 1920/1921). evaluate_cxr_retrieval.py loaded a FRESH BiomedCLIP visual + discarded the checkpoint's fine-tuned image_encoder.* (vit_unfreeze=2) → train/eval image-space mismatch → MIMIC i2t read 1.89%. FIX commit 5a49307: load image_encoder.* from ckpt into clip.visual (training sets self.image_encoder=clip_model.visual:388). Plus earlier auto-detect of layer_pattern+norm_topology.",
     "2026-06-17: AUTHORITATIVE Phase 11 eval (jobs 1922/1923, fix verified: '151 keys; missing=0 unexpected=0'). MIMIC (N=3063): i2t R@10=10.94%, t2i R@10=9.99%, paired cos 0.369. Indiana (N=743): i2t R@10=2.96%, t2i R@10=4.98%, paired cos 0.287. (The '✗ FAIL R@10<0.25' lines are STALE boilerplate in evaluate_cxr_retrieval — 25% bar, ignore.) VERDICT: MIMIC reproduces the 11.2% in-training (10.94%) → ceiling BROKEN, TARGET tier (>=9.99%). Indiana 2.96% < 4.04% floor → CROSS-DOMAIN REGRESSION. Mixed result: big in-domain win, OOD regression = MIMIC overfitting. NOTE: ViT-unfreeze is NOT the Indiana culprit (fresh-ViT job 1921 Indiana 2.42% < finetuned 2.96% → unfreeze slightly HELPED Indiana). Leading suspects for OOD regression: freq_kd (low-band overfits MIMIC templated reports) and/or 5000-step MIMIC overfitting. Success-bar floor requires BOTH MIMIC>=8.23% AND Indiana>=4.04% → Indiana fails floor. NEXT: ablation to attribute + recover Indiana — recommend v2 backbone + pure Phase 6e recipe (freq_kd=false, vit_unfreeze=0) to isolate whether the two new contrastive deltas caused the OOD regression.",
     "2026-06-18: freq_kd=false ABLATION (job 1924, train_biomedclip_kd_phase15_nofreq.sh) ran correctly (freq_kd:false confirmed, exact-match load, ViT unfrozen) but CANCELLED at 12h walltime ~epoch 22 / ~step 4700 of 5000 (metric plateaued, fine for ablation). MIMIC in-training i2t R@10 plateaued ~0.107-0.110 = IDENTICAL to freq_kd=true (11.2%); cos_text_teacher ~0.65 same. FINDING: freq_kd has NO meaningful effect on in-domain MIMIC retrieval. Ablation now hinges on Indiana authoritative eval (vs freq_kd=true Indiana 2.96%). Checkpoint: outputs/biomedclip_kd_phase15_v2_nofreq/checkpoints/last.ckpt. NEXT: eval last.ckpt on MIMIC+Indiana (JOINT_CKPT=...; eval fix already in). Expectation: Indiana likely still ~3% (since MIMIC identical) → freq_kd NOT the OOD driver → whole-model MIMIC overfitting; lever = fewer steps/regularization or frame as in-domain specialization.",
-    "2026-06-18: freq_kd=false ABLATION eval (jobs 1930/1931, last.ckpt ~step 4700). MIMIC: i2t R@10=10.45%, t2i R@10=10.19%, cos 0.386. Indiana: i2t R@10=3.90%, t2i R@10=5.38%, mean R@10=4.64%, cos 0.301. VERDICT: freq_kd OFF DOMINATES freq_kd ON — MIMIC ~flat (10.45 vs 10.94), Indiana clearly BETTER (i2t 3.90 vs 2.96 = +0.94pp; t2i 5.38 vs 4.98). My earlier expectation (freq_kd irrelevant to Indiana) was WRONG — freq_kd was hurting cross-domain. CANONICAL CONFIG = v2 backbone + vit_unfreeze=2 + freq_kd=FALSE + K=0. vs Phase 6e (MIMIC 8.23%/Indiana 4.04%): MIMIC +2.2pp (target tier, ceiling broken); Indiana i2t 3.90% ~= floor parity (0.14pp = ~1 sample/743, noise) + t2i 5.38%/mean 4.64% ABOVE floor. NET WIN. CAVEAT: this run was walltime-truncated 4700/5000 → numbers slightly understated; a full 5000-step run likely pushes Indiana i2t >= 4.04%. NEXT: (1) clean full-5000 nofreq run (bump walltime 12h->16h) to lock dissertation numbers; (2) Phase 13 STS eval (BIOSSES/STS-B); (3) Phase 14 writeup. Set biomedclip_kd_joint_v2.yaml freq_kd default -> false as canonical."
+    "2026-06-18: freq_kd=false ABLATION eval (jobs 1930/1931, last.ckpt ~step 4700). MIMIC: i2t R@10=10.45%, t2i R@10=10.19%, cos 0.386. Indiana: i2t R@10=3.90%, t2i R@10=5.38%, mean R@10=4.64%, cos 0.301. VERDICT: freq_kd OFF DOMINATES freq_kd ON — MIMIC ~flat (10.45 vs 10.94), Indiana clearly BETTER (i2t 3.90 vs 2.96 = +0.94pp; t2i 5.38 vs 4.98). My earlier expectation (freq_kd irrelevant to Indiana) was WRONG — freq_kd was hurting cross-domain. CANONICAL CONFIG = v2 backbone + vit_unfreeze=2 + freq_kd=FALSE + K=0. vs Phase 6e (MIMIC 8.23%/Indiana 4.04%): MIMIC +2.2pp (target tier, ceiling broken); Indiana i2t 3.90% ~= floor parity (0.14pp = ~1 sample/743, noise) + t2i 5.38%/mean 4.64% ABOVE floor. NET WIN. CAVEAT: this run was walltime-truncated 4700/5000 → numbers slightly understated; a full 5000-step run likely pushes Indiana i2t >= 4.04%. NEXT: (1) clean full-5000 nofreq run (bump walltime 12h->16h) to lock dissertation numbers; (2) Phase 13 STS eval (BIOSSES/STS-B); (3) Phase 14 writeup. Set biomedclip_kd_joint_v2.yaml freq_kd default -> false as canonical.",
+    "2026-06-19: Full nofreq run (job 1932, 16h walltime) COMPLETED all 5000 steps (Trainer.fit stopped max_steps=5000). freq_kd=false, exact-match load, ViT unfrozen. In-training i2t R@10 plateaued ~0.106-0.110, t2i ~0.107 — same as the truncated 4700-step run, so converged. Best ckpt = outputs/biomedclip_kd_phase15_v2_nofreq/checkpoints/last.ckpt (step 5000). NEXT: authoritative MIMIC+Indiana eval on last.ckpt for final dissertation numbers (eval gate now tiered floor/target/stretch); then Phase 13 STS (BIOSSES/STS-B) + Phase 14 writeup."
   ]
 }
