@@ -87,10 +87,24 @@ def load_encoder(checkpoint_path: str, device: str = "cuda") -> HybridTextEncode
         (int(v.shape[1]) for k, v in state.items() if "token_embedding.weight" in k),
         512,
     )
-    base = ["mamba", "mamba", "mlstm"]
+    # Auto-detect architecture from the checkpoint so v1 AND v2 load exact-match
+    # (hardcoding [mamba,mamba,mlstm]+pre_rms mismapped the v2 backbone — same bug
+    #  class fixed in evaluate_cxr_retrieval.py). mamba blocks carry mixer.A_log;
+    # HybridNorm adds dt_norm/B_norm/C_norm (mamba) + v_norm (mlstm).
+    layer_pattern = []
+    for i in range(num_layers):
+        mixer_keys = [k for k in state if f"lm.layers.{i}.mixer." in k]
+        is_mamba = any("A_log" in k or "conv1d" in k for k in mixer_keys)
+        layer_pattern.append("mamba" if is_mamba else "mlstm")
+    norm_topology = "hybrid" if any(
+        (".dt_norm." in k or ".v_norm." in k or ".B_norm." in k or ".C_norm." in k)
+        for k in state
+    ) else "pre_rms"
+    print(f"  detected layer_pattern={layer_pattern}, norm_topology={norm_topology}")
     cfg = HybridConfig(
         dim=dim, num_layers=num_layers,
-        layer_pattern=[base[i % len(base)] for i in range(num_layers)],
+        layer_pattern=layer_pattern,
+        norm_topology=norm_topology,
         vocab_size=50257, max_position_embeddings=1024,
         state_size=16, conv_size=4, expand_factor=2, head_dim=64,
         use_tfla=True, proj_factor=2, slstm_hidden_dim=dim, slstm_num_heads=4,
