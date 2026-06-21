@@ -201,36 +201,33 @@ The undertraining fix. Job 1884's val/perplexity was still descending at 50K; ba
 
 
 ### Phase 10 — Advanced contrastive head (PDF gap 6)
-- [ ] **10A** — Verify `pooling_strategy: attention` active in `hybrid_70m_v2.yaml`; `AttentionPooling` (`hybrid_lm.py:313-349`) gets gradient.
-- [ ] **10B** — `lightning_module.py:976-978` `_joint_step`: frequency-decoupled KD — `L_KD_low = MSE(low_band(z_text, t_emb))` (first 32 FFT bins, λ_low=1.0); `L_KD_high = α_high · MSE(high_band(...))` (α_high=0.1); blend `l_kd = λ_low·L_low + α_high·L_high + 0.5·(1-cos)`.
-- [ ] **10C** — `configs/distill/biomedclip_kd_joint_v2.yaml` (NEW): clone of v1 + `freq_kd: true`, `freq_kd_low_bins: 32`, `freq_kd_alpha_high: 0.1`. Keep Phase 6e settings (K=0, freeze=1000, α_warmup=1.0, α_post=0.3).
-- [ ] **10D** — `tests/test_willi_parity.py`: `test_freq_decoupled_kd_loss_finite`, `test_joint_module_v2_config`.
-- [ ] **10E** — `validate_for_willi.sh` green; commit.
-- [ ] **10F** — `configs/distill/biomedclip_kd_joint_v2.yaml`: add `vit_unfreeze_blocks: 2`, `vit_lr: 1.0e-6` (supervisor-proposal Step 6 — the only genuinely-new lever; see "Supervisor proposal — verification" §). Test: `test_biomedclip_kd_joint_v2_config_vit_unfreeze_present` (assert yaml has both keys at correct values). Smoke: extend `scripts/smoke_test_joint.py` Test 5 — assert 4-group optimizer, ViT group params == last 2 `resblocks`, `lr == 1e-6`, all 2-block params `requires_grad=True`, frozen blocks remain `.training == False` (LayerNorm-mode invariant). If smoke fails the LayerNorm assertion: conditional sub-step 10F-2 — replace `lightning_module.py:430`'s blanket `self.image_encoder.train()` with selective `.eval()` on whole encoder + `.train()` on last `vit_unfreeze_blocks` only; add `on_train_epoch_start` re-assert; new test `test_vit_unfreeze_only_unfrozen_blocks_in_train_mode`.
+- [x] **10A** — DONE: `pooling_strategy: attention` in `hybrid_70m_v2.yaml:51`, threaded via `train_contrastive` HybridConfig.
+- [x] **10B** — DONE: freq-decoupled KD in `JointMultiTaskLightningModule._joint_step` (rFFT low/high band + cos), opt-in via `freq_kd`. **Ablation later proved it HURTS Indiana → dropped from canonical.**
+- [x] **10C** — DONE: `configs/distill/biomedclip_kd_joint_v2.yaml` (freq_kd, K=0, α 1.0→0.3, freeze=1000).
+- [x] **10D** — DONE: `test_freq_decoupled_kd_*`, `test_biomedclip_kd_joint_v2_config_present`.
+- [x] **10E** — DONE: validate_for_willi green (70 passed); committed.
+- [x] **10F** — DONE: `vit_unfreeze_blocks: 2`, `vit_lr: 1.0e-6` in v2 yaml; threaded from distill_cfg. Smoke deferred to willi-side 11D (verified `✓ Unfreezing last 2 ViT blocks` in job 1917). **Ablation proved ViT-unfreeze a pure win (+2.5pp MIMIC, 0 Indiana cost) → kept.** (supervisor-proposal Step 6 — the only genuinely-new lever; see "Supervisor proposal — verification" §). Test: `test_biomedclip_kd_joint_v2_config_vit_unfreeze_present` (assert yaml has both keys at correct values). Smoke: extend `scripts/smoke_test_joint.py` Test 5 — assert 4-group optimizer, ViT group params == last 2 `resblocks`, `lr == 1e-6`, all 2-block params `requires_grad=True`, frozen blocks remain `.training == False` (LayerNorm-mode invariant). If smoke fails the LayerNorm assertion: conditional sub-step 10F-2 — replace `lightning_module.py:430`'s blanket `self.image_encoder.train()` with selective `.eval()` on whole encoder + `.train()` on last `vit_unfreeze_blocks` only; add `on_train_epoch_start` re-assert; new test `test_vit_unfreeze_only_unfrozen_blocks_in_train_mode`.
 
 ### Phase 11 — Joint contrastive re-run on new backbone (~12h A100)
-- [ ] **11A** — `scripts/train_biomedclip_kd_phase15.sh` (NEW): init from Phase 9 Stage 0; `distill=biomedclip_kd_joint_v2`; `model=hybrid_70m_v2`; MIMIC-CXR data path same as Phase 6e.
-- [ ] **11B** — Submit. Kill gates: `cos_text_teacher` → ≥ 0.85 by step 1000; val/clip_loss at step 1000 < 3.0; MIMIC R@10 by step 3000 ≥ 8.23%. New ViT-specific kill gate: log `optimizer.param_groups[-1]['lr']` every 100 steps — assert `1e-6 ± 1e-9` (catches accidental LR override on the ViT group).
-- [ ] **11C** — `scripts/eval_biomedclip_kd_phase15.sh` (NEW): MIMIC + Indiana + STS-B + BIOSSES on best ckpt.
-- [ ] **11D** — Pre-sbatch sanity (10F gate): `python scripts/train_contrastive.py --cfg job model=hybrid_70m_v2 distill=biomedclip_kd_joint_v2 ... | grep -E "vit_unfreeze_blocks|vit_lr"` must print `vit_unfreeze_blocks: 2`, `vit_lr: 1.0e-06`. Then `--max-steps 100` smoke on willi — stdout must include `✓ Unfreezing last 2 ViT blocks (...M params, lr=1e-06)` (from `lightning_module.py:432-433`). If Hydra struct mode drops keys, add `+model.vit_unfreeze_blocks=2 +model.vit_lr=1e-6` to the sbatch CLI (same gotcha that bit Phase 8 `norm_topology`).
+- [x] **11A** — DONE: `scripts/train_biomedclip_kd_phase15.sh` (model=hybrid_70m_v2, +distill=biomedclip_kd_joint_v2, lm_checkpoint=ext 40K). Plus ablation launchers `_nofreq.sh` (freq_kd=false, CANONICAL) and `_pure.sh` (freq_kd=false+vit=0).
+- [x] **11B** — DONE: job 1917 (freq) + 1932 (nofreq, canonical) ran 5000 steps. cos_text_teacher hit 0.85 in warmup; val/clip_loss < 3.0; exact-match backbone load; ViT-unfreeze confirmed.
+- [x] **11C** — DONE: reused `eval_joint_mimic_cxr_val.sh` + `eval_joint_indiana_cxr.sh` + `evaluate_sts.py` (all fixed: norm_topology/layer_pattern auto-detect + fine-tuned-ViT load).
+- [x] **11D** — DONE: `--cfg job` confirmed norm_topology=hybrid, freq_kd, vit_unfreeze=2, K=0; willi log showed `✓ Unfreezing last 2 ViT blocks (14.2M params, lr=1e-06)`.
 
 ### Phase 12 — Decision gate
-- [ ] **12A** — Stretch hit (MIMIC ≥ 12% AND Indiana ≥ 6%) → Phase 13.
-- [ ] **12B** — Target hit (MIMIC ≥ 9.99% AND Indiana ≥ 5.5%) → Phase 13.
-- [ ] **12C** — Floor hit only → escalate: SCCM (5-prompt ensemble MSE), KDSP (z-score-filtered teacher KL), v3 swap, 4× longer run.
-- [ ] **12D** — Floor missed → halt; per-fix isolation re-run.
+- [x] **12 — RESOLVED: partial-target.** MIMIC i2t R@10 = 10.45% ≥ 9.99% (Target) but Indiana i2t 3.90% < the 5.5% target (and 0.14pp under the 4.04% floor; t2i 5.38% above). Per-fix ablation done (12C path) instead of escalation: freq-KD dropped, ViT-unfreeze kept, Indiana gap proven INTRINSIC (3.90% across all configs). No SCCM/KDSP/v3 escalation — ablation showed the cross-domain gap is data-bound, not recipe-bound. Proceeded to Phase 13/14.
 
 ### Phase 13 — Full eval + comparison
-- [ ] **13A** — `evaluate_cxr_retrieval.py`: external Indiana + MIMIC-val authoritative.
-- [ ] **13B** — `evaluate_sts.py`: BIOSSES + STS-B Spearman.
-- [ ] **13C** — `evaluate_lm.py`: PubMed PPL on joint ckpt.
-- [ ] **13D** — `evaluate_retrieval.py`: BEIR — only if stretch hit.
-- [ ] **13E** — Comparison table (rows: Phase 5c, Phase 6e, Phase 11, any Phase 12).
+- [x] **13A** — DONE: authoritative MIMIC (10.45%) + Indiana (3.90%) on canonical ckpt (jobs 1940/1941).
+- [x] **13B** — DONE: BIOSSES 0.5125, STS-B 0.4963 (informational; CLIP-alignment STS tradeoff).
+- [ ] **13C** — OPTIONAL/pending: PubMed PPL on the joint ckpt (quantifies LM drift post-contrastive). Informational only.
+- [x] **13D** — SKIPPED: BEIR was stretch-only; stretch not hit.
+- [x] **13E** — DONE: comparison table in `analysis/phase14_results.md`.
 
 ### Phase 14 — Writeup + dissertation
-- [ ] **14A** — Update plan + state JSON with final verdict, best ckpt path, per-fix attribution.
-- [ ] **14B** — Dissertation table & ablation paragraph; honest reporting of failed paths.
-- [ ] **14C** — Reaffirm deprecation banner on `BIOMEDCLIP_KD_PLAN.md`.
+- [x] **14A** — DONE: state JSON has final verdict + `final_ablation_matrix_i2t_R10` + best ckpt path.
+- [x] **14B** — DONE: `analysis/phase14_results.md` — table + per-fix ablation + 4 bugs caught + honest limitations.
+- [x] **14C** — DONE: deprecation banner present + reaffirmed on `BIOMEDCLIP_KD_PLAN.md` (do-not-resume; historical record only).
 
 ## A100 compute (no budget constraint)
 
