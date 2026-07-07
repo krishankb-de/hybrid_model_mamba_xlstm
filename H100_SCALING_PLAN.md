@@ -86,18 +86,18 @@ Only makes multi-GPU help retrieval. Single 141GB already gives 128-256 negative
 - [x] **4C** — `test_hybrid_150m_v2_config_and_param_count`: **183.72M actual** (nominal "150M"; untied 50k-vocab embeddings dominate — consistent with the 70M config → 83M convention). Tight band [181,186]M guards arch drift.
 - [x] **4D** — `validate_for_willi.sh` green (72 passed, 9/9 gates); committed.
 
-### Phase 5 — Stage-0 pretrain 150M v2 on H100 (backbone quality)
-- [ ] **5A** — `scripts/train_stage0_150m_h100.sh` (NEW): `model=hybrid_150m_v2 trainer=h100_single_gpu`, bs=32-48, accum→eff ~128-256, `max_steps` for ~3B tokens (~90-120K), `warmup=2000`, WSD (auto-reshapes). `aisc-batch` 7-day.
-- [ ] **5B** — Verify `train_stage0_distill.py` threads `norm_topology` (fixed 9F) + no hardcoded dim=512.
-- [ ] **5C** — Submit on H100. KD teacher BioMedLM 2.7B (primary); fallback larger teacher (BioGPT-Large/Meditron-7B/OpenBioLLM-8B) if PPL misses. Optional KD `alpha` {0.3,0.5} sweep.
-- [ ] **5D** — Gate: `eval_stage0_lm.sh` (auto-detect config; locked protocol). Target PPL ≤ 13.76.
+### Phase 5 — Stage-0 pretrain 150M v2 on H100 (backbone quality) ⏳ SCRIPT READY — run pending H100 box
+- [x] **5A** — `scripts/train_stage0_150m_h100.sh` (wrapper over `train_stage0_h100.sh`; `model=hybrid_150m_v2`, bs=48/accum=1, `max_steps=120000` ~3B tokens, `warmup=2000`, WSD, aisc-batch 4-day).
+- [ ] **5B** — (H100) Verify `train_stage0_distill.py` threads `norm_topology` (fixed 9F) + no hardcoded dim=512.
+- [ ] **5C** — (H100) Submit. KD teacher BioMedLM 2.7B (primary); fallback larger teacher (BioGPT-Large/Meditron-7B/OpenBioLLM-8B) if PPL misses. Optional KD `alpha` {0.3,0.5} sweep.
+- [ ] **5D** — (H100) Gate: `eval_h100.sh MODE=ppl` / `eval_stage0_lm.sh` (auto-detect; locked protocol). Target PPL ≤ 13.76.
 
-### Phase 6 — Contrastive batch scaling (MIMIC-only, isolate lever) → stretch MIMIC
+### Phase 6 — Contrastive batch scaling (MIMIC-only, isolate lever) → stretch MIMIC ⏳ SCRIPT READY — run pending H100 box
 Hold canonical recipe (`biomedclip_kd_joint_v2`: freq_kd=false, vit_unfreeze=2, moco=0). Change ONLY batch + backbone.
-- [ ] **6A** — `scripts/train_biomedclip_kd_150m_h100.sh` (NEW): `model=hybrid_150m_v2`, `lm_checkpoint`=Phase-5, `batch_size` sweep {64,128,256}, `accumulate_grad_batches=1`.
-- [ ] **6B** — LR √-scale for batch: `backbone_lr 1e-5→~2e-5`, `head_lr 3e-4→~6e-4` at bs=128 (tune). Log embedding mean/std + cosine histogram (collapse watch).
-- [ ] **6C** — Submit. Kill gates: `cos_text_teacher≥0.85` by 1k; `val/clip_loss<3.0`; MIMIC R@10 ≥ 10.45% by 3k.
-- [ ] **6D** — Gate: MIMIC i2t R@10 (`evaluate_cxr_retrieval.py`). Target ≥12%.
+- [x] **6A** — `scripts/train_biomedclip_kd_150m_h100.sh` (wrapper; `model=hybrid_150m_v2`, `lm_checkpoint`=Phase-5, `batch_size` sweep {64,128,256} via env, `accum=1`, LR √-scaled for bs=128).
+- [ ] **6B** — (H100) LR √-scale per batch: `backbone_lr→~2e-5`, `head_lr→~6e-4` at bs=128 (re-scale for other bs). Log embedding mean/std + cosine histogram (collapse watch).
+- [ ] **6C** — (H100) Submit. Kill gates: `cos_text_teacher≥0.85` by 1k; `val/clip_loss<3.0`; MIMIC R@10 ≥ 10.45% by 3k.
+- [ ] **6D** — (H100) Gate: MIMIC i2t R@10 (`eval_h100.sh MODE=retrieval` / `evaluate_cxr_retrieval.py`). Target ≥12%.
 
 ### Phase 7 — Multi-source CXR data diversification → Indiana lever
 Only proven Indiana lever. **IU-Xray EXCLUDED from training (= Indiana eval; zero-leakage).**

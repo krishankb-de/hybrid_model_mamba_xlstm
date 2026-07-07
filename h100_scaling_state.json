@@ -89,12 +89,14 @@
       }
     },
     "phase5_stage0_150m": {
-      "status": "pending",
-      "goal": "Stage-0 pretrain 150M v2 on H100 (~3B tokens Chinchilla, bs=32-48, WSD). Gate PPL <= 13.76. BioMedLM teacher primary + fallback."
+      "status": "script_ready_run_pending_h100",
+      "goal": "Stage-0 pretrain 150M v2 on H100 (~3B tokens Chinchilla, bs=48, WSD). Gate PPL <= 13.76. BioMedLM teacher primary + fallback.",
+      "launch_script": "scripts/train_stage0_150m_h100.sh (aisc-batch, gpu:h100:1, 4-day, MAX_STEPS=120000 BATCH_SIZE=48 overridable)"
     },
     "phase6_contrastive_batch_scale": {
-      "status": "pending",
-      "goal": "Canonical recipe held; batch sweep {64,128,256}, accum=1, LR sqrt-scaled. Gate MIMIC i2t R@10 >= 12% (stretch)."
+      "status": "script_ready_run_pending_h100",
+      "goal": "Canonical recipe held; batch sweep {64,128,256}, accum=1, LR sqrt-scaled. Gate MIMIC i2t R@10 >= 12% (stretch).",
+      "launch_script": "scripts/train_biomedclip_kd_150m_h100.sh (aisc-batch, gpu:h100:1, BATCH_SIZE={64,128,256} overridable; needs Phase-5 stage0_model_only.pt)"
     },
     "phase7_data_diversification": {
       "status": "pending",
@@ -114,6 +116,7 @@
     "2026-07-07: Plan approved (/Users/krish/.claude/plans/i-want-to-implement-twinkling-ullman.md). Phase 1 started on branch h100_scaling. 3 Explore agents mapped infra/contrastive/model layers: key findings — CLIP loss in-batch only (no all_gather), Stage-0 undertrained (40K/117K), 150M/350M configs lack v2 wins. 4 user decisions locked (150M v2, backbone+MIMIC priority, diverse CXR w/ IU-Xray excluded, single-H100 first + 2-4 node file). 7 unresolved Qs answered (aisc-batch/shortrun partitions, gpu:h100:X, py>=3.10, BioMedLM teacher primary, max_pos=1024, Phase 3 secondary).",
     "2026-07-07: Phase 1 COMPLETE. H100_SCALING_PLAN.md + h100_scaling_state.json created; .gitignore allowlisted both; CLAUDE.md Session Bootstrap repointed to H100 plan (refactor plan -> completed-historical). validate_for_willi.sh green (69 passed, 5 skipped, 9/9 gates — no regression, doc-only). Committed on branch h100_scaling. current_phase -> phase2_h100_infra.",
     "2026-07-07: Phase 2 (H100 infra) LOCAL COMPLETE + committed. configs/trainer/h100_single_gpu.yaml (bf16, devices=1, compile=true, accum=1) + h100_multi_ddp.yaml (ddp, devices=-1, find_unused_parameters=true — the 2-4 node file). SLURM templates: train_stage0_h100.sh (aisc-batch 7-day, bs=64 accum=1, gc off), train_biomedclip_kd_h100.sh (aisc-shortrun, bs=128 = the H100 in-batch-negative lever, LR sqrt-scaled 32->128), eval_h100.sh (ppl/retrieval modes) — all ENV-parametrized (SCRATCH_ROOT/VENV_ACTIVATE) since aisc scratch/env paths TBD. flash-attn kept opt-in (not forced into base reqs — needs nvcc, breaks CPU/parity; ViT-only marginal). test_h100_trainer_configs_resolve added (2 cases green). validate_for_willi green 9/9 gates. 2D (py>=3.10 stack verify) + 2G (H100 smoke) deferred to physical H100 box. current_phase -> phase4_150m_v2_config (Phase 3 all_gather deferred post-Phase-6 per plan).",
-    "2026-07-07: Phase 4 (150M v2 config) COMPLETE + committed. configs/model/hybrid_150m_v2.yaml: dim=768, 12 layers, layer_pattern [m,m,m,m,L,L,L,m,m,m,m,m] (3 mLSTM centered = 25% v2-parity ratio), norm_topology=hybrid, pooling=attention, max_pos=1024, lr=4.0e-4 (sqrt-width scaled, conservative), warmup=2000. Built + counted: 183.72M params (nominal '150M' — untied 50k embeddings ~77M dominate, same convention as 70M config -> 83M). test_hybrid_150m_v2_config_and_param_count added (asserts v2 invariants + tight [181,186]M band). validate_for_willi green 72 passed 9/9 gates. current_phase -> phase5_stage0_150m. NOTE: Phases 5-8 need the physical H100 (training runs); Phase 3 (all_gather) local but deferred post-Phase-6 per user."
+    "2026-07-07: Phase 4 (150M v2 config) COMPLETE + committed. configs/model/hybrid_150m_v2.yaml: dim=768, 12 layers, layer_pattern [m,m,m,m,L,L,L,m,m,m,m,m] (3 mLSTM centered = 25% v2-parity ratio), norm_topology=hybrid, pooling=attention, max_pos=1024, lr=4.0e-4 (sqrt-width scaled, conservative), warmup=2000. Built + counted: 183.72M params (nominal '150M' — untied 50k embeddings ~77M dominate, same convention as 70M config -> 83M). test_hybrid_150m_v2_config_and_param_count added (asserts v2 invariants + tight [181,186]M band). validate_for_willi green 72 passed 9/9 gates. current_phase -> phase5_stage0_150m. NOTE: Phases 5-8 need the physical H100 (training runs); Phase 3 (all_gather) local but deferred post-Phase-6 per user.",
+    "2026-07-07: 150M launch scripts created (Phase 5A/6A local prep): scripts/train_stage0_150m_h100.sh + train_biomedclip_kd_150m_h100.sh — thin wrappers over the generic H100 templates with 150M defaults + correct SBATCH walltime/mem (Stage-0 aisc-batch 4-day, contrastive aisc-batch 1-day). Runs are server-side. LOCAL SCAFFOLDING COMPLETE through Phase 4 + all launch scripts. Next action is on the H100 box: env setup (py>=3.10), Phase 2 2D/2G smoke, then sbatch train_stage0_150m_h100.sh."
   ]
 }
