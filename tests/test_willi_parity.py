@@ -241,6 +241,44 @@ def test_h100_trainer_configs_resolve(trainer_name, expected_strategy, expected_
             "h100_multi_ddp: find_unused_parameters must be true (ViT-unfreeze/KD leave frozen params)"
 
 
+# ── 4c. hybrid_150m_v2 config + param count (Phase 4) ─────────────────────────
+
+@pytest.mark.willi_parity
+def test_hybrid_150m_v2_config_and_param_count():
+    """Phase 4: the 150M v2 backbone ports every v2 arch win and builds to the
+    expected size. Param count verified explicitly (count before assuming a
+    mismatch) — ~183.72M actual (nominal '150M'; untied 50k-vocab embeddings
+    dominate, consistent with the 70M config → 83M naming convention)."""
+    import dataclasses
+    from omegaconf import OmegaConf
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    raw = OmegaConf.to_container(
+        OmegaConf.load(REPO_ROOT / "configs" / "model" / "hybrid_150m_v2.yaml"),
+        resolve=True,
+    )
+    # v2 architectural invariants
+    assert raw["dim"] == 768, f"dim={raw['dim']} != 768"
+    assert raw["num_layers"] == 12, f"num_layers={raw['num_layers']} != 12"
+    assert raw["num_heads"] == 12 and raw["head_dim"] == 64
+    assert raw["norm_topology"] == "hybrid", "150m v2 must use HybridNorm"
+    assert raw["pooling_strategy"] == "attention"
+    assert raw["max_position_embeddings"] == 1024, "v2 parity: max_pos=1024"
+    pattern = list(raw["layer_pattern"])
+    assert len(pattern) == 12, f"layer_pattern len={len(pattern)} != 12"
+    assert pattern.count("mlstm") == 3, "centered 3-mLSTM (25% ratio) v2 analogue"
+
+    fields = {f.name for f in dataclasses.fields(HybridConfig)}
+    cfg = HybridConfig(**{k: v for k, v in raw.items() if k in fields})
+    model = HybridLanguageModel(cfg)
+    n_params = sum(p.numel() for p in model.parameters())
+    assert 181e6 < n_params < 186e6, (
+        f"hybrid_150m_v2 param count {n_params/1e6:.2f}M outside [181, 186]M — "
+        f"arch drift; expected ~183.72M"
+    )
+
+
 # ── 5. Checkpoint prefix stripping roundtrip ──────────────────────────────────
 
 @pytest.mark.willi_parity

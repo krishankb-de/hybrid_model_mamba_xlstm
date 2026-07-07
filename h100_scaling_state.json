@@ -1,5 +1,5 @@
 {
-  "current_phase": "phase4_150m_v2_config",
+  "current_phase": "phase5_stage0_150m",
   "last_updated": "2026-07-07T00:00:00+0000",
   "builds_on": "HYBRID_ARCH_REFACTOR_PLAN.md + hybrid_arch_refactor_state.json (COMPLETE — MIMIC i2t R@10 8.23%->10.45% Target tier; Indiana 3.90% intrinsic; Stage-0 PPL 15.62). That plan is finished; historical reference only.",
   "primary_thesis": "Migrate the completed A100-40GB pipeline to H100 (94/141GB) and use the headroom on the three A100-era ceilings: (1) contrastive negatives capped at ~31 (in-batch only, no all_gather, moco=0) -> scale true per-step batch to 128-256; (2) Stage-0 undertrained (bs=8/40GB, 40K of ~117K steps) -> finish it; (3) 70M cap -> port v2 arch to 150M. Plus multi-source CXR data (IU-Xray excluded) for the intrinsic Indiana gap. Clean per-lever attribution held throughout.",
@@ -77,8 +77,16 @@
       "goal": "Grad-preserving all_gather in CLIP loss (gated world_size>1). Deferred until after Phase 6 single-H100 MIMIC win."
     },
     "phase4_150m_v2_config": {
-      "status": "pending",
-      "goal": "hybrid_150m_v2.yaml (dim=768, 12 layers, [m,m,m,m,L,L,L,m,m,m,m,m], hybrid norm, attention pool). Param-count assert ~150M."
+      "status": "complete",
+      "goal": "hybrid_150m_v2.yaml (dim=768, 12 layers, [m,m,m,m,L,L,L,m,m,m,m,m], hybrid norm, attention pool). Param-count verified.",
+      "actual_param_count": "183.72M (nominal '150M'; untied 50k-vocab embeddings ~77M dominate — consistent with 70M config -> 83M naming convention)",
+      "learning_rate": "4.0e-4 (sqrt-width scaled from 6e-4; tunable to 5e-4)",
+      "tasks": {
+        "4A_config": "done",
+        "4B_layer_pattern": "done — [m,m,m,m,L,L,L,m,m,m,m,m] 3 mLSTM centered (25% ratio)",
+        "4C_parity_test_param_count": "done — test_hybrid_150m_v2_config_and_param_count, tight band [181,186]M",
+        "4D_validate_commit": "done — 72 passed, 9/9 gates"
+      }
     },
     "phase5_stage0_150m": {
       "status": "pending",
@@ -99,12 +107,13 @@
   },
   "open_questions": {
     "chexpert_vindr_template_wording": "Finalize label->prompt template in Phase 7 (CheXzero-style start; iterate if in-domain MIMIC regresses).",
-    "lr_150m_exact": "4e-4 vs 5e-4 — pick in Phase 4, confirm via Phase-5 loss curve.",
+    "lr_150m_exact": "RESOLVED 4.0e-4 (conservative sqrt-width scale); revisit only if Phase-5 loss slow.",
     "willi_retirement": "If willi/A100 retired post-migration, drop py3.9 guards + validate_for_willi.sh."
   },
   "notes": [
     "2026-07-07: Plan approved (/Users/krish/.claude/plans/i-want-to-implement-twinkling-ullman.md). Phase 1 started on branch h100_scaling. 3 Explore agents mapped infra/contrastive/model layers: key findings — CLIP loss in-batch only (no all_gather), Stage-0 undertrained (40K/117K), 150M/350M configs lack v2 wins. 4 user decisions locked (150M v2, backbone+MIMIC priority, diverse CXR w/ IU-Xray excluded, single-H100 first + 2-4 node file). 7 unresolved Qs answered (aisc-batch/shortrun partitions, gpu:h100:X, py>=3.10, BioMedLM teacher primary, max_pos=1024, Phase 3 secondary).",
     "2026-07-07: Phase 1 COMPLETE. H100_SCALING_PLAN.md + h100_scaling_state.json created; .gitignore allowlisted both; CLAUDE.md Session Bootstrap repointed to H100 plan (refactor plan -> completed-historical). validate_for_willi.sh green (69 passed, 5 skipped, 9/9 gates — no regression, doc-only). Committed on branch h100_scaling. current_phase -> phase2_h100_infra.",
-    "2026-07-07: Phase 2 (H100 infra) LOCAL COMPLETE + committed. configs/trainer/h100_single_gpu.yaml (bf16, devices=1, compile=true, accum=1) + h100_multi_ddp.yaml (ddp, devices=-1, find_unused_parameters=true — the 2-4 node file). SLURM templates: train_stage0_h100.sh (aisc-batch 7-day, bs=64 accum=1, gc off), train_biomedclip_kd_h100.sh (aisc-shortrun, bs=128 = the H100 in-batch-negative lever, LR sqrt-scaled 32->128), eval_h100.sh (ppl/retrieval modes) — all ENV-parametrized (SCRATCH_ROOT/VENV_ACTIVATE) since aisc scratch/env paths TBD. flash-attn kept opt-in (not forced into base reqs — needs nvcc, breaks CPU/parity; ViT-only marginal). test_h100_trainer_configs_resolve added (2 cases green). validate_for_willi green 9/9 gates. 2D (py>=3.10 stack verify) + 2G (H100 smoke) deferred to physical H100 box. current_phase -> phase4_150m_v2_config (Phase 3 all_gather deferred post-Phase-6 per plan)."
+    "2026-07-07: Phase 2 (H100 infra) LOCAL COMPLETE + committed. configs/trainer/h100_single_gpu.yaml (bf16, devices=1, compile=true, accum=1) + h100_multi_ddp.yaml (ddp, devices=-1, find_unused_parameters=true — the 2-4 node file). SLURM templates: train_stage0_h100.sh (aisc-batch 7-day, bs=64 accum=1, gc off), train_biomedclip_kd_h100.sh (aisc-shortrun, bs=128 = the H100 in-batch-negative lever, LR sqrt-scaled 32->128), eval_h100.sh (ppl/retrieval modes) — all ENV-parametrized (SCRATCH_ROOT/VENV_ACTIVATE) since aisc scratch/env paths TBD. flash-attn kept opt-in (not forced into base reqs — needs nvcc, breaks CPU/parity; ViT-only marginal). test_h100_trainer_configs_resolve added (2 cases green). validate_for_willi green 9/9 gates. 2D (py>=3.10 stack verify) + 2G (H100 smoke) deferred to physical H100 box. current_phase -> phase4_150m_v2_config (Phase 3 all_gather deferred post-Phase-6 per plan).",
+    "2026-07-07: Phase 4 (150M v2 config) COMPLETE + committed. configs/model/hybrid_150m_v2.yaml: dim=768, 12 layers, layer_pattern [m,m,m,m,L,L,L,m,m,m,m,m] (3 mLSTM centered = 25% v2-parity ratio), norm_topology=hybrid, pooling=attention, max_pos=1024, lr=4.0e-4 (sqrt-width scaled, conservative), warmup=2000. Built + counted: 183.72M params (nominal '150M' — untied 50k embeddings ~77M dominate, same convention as 70M config -> 83M). test_hybrid_150m_v2_config_and_param_count added (asserts v2 invariants + tight [181,186]M band). validate_for_willi green 72 passed 9/9 gates. current_phase -> phase5_stage0_150m. NOTE: Phases 5-8 need the physical H100 (training runs); Phase 3 (all_gather) local but deferred post-Phase-6 per user."
   ]
 }

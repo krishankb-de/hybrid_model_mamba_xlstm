@@ -1,0 +1,69 @@
+# 150M hybrid v2 — H100 scale-up of the canonical 70M v2 backbone.
+# Ports every v2 architectural win to 150M (H100_SCALING_PLAN.md Phase 4):
+#   - norm_topology=hybrid (Q/K/V + Δ/B/C pre-norm, FFN post-norm, first block pre-norm)
+#   - pooling_strategy=attention (contrastive encoder)
+#   - mLSTM exp-gate stabilization (soft-cap=15, i-bias=-10) — from HybridConfig defaults,
+#     same as hybrid_70m_v2 (not listed here on purpose; defaults are the desired values).
+# Layer pattern: 3 mLSTM centered over 12 layers (positions 4,5,6) = 25% mLSTM ratio,
+#   the 150M analogue of the 70M v2 [m,m,m,L,L,m,m,m] middle placement.
+# Dims from hybrid_150m.yaml (dim=768, 12 layers, 12 heads); max_pos=1024 for v2 parity
+#   (PubMed abstracts ≤512, CXR reports ≤256 — 1024 is ample; keeps Stage-0 comparable).
+
+model_type: "hybrid_lm"
+
+# Architecture
+vocab_size: 50257
+dim: 768
+num_layers: 12
+layer_pattern: ["mamba", "mamba", "mamba", "mamba", "mlstm", "mlstm", "mlstm", "mamba", "mamba", "mamba", "mamba", "mamba"]
+
+# Mamba parameters
+state_size: 16
+conv_size: 4
+expand_factor: 2
+dt_rank: null          # Auto: 768 / 16 = 48
+use_fast_path: true
+
+# mLSTM parameters
+head_dim: 64           # keep 64 (matrix state ∝ head_dim²); num_heads scales instead
+num_heads: 12          # 768 / 64 = 12
+use_tfla: true
+proj_factor: 2
+
+# sLSTM parameters (unused by this pattern; kept for config completeness)
+slstm_hidden_dim: 768
+slstm_num_heads: 4
+use_exponential_gate: true
+
+# Shared parameters
+norm_type: "rms"
+use_mlp: true
+mlp_ratio: 4.0
+
+# Training parameters
+max_position_embeddings: 1024
+dropout: 0.1
+initializer_range: 0.02
+
+# Generation parameters
+use_cache: true
+tie_word_embeddings: false
+
+use_gradient_checkpointing: false
+proj_head_dropout: 0.1
+norm_topology: hybrid
+pooling_strategy: attention
+
+# Optimization
+# LR √-width-scaled from the 70M's 6e-4 (sqrt(512/768)≈0.82 → ~4.9e-4). Start
+# conservative at 4.0e-4 (fresh 150M pretrain + mLSTM gate sensitivity); bump to
+# 5e-4 if the Stage-0 loss curve descends slowly. warmup_steps 1000→2000 for the
+# larger model. max_steps here is a fallback; the Phase-5 SLURM script sets the
+# real 150M Chinchilla target via trainer.max_steps (~90-120K, ~3B tokens).
+learning_rate: 4.0e-4
+weight_decay: 0.1
+warmup_steps: 2000
+max_steps: 90000
+gradient_clip_val: 1.0
+
+distill: null

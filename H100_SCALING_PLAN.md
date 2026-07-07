@@ -4,7 +4,7 @@
 > **Builds on the COMPLETED `HYBRID_ARCH_REFACTOR_PLAN.md`** (broke the MIMIC ceiling 8.23%→10.45% i2t R@10). That plan is finished — historical reference only.
 > Full approved plan: `/Users/krish/.claude/plans/i-want-to-implement-twinkling-ullman.md`.
 >
-> **Current phase: Phase 4 — 150M v2 config** (Phase 2 local-complete; Phase 3 deferred post-Phase-6).
+> **Current phase: Phase 5 — Stage-0 150M pretrain** (H100 box; local scaffolding through Phase 4 done; Phase 3 deferred post-Phase-6).
 
 ## Context
 
@@ -79,12 +79,12 @@ Only makes multi-GPU help retrieval. Single 141GB already gives 128-256 negative
 - [ ] **3B** — Test: world_size=1 numerical invariance; gather shape == world_size×B.
 - [ ] **3C** — `validate_for_willi.sh` green; commit.
 
-### Phase 4 — 150M v2 architecture config
+### Phase 4 — 150M v2 architecture config ✅ COMPLETE
 `HybridConfig` supports all knobs; `create_hybrid_blocks` handles any pattern — config-only + tests.
-- [ ] **4A** — `configs/model/hybrid_150m_v2.yaml` (NEW): `dim=768`, `num_layers=12`, `head_dim=64`, `num_heads=12`, `norm_topology=hybrid`, `pooling_strategy=attention`, mLSTM knobs (`gate_soft_cap=15`, bias `-10/0`), `max_position_embeddings=1024`, `gradient_clip_val=1.0`, `learning_rate≈4-5e-4`, `warmup_steps=2000`.
-- [ ] **4B** — `layer_pattern`: `[m,m,m,m,L,L,L,m,m,m,m,m]` (3 mLSTM centered = 25% = v2 parity).
-- [ ] **4C** — `tests/test_willi_parity.py`: parametrize `+hybrid_150m_v2`; assert param count ~150M (verify before assuming mismatch).
-- [ ] **4D** — `validate_for_willi.sh` green; commit.
+- [x] **4A** — `configs/model/hybrid_150m_v2.yaml`: `dim=768`, `num_layers=12`, `head_dim=64`, `num_heads=12`, `norm_topology=hybrid`, `pooling_strategy=attention`, `max_position_embeddings=1024`, `learning_rate=4.0e-4` (√-width scaled; tunable→5e-4), `warmup_steps=2000`. mLSTM stabilization knobs via HybridConfig defaults (as 70m_v2 does).
+- [x] **4B** — `layer_pattern`: `[m,m,m,m,L,L,L,m,m,m,m,m]` (3 mLSTM centered = 25% = v2 parity).
+- [x] **4C** — `test_hybrid_150m_v2_config_and_param_count`: **183.72M actual** (nominal "150M"; untied 50k-vocab embeddings dominate — consistent with the 70M config → 83M convention). Tight band [181,186]M guards arch drift.
+- [x] **4D** — `validate_for_willi.sh` green (72 passed, 9/9 gates); committed.
 
 ### Phase 5 — Stage-0 pretrain 150M v2 on H100 (backbone quality)
 - [ ] **5A** — `scripts/train_stage0_150m_h100.sh` (NEW): `model=hybrid_150m_v2 trainer=h100_single_gpu`, bs=32-48, accum→eff ~128-256, `max_steps` for ~3B tokens (~90-120K), `warmup=2000`, WSD (auto-reshapes). `aisc-batch` 7-day.
@@ -137,5 +137,5 @@ Only proven Indiana lever. **IU-Xray EXCLUDED from training (= Indiana eval; zer
 
 ## Unresolved questions
 - CheXpert/VinDr label→prompt template wording — finalize in Phase 7 (start CheXzero-style; iterate if MIMIC regresses).
-- 150M `learning_rate` exact value (4e-4 vs 5e-4) — pick in Phase 4, confirm via Phase-5 loss curve.
+- 150M `learning_rate`: **4.0e-4 chosen** (conservative √-width scale; bump to 5e-4 if Phase-5 loss descends slowly).
 - Whether willi/A100 remains a target after H100 migration (if retired, drop py3.9 guards + `validate_for_willi.sh`).
