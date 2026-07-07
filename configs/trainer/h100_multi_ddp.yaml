@@ -1,0 +1,46 @@
+# H100 multi-GPU (DDP) trainer configuration — 2-4 (up to 8) H100 node.
+# Clone of gpu_ddp.yaml, tuned for H100 + this project's contrastive pipeline.
+#
+# IMPORTANT: multi-GPU only INCREASES contrastive negatives if the CLIP loss gathers
+# features across ranks. That all_gather is added in Phase 3 (H100_SCALING_PLAN.md).
+# Until Phase 3 lands, DDP here scales throughput / effective batch for Stage-0 LM
+# pretraining but does NOT add in-batch negatives for the retrieval loss.
+#
+# find_unused_parameters=true: the joint contrastive module leaves some parameters
+# unused per step (frozen ViT blocks when vit_unfreeze < all, KD projection paths),
+# which DDP with find_unused_parameters=false would raise on.
+
+# Hardware
+accelerator: "gpu"
+devices: -1                    # all GPUs on the node (--gres=gpu:h100:X)
+precision: "bf16-mixed"
+strategy: "ddp"
+
+# DDP specific
+sync_batchnorm: true
+find_unused_parameters: true   # ViT-unfreeze / KD paths leave frozen params
+
+# Training loop
+max_epochs: null
+max_steps: 100000
+val_check_interval: 5000
+check_val_every_n_epoch: null
+log_every_n_steps: 100
+
+# Gradient accumulation — accum=1; scale per-GPU batch + GPU count instead.
+accumulate_grad_batches: 1
+
+# Checkpointing
+enable_checkpointing: true
+default_root_dir: "${output_dir}"
+
+# Logging
+enable_progress_bar: true
+enable_model_summary: true
+
+# Performance
+num_sanity_val_steps: 2
+detect_anomaly: false
+
+# Profiling
+profiler: null

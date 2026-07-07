@@ -1,5 +1,5 @@
 {
-  "current_phase": "phase2_h100_infra",
+  "current_phase": "phase4_150m_v2_config",
   "last_updated": "2026-07-07T00:00:00+0000",
   "builds_on": "HYBRID_ARCH_REFACTOR_PLAN.md + hybrid_arch_refactor_state.json (COMPLETE — MIMIC i2t R@10 8.23%->10.45% Target tier; Indiana 3.90% intrinsic; Stage-0 PPL 15.62). That plan is finished; historical reference only.",
   "primary_thesis": "Migrate the completed A100-40GB pipeline to H100 (94/141GB) and use the headroom on the three A100-era ceilings: (1) contrastive negatives capped at ~31 (in-batch only, no all_gather, moco=0) -> scale true per-step batch to 128-256; (2) Stage-0 undertrained (bs=8/40GB, 40K of ~117K steps) -> finish it; (3) 70M cap -> port v2 arch to 150M. Plus multi-source CXR data (IU-Xray excluded) for the intrinsic Indiana gap. Clean per-lever attribution held throughout.",
@@ -59,8 +59,18 @@
       }
     },
     "phase2_h100_infra": {
-      "status": "pending",
-      "goal": "H100 trainer configs (single-GPU primary + 2-4 node DDP file), SLURM templates (aisc-batch/shortrun), py>=3.10 env verify, parity tests, H100 smoke."
+      "status": "local_complete_server_pending",
+      "goal": "H100 trainer configs (single-GPU primary + 2-4 node DDP file), SLURM templates (aisc-batch/shortrun), py>=3.10 env verify, parity tests, H100 smoke.",
+      "tasks": {
+        "2A_h100_single_gpu_yaml": "done",
+        "2B_h100_multi_ddp_yaml": "done",
+        "2C_slurm_templates": "done — train_stage0_h100.sh / train_biomedclip_kd_h100.sh / eval_h100.sh (ENV-parametrized)",
+        "2D_py310_env_verify": "pending_h100_box",
+        "2E_flash_attn": "done — documented opt-in (not forced into base reqs)",
+        "2F_parity_tests": "done — test_h100_trainer_configs_resolve (2 cases green)",
+        "2G_h100_smoke": "pending_h100_box",
+        "2H_validate_commit": "done — validate green 9/9 gates"
+      }
     },
     "phase3_distributed_negatives": {
       "status": "pending_secondary",
@@ -94,6 +104,7 @@
   },
   "notes": [
     "2026-07-07: Plan approved (/Users/krish/.claude/plans/i-want-to-implement-twinkling-ullman.md). Phase 1 started on branch h100_scaling. 3 Explore agents mapped infra/contrastive/model layers: key findings — CLIP loss in-batch only (no all_gather), Stage-0 undertrained (40K/117K), 150M/350M configs lack v2 wins. 4 user decisions locked (150M v2, backbone+MIMIC priority, diverse CXR w/ IU-Xray excluded, single-H100 first + 2-4 node file). 7 unresolved Qs answered (aisc-batch/shortrun partitions, gpu:h100:X, py>=3.10, BioMedLM teacher primary, max_pos=1024, Phase 3 secondary).",
-    "2026-07-07: Phase 1 COMPLETE. H100_SCALING_PLAN.md + h100_scaling_state.json created; .gitignore allowlisted both; CLAUDE.md Session Bootstrap repointed to H100 plan (refactor plan -> completed-historical). validate_for_willi.sh green (69 passed, 5 skipped, 9/9 gates — no regression, doc-only). Committed on branch h100_scaling. current_phase -> phase2_h100_infra."
+    "2026-07-07: Phase 1 COMPLETE. H100_SCALING_PLAN.md + h100_scaling_state.json created; .gitignore allowlisted both; CLAUDE.md Session Bootstrap repointed to H100 plan (refactor plan -> completed-historical). validate_for_willi.sh green (69 passed, 5 skipped, 9/9 gates — no regression, doc-only). Committed on branch h100_scaling. current_phase -> phase2_h100_infra.",
+    "2026-07-07: Phase 2 (H100 infra) LOCAL COMPLETE + committed. configs/trainer/h100_single_gpu.yaml (bf16, devices=1, compile=true, accum=1) + h100_multi_ddp.yaml (ddp, devices=-1, find_unused_parameters=true — the 2-4 node file). SLURM templates: train_stage0_h100.sh (aisc-batch 7-day, bs=64 accum=1, gc off), train_biomedclip_kd_h100.sh (aisc-shortrun, bs=128 = the H100 in-batch-negative lever, LR sqrt-scaled 32->128), eval_h100.sh (ppl/retrieval modes) — all ENV-parametrized (SCRATCH_ROOT/VENV_ACTIVATE) since aisc scratch/env paths TBD. flash-attn kept opt-in (not forced into base reqs — needs nvcc, breaks CPU/parity; ViT-only marginal). test_h100_trainer_configs_resolve added (2 cases green). validate_for_willi green 9/9 gates. 2D (py>=3.10 stack verify) + 2G (H100 smoke) deferred to physical H100 box. current_phase -> phase4_150m_v2_config (Phase 3 all_gather deferred post-Phase-6 per plan)."
   ]
 }

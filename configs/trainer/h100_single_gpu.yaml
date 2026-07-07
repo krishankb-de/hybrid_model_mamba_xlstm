@@ -1,0 +1,54 @@
+# H100 single-GPU trainer configuration
+# Tuned for a single NVIDIA H100 (94GB NVL / 141GB H200-class) with bf16 mixed precision.
+# Successor to a100_single_gpu.yaml — the large VRAM removes the 40GB batch/checkpointing
+# compromises that constrained the A100 campaign.
+#
+# Key differences vs a100_single_gpu.yaml:
+# - compile_model=true by default: H100 (sm_90) benefits from torch.compile and has the
+#   VRAM headroom the A100 lacked. NOTE: override to false for the Stage-0 KD / doc-boundary
+#   segmented path (data-dependent cu_seqlens loop → graph breaks). The SLURM scripts do this.
+# - accumulate_grad_batches=1: on H100 we want the TRUE per-step batch large (real in-batch
+#   contrastive negatives — grad-accum does NOT add negatives). Scale dataset.batch_size up
+#   instead of accumulating.
+# - gradient checkpointing not needed for <=150M models at this VRAM (set per-script).
+
+# Hardware
+accelerator: "gpu"
+devices: 1
+precision: "bf16-mixed"     # H100 Tensor Core bf16 (same dynamic range as fp32)
+strategy: "auto"
+
+# Compilation — H100 sm_90; default ON. Override false for Stage-0/segmented paths.
+compile_model: true
+
+# Training loop
+max_epochs: 1                # Override per run (max_steps usually drives)
+max_steps: 10000
+val_check_interval: 500
+check_val_every_n_epoch: null
+log_every_n_steps: 25
+
+# Batching — H100 headroom: prefer large dataset.batch_size at accum=1 (true negatives).
+# effective_batch = batch_size × accumulate_grad_batches
+accumulate_grad_batches: 1
+
+# Checkpointing
+enable_checkpointing: true
+default_root_dir: "${output_dir}"
+
+# Logging
+enable_progress_bar: true
+enable_model_summary: true
+
+# Performance
+num_sanity_val_steps: 2
+detect_anomaly: false
+track_grad_norm: -1
+
+# Profiling (disable for production training)
+profiler: null
+
+# Limits (set to 1.0 for full training)
+limit_train_batches: 1.0
+limit_val_batches: 1.0
+limit_test_batches: 1.0

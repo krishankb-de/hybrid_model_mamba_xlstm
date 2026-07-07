@@ -198,6 +198,49 @@ def test_hydra_config_resolves_70m_invariants(model_name: str):
         f"{model_name}: dataset.max_length ({dataset_max}) > model.max_position_embeddings ({model_max})"
 
 
+# ── 4b. H100 trainer config invariants (Phase 2) ──────────────────────────────
+
+@pytest.mark.willi_parity
+@pytest.mark.parametrize("trainer_name,expected_strategy,expected_devices", [
+    ("h100_single_gpu", "auto", 1),
+    ("h100_multi_ddp", "ddp", -1),
+])
+def test_h100_trainer_configs_resolve(trainer_name, expected_strategy, expected_devices):
+    """H100 trainer configs must load and carry the scale-up invariants:
+    bf16-mixed + accumulate_grad_batches=1 (true per-step batch — grad-accum does
+    NOT add in-batch contrastive negatives, so we scale batch_size, not accum)."""
+    pytest.importorskip("hydra")
+    from hydra import compose, initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
+
+    GlobalHydra.instance().clear()
+    configs_dir = str(REPO_ROOT / "configs")
+
+    with initialize_config_dir(config_dir=configs_dir, version_base="1.3"):
+        cfg = compose(
+            config_name="config",
+            overrides=[
+                "model=hybrid_70m_v2",
+                "dataset=wikitext",
+                f"trainer={trainer_name}",
+                "experiment_name=parity_check",
+            ],
+        )
+
+    t = cfg.trainer
+    assert t.get("precision") == "bf16-mixed", \
+        f"{trainer_name}: precision={t.get('precision')!r} != 'bf16-mixed'"
+    assert t.get("accumulate_grad_batches") == 1, \
+        f"{trainer_name}: accumulate_grad_batches={t.get('accumulate_grad_batches')} != 1 (H100 wants true per-step batch)"
+    assert str(t.get("strategy")) == expected_strategy, \
+        f"{trainer_name}: strategy={t.get('strategy')!r} != {expected_strategy!r}"
+    assert t.get("devices") == expected_devices, \
+        f"{trainer_name}: devices={t.get('devices')} != {expected_devices}"
+    if trainer_name == "h100_multi_ddp":
+        assert t.get("find_unused_parameters") is True, \
+            "h100_multi_ddp: find_unused_parameters must be true (ViT-unfreeze/KD leave frozen params)"
+
+
 # ── 5. Checkpoint prefix stripping roundtrip ──────────────────────────────────
 
 @pytest.mark.willi_parity

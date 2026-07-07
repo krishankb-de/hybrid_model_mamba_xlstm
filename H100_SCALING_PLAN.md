@@ -4,7 +4,7 @@
 > **Builds on the COMPLETED `HYBRID_ARCH_REFACTOR_PLAN.md`** (broke the MIMIC ceiling 8.23%→10.45% i2t R@10). That plan is finished — historical reference only.
 > Full approved plan: `/Users/krish/.claude/plans/i-want-to-implement-twinkling-ullman.md`.
 >
-> **Current phase: Phase 2 — H100 infra enablement.**
+> **Current phase: Phase 4 — 150M v2 config** (Phase 2 local-complete; Phase 3 deferred post-Phase-6).
 
 ## Context
 
@@ -62,16 +62,16 @@ Indiana gap is ablation-proven data-bound → only lever is diverse CXR data (us
 - [x] **1E** — `bash scripts/validate_for_willi.sh` green: 69 passed, 5 skipped, 9/9 gates (doc-only; no regression).
 - [x] **1F** — Commit on branch `h100_scaling`.
 
-### Phase 2 — H100 infra enablement (single-GPU primary + 2-4 node file)
+### Phase 2 — H100 infra enablement (single-GPU primary + 2-4 node file) ✅ LOCAL COMPLETE (2D/2G need H100 box)
 Reuse: `torch.set_float32_matmul_precision('high')` (already in train scripts); auto-compile on sm_90 (`train.py:320-334` covers H100).
-- [ ] **2A** — `configs/trainer/h100_single_gpu.yaml` (NEW): `precision=bf16-mixed`, `devices=1`, `compile_model=true`, `accumulate_grad_batches=1` (TRUE batch, not accumulated — critical for contrastive negatives).
-- [ ] **2B** — `configs/trainer/h100_multi_ddp.yaml` (NEW, "2-4 node file"): clone `gpu_ddp.yaml`; `strategy=ddp`, `devices=-1`, `find_unused_parameters=true` (ViT-unfreeze leaves frozen params), `accumulate_grad_batches=1`. Inert until Phase 3.
-- [ ] **2C** — SLURM templates `scripts/train_stage0_h100.sh`, `train_biomedclip_kd_h100.sh`, `eval_h100.sh` (NEW). Training → `--partition=aisc-batch --gres=gpu:h100:1 --time=7-00:00:00`; eval → `--partition=aisc-shortrun`. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
-- [ ] **2D** — Python env: verify full-stack import + 2-step train smoke on H100 conda py≥3.10; fall back to 3.9 if a dep breaks. Keep 3.9-syntax hygiene.
-- [ ] **2E** — `requirements.txt`: uncomment `flash-attn` (ViT-only, optional); verify `mamba-ssm`/Triton build on sm_90.
-- [ ] **2F** — `tests/test_willi_parity.py`: h100 configs load + invariants (bf16, accum=1).
-- [ ] **2G** — Smoke `smoke_arch_refactor.py` on H100 (finite fwd/bwd, i_gate<cap, no NaN).
-- [ ] **2H** — `validate_for_willi.sh` green; commit.
+- [x] **2A** — `configs/trainer/h100_single_gpu.yaml`: `bf16-mixed`, `devices=1`, `compile_model=true`, `accumulate_grad_batches=1`.
+- [x] **2B** — `configs/trainer/h100_multi_ddp.yaml` (2-4 node): `strategy=ddp`, `devices=-1`, `find_unused_parameters=true`, `accum=1`. Inert until Phase 3.
+- [x] **2C** — SLURM templates `train_stage0_h100.sh` (aisc-batch 7-day, bs=64/accum=1, gc off, compile off for segmented path), `train_biomedclip_kd_h100.sh` (aisc-shortrun, **bs=128 = the in-batch-negative lever**, LR √-scaled), `eval_h100.sh` (ppl/retrieval modes). ENV-parametrized (`SCRATCH_ROOT`/`VENV_ACTIVATE`) — aisc scratch/env paths TBD.
+- [ ] **2D** — (H100 box) Python env: full-stack import + 2-step train smoke on py≥3.10; fall back to 3.9 if a dep breaks.
+- [x] **2E** — `requirements.txt`: flash-attn documented **opt-in** (NOT forced into base reqs — needs nvcc, breaks CPU/parity harness; ViT-only, marginal).
+- [x] **2F** — `tests/test_willi_parity.py::test_h100_trainer_configs_resolve` (2 cases green).
+- [ ] **2G** — (H100 box) Smoke `smoke_arch_refactor.py` on H100 (finite fwd/bwd, i_gate<cap, no NaN).
+- [x] **2H** — `validate_for_willi.sh` green (9/9 gates; +2 h100 config tests); committed.
 
 ### Phase 3 — Distributed CLIP negatives (`all_gather`) — SECONDARY, deferred post-Phase-6
 Only makes multi-GPU help retrieval. Single 141GB already gives 128-256 negatives → not on the critical path.

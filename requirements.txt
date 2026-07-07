@@ -21,8 +21,12 @@ sentencepiece>=0.1.99
 # Optimization (Colab-compatible)
 # apex  # COMMENTED OUT: Requires manual compilation from source
 #       # Install manually if needed: pip install git+https://github.com/NVIDIA/apex
-# flash-attn>=2.3.0  # COMMENTED OUT: Requires CUDA compilation (5-10 min)
-#                    # Install manually if needed: pip install flash-attn --no-build-isolation
+#
+# flash-attn (OPTIONAL, H100/CUDA only): speeds up the BiomedCLIP ViT image tower.
+#   The Mamba/mLSTM text mixers do NOT use attention, so the benefit is marginal.
+#   Deliberately NOT in base requirements — it needs nvcc/CUDA to build and would
+#   break CPU/local installs + the willi/H100 parity harness. On the H100 box, opt in:
+#     pip install "flash-attn>=2.3.0" --no-build-isolation
 
 # Utilities
 wandb>=0.15.0
