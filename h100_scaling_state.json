@@ -1,0 +1,99 @@
+{
+  "current_phase": "phase2_h100_infra",
+  "last_updated": "2026-07-07T00:00:00+0000",
+  "builds_on": "HYBRID_ARCH_REFACTOR_PLAN.md + hybrid_arch_refactor_state.json (COMPLETE — MIMIC i2t R@10 8.23%->10.45% Target tier; Indiana 3.90% intrinsic; Stage-0 PPL 15.62). That plan is finished; historical reference only.",
+  "primary_thesis": "Migrate the completed A100-40GB pipeline to H100 (94/141GB) and use the headroom on the three A100-era ceilings: (1) contrastive negatives capped at ~31 (in-batch only, no all_gather, moco=0) -> scale true per-step batch to 128-256; (2) Stage-0 undertrained (bs=8/40GB, 40K of ~117K steps) -> finish it; (3) 70M cap -> port v2 arch to 150M. Plus multi-source CXR data (IU-Xray excluded) for the intrinsic Indiana gap. Clean per-lever attribution held throughout.",
+  "approved_plan": "/Users/krish/.claude/plans/i-want-to-implement-twinkling-ullman.md",
+  "branch": "h100_scaling",
+  "hardware": {
+    "primary": "single H100 94/141GB",
+    "secondary": "2-4 H100 node (Phase 3 all_gather)",
+    "slurm_partitions": {
+      "training": "aisc-batch (7-day cap)",
+      "eval_smoke": "aisc-shortrun (1-day cap)"
+    },
+    "gres": "--gres=gpu:h100:X (X=1..8)"
+  },
+  "success_bar": {
+    "floor": {
+      "MIMIC_i2t_R10": 0.1045,
+      "Indiana_i2t_R10": 0.0404,
+      "stage0_ppl": 15.62,
+      "rule": "no regression vs current best; recover Indiana floor"
+    },
+    "target": {
+      "MIMIC_i2t_R10": 0.12,
+      "Indiana_i2t_R10": 0.055,
+      "stage0_ppl": 13.76,
+      "rule": "MIMIC old-stretch parity + Indiana uplift + backbone PPL gate"
+    },
+    "stretch": {
+      "MIMIC_i2t_R10": 0.14,
+      "Indiana_i2t_R10": 0.07,
+      "stage0_ppl": 13.10,
+      "rule": "dissertation headline; matches baseline PPL"
+    }
+  },
+  "resolved_decisions": {
+    "slurm": "training -> aisc-batch (7-day); eval/smoke -> aisc-shortrun (1-day); --gres=gpu:h100:X. 7-day cap => full Stage-0 in ONE block.",
+    "model_scale": "150M v2 — port v2 arch (HybridNorm hybrid topology, middle-mLSTM 25% ratio, attention pooling, mLSTM stabilization) into hybrid_150m_v2; fresh Stage-0.",
+    "priority": "backbone + MIMIC — finish Stage-0, then scale contrastive batch to push MIMIC to stretch.",
+    "indiana_data": "add diverse CXR (CheXpert/PadChest/VinDr); IU-Xray EXCLUDED from training (it IS the 743-pair Indiana eval set — zero-leakage).",
+    "per_source_text": "free-text passthrough (MIMIC findings+impression; PadChest translated-EN) + label->prompt template (CheXpert/VinDr structured labels -> synthetic report sentences, CheXzero-style).",
+    "max_position_embeddings_150m": "1024 (v2 parity; PubMed-512 / CXR-256 corpora fit).",
+    "kd_teacher": "BioMedLM 2.7B primary; larger frozen biomedical teacher (BioGPT-Large/Meditron-7B/OpenBioLLM-8B) fallback if PPL gate missed (141GB fits 7-8B).",
+    "python": "target py>=3.10 on H100 (verify stack; fall back to 3.9 if a dep breaks). Keep 3.9-syntax hygiene (forward-compatible; preserves willi bridge).",
+    "multi_gpu_phase3": "secondary — deferred until after single-H100 MIMIC win (Phase 6)."
+  },
+  "phases": {
+    "phase1_plan_of_record": {
+      "status": "complete",
+      "goal": "Create plan-of-record + resumable state + gitignore/CLAUDE.md wiring; validate; commit on h100_scaling branch.",
+      "tasks": {
+        "1A_create_plan_md": "done",
+        "1B_create_state_json": "done",
+        "1C_gitignore_allowlist": "done",
+        "1D_claude_md_repoint": "done",
+        "1E_validate_for_willi": "done — 69 passed, 5 skipped, 9/9 gates green",
+        "1F_commit": "done"
+      }
+    },
+    "phase2_h100_infra": {
+      "status": "pending",
+      "goal": "H100 trainer configs (single-GPU primary + 2-4 node DDP file), SLURM templates (aisc-batch/shortrun), py>=3.10 env verify, parity tests, H100 smoke."
+    },
+    "phase3_distributed_negatives": {
+      "status": "pending_secondary",
+      "goal": "Grad-preserving all_gather in CLIP loss (gated world_size>1). Deferred until after Phase 6 single-H100 MIMIC win."
+    },
+    "phase4_150m_v2_config": {
+      "status": "pending",
+      "goal": "hybrid_150m_v2.yaml (dim=768, 12 layers, [m,m,m,m,L,L,L,m,m,m,m,m], hybrid norm, attention pool). Param-count assert ~150M."
+    },
+    "phase5_stage0_150m": {
+      "status": "pending",
+      "goal": "Stage-0 pretrain 150M v2 on H100 (~3B tokens Chinchilla, bs=32-48, WSD). Gate PPL <= 13.76. BioMedLM teacher primary + fallback."
+    },
+    "phase6_contrastive_batch_scale": {
+      "status": "pending",
+      "goal": "Canonical recipe held; batch sweep {64,128,256}, accum=1, LR sqrt-scaled. Gate MIMIC i2t R@10 >= 12% (stretch)."
+    },
+    "phase7_data_diversification": {
+      "status": "pending",
+      "goal": "cxr_multi dataset (MIMIC+CheXpert+PadChest+VinDr, IU-Xray excluded) + CXRJointDataset text adapter. Gate Indiana i2t R@10 >= 4.04% floor (target 5.5%) with MIMIC held."
+    },
+    "phase8_eval_writeup": {
+      "status": "pending",
+      "goal": "Full eval matrix + analysis/h100_scaling_results.md (70M-A100 vs 150M-H100 + per-lever ablation) + final state verdict."
+    }
+  },
+  "open_questions": {
+    "chexpert_vindr_template_wording": "Finalize label->prompt template in Phase 7 (CheXzero-style start; iterate if in-domain MIMIC regresses).",
+    "lr_150m_exact": "4e-4 vs 5e-4 — pick in Phase 4, confirm via Phase-5 loss curve.",
+    "willi_retirement": "If willi/A100 retired post-migration, drop py3.9 guards + validate_for_willi.sh."
+  },
+  "notes": [
+    "2026-07-07: Plan approved (/Users/krish/.claude/plans/i-want-to-implement-twinkling-ullman.md). Phase 1 started on branch h100_scaling. 3 Explore agents mapped infra/contrastive/model layers: key findings — CLIP loss in-batch only (no all_gather), Stage-0 undertrained (40K/117K), 150M/350M configs lack v2 wins. 4 user decisions locked (150M v2, backbone+MIMIC priority, diverse CXR w/ IU-Xray excluded, single-H100 first + 2-4 node file). 7 unresolved Qs answered (aisc-batch/shortrun partitions, gpu:h100:X, py>=3.10, BioMedLM teacher primary, max_pos=1024, Phase 3 secondary).",
+    "2026-07-07: Phase 1 COMPLETE. H100_SCALING_PLAN.md + h100_scaling_state.json created; .gitignore allowlisted both; CLAUDE.md Session Bootstrap repointed to H100 plan (refactor plan -> completed-historical). validate_for_willi.sh green (69 passed, 5 skipped, 9/9 gates — no regression, doc-only). Committed on branch h100_scaling. current_phase -> phase2_h100_infra."
+  ]
+}
