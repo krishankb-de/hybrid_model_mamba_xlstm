@@ -7,11 +7,11 @@
 # H100 changes vs the A100 script:
 #   - partition aisc-batch (7-day cap) → the full run finishes in ONE block
 #     (no requeue juggling; A100 hit 16-36h walltime kills mid-run).
-#   - --gres=gpu:h100:1 ; larger --mem.
+#   - --gpus=1 (H100 node via --exclude=ga03,gx17v1) ; larger --mem.
 #   - trainer=h100_single_gpu.
-#   - bs=64 accum=1 (eff batch 64, same recipe) — 141GB fits it without the
-#     A100's bs=8/accum=8 compromise; fewer accum steps → faster wall-clock.
-#   - use_gradient_checkpointing=false (not needed at this VRAM for <=150M).
+#   - BATCH_SIZE/ACCUM/GRAD_CKPT are env-overridable. aisc H100 = 80GB (NOT the
+#     94/141GB the plan first assumed), so 150M needs GRAD_CKPT=true + accum to
+#     fit (see train_stage0_150m_h100.sh). 70M fits larger microbatch bare.
 #   - compile_model=false: Stage-0 uses the cu_seqlens doc-boundary segmented
 #     scan (data-dependent loop) which graph-breaks under torch.compile.
 #
@@ -40,6 +40,8 @@ VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 MODEL_CONFIG="${MODEL_CONFIG:-hybrid_70m_v2}"
 MAX_STEPS="${MAX_STEPS:-120000}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
+ACCUM="${ACCUM:-1}"                 # grad-accum: eff batch = BATCH_SIZE*ACCUM
+GRAD_CKPT="${GRAD_CKPT:-false}"     # gradient checkpointing (trades compute for VRAM)
 EXPERIMENT="${EXPERIMENT:-h100_stage0_${MODEL_CONFIG}}"
 
 echo "=== H100 Stage-0 pre-train: ${MODEL_CONFIG} + BioMedLM KD ==="
@@ -75,7 +77,7 @@ python scripts/train_stage0_distill.py \
   trainer.accelerator=cuda \
   trainer.max_epochs=-1 \
   trainer.max_steps=${MAX_STEPS} \
-  trainer.accumulate_grad_batches=1 \
+  trainer.accumulate_grad_batches=${ACCUM} \
   trainer.val_check_interval=2000 \
   trainer.log_every_n_steps=25 \
   trainer.compile_model=false \
@@ -95,7 +97,7 @@ python scripts/train_stage0_distill.py \
   model.learning_rate=6.0e-4 \
   model.warmup_steps=1000 \
   model.gradient_clip_val=1.0 \
-  model.use_gradient_checkpointing=false \
+  model.use_gradient_checkpointing=${GRAD_CKPT} \
   +model.scheduler_name=wsd \
   +model.beta2_schedule=true \
   +model.beta2_start=0.999 \
