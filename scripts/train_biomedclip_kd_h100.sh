@@ -52,6 +52,7 @@ export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export TORCHINDUCTOR_CACHE_DIR="${SCRATCH_ROOT}/.torchinductor"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export CUDA_LAUNCH_BLOCKING=0
+export PYTHONUNBUFFERED=1   # flush progress bar to the log live (else block-buffered → looks frozen)
 
 source "${VENV_ACTIVATE}"
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA unavailable'; print('GPU:', torch.cuda.get_device_name(0), f'{torch.cuda.get_device_properties(0).total_memory/1024**3:.0f}GB')"

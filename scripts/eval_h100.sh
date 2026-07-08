@@ -44,6 +44,7 @@ cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUB
 export HF_HOME="${SCRATCH_ROOT}/.hf"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+export PYTHONUNBUFFERED=1   # flush output to the log live (else block-buffered → looks frozen)
 
 source "${VENV_ACTIVATE}"
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA unavailable'; print('GPU:', torch.cuda.get_device_name(0))"
