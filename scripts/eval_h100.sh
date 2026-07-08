@@ -15,7 +15,9 @@
 #      SCRATCH_ROOT, VENV_ACTIVATE.
 # ============================================================================
 #SBATCH --partition=aisc-shortrun
-#SBATCH --gres=gpu:h100:1
+#SBATCH --account=aisc
+#SBATCH --gpus=1
+#SBATCH --exclude=ga03,gx17v1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=02:00:00
@@ -25,7 +27,7 @@
 
 set -euo pipefail
 
-SCRATCH_ROOT="${SCRATCH_ROOT:-/scratch/$USER/hybrid_xmamba_h100}"
+SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 MODE="${MODE:-ppl}"
 MODEL_CONFIG="${MODEL_CONFIG:-hybrid_70m_v2}"

@@ -20,7 +20,9 @@
 # ENV placeholders (adjust for aisc/H100): SCRATCH_ROOT, VENV_ACTIVATE, STAGE0_CKPT.
 # ============================================================================
 #SBATCH --partition=aisc-shortrun
-#SBATCH --gres=gpu:h100:1
+#SBATCH --account=aisc
+#SBATCH --gpus=1
+#SBATCH --exclude=ga03,gx17v1
 #SBATCH --mem=96G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=16:00:00
@@ -31,7 +33,7 @@
 
 set -euo pipefail
 
-SCRATCH_ROOT="${SCRATCH_ROOT:-/scratch/$USER/hybrid_xmamba_h100}"
+SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 MODEL_CONFIG="${MODEL_CONFIG:-hybrid_70m_v2}"
 BATCH_SIZE="${BATCH_SIZE:-128}"

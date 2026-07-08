@@ -22,7 +22,9 @@
 # PPL gate (informational per plan): PubMed val PPL — target <= 13.76.
 # ============================================================================
 #SBATCH --partition=aisc-batch
-#SBATCH --gres=gpu:h100:1
+#SBATCH --account=aisc
+#SBATCH --gpus=1
+#SBATCH --exclude=ga03,gx17v1
 #SBATCH --mem=128G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=2-00:00:00
@@ -33,7 +35,7 @@
 
 set -euo pipefail
 
-SCRATCH_ROOT="${SCRATCH_ROOT:-/scratch/$USER/hybrid_xmamba_h100}"
+SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 MODEL_CONFIG="${MODEL_CONFIG:-hybrid_70m_v2}"
 MAX_STEPS="${MAX_STEPS:-120000}"

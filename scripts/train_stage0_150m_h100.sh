@@ -11,7 +11,9 @@
 # Override at submit time, e.g.:  MAX_STEPS=90000 BATCH_SIZE=64 sbatch scripts/train_stage0_150m_h100.sh
 # ============================================================================
 #SBATCH --partition=aisc-batch
-#SBATCH --gres=gpu:h100:1
+#SBATCH --account=aisc
+#SBATCH --gpus=1
+#SBATCH --exclude=ga03,gx17v1
 #SBATCH --mem=160G
 #SBATCH --cpus-per-task=12
 #SBATCH --time=4-00:00:00

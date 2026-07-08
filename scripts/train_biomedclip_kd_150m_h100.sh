@@ -18,7 +18,9 @@
 # Submit sweep e.g.:  BATCH_SIZE=256 sbatch scripts/train_biomedclip_kd_150m_h100.sh
 # ============================================================================
 #SBATCH --partition=aisc-batch
-#SBATCH --gres=gpu:h100:1
+#SBATCH --account=aisc
+#SBATCH --gpus=1
+#SBATCH --exclude=ga03,gx17v1
 #SBATCH --mem=128G
 #SBATCH --cpus-per-task=12
 #SBATCH --time=1-00:00:00
