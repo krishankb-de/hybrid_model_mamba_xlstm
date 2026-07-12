@@ -34,6 +34,12 @@ export MAX_STEPS="${MAX_STEPS:-120000}"     # ~3B tokens Chinchilla for 150M (ef
 export BATCH_SIZE="${BATCH_SIZE:-16}"       # 80GB-safe microbatch
 export ACCUM="${ACCUM:-3}"                  # 16*3 = eff batch 48
 export GRAD_CKPT="${GRAD_CKPT:-true}"       # required to fit 150M+2.6B teacher in 80GB
+# 2026-07-11: the FIRST run collapsed (val PPL 1165) because the generic template
+# forced 70M's LR=6e-4/warmup=1000 onto the 150M — too hot, model collapsed to
+# unigram entropy (val loss 4.27 @ step666 -> 7.05 forever) as LR hit 6e-4.
+# Restore the 150M's stability-tuned values (plan resolved LR=4.0e-4, warmup=2000).
+export LR="${LR:-4.0e-4}"
+export WARMUP="${WARMUP:-2000}"
 export EXPERIMENT="${EXPERIMENT:-h100_stage0_150m_v2}"
 
 cd "${SLURM_SUBMIT_DIR:-.}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"
