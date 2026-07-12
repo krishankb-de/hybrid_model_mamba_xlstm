@@ -11,7 +11,7 @@
 # NOTE: deliberately NOT `set -e` — every step must run even if an earlier one
 # fails, so we still get the loss trajectory even if the eval errors.
 # ============================================================================
-#SBATCH --partition=aisc-shortrun
+#SBATCH --partition=aisc-batch
 #SBATCH --account=aisc
 #SBATCH --gpus=1
 #SBATCH --exclude=ga03,gx17v1

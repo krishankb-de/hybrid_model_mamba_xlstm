@@ -19,7 +19,7 @@
 #
 # ENV placeholders (adjust for aisc/H100): SCRATCH_ROOT, VENV_ACTIVATE, STAGE0_CKPT.
 # ============================================================================
-#SBATCH --partition=aisc-shortrun
+#SBATCH --partition=aisc-batch
 #SBATCH --account=aisc
 #SBATCH --gpus=1
 #SBATCH --exclude=ga03,gx17v1

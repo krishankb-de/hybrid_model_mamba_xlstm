@@ -14,7 +14,7 @@
 # ENV: CKPT, MODEL_CONFIG, MODE, DATASET (retrieval: mimic_cxr | indiana),
 #      SCRATCH_ROOT, VENV_ACTIVATE.
 # ============================================================================
-#SBATCH --partition=aisc-shortrun
+#SBATCH --partition=aisc-batch
 #SBATCH --account=aisc
 #SBATCH --gpus=1
 #SBATCH --exclude=ga03,gx17v1
