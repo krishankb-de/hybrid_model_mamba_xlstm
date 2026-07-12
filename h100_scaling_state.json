@@ -1,6 +1,6 @@
 {
   "current_phase": "phase5_stage0_150m",
-  "last_updated": "2026-07-08T11:30:00+0200",
+  "last_updated": "2026-07-11T20:00:00+0200",
   "builds_on": "HYBRID_ARCH_REFACTOR_PLAN.md + hybrid_arch_refactor_state.json (COMPLETE — MIMIC i2t R@10 8.23%->10.45% Target tier; Indiana 3.90% intrinsic; Stage-0 PPL 15.62). That plan is finished; historical reference only.",
   "primary_thesis": "Migrate the completed A100-40GB pipeline to H100 (94/141GB) and use the headroom on the three A100-era ceilings: (1) contrastive negatives capped at ~31 (in-batch only, no all_gather, moco=0) -> scale true per-step batch to 128-256; (2) Stage-0 undertrained (bs=8/40GB, 40K of ~117K steps) -> finish it; (3) 70M cap -> port v2 arch to 150M. Plus multi-source CXR data (IU-Xray excluded) for the intrinsic Indiana gap. Clean per-lever attribution held throughout.",
   "approved_plan": "/Users/krish/.claude/plans/i-want-to-implement-twinkling-ullman.md",
@@ -30,7 +30,7 @@
     "stretch": {
       "MIMIC_i2t_R10": 0.14,
       "Indiana_i2t_R10": 0.07,
-      "stage0_ppl": 13.10,
+      "stage0_ppl": 13.1,
       "rule": "dissertation headline; matches baseline PPL"
     }
   },
@@ -89,7 +89,7 @@
       }
     },
     "phase5_stage0_150m": {
-      "status": "script_ready_run_pending_h100",
+      "status": "run_complete_FAILED_gate_debugging",
       "goal": "Stage-0 pretrain 150M v2 on H100 (~3B tokens Chinchilla, bs=48, WSD). Gate PPL <= 13.76. BioMedLM teacher primary + fallback.",
       "launch_script": "scripts/train_stage0_150m_h100.sh (aisc-batch, gpu:h100:1, 4-day, MAX_STEPS=120000 BATCH_SIZE=48 overridable)"
     },
@@ -119,6 +119,7 @@
     "2026-07-07: Phase 4 (150M v2 config) COMPLETE + committed. configs/model/hybrid_150m_v2.yaml: dim=768, 12 layers, layer_pattern [m,m,m,m,L,L,L,m,m,m,m,m] (3 mLSTM centered = 25% v2-parity ratio), norm_topology=hybrid, pooling=attention, max_pos=1024, lr=4.0e-4 (sqrt-width scaled, conservative), warmup=2000. Built + counted: 183.72M params (nominal '150M' — untied 50k embeddings ~77M dominate, same convention as 70M config -> 83M). test_hybrid_150m_v2_config_and_param_count added (asserts v2 invariants + tight [181,186]M band). validate_for_willi green 72 passed 9/9 gates. current_phase -> phase5_stage0_150m. NOTE: Phases 5-8 need the physical H100 (training runs); Phase 3 (all_gather) local but deferred post-Phase-6 per user.",
     "2026-07-07: 150M launch scripts created (Phase 5A/6A local prep): scripts/train_stage0_150m_h100.sh + train_biomedclip_kd_150m_h100.sh — thin wrappers over the generic H100 templates with 150M defaults + correct SBATCH walltime/mem (Stage-0 aisc-batch 4-day, contrastive aisc-batch 1-day). Runs are server-side. LOCAL SCAFFOLDING COMPLETE through Phase 4 + all launch scripts. Next action is on the H100 box: env setup (py>=3.10), Phase 2 2D/2G smoke, then sbatch train_stage0_150m_h100.sh.",
     "2026-07-08: FIRST H100 RUN on aisc (account=aisc; GPU alloc via --gpus=1 + --exclude=ga03,gx17v1; gpu:h100 gres unverified). Phase 2 2D DONE: setup_env_h100.sh builds .venv py3.11 (uv). CRITICAL: default PyPI torch wheel is cu130 but aisc H100 driver is CUDA 12.8 → installed torch 2.11.0+cu128 (setup pins TORCH_INDEX_URL=cu128). Stack is bleeding-edge (transformers 5.13, lightning 2.6.5) but Stage-0 ran: 183.7M student + 2.59B BioMedLM teacher loaded, PubMed packed 483M tokens, training started.",
-    "2026-07-08: CORE PLAN ASSUMPTION WRONG — aisc H100 nodes are 80GB (81559MiB), NOT the 94/141GB the plan assumed. bs=48/accum=1 OOMs at first optimizer step in the Mamba selective_scan_parallel (289MB short, 96MB free) alongside the resident 2.6B teacher. FIX (Phase 5 launch script): gradient checkpointing ON (torch.utils.checkpoint per hybrid_block, wired at hybrid_lm.py:183-191) + microbatch 16 * accum 3 = eff batch 48 (token math preserved). Made ACCUM/GRAD_CKPT env-overridable in train_stage0_h100.sh. IMPLICATION for Phase 6: the 128-256 in-batch-negative thesis assumed 141GB — on 80GB the true batch ceiling is lower; train_biomedclip_kd_150m_h100.sh bs=128 will likely need grad-ckpt + reduced microbatch (accum does NOT add CLIP negatives, so batch ceiling directly caps the MIMIC lever). Re-scope Phase 6 target when reached."
+    "2026-07-08: CORE PLAN ASSUMPTION WRONG — aisc H100 nodes are 80GB (81559MiB), NOT the 94/141GB the plan assumed. bs=48/accum=1 OOMs at first optimizer step in the Mamba selective_scan_parallel (289MB short, 96MB free) alongside the resident 2.6B teacher. FIX (Phase 5 launch script): gradient checkpointing ON (torch.utils.checkpoint per hybrid_block, wired at hybrid_lm.py:183-191) + microbatch 16 * accum 3 = eff batch 48 (token math preserved). Made ACCUM/GRAD_CKPT env-overridable in train_stage0_h100.sh. IMPLICATION for Phase 6: the 128-256 in-batch-negative thesis assumed 141GB — on 80GB the true batch ceiling is lower; train_biomedclip_kd_150m_h100.sh bs=128 will likely need grad-ckpt + reduced microbatch (accum does NOT add CLIP negatives, so batch ceiling directly caps the MIMIC lever). Re-scope Phase 6 target when reached.",
+    "2026-07-11: PHASE 5 RUN FAILED GATE — job 2320933 completed all 120000 steps (~80h wall, 1.34 it/s) but final val/loss=7.044 -> val PPL 1165 (train PPL ~1106). Gate <=13.76 target / <=15.62 floor -> MISSED ~85x. Checkpoint UNUSABLE for Phase 6. Under systematic-debugging (root-cause first, no fix yet). Five variables changed at once vs the working A100 15.62 recipe: (1) hybrid_150m_v2 trained for the FIRST time [top suspect], (2) grad-ckpt ON, (3) eff batch 48 vs 64, (4) LR forced 6.0e-4 by train_stage0_h100.sh (overrode 150m config 4.0e-4), (5) torch 2.11/transformers 5.13. PROCESS GAP: Phase-2 2G arch smoke on 150m_v2 was NEVER run before the 3-day commit. EVIDENCE (scripts/diag_stage0_150m.sh, queue-and-forget): (A) loss+LR trajectory from version_1 tfevents [buffered stdout lost the live log; no metrics.csv but tfevents present]; (B) authoritative evaluate_lm.py PPL on stage0_model_only.pt to reconcile 1165 (lesson #5). Do NOT start Phase 6 or relaunch until A+B in."
   ]
 }
