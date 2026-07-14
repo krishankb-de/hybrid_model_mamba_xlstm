@@ -40,6 +40,11 @@ export GRAD_CKPT="${GRAD_CKPT:-true}"       # required to fit 150M+2.6B teacher 
 # Restore the 150M's stability-tuned values (plan resolved LR=4.0e-4, warmup=2000).
 export LR="${LR:-4.0e-4}"
 export WARMUP="${WARMUP:-2000}"
+# 2026-07-14: the 4e-4 run trained HEALTHILY to PPL 18.75 @ step 23.6k, then a single
+# gradient SPIKE at step 24749 (norm 1.59 vs ~0.23 baseline) — clipped only to the loose
+# max_norm=1.0 (~4x baseline) — knocked the 150M into irreversible collapse. Tighten the
+# clip so spikes are bounded near the baseline. β2 (flat 0.999) and LR (flat) were NOT the cause.
+export GRAD_CLIP="${GRAD_CLIP:-0.5}"
 export EXPERIMENT="${EXPERIMENT:-h100_stage0_150m_v2}"
 
 cd "${SLURM_SUBMIT_DIR:-.}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"

@@ -44,6 +44,7 @@ ACCUM="${ACCUM:-1}"                 # grad-accum: eff batch = BATCH_SIZE*ACCUM
 GRAD_CKPT="${GRAD_CKPT:-false}"     # gradient checkpointing (trades compute for VRAM)
 LR="${LR:-6.0e-4}"                  # 70M default; 150M wrapper overrides to 4.0e-4
 WARMUP="${WARMUP:-1000}"            # 70M default; 150M wrapper overrides to 2000
+GRAD_CLIP="${GRAD_CLIP:-1.0}"       # 70M default; 150M wrapper overrides to 0.5 (spike guard)
 EXPERIMENT="${EXPERIMENT:-h100_stage0_${MODEL_CONFIG}}"
 
 echo "=== H100 Stage-0 pre-train: ${MODEL_CONFIG} + BioMedLM KD ==="
@@ -99,7 +100,7 @@ python scripts/train_stage0_distill.py \
   wandb.enabled=false \
   model.learning_rate=${LR} \
   model.warmup_steps=${WARMUP} \
-  model.gradient_clip_val=1.0 \
+  model.gradient_clip_val=${GRAD_CLIP} \
   model.use_gradient_checkpointing=${GRAD_CKPT} \
   +model.scheduler_name=wsd \
   +model.beta2_schedule=true \
