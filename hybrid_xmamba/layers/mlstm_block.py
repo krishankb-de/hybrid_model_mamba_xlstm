@@ -148,7 +148,11 @@ class mLSTMBlock(nn.Module):
         i_logit = _tanh_soft_cap(self.i_gate_proj(x_inner), self.gate_soft_cap)
         f_logit = _tanh_soft_cap(self.f_gate_proj(x_inner), self.gate_soft_cap)
 
-        i_gate = exponential_activation(i_logit)      # exp(capped ĩ_t)
+        # fp32 gate guard (H100 150M stability, 2026-07): exp() of the soft-capped input
+        # logit reaches exp(gate_soft_cap)=exp(15)≈3.3M; in bf16 that value and its local
+        # gradient (=exp itself) lose precision and spike. Compute exp in fp32, cast back.
+        _gdt = i_logit.dtype
+        i_gate = exponential_activation(i_logit.float()).to(_gdt)   # exp(capped ĩ_t), fp32
         f_gate = torch.sigmoid(f_logit)               # σ(capped f̃_t)
         o_gate = torch.sigmoid(self.o_gate_proj(x_inner))
 

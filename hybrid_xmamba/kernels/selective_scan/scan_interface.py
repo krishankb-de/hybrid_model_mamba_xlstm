@@ -190,10 +190,21 @@ def selective_scan(
     else:
         chunk_size = 128
     
-    y = selective_scan_parallel(x, dt, A, B, C, D, chunk_size=chunk_size)
-    
+    # --- fp32 numerical guard (H100 150M stability, 2026-07) ---
+    # The chunk-parallel scan divides by the cumulative decay A_cum (clamped to 1e-8)
+    # and cumsum's log-decays over the chunk. Under bf16 autocast those underflowing
+    # divisions/accumulations produce large-magnitude gradients — the spikes that
+    # collapse the 150M model (grad_norm 0.23 -> 1.6 -> representation collapse).
+    # Reference Mamba keeps this SSM scan in fp32 for exactly this reason. Run it in
+    # fp32 and cast the result back to the mixer dtype (interface unchanged).
+    in_dtype = x.dtype
+    y = selective_scan_parallel(
+        x.float(), dt.float(), A.float(), B.float(), C.float(), D.float(),
+        chunk_size=chunk_size,
+    ).to(in_dtype)
+
     # Apply gating if provided
     if z is not None:
         y = y * z
-    
+
     return y
