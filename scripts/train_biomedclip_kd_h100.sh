@@ -58,7 +58,9 @@ export HF_HOME="${SCRATCH_ROOT}/.hf"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export TORCHINDUCTOR_CACHE_DIR="${SCRATCH_ROOT}/.torchinductor"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
-export CUDA_LAUNCH_BLOCKING=0
+# Set CUDA_LAUNCH_BLOCKING=1 to make CUDA errors report at the REAL faulting kernel
+# (async reporting otherwise blames a later op, e.g. the embedding lookup). Slow — debug only.
+export CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING:-0}"
 export PYTHONUNBUFFERED=1   # flush progress bar to the log live (else block-buffered → looks frozen)
 
 source "${VENV_ACTIVATE}"
