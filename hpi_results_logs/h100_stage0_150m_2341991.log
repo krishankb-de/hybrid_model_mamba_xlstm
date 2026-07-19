@@ -1,0 +1,323 @@
+[wrapper] 150M Stage-0 → delegating to train_stage0_h100.sh (MODEL_CONFIG=hybrid_150m_v2, MAX_STEPS=120000, BATCH_SIZE=16)
+=== H100 Stage-0 pre-train: hybrid_150m_v2 + BioMedLM KD ===
+Thu Jul 16 07:08:20 CEST 2026
+gx13v1
+GPU: NVIDIA H100 80GB HBM3 79GB
+Thu Jul 16 07:08:26 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 590.48.01              Driver Version: 590.48.01      CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 80GB HBM3          On  |   00000000:02:00.0 Off |                    0 |
+| N/A   32C    P0             68W /  700W |       0MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+Pre-caching BioMedLM (2.7B)...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+Loading weights:   0%|          | 0/389 [00:00<?, ?it/s]Loading weights:   4%|▍         | 17/389 [00:00<00:02, 166.12it/s]Loading weights:  12%|█▏        | 47/389 [00:00<00:01, 212.47it/s]Loading weights:  20%|█▉        | 77/389 [00:00<00:01, 238.21it/s]Loading weights:  26%|██▌       | 101/389 [00:00<00:01, 235.45it/s]Loading weights:  34%|███▎      | 131/389 [00:00<00:01, 236.08it/s]Loading weights:  40%|███▉      | 155/389 [00:00<00:01, 229.15it/s]Loading weights:  49%|████▉     | 191/389 [00:00<00:00, 244.78it/s]Loading weights:  57%|█████▋    | 221/389 [00:00<00:00, 248.59it/s]Loading weights:  63%|██████▎   | 246/389 [00:01<00:00, 242.21it/s]Loading weights:  71%|███████   | 275/389 [00:01<00:00, 252.55it/s]Loading weights:  77%|███████▋  | 301/389 [00:01<00:00, 241.85it/s]Loading weights:  84%|████████▍ | 326/389 [00:01<00:00, 236.06it/s]Loading weights:  92%|█████████▏| 359/389 [00:01<00:00, 244.48it/s]Loading weights: 100%|██████████| 389/389 [00:01<00:00, 254.99it/s]Loading weights: 100%|██████████| 389/389 [00:01<00:00, 241.93it/s]
+[transformers] [1mGPT2LMHeadModel LOAD REPORT[0m from: stanford-crfm/BioMedLM
+Key                                     | Status     |  | 
+----------------------------------------+------------+--+-
+transformer.h.{0...31}.attn.masked_bias | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+BioMedLM cached.
+Starting Stage-0 distillation (120000 steps, bs=16, accum=1)...
+================================================================================
+Stage 0 Distillation Configuration:
+model:
+  model_type: hybrid_lm
+  vocab_size: 50257
+  dim: 768
+  num_layers: 12
+  layer_pattern:
+  - mamba
+  - mamba
+  - mamba
+  - mamba
+  - mlstm
+  - mlstm
+  - mlstm
+  - mamba
+  - mamba
+  - mamba
+  - mamba
+  - mamba
+  state_size: 16
+  conv_size: 4
+  expand_factor: 2
+  dt_rank: null
+  use_fast_path: true
+  head_dim: 64
+  num_heads: 12
+  use_tfla: true
+  proj_factor: 2
+  slstm_hidden_dim: 768
+  slstm_num_heads: 4
+  use_exponential_gate: true
+  norm_type: rms
+  use_mlp: true
+  mlp_ratio: 4.0
+  max_position_embeddings: 1024
+  dropout: 0.1
+  initializer_range: 0.02
+  use_cache: true
+  tie_word_embeddings: false
+  use_gradient_checkpointing: true
+  proj_head_dropout: 0.1
+  norm_topology: hybrid
+  pooling_strategy: attention
+  learning_rate: 0.0004
+  weight_decay: 0.1
+  warmup_steps: 2000
+  max_steps: 90000
+  gradient_clip_val: 0.5
+  distill: null
+  scheduler_name: wsd
+  beta2_schedule: true
+  beta2_start: 0.999
+  beta2_end: 0.974
+dataset:
+  dataset_name: pubmed
+  dataset_version: pubmed23n
+  train_split: train
+  validation_split: train
+  tokenizer: gpt2
+  max_length: 512
+  max_seq_length: 512
+  batch_size: 16
+  eval_batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  streaming: false
+  cache_dir: /sc/scratch/krishankumar.bhushan/hybrid_xmamba_h100/pubmed_cache
+  pack_sequences: true
+  preprocessing_num_workers: 8
+  target_tokens: 1500000000
+  val_size: 0.001
+  val_max_samples: 2000
+trainer:
+  accelerator: cuda
+  devices: 1
+  precision: bf16-mixed
+  strategy: auto
+  compile_model: false
+  max_epochs: -1
+  max_steps: 120000
+  val_check_interval: 2000
+  check_val_every_n_epoch: null
+  log_every_n_steps: 25
+  accumulate_grad_batches: 3
+  enable_checkpointing: true
+  default_root_dir: ${output_dir}
+  enable_progress_bar: true
+  enable_model_summary: true
+  num_sanity_val_steps: 2
+  detect_anomaly: false
+  track_grad_norm: -1
+  profiler: null
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  limit_test_batches: 1.0
+callbacks:
+  checkpoint:
+    monitor: val/loss
+    mode: min
+    save_top_k: 3
+    save_last: true
+    filename: checkpoint-{epoch:02d}-{val_loss:.4f}
+    auto_insert_metric_name: false
+    every_n_epochs: null
+    every_n_train_steps: 2000
+  early_stopping:
+    enabled: false
+    monitor: val/loss
+    patience: 10
+    mode: min
+    min_delta: 0.001
+  lr_monitor:
+    enabled: true
+    logging_interval: step
+  model_summary:
+    enabled: true
+    max_depth: 2
+distill:
+  teacher_model: stanford-crfm/BioMedLM
+  alpha: 0.5
+  temperature: 2.0
+  teacher_dtype: bfloat16
+  teacher_ppl_abort_threshold: 50.0
+  log_every_n_steps: 25
+  batch_size: 16
+  accumulate_grad_batches: 4
+  oom_fallback_batch_size: 8
+  oom_fallback_grad_accum: 8
+seed: 42
+debug: false
+project_name: hybrid-xmamba
+experiment_name: h100_stage0_150m_v2
+wandb:
+  enabled: false
+  entity: null
+  project: ${project_name}
+  name: ${experiment_name}
+  tags: []
+data_dir: ./data
+output_dir: ./outputs/h100_stage0_150m_v2
+checkpoint_dir: ${output_dir}/checkpoints
+log_dir: ${output_dir}/logs
+contrastive_mode: simcse
+deterministic: false
+benchmark: true
+
+================================================================================
+[rank: 0] Seed set to 42
+[run_metadata] wrote outputs/h100_stage0_150m_v2/run_metadata.json
+Device: cuda
+Thu Jul 16 07:09:10 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 590.48.01              Driver Version: 590.48.01      CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 80GB HBM3          On  |   00000000:02:00.0 Off |                    0 |
+| N/A   31C    P0             68W /  700W |       0MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+[2026-07-16 07:09:10,848][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/config.json "HTTP/1.1 200 OK"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[2026-07-16 07:09:10,848][huggingface_hub.utils._http][WARNING] - Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[2026-07-16 07:09:11,051][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/gpt2/resolve/main/tokenizer_config.json "HTTP/1.1 200 OK"
+[2026-07-16 07:09:11,218][httpx][INFO] - HTTP Request: GET https://huggingface.co/api/models/gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 307 Temporary Redirect"
+[2026-07-16 07:09:11,365][httpx][INFO] - HTTP Request: GET https://huggingface.co/api/models/openai-community/gpt2/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+[2026-07-16 07:09:11,515][httpx][INFO] - HTTP Request: GET https://huggingface.co/api/models/gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 307 Temporary Redirect"
+[2026-07-16 07:09:11,669][httpx][INFO] - HTTP Request: GET https://huggingface.co/api/models/openai-community/gpt2/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+Student tokenizer vocab size: 50257
+Student trainable params: 183,721,824 (183.7M)
+
+Loading teacher: stanford-crfm/BioMedLM (bfloat16)...
+[2026-07-16 07:09:13,439][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/stanford-crfm/BioMedLM/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+[2026-07-16 07:09:13,472][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/stanford-crfm/BioMedLM/3e1a0abb814b8398bc34b4b6680ecf2c26d6a66f/config.json "HTTP/1.1 200 OK"
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[2026-07-16 07:09:14,652][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/stanford-crfm/BioMedLM/resolve/main/model.safetensors "HTTP/1.1 404 Not Found"
+[2026-07-16 07:09:14,809][httpx][INFO] - HTTP Request: GET https://huggingface.co/api/models/stanford-crfm/BioMedLM "HTTP/1.1 200 OK"
+[2026-07-16 07:09:14,970][httpx][INFO] - HTTP Request: GET https://huggingface.co/api/models/stanford-crfm/BioMedLM/commits/main "HTTP/1.1 200 OK"
+[2026-07-16 07:09:15,149][httpx][INFO] - HTTP Request: GET https://huggingface.co/api/models/stanford-crfm/BioMedLM/discussions?p=0 "HTTP/1.1 200 OK"
+[2026-07-16 07:09:15,319][httpx][INFO] - HTTP Request: GET https://huggingface.co/api/models/stanford-crfm/BioMedLM/commits/refs%2Fpr%2F7 "HTTP/1.1 200 OK"
+[2026-07-16 07:09:15,469][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/stanford-crfm/BioMedLM/resolve/refs%2Fpr%2F7/model.safetensors.index.json "HTTP/1.1 404 Not Found"
+[2026-07-16 07:09:15,621][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/stanford-crfm/BioMedLM/resolve/refs%2Fpr%2F7/model.safetensors "HTTP/1.1 302 Found"
+Loading weights:   0%|          | 0/389 [00:00<?, ?it/s]Loading weights:   6%|▌         | 23/389 [00:00<00:02, 181.61it/s]Loading weights:  13%|█▎        | 49/389 [00:00<00:01, 215.20it/s]Loading weights:  19%|█▉        | 73/389 [00:00<00:01, 206.57it/s]Loading weights:  28%|██▊       | 107/389 [00:00<00:01, 235.62it/s]Loading weights:  34%|███▍      | 133/389 [00:00<00:01, 235.44it/s]Loading weights:  40%|████      | 157/389 [00:00<00:01, 228.17it/s]Loading weights:  49%|████▉     | 191/389 [00:00<00:00, 240.71it/s]Loading weights:  58%|█████▊    | 227/389 [00:00<00:00, 248.27it/s]Loading weights:  68%|██████▊   | 263/389 [00:01<00:00, 243.96it/s]Loading weights:  74%|███████▍  | 289/389 [00:01<00:00, 234.77it/s]Loading weights:  84%|████████▎ | 325/389 [00:01<00:00, 254.09it/s]Loading weights:  92%|█████████▏| 359/389 [00:01<00:00, 240.94it/s]Loading weights: 100%|██████████| 389/389 [00:01<00:00, 253.49it/s]Loading weights: 100%|██████████| 389/389 [00:01<00:00, 240.01it/s]
+[transformers] [1mGPT2LMHeadModel LOAD REPORT[0m from: stanford-crfm/BioMedLM
+Key                                     | Status     |  | 
+----------------------------------------+------------+--+-
+transformer.h.{0...31}.attn.masked_bias | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+[2026-07-16 07:09:19,905][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/stanford-crfm/BioMedLM/resolve/main/generation_config.json "HTTP/1.1 404 Not Found"
+[2026-07-16 07:09:20,052][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/stanford-crfm/BioMedLM/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+[2026-07-16 07:09:20,084][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/stanford-crfm/BioMedLM/3e1a0abb814b8398bc34b4b6680ecf2c26d6a66f/config.json "HTTP/1.1 200 OK"
+Teacher params: 2,594,247,680 (2.59B), frozen.
+Teacher hidden dim: 2560
+Loading teacher tokenizer: stanford-crfm/BioMedLM
+[2026-07-16 07:09:21,566][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/stanford-crfm/BioMedLM/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+[2026-07-16 07:09:21,598][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/stanford-crfm/BioMedLM/3e1a0abb814b8398bc34b4b6680ecf2c26d6a66f/config.json "HTTP/1.1 200 OK"
+[2026-07-16 07:09:21,747][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/stanford-crfm/BioMedLM/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
+[2026-07-16 07:09:21,779][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/stanford-crfm/BioMedLM/3e1a0abb814b8398bc34b4b6680ecf2c26d6a66f/tokenizer_config.json "HTTP/1.1 200 OK"
+[2026-07-16 07:09:21,942][httpx][INFO] - HTTP Request: GET https://huggingface.co/api/models/stanford-crfm/BioMedLM/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+[2026-07-16 07:09:22,096][httpx][INFO] - HTTP Request: GET https://huggingface.co/api/models/stanford-crfm/BioMedLM/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+Teacher tokenizer vocab size: 28895, max_length: 512
+/sc/home/krishankumar.bhushan/hybrid_mamba_xlstm/.venv/lib/python3.11/site-packages/pytorch_lightning/utilities/parsing.py:213: Attribute 'teacher' is an instance of `nn.Module` and is already saved during checkpointing. It is recommended to ignore them using `self.save_hyperparameters(ignore=['teacher'])`.
+Loading PubMed (train)...
+[2026-07-16 07:09:22,405][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/datasets/ccdv/pubmed-summarization/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+[2026-07-16 07:09:22,438][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/ccdv/pubmed-summarization/6b30a2cae59b11ed77cb19959bffccbbd18e1106/README.md "HTTP/1.1 200 OK"
+[2026-07-16 07:09:22,620][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/datasets/ccdv/pubmed-summarization/resolve/6b30a2cae59b11ed77cb19959bffccbbd18e1106/pubmed-summarization.py "HTTP/1.1 404 Not Found"
+[2026-07-16 07:09:22,999][httpx][INFO] - HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/ccdv/pubmed-summarization/ccdv/pubmed-summarization.py "HTTP/1.1 404 Not Found"
+[2026-07-16 07:09:23,171][httpx][INFO] - HTTP Request: GET https://huggingface.co/api/datasets/ccdv/pubmed-summarization/revision/6b30a2cae59b11ed77cb19959bffccbbd18e1106 "HTTP/1.1 200 OK"
+[2026-07-16 07:09:23,324][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/datasets/ccdv/pubmed-summarization/resolve/6b30a2cae59b11ed77cb19959bffccbbd18e1106/.huggingface.yaml "HTTP/1.1 404 Not Found"
+[2026-07-16 07:09:23,581][httpx][INFO] - HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=ccdv/pubmed-summarization "HTTP/1.1 200 OK"
+[2026-07-16 07:09:23,736][httpx][INFO] - HTTP Request: GET https://huggingface.co/api/datasets/ccdv/pubmed-summarization/tree/6b30a2cae59b11ed77cb19959bffccbbd18e1106/document?recursive=true&expand=false "HTTP/1.1 200 OK"
+[2026-07-16 07:09:23,886][httpx][INFO] - HTTP Request: GET https://huggingface.co/api/datasets/ccdv/pubmed-summarization/tree/6b30a2cae59b11ed77cb19959bffccbbd18e1106?recursive=false&expand=false "HTTP/1.1 200 OK"
+[2026-07-16 07:09:24,035][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/datasets/ccdv/pubmed-summarization/resolve/6b30a2cae59b11ed77cb19959bffccbbd18e1106/dataset_infos.json "HTTP/1.1 404 Not Found"
+[2026-07-16 07:09:24,198][httpx][INFO] - HTTP Request: GET https://huggingface.co/api/datasets/ccdv/pubmed-summarization/tree/6b30a2cae59b11ed77cb19959bffccbbd18e1106/section?recursive=true&expand=false "HTTP/1.1 200 OK"
+  Packed train: 943,706 chunks × 512 = 483M tokens
+Loading PubMed (validation)...
+[2026-07-16 07:09:25,374][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/datasets/ccdv/pubmed-summarization/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+[2026-07-16 07:09:25,407][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/ccdv/pubmed-summarization/6b30a2cae59b11ed77cb19959bffccbbd18e1106/README.md "HTTP/1.1 200 OK"
+[2026-07-16 07:09:25,554][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/datasets/ccdv/pubmed-summarization/resolve/6b30a2cae59b11ed77cb19959bffccbbd18e1106/pubmed-summarization.py "HTTP/1.1 404 Not Found"
+[2026-07-16 07:09:25,672][httpx][INFO] - HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/ccdv/pubmed-summarization/ccdv/pubmed-summarization.py "HTTP/1.1 404 Not Found"
+[2026-07-16 07:09:25,828][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/datasets/ccdv/pubmed-summarization/resolve/6b30a2cae59b11ed77cb19959bffccbbd18e1106/.huggingface.yaml "HTTP/1.1 404 Not Found"
+[2026-07-16 07:09:25,988][httpx][INFO] - HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=ccdv/pubmed-summarization "HTTP/1.1 200 OK"
+[2026-07-16 07:09:26,137][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/datasets/ccdv/pubmed-summarization/resolve/6b30a2cae59b11ed77cb19959bffccbbd18e1106/dataset_infos.json "HTTP/1.1 404 Not Found"
+  Packed validation: 15,724 chunks × 512 = 8M tokens
+/sc/home/krishankumar.bhushan/hybrid_mamba_xlstm/.venv/lib/python3.11/site-packages/lightning_fabric/plugins/environments/slurm.py:204: The `srun` command is available on your system but is not used. HINT: If your intention is to run Lightning on SLURM, prepend your python command with `srun` like so: srun python scripts/train_stage0_distill.py model=hybrid_150m_v2 ...
+Using bfloat16 Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+
+Starting Stage 0 distillation (alpha=0.5, hidden-state KD)
+Output: ./outputs/h100_stage0_150m_v2
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+/sc/home/krishankumar.bhushan/hybrid_mamba_xlstm/.venv/lib/python3.11/site-packages/pytorch_lightning/utilities/model_summary/model_summary.py:242: Precision bf16-mixed is not supported by the model summary.  Estimated model size in MB will not be accurate. Using 32 bits instead.
+┏━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name          ┃ Type                ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model         │ HybridLanguageModel │  183 M │ train │     0 │
+│ 1 │ teacher       │ GPT2LMHeadModel     │  2.6 B │ eval  │     0 │
+│ 2 │ kd_projection │ Linear              │  2.0 M │ train │     0 │
+└───┴───────────────┴─────────────────────┴────────┴───────┴───────┘
+Trainable params: 185 M                                                         
+Non-trainable params: 2.6 B                                                     
+Total params: 2.8 B                                                             
+Total estimated model params size (MB): 11,119.742                              
+Modules in train mode: 218                                                      
+Modules in eval mode: 424                                                       
+Total FLOPs: 0                                                                  
+/sc/home/krishankumar.bhushan/hybrid_mamba_xlstm/.venv/lib/python3.11/site-packages/pytorch_lightning/utilities/_pytree.py:21: `isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.
+/sc/home/krishankumar.bhushan/hybrid_mamba_xlstm/.venv/lib/python3.11/site-packages/pytorch_lightning/loops/fit_loop.py:538: Found 424 module(s) in eval mode at the start of training. This may lead to unexpected behavior during training. If this is intentional, you can ignore this warning.
+`Trainer.fit` stopped: `max_steps=120000` reached.
+Epoch 6/-2 ━━━━━━━━━━━━━━━━ 6102/2034 0:27:17 •       1.35it/s v_num: 0.000     
+                                      0:00:00                  train/ce_loss_st…
+                                                               2.358            
+                                                               train/total_loss…
+                                                               1.206            
+                                                               train/perplexity…
+                                                               10.575 val/loss: 
+                                                               2.511            
+                                                               val/perplexity:  
+                                                               13.182           
+                                                               train/ce_loss_ep…
+                                                               2.356            
+                                                               train/total_loss…
+                                                               1.206            
+                                                               train/perplexity…
+                                                               10.633           
+
+Stage 0 distillation complete.
+Checkpoint saved to: ./outputs/h100_stage0_150m_v2/checkpoints
+=== END: checkpoints in ./outputs/h100_stage0_150m_v2/checkpoints/ ===
+Sun Jul 19 14:51:33 CEST 2026

@@ -1,0 +1,13 @@
+=== verify Stage-0 -> Phase-6 handoff ===
+Sun Jul 19 15:25:14 CEST 2026
+gx17v1
+config: norm_topology=hybrid  pooling=attention  dim=768  layers=12  pattern=['mamba', 'mamba', 'mamba', 'mamba', 'mlstm', 'mlstm', 'mlstm', 'mamba', 'mamba', 'mamba', 'mamba', 'mamba']
+
+ckpt keys: 204   text_encoder.lm keys: 204
+MISSING   (expected by lm, absent in ckpt): 0
+UNEXPECTED(in ckpt, not in lm):             0
+norm-related keys in ckpt: 61  (must be >0 for hybrid topology)
+
+RESULT: PASS — clean exact-match handoff, Phase 6 will load the backbone correctly
+=== verify exit code: 0 (0 = PASS) ===
+Sun Jul 19 15:25:20 CEST 2026

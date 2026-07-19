@@ -1,0 +1,145 @@
+=== checkpoints in outputs/h100_stage0_150m_v2/checkpoints (newest first) ===
+total 2176266
+-rw-rw---- 1 krishankumar.bhushan domain users 2228495971 14:51 last.ckpt
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 14:51 stage0_kd-step=114000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 14:51 stage0_kd-step=120000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 13:31 stage0_kd-step=112000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 13:31 stage0_kd-step=118000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 12:11 stage0_kd-step=110000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 12:11 stage0_kd-step=116000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 10:51 stage0_kd-step=108000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 09:31 stage0_kd-step=106000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 08:11 stage0_kd-step=104000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 06:51 stage0_kd-step=098000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 05:31 stage0_kd-step=100000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 04:12 stage0_kd-step=096000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 01:32 stage0_kd-step=092000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 00:14 stage0_kd-step=090000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 22:54 stage0_kd-step=086000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 20:15 stage0_kd-step=088000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 18:55 stage0_kd-step=084000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 17:35 stage0_kd-step=082000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 16:15 stage0_kd-step=078000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 14:56 stage0_kd-step=080000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 13:36 stage0_kd-step=076000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 12:16 stage0_kd-step=074000-val
+drwxrwx--- 2 krishankumar.bhushan domain users       4096 10:56 stage0_kd-step=072000-val
+
+=== live val/loss + lr trajectory from tfevents ===
+reading: outputs/h100_stage0_150m_v2/logs/stage0_kd/version_0
+
+== val/loss  (177 pts) ==
+  step     666  4.6781
+  step    5333  3.2691
+  step    9999  3.0412
+  step   14666  2.9368
+  step   19333  2.8734
+  step   24327  2.8269
+  step   28994  2.7956
+  step   33660  2.8038
+  step   38327  2.7772
+  step   43321  2.7585
+  step   47988  2.7417
+  step   52655  2.7420
+  step   57321  2.7298
+  step   62316  2.7218
+  step   66982  2.7142
+  step   71649  2.7014
+  step   76316  2.6969
+  step   81310  2.6886
+  step   85977  2.6856
+  step   90643  2.6892
+  step   95310  2.6749
+  step  100304  2.6760
+  step  104971  2.6299
+  step  109638  2.5639
+  step  114304  2.5309
+  step  119299  2.5120
+  LATEST step  119965  2.5110
+
+== val/perplexity  (177 pts) ==
+  step     666  116.9383
+  step    5333  28.5691
+  step    9999  22.6581
+  step   14666  20.3609
+  step   19333  19.0781
+  step   24327  18.1780
+  step   28994  17.6062
+  step   33660  17.7641
+  step   38327  17.2703
+  step   43321  16.9557
+  step   47988  16.6601
+  step   52655  16.6632
+  step   57321  16.4528
+  step   62316  16.3261
+  step   66982  16.1883
+  step   71649  15.9827
+  step   76316  15.8995
+  step   81310  15.7770
+  step   85977  15.7211
+  step   90643  15.7769
+  step   95310  15.5475
+  step  100304  15.5747
+  step  104971  14.8549
+  step  109638  13.8864
+  step  114304  13.4388
+  step  119299  13.1950
+  LATEST step  119965  13.1822
+
+== train/lr  (4800 pts) ==
+  step      24  0.0000
+  step    4824  0.0004
+  step    9624  0.0004
+  step   14424  0.0004
+  step   19224  0.0004
+  step   24024  0.0004
+  step   28824  0.0004
+  step   33624  0.0004
+  step   38424  0.0004
+  step   43224  0.0004
+  step   48024  0.0004
+  step   52824  0.0004
+  step   57624  0.0004
+  step   62424  0.0004
+  step   67224  0.0004
+  step   72024  0.0004
+  step   76824  0.0004
+  step   81624  0.0004
+  step   86424  0.0004
+  step   91224  0.0004
+  step   96024  0.0004
+  step  100824  0.0004
+  step  105624  0.0002
+  step  110424  0.0001
+  step  115224  0.0001
+  LATEST step  119999  0.0000
+
+== train/grad_norm  (4800 pts) ==
+  step      24  1.6272
+  step    4824  0.3358
+  step    9624  0.2667
+  step   14424  0.2398
+  step   19224  0.2410
+  step   24024  0.2289
+  step   28824  0.2325
+  step   33624  0.2879
+  step   38424  0.2321
+  step   43224  0.2487
+  step   48024  0.2359
+  step   52824  0.2570
+  step   57624  0.2589
+  step   62424  0.2570
+  step   67224  0.2512
+  step   72024  0.2589
+  step   76824  0.2593
+  step   81624  0.2526
+  step   86424  0.2692
+  step   91224  0.2618
+  step   96024  0.2430
+  step  100824  0.2624
+  step  105624  0.2799
+  step  110424  0.2506
+  step  115224  0.2650
+  LATEST step  119999  0.2523
+
+=== done ===
