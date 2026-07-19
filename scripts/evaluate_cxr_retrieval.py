@@ -110,8 +110,17 @@ def load_text_encoder(text_state: Dict, device: str) -> HybridTextEncoder:
         (".dt_norm." in k or ".v_norm." in k or ".B_norm." in k or ".C_norm." in k)
         for k in text_state
     ) else "pre_rms"
+    # Contrastive embed_dim is the CLIP joint-space size (512), NOT the model hidden
+    # dim. These coincided for the 70M (dim=512), which hid this bug; the 150M has
+    # dim=768 and building a 768-d head fails to load the checkpoint's 768->512 one.
+    # projection_head.3 is the final Linear(dim -> embed_dim), so shape[0] == embed_dim.
+    embed_dim = next(
+        (int(v.shape[0]) for k, v in text_state.items()
+         if k.endswith("projection_head.3.weight")),
+        dim,
+    )
     print(f"  [text encoder] detected layer_pattern={layer_pattern}, "
-          f"norm_topology={norm_topology}")
+          f"norm_topology={norm_topology}, dim={dim}, embed_dim={embed_dim}")
     cfg = HybridConfig(
         vocab_size=50257,
         dim=dim,
@@ -121,7 +130,7 @@ def load_text_encoder(text_state: Dict, device: str) -> HybridTextEncoder:
         max_position_embeddings=1024,
         pooling_strategy="attention",
     )
-    model = HybridTextEncoder(cfg, embed_dim=dim)
+    model = HybridTextEncoder(cfg, embed_dim=embed_dim)
     missing, unexpected = model.load_state_dict(text_state, strict=False)
     if missing:
         print(f"  [text encoder] {len(missing)} missing keys (first 5): {missing[:5]}")
