@@ -842,6 +842,12 @@ def main(cfg: DictConfig):
         strategy=cfg.trainer.strategy,
         max_steps=cfg.trainer.max_steps,
         val_check_interval=cfg.trainer.val_check_interval,
+        # Must be threaded through: with the default (1), an int val_check_interval is
+        # read as "batches WITHIN an epoch" and Lightning errors when it exceeds the
+        # epoch length (MIMIC 27.5k @ bs128 = 215 batches < 250). The configs set this
+        # to null, which makes val_check_interval count GLOBAL STEPS instead — correct
+        # for a max_steps-driven run and safe at any batch size (bs=256 -> 107 batches).
+        check_val_every_n_epoch=cfg.trainer.get("check_val_every_n_epoch", 1),
         log_every_n_steps=cfg.trainer.log_every_n_steps,
         accumulate_grad_batches=cfg.trainer.accumulate_grad_batches,
         # gradient_clip_val omitted: clipping handled in on_before_optimizer_step

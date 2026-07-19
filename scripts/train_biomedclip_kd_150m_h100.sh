@@ -20,7 +20,7 @@
 #SBATCH --partition=aisc-batch
 #SBATCH --account=aisc
 #SBATCH --gpus=1
-#SBATCH --exclude=ga03,gx17v1
+#SBATCH --exclude=ga03,gx17v1,gx13v1   # gx13v1: faulty GPU (cudaErrorContained, 2026-07-19)
 #SBATCH --mem=128G
 #SBATCH --cpus-per-task=12
 #SBATCH --time=1-00:00:00
