@@ -437,12 +437,14 @@ def print_decision_gate(metrics: Dict[str, float], dataset_name: str) -> None:
     print(f"  i2t R@10: {r10:.4f}  ({r10*100:.2f}%)")
     print(f"  t2i R@10: {metrics['t2i_R@10']:.4f}  ({metrics['t2i_R@10']*100:.2f}%)")
     print()
-    # HYBRID_ARCH_REFACTOR_PLAN tiered success bar (i2t R@10), per dataset.
-    # (Replaces the obsolete 0.25/0.40 gate — those bars were never attainable
-    #  on this task; Phase 6e's best was 0.0823.)
+    # H100_SCALING_PLAN tiered success bar (i2t R@10), per dataset.
+    # Superseded the HYBRID_ARCH_REFACTOR bars (mimic 0.0823/0.0999/0.12) once that
+    # plan COMPLETED at 10.45% — leaving them in place made a 10.84% run print
+    # "TARGET" when the current target is 12%. MIMIC floor is now the achieved
+    # 10.45%; Indiana floor 4.04% is unchanged (still the recovery bar).
     tiers = {
-        "mimic":   {"floor": 0.0823, "target": 0.0999, "stretch": 0.12},
-        "indiana": {"floor": 0.0404, "target": 0.055,  "stretch": 0.06},
+        "mimic":   {"floor": 0.1045, "target": 0.12,  "stretch": 0.14},
+        "indiana": {"floor": 0.0404, "target": 0.055, "stretch": 0.07},
     }
     t = tiers.get(dataset_name.lower())
     if t is None:

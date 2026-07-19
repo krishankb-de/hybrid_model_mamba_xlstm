@@ -44,6 +44,10 @@ BATCH_SIZE="${BATCH_SIZE:-128}"
 # compile_model=false for exactly this reason. Set COMPILE=true to re-test.
 COMPILE="${COMPILE:-false}"
 GRAD_CKPT="${GRAD_CKPT:-false}"   # flip true if bs=128 OOMs on the 80GB card
+# Epoch budget matters more than raw steps: MIMIC is only 27570 pairs, so bs=128 x
+# 5000 steps = 23 epochs (vs A100 bs=32 x 5000 = 5.8) and val/loss bottomed at ~2750.
+# Scale MAX_STEPS DOWN as batch goes UP to keep epochs comparable.
+MAX_STEPS="${MAX_STEPS:-5000}"
 STAGE0_CKPT="${STAGE0_CKPT:-./outputs/h100_stage0_${MODEL_CONFIG}/checkpoints/stage0_model_only.pt}"
 MIMIC_CACHE_DIR="${MIMIC_CACHE_DIR:-${SCRATCH_ROOT}/mimic_cxr_cache}"
 EXPERIMENT="${EXPERIMENT:-h100_kd_${MODEL_CONFIG}_bs${BATCH_SIZE}}"
@@ -87,7 +91,7 @@ python scripts/train_contrastive.py \
   distill.head_lr=6e-4 \
   trainer=h100_single_gpu \
   contrastive_mode=joint \
-  trainer.max_steps=5000 \
+  trainer.max_steps=${MAX_STEPS} \
   trainer.accumulate_grad_batches=1 \
   trainer.val_check_interval=250 \
   trainer.log_every_n_steps=25 \
