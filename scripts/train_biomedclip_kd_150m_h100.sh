@@ -33,6 +33,13 @@ set -euo pipefail
 
 export MODEL_CONFIG="hybrid_150m_v2"
 export BATCH_SIZE="${BATCH_SIZE:-128}"
+# 2026-07-19: bs=128 OOMs on the 80GB card the moment freeze_text_encoder_steps=1000
+# expires and the 184M backbone unfreezes (scan intermediate B*L*(D*expand)*N =
+# 128*256*1536*16 ~= 3.2GB EACH in fp32 — the fp32 scan that fixed Stage-0 costs 2x
+# memory here). Gradient checkpointing is the same lever that fixed Stage-0; keep
+# bs=128 so the in-batch-negative count (the MIMIC lever) is preserved.
+# If it still OOMs: BATCH_SIZE=64 (halves negatives — last resort).
+export GRAD_CKPT="${GRAD_CKPT:-true}"
 export STAGE0_CKPT="${STAGE0_CKPT:-./outputs/h100_stage0_150m_v2/checkpoints/stage0_model_only.pt}"
 export EXPERIMENT="${EXPERIMENT:-h100_kd_150m_v2_bs${BATCH_SIZE}}"
 
