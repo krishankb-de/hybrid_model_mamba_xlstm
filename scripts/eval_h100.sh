@@ -32,7 +32,12 @@ VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 MODE="${MODE:-ppl}"
 MODEL_CONFIG="${MODEL_CONFIG:-hybrid_70m_v2}"
 CKPT="${CKPT:?set CKPT=/path/to/checkpoint.pt}"
-DATASET="${DATASET:-mimic_cxr}"
+# NOTE: evaluate_cxr_retrieval.py's --dataset choices are exactly {mimic, indiana}
+# (NOT "mimic_cxr"), and it does NOT accept --model-config (it auto-detects arch from
+# the checkpoint). Its --cache-dir default is the stale willi path, so point it at the
+# local HF download cache and run with HF_DATASETS_OFFLINE=1 to avoid the gated-repo 401.
+DATASET="${DATASET:-mimic}"
+EVAL_CACHE_DIR="${EVAL_CACHE_DIR:-${SCRATCH_ROOT}/mimic_cxr_cache}"
 OUTPUT_DIR="${OUTPUT_DIR:-$(dirname "${CKPT}")/eval_results}"
 
 echo "=== H100 eval (MODE=${MODE}) ==="
@@ -62,8 +67,8 @@ if [ "${MODE}" = "ppl" ]; then
 elif [ "${MODE}" = "retrieval" ]; then
   python scripts/evaluate_cxr_retrieval.py \
     --checkpoint "${CKPT}" \
-    --model-config "${MODEL_CONFIG}" \
     --dataset "${DATASET}" \
+    --cache-dir "${EVAL_CACHE_DIR}" \
     --batch-size 32 \
     --output-dir "${OUTPUT_DIR}"
 else
