@@ -37,6 +37,13 @@ SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 MODEL_CONFIG="${MODEL_CONFIG:-hybrid_70m_v2}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
+# 2026-07-19: compile OFF by default. With compile_model=true the joint run died in
+# sanity-val with "CUDA error: Invalid access of peer GPU memory over nvlink or a
+# hardware error" (async — reported at the embedding lookup, faulted earlier). The text
+# encoder uses the same custom Mamba/mLSTM Triton kernels that Stage-0 runs with
+# compile_model=false for exactly this reason. Set COMPILE=true to re-test.
+COMPILE="${COMPILE:-false}"
+GRAD_CKPT="${GRAD_CKPT:-false}"   # flip true if bs=128 OOMs on the 80GB card
 STAGE0_CKPT="${STAGE0_CKPT:-./outputs/h100_stage0_${MODEL_CONFIG}/checkpoints/stage0_model_only.pt}"
 MIMIC_CACHE_DIR="${MIMIC_CACHE_DIR:-${SCRATCH_ROOT}/mimic_cxr_cache}"
 EXPERIMENT="${EXPERIMENT:-h100_kd_${MODEL_CONFIG}_bs${BATCH_SIZE}}"
@@ -82,13 +89,13 @@ python scripts/train_contrastive.py \
   trainer.accumulate_grad_batches=1 \
   trainer.val_check_interval=250 \
   trainer.log_every_n_steps=25 \
-  trainer.compile_model=true \
+  trainer.compile_model=${COMPILE} \
   dataset.batch_size=${BATCH_SIZE} \
   dataset.eval_batch_size=${BATCH_SIZE} \
   dataset.num_workers=8 \
   dataset.pin_memory=true \
   dataset.cache_dir="${MIMIC_CACHE_DIR}" \
-  model.use_gradient_checkpointing=false \
+  model.use_gradient_checkpointing=${GRAD_CKPT} \
   lm_checkpoint="${STAGE0_CKPT}" \
   experiment_name=${EXPERIMENT} \
   output_dir=./outputs/${EXPERIMENT} \
