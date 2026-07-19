@@ -13,6 +13,12 @@ CPU-only, ~seconds. Run in the venv on a compute/run node:
     [configs/model/hybrid_150m_v2.yaml]
 """
 import sys
+from pathlib import Path
+
+# Make the repo root importable when run as `python scripts/verify_stage0_handoff.py`
+# (Python puts scripts/ on sys.path, not the repo root; mirror train_stage0_distill.py:40).
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import torch
 from omegaconf import OmegaConf
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
