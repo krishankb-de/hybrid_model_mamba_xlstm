@@ -1533,8 +1533,10 @@ def test_resume_from_checkpoint_wired_to_trainer_fit():
 
 
 def test_biomedclip_kd_joint_v2_config_present():
-    """Phase 10C/10F: the v2 joint distill config must enable freq-decoupled KD,
-    the ViT unfreeze (supervisor Step 6), and hold the Phase 6e recipe (K=0).
+    """Phase 10C/10F: the v2 joint distill config must keep freq-decoupled KD OFF
+    (2026-06-18 ablation: ON cost Indiana 3.90%->2.96%), enable the ViT unfreeze
+    (supervisor Step 6; ablation proved it a pure +2.5pp MIMIC win), and hold the
+    Phase 6e recipe (K=0).
     """
     import pathlib
     import yaml
@@ -1546,7 +1548,11 @@ def test_biomedclip_kd_joint_v2_config_present():
     assert cfg_path.exists(), "configs/distill/biomedclip_kd_joint_v2.yaml missing"
     cfg = yaml.safe_load(cfg_path.read_text())
     assert cfg["teacher"] == "biomedclip_text"
-    assert cfg["freq_kd"] is True
+    assert cfg["freq_kd"] is False, (
+        "freq_kd must default to false — the 2026-06-18 ablation showed it is a "
+        "cross-domain regression (Indiana 3.90% -> 2.96%). Re-enable only per-run "
+        "via distill.freq_kd=true (see train_biomedclip_kd_phase15.sh)."
+    )
     assert cfg["freq_kd_low_bins"] == 32
     assert abs(float(cfg["freq_kd_alpha_high"]) - 0.1) < 1e-9
     assert cfg["vit_unfreeze_blocks"] == 2
@@ -1555,6 +1561,79 @@ def test_biomedclip_kd_joint_v2_config_present():
     # α_kd schedule unchanged from Phase 6e for attribution
     assert abs(float(cfg["alpha_kd_warmup"]) - 1.0) < 1e-9
     assert abs(float(cfg["alpha_kd_post"]) - 0.3) < 1e-9
+
+
+def test_h100_contrastive_lrs_are_overridable():
+    """Phase 6 post-mortem: backbone_lr/head_lr were HARDCODED at the bs=128
+    sqrt-scaled values, so every arm of the batch sweep — including the winning
+    bs=64 arm — trained at bs=128 LRs. The sweep was never LR-matched. Guard that
+    the template threads the env vars instead of baking literals.
+    """
+    import pathlib
+    import re
+
+    script = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "scripts" / "train_biomedclip_kd_h100.sh"
+    ).read_text()
+
+    assert "distill.backbone_lr=${BACKBONE_LR}" in script, (
+        "train_biomedclip_kd_h100.sh: backbone_lr must come from ${BACKBONE_LR}"
+    )
+    assert "distill.head_lr=${HEAD_LR}" in script, (
+        "train_biomedclip_kd_h100.sh: head_lr must come from ${HEAD_LR}"
+    )
+    assert re.search(r"^BACKBONE_LR=\"\$\{BACKBONE_LR:-", script, re.M)
+    assert re.search(r"^HEAD_LR=\"\$\{HEAD_LR:-", script, re.M)
+    # The literals must not survive on the python invocation lines.
+    assert "distill.head_lr=6e-4" not in script
+    assert "distill.backbone_lr=2e-5" not in script
+
+
+def test_h100_150m_contrastive_epoch_budget_is_batch_matched():
+    """Phase 6 found bigger batches at fixed MAX_STEPS see MORE epochs, not fewer
+    (bs=128 x 5000 = 23 epochs vs A100's 5.8), which confounded the negatives
+    lever. The 150M wrapper now derives MAX_STEPS from BATCH_SIZE; assert every
+    arm holds the same 384000-sample (13.93-epoch) budget over 27570 pairs.
+    """
+    import pathlib
+    import re
+
+    script = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "scripts" / "train_biomedclip_kd_150m_h100.sh"
+    ).read_text()
+
+    arms = re.findall(
+        r"^\s*(\d+)\)\s+DEF_BACKBONE_LR=([0-9.e-]+);\s+"
+        r"DEF_HEAD_LR=([0-9.e-]+);\s+DEF_MAX_STEPS=(\d+)",
+        script,
+        re.M,
+    )
+    assert len(arms) >= 3, f"expected >=3 batch arms, parsed {arms}"
+
+    seen = {}
+    for bs_s, backbone_lr, head_lr, steps_s in arms:
+        bs, steps = int(bs_s), int(steps_s)
+        assert bs * steps == 384000, (
+            f"bs={bs} x {steps} steps = {bs * steps} samples, expected 384000 "
+            "(13.93 epochs over 27570 MIMIC pairs)"
+        )
+        seen[bs] = (float(backbone_lr), float(head_lr))
+
+    assert {32, 64, 128} <= set(seen), f"missing batch arms: {sorted(seen)}"
+    # Canonical A100 anchor: bs=32 -> backbone 1e-5 / head 3e-4.
+    assert abs(seen[32][0] - 1.0e-5) < 1e-12
+    assert abs(seen[32][1] - 3.0e-4) < 1e-12
+    # LRs must be sqrt-scaled off that anchor (monotone in batch size).
+    assert seen[32][1] < seen[64][1] < seen[128][1], (
+        f"head_lr must grow with batch size: {seen}"
+    )
+    for bs in (64, 128):
+        expected = 3.0e-4 * (bs / 32.0) ** 0.5
+        assert abs(seen[bs][1] - expected) / expected < 0.02, (
+            f"bs={bs} head_lr {seen[bs][1]} deviates >2% from sqrt-scaled {expected:.3e}"
+        )
 
 
 def test_freq_decoupled_kd_threaded():

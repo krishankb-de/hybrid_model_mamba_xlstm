@@ -30,7 +30,16 @@ gamma_simcse: 0.1
 # When freq_kd=true, L_KD = λ_low·MSE(low_band) + α_high·MSE(high_band)
 #                            + 0.5·(1 - cos(z_text, t_emb))
 # computed via rFFT along the 512-d embedding feature axis.
-freq_kd: true
+#
+# CANONICAL = FALSE (2026-06-18 ablation, jobs 1922/1923 vs 1930/1931):
+#   freq_kd=true  -> MIMIC 10.94% / Indiana 2.96%
+#   freq_kd=false -> MIMIC 10.45% / Indiana 3.90%   <-- dominates
+# MIMIC is flat within noise but Indiana is clearly worse with it ON, so
+# freq-decoupled KD is a cross-domain REGRESSION. Do not re-enable it without
+# new evidence; it directly attacks the Indiana >= 4.04% floor that Phase 7
+# exists to clear. The default was left `true` until 2026-07-21 and was only
+# false in practice because every launch script passed distill.freq_kd=false.
+freq_kd: false
 freq_kd_low_bins: 32       # first 32 rFFT bins = low-frequency (coarse) band
 freq_kd_alpha_high: 0.1    # down-weight high-frequency (fine-detail) band
 

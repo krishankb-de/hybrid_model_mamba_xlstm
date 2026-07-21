@@ -12,7 +12,8 @@
 # it also cuts epoch count on the 27.5k-pair set (less overfitting). Grad-accum
 # does NOT add negatives, so keep accum=1 and scale batch_size instead.
 #
-# LR is sqrt-scaled for the 4x batch (32->128): backbone 1e-5->2e-5, head 3e-4->6e-4.
+# LR defaults are sqrt-scaled for the 4x batch (32->128): backbone 1e-5->2e-5,
+# head 3e-4->6e-4. Override per-arm with BACKBONE_LR= / HEAD_LR= (see note below).
 #
 # Kill gates: cos_text_teacher >= 0.85 by step 1000; val/clip_loss < 3.0 by 1000;
 #   MIMIC R@10 >= 0.1045 (current best) by step 3000; ViT group lr == 1e-6.
@@ -48,11 +49,20 @@ GRAD_CKPT="${GRAD_CKPT:-false}"   # flip true if bs=128 OOMs on the 80GB card
 # 5000 steps = 23 epochs (vs A100 bs=32 x 5000 = 5.8) and val/loss bottomed at ~2750.
 # Scale MAX_STEPS DOWN as batch goes UP to keep epochs comparable.
 MAX_STEPS="${MAX_STEPS:-5000}"
+# 2026-07-21: LRs are now ENV-OVERRIDABLE. They were hardcoded at the bs=128
+# sqrt-scaled values (backbone 2e-5 / head 6e-4), so the Phase-6 batch sweep ran
+# EVERY arm at bs=128 LRs — including the bs=64 arm that produced the best number
+# (0.1113). The sweep was therefore never LR-matched, and grad_norm ran ~12.3
+# against gradient_clip_val=1.0 (~12x clipping every step). Canonical A100 values
+# at bs=32 are backbone 1e-5 / head 3e-4; sqrt-scale from there for other batches.
+BACKBONE_LR="${BACKBONE_LR:-2e-5}"
+HEAD_LR="${HEAD_LR:-6e-4}"
 STAGE0_CKPT="${STAGE0_CKPT:-./outputs/h100_stage0_${MODEL_CONFIG}/checkpoints/stage0_model_only.pt}"
 MIMIC_CACHE_DIR="${MIMIC_CACHE_DIR:-${SCRATCH_ROOT}/mimic_cxr_cache}"
 EXPERIMENT="${EXPERIMENT:-h100_kd_${MODEL_CONFIG}_bs${BATCH_SIZE}}"
 
 echo "=== H100 joint contrastive: ${MODEL_CONFIG}, bs=${BATCH_SIZE} (true negatives) ==="
+echo "=== LRs: backbone=${BACKBONE_LR} head=${HEAD_LR} | max_steps=${MAX_STEPS} ==="
 date; hostname
 mkdir -p logs "${MIMIC_CACHE_DIR}"
 
@@ -87,8 +97,8 @@ python scripts/train_contrastive.py \
   distill.freq_kd=false \
   distill.vit_unfreeze_blocks=2 \
   distill.vit_lr=1e-6 \
-  distill.backbone_lr=2e-5 \
-  distill.head_lr=6e-4 \
+  distill.backbone_lr=${BACKBONE_LR} \
+  distill.head_lr=${HEAD_LR} \
   trainer=h100_single_gpu \
   contrastive_mode=joint \
   trainer.max_steps=${MAX_STEPS} \

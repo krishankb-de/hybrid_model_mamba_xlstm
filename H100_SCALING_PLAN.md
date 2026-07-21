@@ -97,7 +97,23 @@ Hold canonical recipe (`biomedclip_kd_joint_v2`: freq_kd=false, vit_unfreeze=2, 
 - [x] **6A** — `scripts/train_biomedclip_kd_150m_h100.sh` (wrapper; `model=hybrid_150m_v2`, `lm_checkpoint`=Phase-5, `batch_size` sweep {64,128,256} via env, `accum=1`, LR √-scaled for bs=128).
 - [ ] **6B** — (H100) LR √-scale per batch: `backbone_lr→~2e-5`, `head_lr→~6e-4` at bs=128 (re-scale for other bs). Log embedding mean/std + cosine histogram (collapse watch).
 - [ ] **6C** — (H100) Submit. Kill gates: `cos_text_teacher≥0.85` by 1k; `val/clip_loss<3.0`; MIMIC R@10 ≥ 10.45% by 3k.
-- [ ] **6D** — (H100) Gate: MIMIC i2t R@10 (`eval_h100.sh MODE=retrieval` / `evaluate_cxr_retrieval.py`). Target ≥12%.
+- [x] **6D** — (H100) Gate: MIMIC i2t R@10 (`eval_h100.sh MODE=retrieval` / `evaluate_cxr_retrieval.py`). Target ≥12%. **RESULT: NULL.** bs=128/23ep 0.1084, bs=128/14ep 0.1090, bs=64/14ep **0.1113** (best). Floor 0.1045 cleared by all; target 0.12 missed by all; spread 0.29pp vs SE ~0.57pp ⇒ arms statistically indistinguishable.
+
+### Phase 6B — LR-matched rerun (the one supported lever from the 2026-07-21 review) ⏳ SCRIPT READY
+Phase-6 post-mortem found the batch sweep was **never LR-matched**: `backbone_lr`/`head_lr` were hardcoded at the bs=128 √-scaled values (`train_biomedclip_kd_h100.sh:90-91`), so the winning bs=64 arm silently trained at ~1.4x its proper LR. Combined with grad_norm ~12.3 against `gradient_clip_val=1.0` (~12x clipping every step), LR is the one untested knob with direct evidence behind it.
+- [x] **6B-1** — `BACKBONE_LR`/`HEAD_LR` env-overridable in `train_biomedclip_kd_h100.sh`; 150M wrapper derives LR **and** `MAX_STEPS` from `BATCH_SIZE` (384000-sample / 13.93-epoch budget held across arms) so neither confound can recur. `EXPERIMENT` name now carries head LR so same-batch arms don't overwrite each other.
+- [x] **6B-2** — Tests `test_h100_contrastive_lrs_are_overridable` + `test_h100_150m_contrastive_epoch_budget_is_batch_matched` (asserts bs×steps == 384000 and √-scaling off the bs=32 anchor). `validate_for_willi.sh` green 74 passed, 9/9 gates.
+- [ ] **6B-3** — (H100) Run two bs=64 arms: √-matched `head_lr=4.24e-4` (default) vs conservative `head_lr=3.0e-4` (canonical A100). Watch grad_norm — if it drops from ~12.3 toward the clip value, LR was the binding issue.
+- [ ] **6B-4** — (H100) Authoritative `evaluate_cxr_retrieval.py` on both best-by-`val/total_loss` ckpts vs 0.1113. **Interpret against SE ~0.57pp** — anything under ~1.1pp of movement is noise, not a win.
+
+**REJECTED by prior evidence** (2026-07-21 review of a proposed recipe change — do NOT re-litigate):
+- `vit_unfreeze_blocks: 0` — already run (jobs 1942/1948/1949): MIMIC **10.45% → 7.97%**, Indiana identical 3.90%. Freezing loses in-domain and recovers nothing cross-domain.
+- `freq_kd: true` — already run (jobs 1922/1923 vs 1930/1931): Indiana **3.90% → 2.96%**. Cross-domain regression; attacks the Phase-7 gate.
+- Checkpoint/early-stop on `val/retrieval_i2t_R@10` — **selection-on-test**: `mimic_cxr.yaml` sets `validation_split == test_split == train[90%:]`, the same 3063 pairs `evaluate_cxr_retrieval.py:346` evaluates. Legitimate version = carve a third disjoint selection split out of `train[:90%]`.
+
+### Phase 6C — Teacher-ceiling reference measurement (NO TRAINING) ⏳ NOT STARTED
+Every text-side lever is flat (PPL 15.62→13.18, 70M→150M, negatives 32→128, 23→14 epochs) while the one image-side lever moved +2.5pp. Before spending more GPU time, measure **stock BiomedCLIP** (its own text + image towers) on the identical `train[90%:]` N=3063 protocol. If BiomedCLIP itself scores ~12-13%, the student at 11.13% is at teacher parity and the 12% target is arbitrary — which reframes Phase 6 as a success (184M hybrid SSM matching a transformer CLIP) rather than a miss. Costs no training.
+- [ ] **6C-1** — Reference eval script; report i2t/t2i R@1/5/10 alongside the 0.1113 student number.
 
 ### Phase 7 — Multi-source CXR data diversification → Indiana lever
 Only proven Indiana lever. **IU-Xray EXCLUDED from training (= Indiana eval; zero-leakage).**

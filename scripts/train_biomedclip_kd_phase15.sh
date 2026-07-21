@@ -106,6 +106,7 @@ python scripts/train_contrastive.py \
   model=hybrid_70m_v2 \
   dataset=mimic_cxr \
   +distill=biomedclip_kd_joint_v2 \
+  distill.freq_kd=true \
   trainer=a100_single_gpu \
   contrastive_mode=joint \
   trainer.max_steps=5000 \
