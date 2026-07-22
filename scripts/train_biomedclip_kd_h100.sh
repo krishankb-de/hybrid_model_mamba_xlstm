@@ -58,7 +58,13 @@ MAX_STEPS="${MAX_STEPS:-5000}"
 BACKBONE_LR="${BACKBONE_LR:-2e-5}"
 HEAD_LR="${HEAD_LR:-6e-4}"
 STAGE0_CKPT="${STAGE0_CKPT:-./outputs/h100_stage0_${MODEL_CONFIG}/checkpoints/stage0_model_only.pt}"
-MIMIC_CACHE_DIR="${MIMIC_CACHE_DIR:-${SCRATCH_ROOT}/mimic_cxr_cache}"
+# 2026-07-22: MIMIC-CXR (itsanmolgupta/mimic-cxr-dataset) is GATED — an online
+# load_dataset 401s (DatasetNotFoundError). The 2026-07-19 Phase-6 runs only
+# worked OFFLINE against a pre-downloaded local cache. Default to that known-good
+# cache dir + offline mode below. Point MIMIC_CACHE_DIR at the dir that actually
+# holds the downloaded dataset (verify with `ls`), or export HF_HUB_OFFLINE=0 +
+# HF_TOKEN for a first-time online populate.
+MIMIC_CACHE_DIR="${MIMIC_CACHE_DIR:-/sc/home/$USER/dataset/mimic_cxr_cache}"
 EXPERIMENT="${EXPERIMENT:-h100_kd_${MODEL_CONFIG}_bs${BATCH_SIZE}}"
 
 echo "=== H100 joint contrastive: ${MODEL_CONFIG}, bs=${BATCH_SIZE} (true negatives) ==="
@@ -70,6 +76,11 @@ cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUB
 
 export HF_HOME="${SCRATCH_ROOT}/.hf"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
+# Gated MIMIC-CXR: load from local cache, never hit the Hub (avoids the 401 that
+# killed job 2357924). BiomedCLIP + gpt2 snapshots are already in HF_HOME cache,
+# so offline resolves them locally too. Override to 0 only to (re)download.
+export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export TORCHINDUCTOR_CACHE_DIR="${SCRATCH_ROOT}/.torchinductor"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 # Set CUDA_LAUNCH_BLOCKING=1 to make CUDA errors report at the REAL faulting kernel
