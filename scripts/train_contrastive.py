@@ -30,6 +30,7 @@ python scripts/train_contrastive.py \\
     lm_checkpoint=./outputs/pubmed_simcse/checkpoints/last.ckpt
 """
 
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -411,12 +412,25 @@ class MIMICJointDataset(Dataset):
             img = img.convert("RGB")
         pixel_values = self.img_transform(img)
 
+        # Phase 6D-3: stable hash of the case/whitespace-normalised report.
+        # MIMIC reports are heavily templated, so many studies share literally
+        # identical text; the CLIP loss currently pushes those apart as
+        # negatives (hard arange(B) targets, lightning_module.py:540). Equal
+        # hashes let the loss treat them as a positive SET instead. blake2b is
+        # used rather than Python's hash() because the latter is salted per
+        # process and would differ across dataloader workers.
+        norm = " ".join(text.lower().split())
+        text_hash = int.from_bytes(
+            hashlib.blake2b(norm.encode("utf-8"), digest_size=8).digest(), "big"
+        ) % (2 ** 62)
+
         return {
             "input_ids":              s_enc["input_ids"].squeeze(0),
             "attention_mask":         s_enc["attention_mask"].squeeze(0),
             "pixel_values":           pixel_values,
             "teacher_input_ids":      t_ids,
             "teacher_attention_mask": t_mask,
+            "text_hash":              torch.tensor(text_hash, dtype=torch.long),
         }
 
 
@@ -617,6 +631,8 @@ def main(cfg: DictConfig):
         use_gradient_checkpointing=cfg.model.get("use_gradient_checkpointing", False),
         proj_head_dropout=cfg.model.get("proj_head_dropout", 0.1),
         pooling_strategy=cfg.model.get("pooling_strategy", "mean"),
+        # Phase 6E: bidirectional contrastive encode (no new parameters).
+        bidirectional_encode=cfg.model.get("bidirectional_encode", False),
     )
 
     # Build text encoder
@@ -722,6 +738,13 @@ def main(cfg: DictConfig):
             freq_kd=bool(distill_cfg.get("freq_kd", False)),
             freq_kd_low_bins=int(distill_cfg.get("freq_kd_low_bins", 32)),
             freq_kd_alpha_high=float(distill_cfg.get("freq_kd_alpha_high", 0.1)),
+            # Phase 6D-2 / 6D-3: KD-anchor decay + objective repair. All four
+            # defaults reproduce the Phase-6B recipe exactly, so 6D-0 is a true
+            # control.
+            kd_decay_steps=int(distill_cfg.get("kd_decay_steps", 0)),
+            alpha_kd_floor=float(distill_cfg.get("alpha_kd_floor", 0.0)),
+            clip_loss_type=str(distill_cfg.get("clip_loss_type", "infonce")),
+            use_multipos=bool(distill_cfg.get("use_multipos", False)),
         )
         print(
             f"JointMultiTaskLightningModule: "
@@ -731,6 +754,17 @@ def main(cfg: DictConfig):
             f"β_clip={distill_cfg.get('beta_clip', 1.0)} "
             f"γ_simcse={distill_cfg.get('gamma_simcse', 0.1)} "
             f"freeze_text_encoder_steps={distill_cfg.get('freeze_text_encoder_steps', 500)}"
+        )
+        # Phase 6D levers echoed explicitly. This repo has twice lost days to a
+        # silently-drifted override (hardcoded LRs, freq_kd default), so every
+        # new knob goes in the SLURM log where the run can be audited from it.
+        print(
+            f"  Phase 6D levers: vit_unfreeze_blocks="
+            f"{distill_cfg.get('vit_unfreeze_blocks', cfg.model.get('vit_unfreeze_blocks', 0))} "
+            f"kd_decay_steps={distill_cfg.get('kd_decay_steps', 0)} "
+            f"alpha_kd_floor={distill_cfg.get('alpha_kd_floor', 0.0)} "
+            f"clip_loss_type={distill_cfg.get('clip_loss_type', 'infonce')} "
+            f"use_multipos={distill_cfg.get('use_multipos', False)}"
         )
 
     elif distill_cfg is not None and contrastive_mode == "simcse":

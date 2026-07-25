@@ -4,7 +4,7 @@
 > **Builds on the COMPLETED `HYBRID_ARCH_REFACTOR_PLAN.md`** (broke the MIMIC ceiling 8.23%→10.45% i2t R@10). That plan is finished — historical reference only.
 > Full approved plan: `/Users/krish/.claude/plans/i-want-to-implement-twinkling-ullman.md`.
 >
-> **Current phase: Phase 5 — Stage-0 150M pretrain** (H100 box; local scaffolding through Phase 4 done; Phase 3 deferred post-Phase-6).
+> **Current phase: Phase 6C — measurement block** (Phases 1/2/4/5/6/6B done; 6B was the 7th consecutive null — see the 2026-07-25 post-mortem below before proposing any new lever. Phase 3 deferred post-Phase-6.)
 
 ## Context
 
@@ -103,17 +103,77 @@ Hold canonical recipe (`biomedclip_kd_joint_v2`: freq_kd=false, vit_unfreeze=2, 
 Phase-6 post-mortem found the batch sweep was **never LR-matched**: `backbone_lr`/`head_lr` were hardcoded at the bs=128 √-scaled values (`train_biomedclip_kd_h100.sh:90-91`), so the winning bs=64 arm silently trained at ~1.4x its proper LR. Combined with grad_norm ~12.3 against `gradient_clip_val=1.0` (~12x clipping every step), LR is the one untested knob with direct evidence behind it.
 - [x] **6B-1** — `BACKBONE_LR`/`HEAD_LR` env-overridable in `train_biomedclip_kd_h100.sh`; 150M wrapper derives LR **and** `MAX_STEPS` from `BATCH_SIZE` (384000-sample / 13.93-epoch budget held across arms) so neither confound can recur. `EXPERIMENT` name now carries head LR so same-batch arms don't overwrite each other.
 - [x] **6B-2** — Tests `test_h100_contrastive_lrs_are_overridable` + `test_h100_150m_contrastive_epoch_budget_is_batch_matched` (asserts bs×steps == 384000 and √-scaling off the bs=32 anchor). `validate_for_willi.sh` green 74 passed, 9/9 gates.
-- [ ] **6B-3** — (H100) Run two bs=64 arms: √-matched `head_lr=4.24e-4` (default) vs conservative `head_lr=3.0e-4` (canonical A100). Watch grad_norm — if it drops from ~12.3 toward the clip value, LR was the binding issue.
-- [ ] **6B-4** — (H100) Authoritative `evaluate_cxr_retrieval.py` on both best-by-`val/total_loss` ckpts vs 0.1113. **Interpret against SE ~0.57pp** — anything under ~1.1pp of movement is noise, not a win.
+- [x] **6B-3** — (H100) Two bs=64 arms run (jobs 2359951 / 2359952). **RESULT: NULL.** √-matched `head_lr=4.24e-4` → in-training i2t R@10 peak 0.120 @ep11, final 0.116. Conservative `head_lr=3.0e-4` → peak/final 0.119. Prior best (head=6e-4) → peak 0.122, final 0.116. Spread 0.1–0.3pp vs SE ~0.57pp ⇒ **LR is not the binding constraint.** Secondary finding: lower LR removed the late-epoch retrieval rollover (arm B ends at its max, no overfit decline) without changing the plateau height — so overfitting is not binding either.
+- [ ] **6B-4** — (H100) Authoritative `evaluate_cxr_retrieval.py` on both best-by-`val/total_loss` ckpts, for the record. Expected ~0.108–0.112 given in-training parity. Not a decision point.
 
-**REJECTED by prior evidence** (2026-07-21 review of a proposed recipe change — do NOT re-litigate):
+---
+
+## 2026-07-25 — Plateau post-mortem: what the seven nulls actually mean
+
+**Lever tally: 7 clean nulls, 1 positive.**
+
+| Lever | Δ i2t R@10 | Verdict |
+|---|---|---|
+| Stage-0 PPL 15.62 → 13.18 | flat | LM quality does not transfer to retrieval |
+| 70M → 150M backbone | flat | capacity not binding |
+| Negatives 32 → 128 | flat (bs=64 nominally ahead) | in-batch-negative thesis unsupported |
+| Epochs 23 → 14 | +0.06pp | overfitting not binding |
+| batch 128 vs 64 (epoch-matched) | 0.29pp spread | indistinguishable |
+| head_lr 6e-4 → 4.24e-4 | flat | optimization not binding |
+| head_lr 6e-4 → 3.0e-4 | flat | optimization not binding |
+| **ViT unfreeze 0 → 2** | **+2.5pp** | **the only live lever — the only trainable thing not anchored to the teacher** |
+
+### The `cos_text_teacher` = 0.57 claim is FALSIFIED — do not build on it
+
+Two external reviews (2026-07-25) independently diagnosed the plateau as a **causal-vs-bidirectional representational ceiling**, evidenced by `cos_text_teacher` pinning at ~0.57 across every configuration. **Our own logs refute this:**
+
+- Steps 0–1000 = KD-only warmup: CLIP is gated off (`lightning_module.py:1012-1016`), `α_kd_warmup=1.0`, and the **LM backbone is frozen** — only `projection_head` + `attn_pool` + `logit_scale` train (15.2M params). In that window `cos_text_teacher` reaches **0.874–0.892** (passes the ≥0.85 gate).
+- It then *falls* to 0.60 → 0.57 **after** CLIP switches on at step 1000, and sits at 0.566 / 0.570 / 0.574 / 0.582 across a 2× LR range, both batch sizes, and both model scales.
+
+A frozen causal SSM backbone with a small head hit **0.89** cosine against the bidirectional PubMedBERT teacher. 0.57 is therefore a **loss-weight equilibrium** between KD (α_post=0.3) and CLIP (β=1.0) pulling `z_text` toward targets that are themselves cos~0.5–0.7 apart in the joint space — exactly what the code comment at `:1086-1090` predicted. It is **not** an architecture ceiling, and its invariance to LR/batch/scale is the expected signature of an equilibrium, not of an optimization failure.
+
+**Consequences carried into the phases below:**
+1. `cos_text_teacher` must **never** be used as a gate on whether the text tower is architecturally adequate. Any experiment whose kill criterion is "did cos rise above 0.62" would draw a wrong conclusion.
+2. **KD-anchor decay (6D-2) is promoted** — it attacks the equilibrium directly and is derived from our own data, not from literature.
+3. Bidirectional encode (6E) is retained but **re-motivated**: the honest argument is report structure (the Impression at token ~300 recontextualizes the Findings at token ~40 and a causal encoder cannot propagate that backwards), *not* the cos number. This framing must survive into the writeup.
+
+### Phase 6C — Measurement block (NO TRAINING, ~1–2 GPU-h) ⏳ SCRIPTS READY — run pending H100
+Launch: `CKPT=<best 6B ckpt> sbatch scripts/run_phase6c_measurements.sh` (runs 6C-3 then 6C-1/6C-2).
+Instrumentation and writeup evidence. **Per user decision 2026-07-25, 6D runs regardless of the 6C-1 result** — 6C does not gate 6D, it explains it and calibrates the writeup.
+- [ ] **6C-1** — `scripts/reference_biomedclip_zeroshot.py`: stock BiomedCLIP (**its own text tower and image tower**) on the identical `train[90%:]` N=3063 protocol. Report i2t/t2i R@1/5/10 next to the 0.1113 student number. Published anchors put BiomedCLIP zero-shot at ~2–4% on comparable ~2.4k-study galleries, which would put the student at ~3× the teacher and imply real headroom — but the only number that counts is ours, on our protocol.
+- [ ] **6C-2** — Tower-swap 2×2 in the same script: {student text, BiomedCLIP text} × {fine-tuned ViT, stock ViT}. Four numbers isolate which tower binds. If substituting BiomedCLIP's text tower barely moves R@10, text-side effort is misallocated and 6E should be dropped.
+- [ ] **6C-3** — `scripts/audit_mimic_duplicates.py` (CPU only): exact + whitespace/case-normalised report-text grouping over `train[:90%]` and `train[90%:]`. Outputs (a) the oracle R@10 ceiling on the eval gallery under arbitrary tie-breaking, (b) expected false-negative rate per batch size {32,64,128}. Decides whether 6D-3's multi-positive mask is worth having and whether a dedup-aware R@10 belongs in the headline.
+- [ ] **6C-4** — Reporting: surface i2t/t2i **R@1 and R@5** (already computed at `evaluate_cxr_retrieval.py:535-540`, just never carried into the state/writeup). R@1 ≈ 1.7% is far more sensitive to representation quality than R@10 and will show movement when R@10 does not. Add dedup-aware R@10 as a secondary metric.
+
+### Phase 6D — Factorial lever block ⏳ CODE + SCRIPTS READY — runs pending H100
+Six one-at-a-time nulls have made single-lever probing expensive per bit of information. Run D1–D3 in parallel for attribution **and** D4 stacked for the number. ~3.5 h/arm on one H100. Gate: **>1.1pp over control** (SE ~0.57pp at p≈0.11, n=3063) or it is noise.
+Launch: `bash scripts/submit_phase6d_arms.sh` (dry run) → `--submit`. Every lever is env-overridable in `train_biomedclip_kd_h100.sh` and **defaults to the Phase-6B recipe**, so an unmodified invocation *is* 6D-0.
+- [ ] **6D-0** — Control: bs=64, LR-matched (`head_lr=4.24e-4`, `backbone_lr=1.41e-5`), 6000 steps, canonical recipe. Baseline for this block.
+- [ ] **6D-1** — `vit_unfreeze_blocks` ∈ {4, 6, 12}. The only lever with a measured positive (+2.5pp at 0→2). Config-only — `_get_vit_blocks()` (`:441-457`) is already generalised to any depth and `configure_optimizers` (`:899-909`) already builds the 4th param group. Watch `vit_lr=1e-6` — consider layer-wise decay only if 12 destabilises.
+- [ ] **6D-2** — KD-anchor decay: linear `alpha_kd_post → alpha_kd_floor` over `kd_decay_steps` post-unfreeze (new keys; default floor 0.0, decay 2000). Directly attacks the equilibrium identified above. Watch `pos_cosine_mean` and `val/clip_loss` for space collapse; fall back to floor 0.05 if it destabilises.
+- [ ] **6D-3** — SigLIP + multi-positive mask, **one arm** (both attack the same false-negative/batch-coupling failure; separating them is not informative). SigLIP: pairwise sigmoid loss with learnable `logit_bias` (init −10), decoupling the objective from batch size and retiring the dead negatives lever cleanly. Multi-positive: `text_hash` from the normalised report emitted by the dataset → in-batch `pos_mask` → averaged log-prob over the positive set instead of `arange(B)`. Log `false_neg_rate` regardless — it is worth having on its own.
+- [ ] **6D-4** — Stack: best-of-6D-1 + 6D-2 + 6D-3. The shot at the 12% target.
+- [ ] **6D-5** — Optional cheap ablation: `gamma_simcse=0`. SimCSE pulls the same projection head toward uniformity using two dropout views of one text, competing with CLIP. May be free gain.
+
+### Phase 6E — Bidirectional text encode ⏳ NOT STARTED (conditional on 6C-2)
+Run only if 6C-2 shows the text tower binds. Motivated by report structure, **not** by `cos_text_teacher` (see falsification above).
+- [ ] **6E-1** — `bidirectional` flag on `HybridTextEncoder.encode`: forward pass + pass over the length-aware reversed sequence (right padding preserved), reverse-pass states gathered back to original positions, averaged before pooling. Costs 2× text-encode FLOPs, trivial next to the ViT. **Checkpoint-compatible — no new parameters, so existing ckpts and `evaluate_cxr_retrieval.py` keep working.**
+- [ ] **6E-2** — If 6E-1 wins: the in-layer version (bidirectional scan inside each Mamba/mLSTM block, concatenate directions, project back to `dim`). That is the publishable contribution; the cheap version exists to test the hypothesis before committing to it.
+
+### Phase 6F — Eval-protocol fix (do regardless) ⏳ NOT STARTED
+- [ ] **6F-1** — Carve a **disjoint selection split** out of `train[:90%]` (e.g. `train[:85%]` train / `train[85%:90%]` select / `train[90%:]` test). Today `validation_split == test_split == train[90%:]`, so any checkpoint selection is selection-on-test. Currently mitigated by selecting on `val/total_loss` rather than retrieval, but a reviewer will still flag the shared split. Fixing it also legitimises checkpoint-on-retrieval, which is otherwise permanently banned.
+
+**REJECTED — do NOT re-litigate** (2026-07-21 recipe review + 2026-07-25 review of two external plateau analyses):
 - `vit_unfreeze_blocks: 0` — already run (jobs 1942/1948/1949): MIMIC **10.45% → 7.97%**, Indiana identical 3.90%. Freezing loses in-domain and recovers nothing cross-domain.
 - `freq_kd: true` — already run (jobs 1922/1923 vs 1930/1931): Indiana **3.90% → 2.96%**. Cross-domain regression; attacks the Phase-7 gate.
-- Checkpoint/early-stop on `val/retrieval_i2t_R@10` — **selection-on-test**: `mimic_cxr.yaml` sets `validation_split == test_split == train[90%:]`, the same 3063 pairs `evaluate_cxr_retrieval.py:346` evaluates. Legitimate version = carve a third disjoint selection split out of `train[:90%]`.
-
-### Phase 6C — Teacher-ceiling reference measurement (NO TRAINING) ⏳ NOT STARTED
-Every text-side lever is flat (PPL 15.62→13.18, 70M→150M, negatives 32→128, 23→14 epochs) while the one image-side lever moved +2.5pp. Before spending more GPU time, measure **stock BiomedCLIP** (its own text + image towers) on the identical `train[90%:]` N=3063 protocol. If BiomedCLIP itself scores ~12-13%, the student at 11.13% is at teacher parity and the 12% target is arbitrary — which reframes Phase 6 as a success (184M hybrid SSM matching a transformer CLIP) rather than a miss. Costs no training.
-- [ ] **6C-1** — Reference eval script; report i2t/t2i R@1/5/10 alongside the 0.1113 student number.
+- Checkpoint/early-stop on `val/retrieval_i2t_R@10` — **selection-on-test** while `validation_split == test_split == train[90%:]`. Unblocked only by 6F-1.
+- "The 0.1113 is a *last*-checkpoint artifact; best-val recovers ~0.9pp for free" — **factually wrong.** 0.1113 was measured on `contrastive-step=002750-val/total_loss=3.6083.ckpt`, which *is* the best-by-`val/total_loss` checkpoint (`train_contrastive.py:801-806`, `monitor=val/total_loss`, `mode=min`). The 0.120–0.122 in-training peak is on the same 3063 pairs the eval uses — chasing it is the banned selection-on-test.
+- **XBM / cross-batch memory queue** — this is the MoCo queue, already ablated in-repo and found harmful post-KD-warmup; `moco_queue_size=0` is canonical and is in "lessons carried". Re-proposing it with a different name does not make it new evidence.
+- **Swapping the image backbone to RAD-DINO / MedSigLIP** — breaks `assert img_out == model.embed_dim` (`:419-422`) and removes the BiomedCLIP joint space that the KD teacher targets. Not a lever; a different project. Also dilutes an MSc contribution that is about the *text* tower.
+- **Image resolution 224 → 336/448/512** — BiomedCLIP ViT-B/16 position embeddings are fixed at 224; interpolating them perturbs the frozen joint space the whole design depends on. Poor cost/benefit here.
+- **Two-stage text-only distillation to raise `cos_text_teacher`** — optimises a number that already reaches 0.89 under pure KD. Not the bottleneck.
+- **"Switch from last-token to mean pooling"** — moot; the v2 configs use attention pooling (`pooling_strategy: attention`), never last-token.
+- **`cos_text_teacher` as an architecture-adequacy gate** — falsified above. Any experiment gated on it draws a wrong conclusion.
 
 ### Phase 7 — Multi-source CXR data diversification → Indiana lever
 Only proven Indiana lever. **IU-Xray EXCLUDED from training (= Indiana eval; zero-leakage).**

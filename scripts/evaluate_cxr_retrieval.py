@@ -85,7 +85,11 @@ def _strip_model_prefix(state_dict: Dict) -> Tuple[Dict, Dict, Optional[Dict]]:
     return text_enc, img_proj_keys, img_enc
 
 
-def load_text_encoder(text_state: Dict, device: str) -> HybridTextEncoder:
+def load_text_encoder(
+    text_state: Dict,
+    device: str,
+    bidirectional_encode: bool = False,
+) -> HybridTextEncoder:
     num_layers = max(
         (int(m.group(1)) + 1 for k in text_state
          for m in [re.search(r"lm\.layers\.(\d+)\.", k)] if m),
@@ -120,7 +124,8 @@ def load_text_encoder(text_state: Dict, device: str) -> HybridTextEncoder:
         dim,
     )
     print(f"  [text encoder] detected layer_pattern={layer_pattern}, "
-          f"norm_topology={norm_topology}, dim={dim}, embed_dim={embed_dim}")
+          f"norm_topology={norm_topology}, dim={dim}, embed_dim={embed_dim}, "
+          f"bidirectional_encode={bidirectional_encode}")
     cfg = HybridConfig(
         vocab_size=50257,
         dim=dim,
@@ -129,6 +134,7 @@ def load_text_encoder(text_state: Dict, device: str) -> HybridTextEncoder:
         norm_topology=norm_topology,
         max_position_embeddings=1024,
         pooling_strategy="attention",
+        bidirectional_encode=bidirectional_encode,
     )
     model = HybridTextEncoder(cfg, embed_dim=embed_dim)
     missing, unexpected = model.load_state_dict(text_state, strict=False)
@@ -193,8 +199,18 @@ def load_models(checkpoint_path: str, device: str):
             "No model.* keys found in checkpoint. "
             f"First 10 keys: {list(raw.keys())[:10]}"
         )
+    # Phase 6E: the bidirectional pass adds NO parameters, so it is invisible in
+    # the state dict and cannot be sniffed from weights the way layer_pattern and
+    # norm_topology are. The training module records it into checkpoint hparams
+    # for exactly this reason — read it back so a bidirectionally-trained model
+    # is never scored unidirectionally (same failure class as the fresh-ViT load
+    # that read 1.89% instead of 10.94%).
+    bidirectional_encode = bool(
+        ckpt.get("hyper_parameters", {}).get("bidirectional_encode", False)
+    )
+
     print("  Building text encoder ...")
-    text_enc = load_text_encoder(text_state, device)
+    text_enc = load_text_encoder(text_state, device, bidirectional_encode)
     print(f"  ✓ Text encoder: {sum(p.numel() for p in text_enc.parameters())/1e6:.1f}M params")
 
     # Phase 8: img_proj deleted from architecture. Checkpoints from Phase 8+
@@ -395,11 +411,52 @@ def encode_dataset(
     return np.concatenate(all_img, axis=0), np.concatenate(all_txt, axis=0)
 
 
+def normalize_report_text(text: str) -> str:
+    """Case/whitespace-normalised report text, used as the duplicate-group key.
+
+    MIMIC reports are heavily templated — many studies share literally identical
+    text. Exact match after this normalisation is a free, high-precision proxy
+    for semantic equivalence (Phase 6C-3).
+    """
+    return " ".join((text or "").lower().split())
+
+
+def group_ids_from_texts(texts: List[str]) -> np.ndarray:
+    """Map each report to an integer duplicate-group id (exact match, normalised).
+
+    Returns an (N,) int64 array. Reports with identical normalised text share an id.
+    """
+    lookup = {}          # type: Dict[str, int]
+    ids = np.empty(len(texts), dtype=np.int64)
+    for i, t in enumerate(texts):
+        key = normalize_report_text(t)
+        if key not in lookup:
+            lookup[key] = len(lookup)
+        ids[i] = lookup[key]
+    return ids
+
+
 def compute_retrieval_metrics(
     img_embs: np.ndarray,
     txt_embs: np.ndarray,
+    groups: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
-    """Compute i2t and t2i R@1/5/10. Both embeddings must be L2-normalised."""
+    """Compute i2t and t2i R@1/5/10. Both embeddings must be L2-normalised.
+
+    Args:
+        img_embs, txt_embs: (N, D) L2-normalised embeddings, index-aligned.
+        groups: optional (N,) duplicate-group ids from ``group_ids_from_texts``.
+            When given, a retrieval counts as a hit if the retrieved item is in
+            the SAME duplicate group as the query, not only when it is the exact
+            paired index. This is the dedup-aware metric: with ``groups=None``
+            (the default, and the authoritative protocol) a duplicate group of
+            size m caps P(hit@k) at ~min(1, k/m) purely from tie-breaking, which
+            is a measurement artifact rather than a model failure.
+
+            Applied symmetrically to i2t and t2i: if two reports are textually
+            identical the model has no signal to tell their studies apart in
+            either direction.
+    """
     sim = img_embs @ txt_embs.T     # (N, N)
     N = sim.shape[0]
     ks = [1, 5, 10]
@@ -409,8 +466,11 @@ def compute_retrieval_metrics(
         for k in ks:
             k_eff = min(k, N)
             top_k = np.argpartition(-mat, kth=k_eff - 1, axis=1)[:, :k_eff]
-            gt = np.arange(N)[:, None]
-            hits = (top_k == gt).any(axis=1)
+            if groups is None:
+                gt = np.arange(N)[:, None]
+                hits = (top_k == gt).any(axis=1)
+            else:
+                hits = (groups[top_k] == groups[:, None]).any(axis=1)
             results[k] = float(hits.mean())
         return results
 

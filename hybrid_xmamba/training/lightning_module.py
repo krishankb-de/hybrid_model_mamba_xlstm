@@ -542,6 +542,99 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         loss_21 = torch.nn.functional.cross_entropy(logits.T, labels)
         return (loss_12 + loss_21) / 2.0
 
+    def _siglip_loss(
+        self,
+        z1: torch.Tensor,
+        z2: torch.Tensor,
+        logit_scale: torch.Tensor,
+        logit_bias: torch.Tensor,
+        pos_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Pairwise sigmoid contrastive loss (SigLIP, Zhai et al. 2023).
+
+        Every (i, j) pair is scored independently as a binary classification
+        problem, so the objective has no global softmax over the batch and is
+        therefore decoupled from batch size. That directly addresses the two
+        things the Phase-6 sweep established: negatives 32->128 did nothing,
+        and bs=64 was nominally ahead of bs=128 at matched epochs.
+
+        Args:
+            z1, z2: (B, D) L2-normalised embeddings.
+            logit_scale: learnable log-temperature (same parameter as InfoNCE).
+            logit_bias: learnable scalar bias. Initialised very negative (-10)
+                so early training is dominated by the B positives rather than
+                the B^2 - B negatives.
+            pos_mask: optional (B, B) bool. True where the pair should be
+                treated as POSITIVE. Defaults to the identity (paired index
+                only). Supplying a duplicate-report mask stops templated
+                MIMIC reports from being pushed apart as false negatives.
+
+        Returns:
+            Scalar loss, summed over the pair matrix and normalised by B so the
+            magnitude stays comparable across batch sizes.
+        """
+        scale = logit_scale.exp().clamp(min=1.0, max=100.0)
+        logits = scale * (z1 @ z2.T) + logit_bias
+        b = z1.shape[0]
+        if pos_mask is None:
+            pos = torch.eye(b, device=z1.device, dtype=torch.bool)
+        else:
+            pos = pos_mask.bool()
+        # +1 on positives, -1 on negatives.
+        targets = torch.where(
+            pos,
+            torch.ones((), device=logits.device, dtype=logits.dtype),
+            -torch.ones((), device=logits.device, dtype=logits.dtype),
+        )
+        return -torch.nn.functional.logsigmoid(targets * logits).sum() / b
+
+    def _multipos_clip_loss(
+        self,
+        z1: torch.Tensor,
+        z2: torch.Tensor,
+        logit_scale: torch.Tensor,
+        pos_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Multi-positive symmetric InfoNCE.
+
+        Identical to ``_nt_xent_loss`` when ``pos_mask`` is the identity; the
+        difference is that each row averages the log-probability over its whole
+        positive SET instead of a single ``arange(B)`` index. This is the fix
+        for false negatives from MIMIC's templated reports — pairs that are
+        word-for-word equal stop being pushed apart.
+
+        Args:
+            z1, z2: (B, D) L2-normalised embeddings.
+            logit_scale: learnable log-temperature.
+            pos_mask: (B, B) bool, True where j is a positive for i. The
+                diagonal must be True.
+        """
+        scale = logit_scale.exp().clamp(min=1.0, max=100.0)
+        logits = scale * (z1 @ z2.T)
+        pos = pos_mask.to(logits.dtype)
+
+        def _dir(mat: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+            logp = mat - torch.logsumexp(mat, dim=1, keepdim=True)
+            return -(mask * logp).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+
+        return 0.5 * (_dir(logits, pos).mean() + _dir(logits.T, pos.T).mean())
+
+    @staticmethod
+    def _pos_mask_from_hash(text_hash: Optional[torch.Tensor], batch_size: int,
+                            device: torch.device) -> torch.Tensor:
+        """(B, B) bool positive mask from per-sample report hashes.
+
+        Falls back to the identity when the dataset does not emit ``text_hash``,
+        which makes every multi-positive path reduce exactly to the single-
+        positive one.
+        """
+        if text_hash is None:
+            return torch.eye(batch_size, device=device, dtype=torch.bool)
+        h = text_hash.view(-1)
+        mask = (h[:, None] == h[None, :])
+        # Guard the diagonal in case of a hash-collision pathology.
+        return mask | torch.eye(batch_size, device=device, dtype=torch.bool)
+
     # ------------------------------------------------------------------
     # Training / validation steps
     # ------------------------------------------------------------------
@@ -806,6 +899,10 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         freq_kd: bool = False,
         freq_kd_low_bins: int = 32,
         freq_kd_alpha_high: float = 0.1,
+        kd_decay_steps: int = 0,
+        alpha_kd_floor: float = 0.0,
+        clip_loss_type: str = "infonce",
+        use_multipos: bool = False,
         scheduler_name: str = "cosine",
         beta2_schedule: bool = False,
     ):
@@ -826,6 +923,15 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
             beta2_schedule=beta2_schedule,
         )
         self.save_hyperparameters(ignore=['model', 'teacher'])
+        # Phase 6E: record the model-side arch flag into hparams so it lands in
+        # the checkpoint and `evaluate_cxr_retrieval.py` can AUTO-DETECT it. The
+        # bidirectional pass adds no parameters, so it is invisible in the state
+        # dict — evaluating a bidirectionally-trained checkpoint unidirectionally
+        # would silently mis-score it, exactly the class of bug that made a
+        # fresh-ViT eval read 1.89% instead of 10.94%.
+        self.hparams["bidirectional_encode"] = bool(
+            getattr(model, "bidirectional_encode", False)
+        )
         self.teacher = teacher
         self.alpha_kd = alpha_kd
         # Phase 10: α_kd schedule. CLIP is gated off during warmup (Phase 9),
@@ -843,6 +949,52 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         self.freq_kd = bool(freq_kd)
         self.freq_kd_low_bins = int(freq_kd_low_bins)
         self.freq_kd_alpha_high = float(freq_kd_alpha_high)
+
+        # --- Phase 6D-2: KD-anchor decay --------------------------------------
+        # The 2026-07-25 post-mortem showed cos_text_teacher is a KD-vs-CLIP
+        # EQUILIBRIUM, not an architecture ceiling: under the KD-only warmup
+        # (CLIP gated off, backbone frozen) it reaches 0.874-0.892, then falls
+        # to ~0.57 once CLIP engages and holds there across a 2x LR range, both
+        # batch sizes and both model scales. α_kd_post is therefore a permanent
+        # restoring force toward the teacher for the entire post-warmup run.
+        #
+        # kd_decay_steps > 0 turns the α_kd step function into a linear ramp
+        # α_kd_post -> alpha_kd_floor over that many steps after the unfreeze,
+        # using KD as initialisation rather than as a standing anchor.
+        # kd_decay_steps == 0 (default) reproduces the pre-6D step function
+        # EXACTLY, so the 6D-0 control is bit-identical to the Phase-6B recipe.
+        self.kd_decay_steps = int(kd_decay_steps)
+        self.alpha_kd_floor = float(alpha_kd_floor)
+
+        # --- Phase 6D-3: objective repair -------------------------------------
+        # clip_loss_type:
+        #   "infonce" (default) — symmetric softmax InfoNCE, hard one-hot targets.
+        #   "siglip"            — pairwise sigmoid loss (Zhai et al. 2023). Each
+        #                         pair is judged independently, so the objective
+        #                         is decoupled from batch size entirely and is
+        #                         far more robust to label noise. This retires
+        #                         the negatives lever the Phase-6 sweep showed
+        #                         to be non-binding.
+        # use_multipos:
+        #   Replaces the hard arange(B) target with an averaged log-probability
+        #   over a positive SET built from exact normalised-report matches in the
+        #   batch (batch["text_hash"]). MIMIC reports are heavily templated, so
+        #   identical reports are currently pushed apart as negatives. Requires
+        #   the dataset to emit text_hash; silently inert without it.
+        valid_clip_losses = ("infonce", "siglip")
+        if clip_loss_type not in valid_clip_losses:
+            raise ValueError(
+                "clip_loss_type must be one of {}, got {!r}".format(
+                    valid_clip_losses, clip_loss_type)
+            )
+        self.clip_loss_type = clip_loss_type
+        self.use_multipos = bool(use_multipos)
+        if self.clip_loss_type == "siglip" and getattr(model, "logit_bias", None) is None:
+            raise ValueError(
+                "clip_loss_type='siglip' requires the text encoder to expose a "
+                "`logit_bias` parameter (HybridTextEncoder provides one). Got a "
+                "model without it — the checkpoint or model class is too old."
+            )
 
         # Phase 8: distill_proj deleted. KD applies directly on z_text vs the
         # 512-d BiomedCLIP joint embedding (same dim as student projection_head),
@@ -889,6 +1041,11 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
                if self.model.attn_pool is not None else [])
             + [self.model.logit_scale]
         )
+        # Phase 6D-3: the SigLIP bias is a head parameter too. Appended (not
+        # inlined above) so the group composition is unchanged for models that
+        # predate it.
+        if getattr(self.model, "logit_bias", None) is not None:
+            head_params = head_params + [self.model.logit_bias]
 
         param_groups = [
             {"params": backbone_wd,    "lr": self.backbone_lr, "weight_decay": self.weight_decay},
@@ -1038,7 +1195,41 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
                 l_clip = self._moco_clip_loss_symmetric(z_text, z_img, z_text_k)
                 self.text_queue.enqueue(z_text_k)
             else:
-                l_clip = self._nt_xent_loss(z_text, z_img, self.model.logit_scale)
+                # Phase 6D-3: build the positive set once and share it between
+                # the SigLIP and multi-positive paths. With use_multipos=False
+                # (default) this is the identity and both paths reduce exactly
+                # to their single-positive form.
+                pos_mask = None
+                if self.use_multipos:
+                    pos_mask = self._pos_mask_from_hash(
+                        batch.get("text_hash"), z_text.shape[0], z_text.device
+                    )
+                if self.clip_loss_type == "siglip":
+                    l_clip = self._siglip_loss(
+                        z_text, z_img, self.model.logit_scale,
+                        self.model.logit_bias, pos_mask=pos_mask,
+                    )
+                elif pos_mask is not None:
+                    l_clip = self._multipos_clip_loss(
+                        z_text, z_img, self.model.logit_scale, pos_mask
+                    )
+                else:
+                    l_clip = self._nt_xent_loss(z_text, z_img, self.model.logit_scale)
+
+                # Worth logging on its own: how poisoned each batch actually is.
+                # Measured from the hashes whenever the dataset emits them, even
+                # when use_multipos is off — that is how we learn whether the
+                # mask is worth enabling.
+                if "text_hash" in batch:
+                    diag_mask = self._pos_mask_from_hash(
+                        batch["text_hash"], z_text.shape[0], z_text.device
+                    )
+                    b = float(z_text.shape[0])
+                    false_neg_rate = (diag_mask.float().sum() - b) / max(b * b, 1.0)
+                    self.log(
+                        f"{split}/false_neg_rate", false_neg_rate,
+                        on_step=(split == "train"), on_epoch=True,
+                    )
         else:
             l_clip = torch.tensor(0.0, device=z_text.device)
 
@@ -1088,11 +1279,21 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         # space fast. Post-unfreeze, decay to α_kd_post to avoid the 6a/6b/6c
         # KD-vs-CLIP gradient conflict (text and image targets cos~0.5–0.7
         # apart in joint space).
-        effective_alpha_kd = (
-            self.alpha_kd_warmup
-            if self.global_step < self.freeze_text_encoder_steps
-            else self.alpha_kd_post
-        )
+        #
+        # Phase 6D-2: when kd_decay_steps > 0, α_kd_post is no longer a constant
+        # anchor but linearly decays to alpha_kd_floor over kd_decay_steps after
+        # the unfreeze — KD as initialisation, not as a standing restoring force.
+        # kd_decay_steps == 0 keeps the original step function exactly.
+        if self.global_step < self.freeze_text_encoder_steps:
+            effective_alpha_kd = self.alpha_kd_warmup
+        elif self.kd_decay_steps > 0:
+            t = (self.global_step - self.freeze_text_encoder_steps) / float(self.kd_decay_steps)
+            t = min(max(t, 0.0), 1.0)
+            effective_alpha_kd = (
+                self.alpha_kd_post * (1.0 - t) + self.alpha_kd_floor * t
+            )
+        else:
+            effective_alpha_kd = self.alpha_kd_post
 
         total = (
             effective_alpha_kd * l_kd

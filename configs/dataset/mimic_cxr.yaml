@@ -17,6 +17,30 @@ hf_repo_id: "itsanmolgupta/mimic-cxr-dataset"
 
 # Splits — itsanmolgupta/mimic-cxr-dataset only has "train"; slice it.
 # 90/10 split: ~27569 train / ~3063 val.
+#
+# ---------------------------------------------------------------------------
+# PROTOCOL HAZARD (Phase 6F): validation_split == test_split.
+# ---------------------------------------------------------------------------
+# These are the SAME 3063 pairs that evaluate_cxr_retrieval.py:346 scores, so
+# ANY checkpoint selection or early stopping on a val metric is selection-on-
+# test. Currently mitigated only by selecting on val/total_loss rather than on
+# val/retrieval_i2t_R@10 — chasing the in-training retrieval peak (0.120-0.122
+# vs the authoritative 0.1113) is therefore permanently banned while these two
+# splits are identical.
+#
+# The defaults below are UNCHANGED so every 6D arm stays directly comparable to
+# the 0.1113 baseline (27570 train pairs). Phase 6F runs the fixed protocol via
+# overrides only — no code change is needed, because the val loader reads
+# validation_split while the authoritative eval hardcodes train[90%:]:
+#
+#   dataset.train_split='train[:85%]' \
+#   dataset.validation_split='train[85%:90%]' \
+#   dataset.test_split='train[90%:]'
+#
+# (SELECTION_SPLIT=true in scripts/train_biomedclip_kd_h100.sh applies exactly
+# that.) Costs ~5% of the training pairs and buys a defensible selection
+# protocol — and legitimises checkpoint-on-retrieval, which is otherwise
+# unusable.
 train_split: "train[:90%]"
 validation_split: "train[90%:]"
 test_split: "train[90%:]"

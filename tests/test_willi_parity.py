@@ -1676,3 +1676,461 @@ def test_freq_decoupled_kd_loss_finite():
     l0_zf = torch.fft.rfft(z, dim=-1)
     l0_low = (l0_zf[:, :n_low] - l0_zf[:, :n_low]).abs().pow(2).mean()
     assert l0_low.item() == 0.0
+
+
+# ── Phase 6C/6D/6E/6F — plateau-intervention block (2026-07-25) ───────────────
+#
+# Context these tests protect: seven consecutive nulls (Stage-0 PPL 15.62->13.18,
+# 70M->150M, negatives 32->128, epochs 23->14, batch 128 vs 64, head_lr
+# 6e-4->4.24e-4 and ->3.0e-4) against one positive (ViT unfreeze 0->2, +2.5pp).
+# Every lever below must default to the Phase-6B recipe so 6D-0 is a real
+# control — that invariant is what these tests exist to enforce.
+
+def _tiny_text_encoder(bidirectional=False):
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
+
+    cfg = HybridConfig(
+        vocab_size=100, dim=64, num_layers=2,
+        layer_pattern=["mamba", "mlstm"],
+        max_position_embeddings=64,
+        use_fast_path=False, use_tfla=False,
+        pooling_strategy="attention",
+        bidirectional_encode=bidirectional,
+    )
+    return HybridTextEncoder(cfg, embed_dim=512)
+
+
+def _tiny_joint_module(**overrides):
+    from hybrid_xmamba.training.lightning_module import JointMultiTaskLightningModule
+
+    class _StubBiomedCLIPText(torch.nn.Module):
+        def encode_text(self, input_ids):
+            return torch.randn(input_ids.shape[0], 512)
+
+    kwargs = dict(
+        model=overrides.pop("model", None) or _tiny_text_encoder(),
+        teacher=_StubBiomedCLIPText(),
+        alpha_kd=0.3, alpha_kd_warmup=1.0, alpha_kd_post=0.3,
+        beta_clip=1.0, gamma_simcse=0.1,
+        backbone_lr=1e-5, head_lr=3e-4, weight_decay=0.01,
+        warmup_steps=5, max_steps=50, gradient_clip_val=1.0,
+        freeze_text_encoder_steps=1000,
+    )
+    kwargs.update(overrides)
+    return JointMultiTaskLightningModule(**kwargs)
+
+
+@pytest.mark.willi_parity
+def test_phase6d_config_defaults_are_the_control():
+    """6D-0 must be bit-identical to the Phase-6B recipe.
+
+    Every new knob in biomedclip_kd_joint_v2.yaml has to ship in its inert
+    state, or the "control" arm silently becomes a treatment arm — the exact
+    class of drift that made the Phase-6 batch sweep run at bs=128 LRs.
+    """
+    import yaml
+
+    cfg_path = REPO_ROOT / "configs" / "distill" / "biomedclip_kd_joint_v2.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+
+    assert cfg["kd_decay_steps"] == 0, "6D-2 must default OFF (step function preserved)"
+    assert cfg["alpha_kd_floor"] == 0.0
+    assert cfg["clip_loss_type"] == "infonce", "6D-3 must default to the canonical loss"
+    assert cfg["use_multipos"] is False
+    # Canonical recipe held from Phase 6e — regressions here are known-harmful.
+    assert cfg["freq_kd"] is False, "freq_kd=true cost Indiana 3.90%->2.96%"
+    assert cfg["vit_unfreeze_blocks"] == 2, "vit_unfreeze=0 cost MIMIC 10.45%->7.97%"
+    assert cfg["moco_queue_size"] == 0, "MoCo/XBM queue post-KD-warmup is harmful"
+
+
+@pytest.mark.willi_parity
+def test_kd_decay_schedule_ramps_post_unfreeze():
+    """6D-2: alpha_kd must ramp alpha_kd_post -> alpha_kd_floor over
+    kd_decay_steps AFTER the unfreeze, and kd_decay_steps=0 must reproduce the
+    original step function exactly.
+
+    Motivation: cos_text_teacher ~0.57 is a KD-vs-CLIP equilibrium (it reaches
+    0.874-0.892 under KD-only warmup with a FROZEN backbone), not an
+    architecture ceiling, so the standing anchor is the thing to attack.
+    """
+    def effective_alpha(step, freeze, decay_steps, post=0.3, warmup=1.0, floor=0.0):
+        if step < freeze:
+            return warmup
+        if decay_steps > 0:
+            t = (step - freeze) / float(decay_steps)
+            t = min(max(t, 0.0), 1.0)
+            return post * (1.0 - t) + floor * t
+        return post
+
+    # decay OFF → legacy step function, exactly.
+    assert effective_alpha(0, 1000, 0) == 1.0
+    assert effective_alpha(999, 1000, 0) == 1.0
+    assert effective_alpha(1000, 1000, 0) == 0.3
+    assert effective_alpha(9999, 1000, 0) == 0.3
+
+    # decay ON → warmup unchanged, then linear ramp to the floor, then clamped.
+    assert effective_alpha(999, 1000, 2000) == 1.0
+    assert effective_alpha(1000, 1000, 2000) == pytest.approx(0.3)
+    assert effective_alpha(2000, 1000, 2000) == pytest.approx(0.15)
+    assert effective_alpha(3000, 1000, 2000) == pytest.approx(0.0, abs=1e-9)
+    assert effective_alpha(9999, 1000, 2000) == pytest.approx(0.0, abs=1e-9)
+
+    # Non-zero floor is honoured (the destabilisation fallback).
+    assert effective_alpha(3000, 1000, 2000, floor=0.05) == pytest.approx(0.05)
+
+    src = (REPO_ROOT / "hybrid_xmamba" / "training" / "lightning_module.py").read_text()
+    assert "self.kd_decay_steps" in src and "self.alpha_kd_floor" in src
+    assert "kd_decay_steps=int(distill_cfg.get(\"kd_decay_steps\", 0))" in (
+        REPO_ROOT / "scripts" / "train_contrastive.py"
+    ).read_text().replace("'", '"'), "kd_decay_steps not threaded from distill_cfg"
+
+
+@pytest.mark.willi_parity
+def test_multipos_loss_reduces_to_nt_xent_on_identity_mask():
+    """6D-3: the multi-positive loss must be a strict GENERALISATION.
+
+    With an identity positive mask it has to equal _nt_xent_loss to numerical
+    precision — otherwise enabling use_multipos would change the objective even
+    on a batch containing no duplicates, and no result would be attributable.
+    """
+    import torch.nn.functional as F
+
+    try:
+        mod = _tiny_joint_module()
+    except ImportError:
+        pytest.skip("open_clip not installed")
+
+    torch.manual_seed(0)
+    b = 8
+    z1 = F.normalize(torch.randn(b, 512), dim=-1)
+    z2 = F.normalize(torch.randn(b, 512), dim=-1)
+    scale = torch.tensor(2.6592)
+
+    eye = torch.eye(b, dtype=torch.bool)
+    l_multi = mod._multipos_clip_loss(z1, z2, scale, eye)
+    l_nt = mod._nt_xent_loss(z1, z2, scale)
+    assert torch.allclose(l_multi, l_nt, atol=1e-5), (l_multi.item(), l_nt.item())
+
+    # A real duplicate group must CHANGE the loss (it stops pushing the
+    # duplicate apart) and must stay finite.
+    mask = eye.clone()
+    mask[0, 1] = True
+    mask[1, 0] = True
+    l_dup = mod._multipos_clip_loss(z1, z2, scale, mask)
+    assert torch.isfinite(l_dup)
+    assert not torch.allclose(l_dup, l_nt, atol=1e-5)
+
+
+@pytest.mark.willi_parity
+def test_siglip_loss_finite_and_bias_is_trainable_head_param():
+    """6D-3: SigLIP path must be finite, batch-decoupled, and its bias must
+    actually be optimised (a frozen bias silently makes the loss useless)."""
+    import torch.nn.functional as F
+
+    enc = _tiny_text_encoder()
+    assert hasattr(enc, "logit_bias"), "HybridTextEncoder must expose logit_bias"
+    assert float(enc.logit_bias.item()) == pytest.approx(-10.0), (
+        "logit_bias must init at -10 so positives dominate early training"
+    )
+    assert enc.logit_bias.requires_grad
+
+    try:
+        mod = _tiny_joint_module(model=enc, clip_loss_type="siglip")
+    except ImportError:
+        pytest.skip("open_clip not installed")
+    assert mod.clip_loss_type == "siglip"
+
+    torch.manual_seed(0)
+    for b in (4, 16, 64):
+        z1 = F.normalize(torch.randn(b, 512), dim=-1)
+        z2 = F.normalize(torch.randn(b, 512), dim=-1)
+        loss = mod._siglip_loss(z1, z2, torch.tensor(2.6592), enc.logit_bias)
+        assert torch.isfinite(loss), (b, loss)
+        assert loss.item() > 0.0
+
+    # Perfectly aligned pairs with a positive bias must score better than
+    # anti-aligned ones — sanity on the sign convention.
+    z = F.normalize(torch.randn(8, 512), dim=-1)
+    good = mod._siglip_loss(z, z, torch.tensor(2.6592), torch.tensor(0.0))
+    bad = mod._siglip_loss(z, -z, torch.tensor(2.6592), torch.tensor(0.0))
+    assert good.item() < bad.item()
+
+    # The bias must land in a param group, else it never moves.
+    groups = mod.configure_optimizers()["optimizer"].param_groups
+    assert any(any(p is enc.logit_bias for p in g["params"]) for g in groups), (
+        "logit_bias is not in any optimizer param group"
+    )
+
+
+@pytest.mark.willi_parity
+def test_pos_mask_from_hash_groups_duplicates():
+    """6D-3: identical report hashes must form a positive set; the diagonal is
+    always positive; a missing text_hash must degrade to the identity so the
+    multi-positive path is inert on datasets that do not emit it."""
+    from hybrid_xmamba.training.lightning_module import JointMultiTaskLightningModule
+
+    dev = torch.device("cpu")
+    h = torch.tensor([11, 22, 11, 33], dtype=torch.long)
+    mask = JointMultiTaskLightningModule._pos_mask_from_hash(h, 4, dev)
+    assert mask.dtype == torch.bool and mask.shape == (4, 4)
+    assert bool(mask.diagonal().all())
+    assert bool(mask[0, 2]) and bool(mask[2, 0]), "duplicate reports must pair"
+    assert not bool(mask[0, 1]) and not bool(mask[1, 3])
+
+    fallback = JointMultiTaskLightningModule._pos_mask_from_hash(None, 4, dev)
+    assert torch.equal(fallback, torch.eye(4, dtype=torch.bool))
+
+
+@pytest.mark.willi_parity
+def test_mimic_dataset_emits_text_hash_matching_normalised_text():
+    """6D-3: the dataset must emit a text_hash that is (a) stable across
+    processes — Python's hash() is salted per process and would differ between
+    dataloader workers — and (b) equal exactly when the normalised report text
+    is equal."""
+    import importlib.util
+
+    from omegaconf import OmegaConf
+    from PIL import Image
+
+    spec = importlib.util.spec_from_file_location(
+        "_tc_mod", REPO_ROOT / "scripts" / "train_contrastive.py"
+    )
+    tc = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(tc)
+    except Exception as e:                                    # pragma: no cover
+        pytest.skip("train_contrastive import failed: {}".format(e))
+
+    src = (REPO_ROOT / "scripts" / "train_contrastive.py").read_text()
+    assert "hashlib.blake2b" in src, "text_hash must not use the salted builtin hash()"
+
+    class _StubTok:
+        # pad_token_id present => MIMICJointDataset takes the HuggingFace
+        # tokenizer branch (the open_clip branch expects a Callable returning a
+        # tensor, not a dict).
+        pad_token_id = 0
+
+        def __call__(self, text, **kw):
+            return {
+                "input_ids": torch.zeros(1, 8, dtype=torch.long),
+                "attention_mask": torch.ones(1, 8, dtype=torch.long),
+            }
+
+    rows = [
+        {"findings": "Lungs are clear.", "impression": "No acute process.",
+         "image": Image.new("RGB", (8, 8))},
+        # Same text, different case/whitespace → must collide.
+        {"findings": "LUNGS   are clear.", "impression": "No  acute process.",
+         "image": Image.new("RGB", (8, 8))},
+        {"findings": "Left pleural effusion.", "impression": "Effusion.",
+         "image": Image.new("RGB", (8, 8))},
+    ]
+    cfg = OmegaConf.create({"dataset": {
+        "max_length": 8, "teacher_max_length": 8,
+        "findings_field": "findings", "impression_field": "impression",
+        "concatenate_sections": True, "image_size": 8,
+    }})
+    ds = tc.MIMICJointDataset(rows, _StubTok(), _StubTok(), cfg)
+
+    hashes = [int(ds[i]["text_hash"]) for i in range(3)]
+    assert "text_hash" in ds[0]
+    assert hashes[0] == hashes[1], "case/whitespace variants must share a hash"
+    assert hashes[0] != hashes[2]
+
+
+@pytest.mark.willi_parity
+def test_bidirectional_encode_is_param_free_and_changes_output():
+    """6E-1: the reverse pass must add NO parameters (so checkpoints stay
+    loadable either way) while actually changing the embedding (so the flag is
+    not a silent no-op)."""
+    torch.manual_seed(0)
+    uni = _tiny_text_encoder(bidirectional=False)
+    bi = _tiny_text_encoder(bidirectional=True)
+
+    assert set(uni.state_dict().keys()) == set(bi.state_dict().keys()), (
+        "bidirectional encode must not introduce state-dict keys"
+    )
+    assert sum(p.numel() for p in uni.parameters()) == sum(
+        p.numel() for p in bi.parameters()
+    )
+    assert uni.bidirectional_encode is False and bi.bidirectional_encode is True
+
+    bi.load_state_dict(uni.state_dict())
+    uni.eval()
+    bi.eval()
+
+    ids = torch.randint(1, 100, (3, 16))
+    mask = torch.ones(3, 16, dtype=torch.long)
+    mask[1, 10:] = 0          # ragged batch: right padding
+    mask[2, 4:] = 0
+
+    with torch.no_grad():
+        z_uni = uni.encode(ids, attention_mask=mask)
+        z_bi = bi.encode(ids, attention_mask=mask)
+        z_override = uni.encode(ids, attention_mask=mask, bidirectional=True)
+
+    assert torch.isfinite(z_uni).all() and torch.isfinite(z_bi).all()
+    assert torch.allclose(z_bi.norm(dim=-1), torch.ones(3), atol=1e-4)
+    assert not torch.allclose(z_uni, z_bi, atol=1e-5), "flag is a no-op"
+    assert torch.allclose(z_bi, z_override, atol=1e-5), (
+        "per-call override must match the config-level flag"
+    )
+
+
+@pytest.mark.willi_parity
+def test_reverse_index_reverses_only_real_tokens():
+    """6E-1: the reverse index must reverse the real-token block, leave right
+    padding in place, and be its own inverse (that involution is what lets the
+    same gather map reverse-pass states back onto original positions)."""
+    enc = _tiny_text_encoder(bidirectional=True)
+
+    ids = torch.tensor([
+        [5, 6, 7, 8, 9],      # full length
+        [5, 6, 7, 0, 0],      # length 3, right padded
+        [5, 0, 0, 0, 0],      # length 1
+    ])
+    mask = torch.tensor([
+        [1, 1, 1, 1, 1],
+        [1, 1, 1, 0, 0],
+        [1, 0, 0, 0, 0],
+    ])
+    idx = enc._reverse_index(ids, mask)
+
+    assert torch.equal(idx[0], torch.tensor([4, 3, 2, 1, 0]))
+    assert torch.equal(idx[1], torch.tensor([2, 1, 0, 3, 4]))
+    assert torch.equal(idx[2], torch.tensor([0, 1, 2, 3, 4]))
+
+    # Involutive: gathering twice returns the original ordering.
+    assert torch.equal(idx.gather(1, idx), torch.arange(5).unsqueeze(0).expand(3, 5))
+
+    # Padding never moves into the real-token block.
+    rev_ids = ids.gather(1, idx)
+    assert torch.equal(rev_ids[1], torch.tensor([7, 6, 5, 0, 0]))
+
+    # No mask → plain full reversal.
+    idx_nomask = enc._reverse_index(ids, None)
+    assert torch.equal(idx_nomask[0], torch.tensor([4, 3, 2, 1, 0]))
+
+
+@pytest.mark.willi_parity
+def test_bidirectional_flag_recorded_for_eval_autodetect():
+    """6E-1: the flag adds no weights, so eval cannot sniff it from the state
+    dict the way it sniffs layer_pattern/norm_topology. It MUST be persisted in
+    checkpoint hparams and read back — same failure class as the fresh-ViT load
+    that read 1.89% instead of 10.94%."""
+    try:
+        mod = _tiny_joint_module(model=_tiny_text_encoder(bidirectional=True))
+    except ImportError:
+        pytest.skip("open_clip not installed")
+    assert mod.hparams["bidirectional_encode"] is True
+
+    try:
+        mod_uni = _tiny_joint_module(model=_tiny_text_encoder(bidirectional=False))
+    except ImportError:
+        pytest.skip("open_clip not installed")
+    assert mod_uni.hparams["bidirectional_encode"] is False
+
+    ev = (REPO_ROOT / "scripts" / "evaluate_cxr_retrieval.py").read_text()
+    assert 'hyper_parameters' in ev and 'bidirectional_encode' in ev, (
+        "evaluate_cxr_retrieval.py must auto-detect bidirectional_encode from the ckpt"
+    )
+
+
+@pytest.mark.willi_parity
+def test_dedup_aware_retrieval_metric_and_grouping():
+    """6C-3/6C-4: dedup-aware R@K must count a same-group retrieval as a hit,
+    must reduce to the strict-index metric when every report is unique, and the
+    grouping must be case/whitespace insensitive."""
+    import importlib.util
+
+    import numpy as np
+
+    spec = importlib.util.spec_from_file_location(
+        "_ecr_mod", REPO_ROOT / "scripts" / "evaluate_cxr_retrieval.py"
+    )
+    ecr = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(ecr)
+    except Exception as e:                                    # pragma: no cover
+        pytest.skip("evaluate_cxr_retrieval import failed: {}".format(e))
+
+    groups = ecr.group_ids_from_texts([
+        "No acute cardiopulmonary process.",
+        "no  ACUTE cardiopulmonary   process.",     # duplicate after normalising
+        "Left lower lobe opacity.",
+    ])
+    assert groups[0] == groups[1] and groups[0] != groups[2]
+
+    # Three items; make image 0 rank text 1 (its duplicate) above text 0.
+    img = np.eye(3, dtype=np.float64)
+    txt = np.eye(3, dtype=np.float64)
+    img[0] = [0.0, 1.0, 0.0]
+
+    strict = ecr.compute_retrieval_metrics(img, txt)
+    dedup = ecr.compute_retrieval_metrics(img, txt, groups=groups)
+    assert strict["i2t_R@1"] < dedup["i2t_R@1"], (
+        "dedup-aware R@1 must credit the textually identical retrieval"
+    )
+    assert dedup["i2t_R@1"] == pytest.approx(1.0)
+
+    # All-unique groups → identical to the authoritative strict metric.
+    uniq = np.arange(3)
+    assert ecr.compute_retrieval_metrics(img, txt, groups=uniq)["i2t_R@1"] == (
+        strict["i2t_R@1"]
+    )
+
+
+@pytest.mark.willi_parity
+def test_h100_launch_script_exposes_phase6d_levers():
+    """Every 6D/6E/6F lever must be env-overridable AND default to the
+    Phase-6B recipe. Hardcoded values in this script have cost this project
+    two separate confounded experiments (LRs, then MAX_STEPS)."""
+    sh = (REPO_ROOT / "scripts" / "train_biomedclip_kd_h100.sh").read_text()
+
+    for var, default in (
+        ("VIT_UNFREEZE", "2"),
+        ("KD_DECAY_STEPS", "0"),
+        ("ALPHA_KD_FLOOR", "0.0"),
+        ("CLIP_LOSS", "infonce"),
+        ("MULTIPOS", "false"),
+        ("GAMMA_SIMCSE", "0.1"),
+        ("BIDIRECTIONAL", "false"),
+        ("SELECTION_SPLIT", "false"),
+    ):
+        assert '{}="${{{}:-{}}}"'.format(var, var, default) in sh, (
+            "{} must be env-overridable with default {}".format(var, default)
+        )
+
+    # The overrides must actually reach Hydra, not just be echoed.
+    for override in (
+        "distill.vit_unfreeze_blocks=${VIT_UNFREEZE}",
+        "distill.kd_decay_steps=${KD_DECAY_STEPS}",
+        "distill.alpha_kd_floor=${ALPHA_KD_FLOOR}",
+        "distill.clip_loss_type=${CLIP_LOSS}",
+        "distill.use_multipos=${MULTIPOS}",
+        "distill.gamma_simcse=${GAMMA_SIMCSE}",
+        "++model.bidirectional_encode=${BIDIRECTIONAL}",
+        'dataset.train_split="${TRAIN_SPLIT}"',
+        'dataset.validation_split="${VAL_SPLIT}"',
+    ):
+        assert override in sh, "missing Hydra override: {}".format(override)
+
+    # 6F must move ONLY the train/val slices; the test gallery is fixed.
+    assert "train[:85%]" in sh and "train[85%:90%]" in sh
+    assert "vit_unfreeze_blocks=2 \\" not in sh, "vit_unfreeze must not be hardcoded"
+
+
+@pytest.mark.willi_parity
+def test_phase6c_measurement_scripts_present_and_parse():
+    """6C is the zero-training block that calibrates everything else; both
+    scripts must exist and parse under the willi Python."""
+    for name in ("reference_biomedclip_zeroshot.py", "audit_mimic_duplicates.py"):
+        path = REPO_ROOT / "scripts" / name
+        assert path.exists(), "missing Phase 6C script: {}".format(name)
+        ast.parse(path.read_text())
+
+    ref = (REPO_ROOT / "scripts" / "reference_biomedclip_zeroshot.py").read_text()
+    # 6C-1 must use the SAME gallery as the authoritative eval or the teacher
+    # number is not comparable to the student's 0.1113.
+    assert 'split="train[90%:]"' in ref

@@ -67,8 +67,39 @@ STAGE0_CKPT="${STAGE0_CKPT:-./outputs/h100_stage0_${MODEL_CONFIG}/checkpoints/st
 MIMIC_CACHE_DIR="${MIMIC_CACHE_DIR:-/sc/home/$USER/dataset/mimic_cxr_cache}"
 EXPERIMENT="${EXPERIMENT:-h100_kd_${MODEL_CONFIG}_bs${BATCH_SIZE}}"
 
+# --- Phase 6D/6E/6F levers (2026-07-25) -------------------------------------
+# ALL defaults below reproduce the Phase-6B recipe EXACTLY, so an unmodified
+# invocation is the 6D-0 control. Seven consecutive nulls (PPL, model scale,
+# negatives, epochs, batch, and both LR arms) against one positive (ViT unfreeze
+# 0->2, +2.5pp) is why these are the levers worth spending H100 hours on.
+#
+#   6D-1  VIT_UNFREEZE=4|6|12    the only lever with a measured positive
+#   6D-2  KD_DECAY_STEPS=2000    decay the KD anchor to ALPHA_KD_FLOOR
+#   6D-3  CLIP_LOSS=siglip + MULTIPOS=true
+#   6D-5  GAMMA_SIMCSE=0.0       ablate the SimCSE term
+#   6E-1  BIDIRECTIONAL=true     second pass over the reversed sequence
+#   6F-1  SELECTION_SPLIT=true   disjoint selection split (not selection-on-test)
+VIT_UNFREEZE="${VIT_UNFREEZE:-2}"
+KD_DECAY_STEPS="${KD_DECAY_STEPS:-0}"
+ALPHA_KD_FLOOR="${ALPHA_KD_FLOOR:-0.0}"
+CLIP_LOSS="${CLIP_LOSS:-infonce}"
+MULTIPOS="${MULTIPOS:-false}"
+GAMMA_SIMCSE="${GAMMA_SIMCSE:-0.1}"
+BIDIRECTIONAL="${BIDIRECTIONAL:-false}"
+SELECTION_SPLIT="${SELECTION_SPLIT:-false}"
+
+# 6F: point the val loader at a slice disjoint from the test gallery. The
+# authoritative eval hardcodes train[90%:], so only the training/val slices move.
+if [ "${SELECTION_SPLIT}" = "true" ]; then
+  TRAIN_SPLIT='train[:85%]'; VAL_SPLIT='train[85%:90%]'
+  echo "=== 6F: disjoint selection split ON (train[:85%] / select train[85%:90%] / test train[90%:]) ==="
+else
+  TRAIN_SPLIT='train[:90%]'; VAL_SPLIT='train[90%:]'
+fi
+
 echo "=== H100 joint contrastive: ${MODEL_CONFIG}, bs=${BATCH_SIZE} (true negatives) ==="
 echo "=== LRs: backbone=${BACKBONE_LR} head=${HEAD_LR} | max_steps=${MAX_STEPS} ==="
+echo "=== 6D levers: vit_unfreeze=${VIT_UNFREEZE} kd_decay=${KD_DECAY_STEPS}->${ALPHA_KD_FLOOR} clip_loss=${CLIP_LOSS} multipos=${MULTIPOS} gamma_simcse=${GAMMA_SIMCSE} bidirectional=${BIDIRECTIONAL} ==="
 date; hostname
 mkdir -p logs "${MIMIC_CACHE_DIR}"
 
@@ -99,17 +130,23 @@ if [ ! -f "${STAGE0_CKPT}" ]; then
 fi
 echo "Stage-0 checkpoint: ${STAGE0_CKPT}"
 
-echo "Starting joint contrastive (canonical: freq_kd=false, vit_unfreeze=2, moco=0)..."
+echo "Starting joint contrastive (canonical: freq_kd=false, moco=0)..."
 python scripts/train_contrastive.py \
   --config-name config_70m \
   model=${MODEL_CONFIG} \
   dataset=mimic_cxr \
   +distill=biomedclip_kd_joint_v2 \
   distill.freq_kd=false \
-  distill.vit_unfreeze_blocks=2 \
+  distill.vit_unfreeze_blocks=${VIT_UNFREEZE} \
   distill.vit_lr=1e-6 \
   distill.backbone_lr=${BACKBONE_LR} \
   distill.head_lr=${HEAD_LR} \
+  distill.gamma_simcse=${GAMMA_SIMCSE} \
+  distill.kd_decay_steps=${KD_DECAY_STEPS} \
+  distill.alpha_kd_floor=${ALPHA_KD_FLOOR} \
+  distill.clip_loss_type=${CLIP_LOSS} \
+  distill.use_multipos=${MULTIPOS} \
+  ++model.bidirectional_encode=${BIDIRECTIONAL} \
   trainer=h100_single_gpu \
   contrastive_mode=joint \
   trainer.max_steps=${MAX_STEPS} \
@@ -122,6 +159,8 @@ python scripts/train_contrastive.py \
   dataset.num_workers=8 \
   dataset.pin_memory=true \
   dataset.cache_dir="${MIMIC_CACHE_DIR}" \
+  dataset.train_split="${TRAIN_SPLIT}" \
+  dataset.validation_split="${VAL_SPLIT}" \
   model.use_gradient_checkpointing=${GRAD_CKPT} \
   lm_checkpoint="${STAGE0_CKPT}" \
   experiment_name=${EXPERIMENT} \

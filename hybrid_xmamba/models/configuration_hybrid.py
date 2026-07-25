@@ -98,6 +98,25 @@ class HybridConfig:
     # to serve as a clean ablation control.
     pooling_strategy: str = "mean"
 
+    # Phase 6E — bidirectional contrastive encoding.
+    # The text tower is causal end to end (Mamba is a left-to-right selective
+    # scan, mLSTM a left-to-right recurrence), so token t never sees token t+1.
+    # For radiology reports built as "Findings: ... Impression: ...", the
+    # Impression at the END is exactly what recontextualises the Findings at the
+    # start, and a causal encoder cannot propagate that backwards.
+    #
+    # When True, HybridTextEncoder.encode runs a second pass over the
+    # length-aware reversed sequence, maps those states back to their original
+    # token positions, and averages before pooling. Costs 2x text-encode FLOPs
+    # (trivial next to the ViT) and adds NO parameters, so existing checkpoints
+    # and every eval path keep working.
+    #
+    # NOTE: this is motivated by report structure, NOT by cos_text_teacher.
+    # The "causal SSM cannot exceed ~0.6 cosine with a bidirectional teacher"
+    # claim is FALSIFIED — a frozen causal backbone with a 15.2M head reaches
+    # 0.874-0.892 under KD-only warmup. See H100_SCALING_PLAN.md 2026-07-25.
+    bidirectional_encode: bool = False
+
     # Contrastive encoder — projection head dropout.
     # SimCSE view diversity comes from dropout; 0.3 gives meaningful
     # positive-pair variance for a pretrained backbone (default 0.1 is too

@@ -43,6 +43,50 @@ freq_kd: false
 freq_kd_low_bins: 32       # first 32 rFFT bins = low-frequency (coarse) band
 freq_kd_alpha_high: 0.1    # down-weight high-frequency (fine-detail) band
 
+# --- Phase 6D-2: KD-anchor decay --------------------------------------------
+# The 2026-07-25 post-mortem established that cos_text_teacher ~0.57 is a
+# KD-vs-CLIP EQUILIBRIUM, not an architecture ceiling: under the KD-only warmup
+# (CLIP gated off, backbone frozen, only the 15.2M head training) it reaches
+# 0.874-0.892, then falls to ~0.57 once CLIP engages, and holds there across a
+# 2x LR range, both batch sizes and both model scales. alpha_kd_post is
+# therefore a permanent restoring force toward the teacher for the whole
+# post-warmup run.
+#
+# kd_decay_steps > 0 turns the alpha_kd step function into a linear ramp
+#   alpha_kd_post -> alpha_kd_floor
+# over that many steps after the unfreeze — KD as initialisation rather than as
+# a standing anchor. 6D-2 arm: kd_decay_steps=2000, alpha_kd_floor=0.0.
+#
+# CANONICAL = 0 (step function preserved exactly) so the 6D-0 control is
+# bit-identical to the Phase-6B recipe. Watch pos_cosine_mean and val/clip_loss
+# when enabling: if the text space drifts/collapses without the anchor, retry
+# with alpha_kd_floor=0.05.
+kd_decay_steps: 0
+alpha_kd_floor: 0.0
+
+# --- Phase 6D-3: objective repair -------------------------------------------
+# clip_loss_type:
+#   infonce (canonical) — symmetric softmax InfoNCE, hard one-hot arange(B)
+#                         targets. Every off-diagonal pair is a negative.
+#   siglip              — pairwise sigmoid loss (Zhai et al. 2023). Each pair is
+#                         judged independently, so the objective is decoupled
+#                         from batch size and is robust to label noise. Uses the
+#                         learnable logit_bias on HybridTextEncoder (init -10).
+#
+# use_multipos:
+#   Replaces the single arange(B) target with an averaged log-probability over a
+#   positive SET built from exact normalised-report matches within the batch
+#   (dataset emits text_hash). MIMIC reports are heavily templated, so
+#   word-for-word identical reports are currently pushed apart as negatives.
+#   Composes with either clip_loss_type. Run 6C-3 first — the audit reports the
+#   measured false-negative rate per batch size and tells you whether the mask
+#   has anything to fix.
+#
+# val/false_neg_rate is logged whenever the dataset emits text_hash, regardless
+# of these settings — that is how the lever earns (or loses) its justification.
+clip_loss_type: "infonce"
+use_multipos: false
+
 # Per-group learning rates (unchanged).
 backbone_lr: 1.0e-5
 head_lr: 3.0e-4

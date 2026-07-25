@@ -389,6 +389,11 @@ class HybridTextEncoder(nn.Module):
         else:
             self.attn_pool = None
 
+        # Phase 6E — bidirectional encode. Adds no parameters (it is a second
+        # pass over the same weights), so toggling it never changes the state
+        # dict and existing checkpoints stay loadable either way.
+        self.bidirectional_encode = bool(getattr(config, "bidirectional_encode", False))
+
         # Projection head: hidden_dim → embed_dim (no bias, standard in CLIP).
         # Dropout between layers provides the stochastic augmentation that
         # SimCSE relies on — without it both forward passes produce identical
@@ -404,29 +409,73 @@ class HybridTextEncoder(nn.Module):
         # Learnable temperature for contrastive loss (initialised to ln(1/0.07))
         self.logit_scale = nn.Parameter(torch.ones([]) * 2.6592)
 
+        # Phase 6D-3: learnable bias for the SigLIP pairwise sigmoid loss.
+        # Initialised at -10 so the B positives dominate the B^2 - B negatives
+        # early in training (Zhai et al. 2023). Always allocated — one scalar —
+        # so a single checkpoint works with either clip_loss_type. Older
+        # checkpoints lack the key and load fine under strict=False, which is
+        # what every eval path already uses.
+        self.logit_bias = nn.Parameter(torch.ones([]) * -10.0)
+
         if freeze_lm:
             for param in self.lm.parameters():
                 param.requires_grad = False
+
+    def _reverse_index(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Index that reverses only the REAL tokens, leaving right padding put.
+
+        For a sequence of length n inside an L-wide right-padded row, position i
+        maps to n-1-i for i < n and to itself for i >= n. Gathering with this
+        index both builds the reversed input and maps the reverse pass's hidden
+        states back onto their original token positions.
+
+        Returns:
+            (B, L) int64 index tensor.
+        """
+        b, seq_len = input_ids.shape
+        if attention_mask is not None:
+            lengths = attention_mask.sum(dim=1)
+        else:
+            lengths = torch.full(
+                (b,), seq_len, dtype=torch.long, device=input_ids.device
+            )
+        idx = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(b, seq_len)
+        lengths = lengths.to(idx.dtype).unsqueeze(1)
+        return torch.where(idx < lengths, lengths - 1 - idx, idx)
 
     def encode(
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        bidirectional: Optional[bool] = None,
     ) -> torch.Tensor:
         """Encode a batch of token sequences into normalised embeddings.
 
-        Uses mean pooling over all non-padding token positions, which gives
-        substantially better sentence representations than last-token pooling
-        for similarity and retrieval tasks (BIOSSES, STS-B, etc.).
+        Pools the final hidden states — attention pooling when
+        ``pooling_strategy == "attention"``, otherwise mean pooling over
+        non-padding positions. Both beat last-token pooling for similarity and
+        retrieval (BIOSSES, STS-B, etc.).
 
         Args:
             input_ids: Token IDs (B, L)
             attention_mask: (B, L) 1 for real tokens, 0 for padding. If None,
                 all positions are treated as real tokens.
+            bidirectional: override for ``config.bidirectional_encode``. When
+                enabled, a second pass runs over the length-aware reversed
+                sequence and its states are averaged back onto the original
+                positions, giving every token a right-context view that a causal
+                scan cannot provide. Adds no parameters — checkpoint-compatible.
 
         Returns:
             L2-normalised embeddings (B, embed_dim)
         """
+        if bidirectional is None:
+            bidirectional = self.bidirectional_encode
+
         outputs = self.lm(
             input_ids,
             attention_mask=attention_mask,
@@ -434,6 +483,23 @@ class HybridTextEncoder(nn.Module):
             return_dict=True,
         )
         last_hidden = outputs.hidden_states[-1]   # (B, L, dim)
+
+        if bidirectional:
+            rev_idx = self._reverse_index(input_ids, attention_mask)
+            rev_ids = input_ids.gather(1, rev_idx)
+            rev_out = self.lm(
+                rev_ids,
+                # Padding stays on the right, so the mask is unchanged.
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            # The reverse index is its own inverse on the real-token block, so
+            # the same gather maps reverse-pass states back to original slots.
+            rev_hidden = rev_out.hidden_states[-1].gather(
+                1, rev_idx.unsqueeze(-1).expand_as(last_hidden)
+            )
+            last_hidden = 0.5 * (last_hidden + rev_hidden)
 
         if self.pooling_strategy == "attention":
             seq_repr = self.attn_pool(last_hidden, mask=attention_mask)
