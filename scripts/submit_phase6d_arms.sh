@@ -26,6 +26,24 @@ SUBMIT=false
 WRAPPER="scripts/train_biomedclip_kd_150m_h100.sh"
 ARMS="${ARMS:-D0 D1a D1b D1c D2 D3 D4 D5}"
 
+# ---------------------------------------------------------------------------
+# PHASE 6C RESULTS (2026-07-25) — how they re-rank these arms
+# ---------------------------------------------------------------------------
+#   Stock BiomedCLIP zero-shot i2t R@10 = 3.40%. Student = 11.72%. Oracle
+#   ceiling = 99.0%. NOT teacher-bound, NOT metric-bound.
+#
+#   -> 6D-2 (KD decay) is PROMOTED to co-priority with 6D-1. The alpha_kd=0.3
+#      anchor does not hold the student at teacher parity, it drags it toward a
+#      representation worth 4.31% (BiomedCLIP text tower on the fine-tuned ViT)
+#      while the student is at 11.72%. The anchor is a drag, not a ceiling.
+#   -> MULTIPOS DROPPED from D3. Measured false negatives at bs=64: 0.58 pairs
+#      per 4096-entry matrix, only 19% of batches contain even one. There is
+#      nothing for the mask to fix. (MULTIPOS=true still works if you want it.)
+#   -> Duplicates are a non-issue: 2.0% of the gallery, oracle R@10 99.0%,
+#      dedup-aware R@10 differs from strict by 0.03pp.
+#   -> 6E deprioritised: swapping BiomedCLIP's text tower IN costs 7.41pp.
+# ---------------------------------------------------------------------------
+
 # Common to every arm: bs=64 (the best Phase-6 batch), LR + MAX_STEPS derived
 # from batch by the wrapper. Do NOT set BACKBONE_LR/HEAD_LR here — letting the
 # wrapper derive them is what keeps the arms LR-matched.
@@ -37,15 +55,18 @@ D0|control: Phase-6B recipe, unmodified|
 D1a|6D-1 ViT unfreeze 4 (the only lever with a measured positive)|VIT_UNFREEZE=4
 D1b|6D-1 ViT unfreeze 6|VIT_UNFREEZE=6
 D1c|6D-1 ViT unfreeze 12 = whole ViT-B/16 (OOM watch: full image-tower backward on top of the fp32 scan; drop to BATCH_SIZE=32 if it dies)|VIT_UNFREEZE=12
-D2|6D-2 KD anchor decays 0.3 -> 0.0 over 2000 steps post-unfreeze|KD_DECAY_STEPS=2000 ALPHA_KD_FLOOR=0.0
-D3|6D-3 SigLIP + multi-positive mask (one arm: same failure mode)|CLIP_LOSS=siglip MULTIPOS=true
-D4|stack: best-of-D1 + D2 + D3 (edit VIT_UNFREEZE after D1 reports)|VIT_UNFREEZE=6 KD_DECAY_STEPS=2000 ALPHA_KD_FLOOR=0.0 CLIP_LOSS=siglip MULTIPOS=true
+D2|6D-2 KD anchor decays 0.3 -> 0.0 over 2000 steps (CO-PRIORITY: the anchor drags toward a 4.31% representation while the student is at 11.72%)|KD_DECAY_STEPS=2000 ALPHA_KD_FLOOR=0.0
+D2b|6D-2 same with a 0.05 floor - the fallback if D2 destabilises (watch pos_cosine_mean / val_clip_loss)|KD_DECAY_STEPS=2000 ALPHA_KD_FLOOR=0.05
+D3|6D-3 SigLIP only - multipos DROPPED, 6C-3 measured only 0.58 false-neg pairs per bs=64 batch|CLIP_LOSS=siglip
+D4|stack: best-of-D1 + D2 + D3 (edit VIT_UNFREEZE after D1 reports)|VIT_UNFREEZE=6 KD_DECAY_STEPS=2000 ALPHA_KD_FLOOR=0.0 CLIP_LOSS=siglip
 D5|6D-5 ablate the SimCSE term|GAMMA_SIMCSE=0.0
 EOF
 
 echo "============================================================"
 echo "Phase 6D factorial block  (submit=${SUBMIT})"
-echo "Baseline to beat: authoritative i2t R@10 = 0.1113"
+echo "Baseline to beat: authoritative i2t R@10 = 0.1113 (0.1172 for the"
+echo "  head=3.0e-4 arm measured in 6C on its best-by-val/total_loss ckpt)"
+echo "Teacher anchor: 3.40%   Oracle ceiling: 99.0%   -> real headroom"
 echo "Gate: > 1.1pp movement. Anything less is noise."
 echo "============================================================"
 

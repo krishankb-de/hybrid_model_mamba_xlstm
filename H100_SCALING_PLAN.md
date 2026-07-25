@@ -137,8 +137,40 @@ A frozen causal SSM backbone with a small head hit **0.89** cosine against the b
 2. **KD-anchor decay (6D-2) is promoted** — it attacks the equilibrium directly and is derived from our own data, not from literature.
 3. Bidirectional encode (6E) is retained but **re-motivated**: the honest argument is report structure (the Impression at token ~300 recontextualizes the Findings at token ~40 and a causal encoder cannot propagate that backwards), *not* the cos number. This framing must survive into the writeup.
 
-### Phase 6C — Measurement block (NO TRAINING, ~1–2 GPU-h) ⏳ SCRIPTS READY — run pending H100
-Launch: `CKPT=<best 6B ckpt> sbatch scripts/run_phase6c_measurements.sh` (runs 6C-3 then 6C-1/6C-2).
+### Phase 6C — Measurement block (NO TRAINING) ✅ COMPLETE (job 2372055, 86 s wall)
+Launch: `CKPT=<best 6B ckpt> sbatch scripts/run_phase6c_measurements.sh`. Ran on the head=3.0e-4 arm's best-by-`val/total_loss` ckpt (step 4750, 2.9465).
+
+**Tower grid, N=3063, strict-index gt (authoritative protocol):**
+
+| image tower | text tower | i2t R@1 | i2t R@5 | **i2t R@10** | t2i R@10 |
+|---|---|---|---|---|---|
+| stock ViT | BiomedCLIP text | 0.0039 | 0.0186 | **0.0340** | 0.0310 |
+| stock ViT | student | 0.0023 | 0.0114 | **0.0232** | 0.0813 |
+| fine-tuned ViT | BiomedCLIP text | 0.0065 | 0.0264 | **0.0431** | 0.0189 |
+| **fine-tuned ViT** | **student** | **0.0180** | **0.0731** | **0.1172** | **0.1087** |
+
+**Four hypotheses killed, one lever promoted:**
+
+1. **Teacher parity — DEAD.** Stock BiomedCLIP scores **3.40%**; the student scores **11.72%**, i.e. **3.4×** the teacher. The 12% target is not above the anchor and Phase 6 is not a parity result. There is real headroom.
+2. **KD anchor is a DRAG, not a ceiling.** BiomedCLIP's text tower is worth 4.31% even on the fine-tuned ViT, while the student is at 11.72%. So `alpha_kd_post=0.3` spends the whole post-warmup run pulling `z_text` toward a representation ~3× worse than the one CLIP is building. This is a stronger and more actionable version of what the external review guessed — **6D-2 is promoted to co-priority with 6D-1.**
+3. **False negatives — DEAD (quantitatively).** At bs=64 only **19%** of batches contain a single false negative, mean **0.58 pairs out of a 4096-entry matrix**; at bs=128, 2.32 of 16384. Both external reviews ranked this a top-3 cause and called it "the direct explanation" for the flat negatives lever. It is not. **`MULTIPOS` dropped from the 6D-3 arm.**
+4. **Metric artifact — DEAD.** Duplicates are 2.0% of the gallery (largest group 40 of 3063), oracle R@10 = **99.0%**, and dedup-aware R@10 differs from strict by 0.03pp. The templated-report ceiling both reviews warned about does not exist at this scale. Keep the strict metric as the headline.
+5. **Text tower is not the weak half.** Swapping BiomedCLIP's text tower **in** costs 7.41pp (0.1172 → 0.0431). Per the pre-registered rule, **Phase 6E is deprioritised.**
+
+**Caveat on 6C-2, state it in the writeup:** the fine-tuned ViT was co-trained with the student text tower, so that pairing is favoured by construction. The mitigating evidence is that fine-tuning still *helped* BiomedCLIP's own text tower (3.40 → 4.31), so the ViT did not drift into a space hostile to the teacher. The defensible claim is "substituting BiomedCLIP's text tower does not help", not "the student text tower is strictly better".
+
+**Logical gap worth being precise about:** 6C-2 answers "is BiomedCLIP's text tower better than ours?" (no). It does **not** answer "would a bidirectional student beat a causal student?" — which is what 6E actually proposes. 6E is therefore *unsupported*, not *refuted*; it drops to an opportunistic cheap test after 6D, not a planned arm.
+
+**Incidental observations for the writeup:**
+- `stock ViT × student text` is strongly asymmetric (i2t 0.0232 vs t2i 0.0813) — hubness in the student text space relative to stock-ViT geometry. The co-trained pair is balanced (0.1172 / 0.1087). Evidence of genuine co-adaptation, not of a collapsed text space.
+- The 6C load reported `1 missing key: ['logit_bias']` — expected and benign: the checkpoint predates the SigLIP parameter, it loads at its −10 init under `strict=False`, and `encode()` never reads it.
+- Fine-tuning 2 ViT blocks lifts the *frozen-text* system 3.40 → 4.31 (+0.91pp), independently corroborating that the image side is where movement lives.
+
+**Net: the binding constraint is the image representation.** Every text-side and optimization lever is null; the only two positives on record are both image-side (ViT unfreeze 0→2 = +2.5pp; ViT unfreeze with a frozen text tower = +0.91pp). Priority order in 6D reflects that.
+- [x] **6C-1** — stock BiomedCLIP reference: **3.40%** i2t R@10.
+- [x] **6C-2** — tower-swap 2×2 grid (table above).
+- [x] **6C-3** — duplicate/false-negative audit: 2.2% train / 2.0% gallery duplicated, oracle R@10 99.0%, 0.58 false-neg pairs per bs=64 batch.
+- [x] **6C-4** — R@1/R@5 surfaced; dedup-aware R@10 implemented and shown unnecessary (0.03pp).
 Instrumentation and writeup evidence. **Per user decision 2026-07-25, 6D runs regardless of the 6C-1 result** — 6C does not gate 6D, it explains it and calibrates the writeup.
 - [ ] **6C-1** — `scripts/reference_biomedclip_zeroshot.py`: stock BiomedCLIP (**its own text tower and image tower**) on the identical `train[90%:]` N=3063 protocol. Report i2t/t2i R@1/5/10 next to the 0.1113 student number. Published anchors put BiomedCLIP zero-shot at ~2–4% on comparable ~2.4k-study galleries, which would put the student at ~3× the teacher and imply real headroom — but the only number that counts is ours, on our protocol.
 - [ ] **6C-2** — Tower-swap 2×2 in the same script: {student text, BiomedCLIP text} × {fine-tuned ViT, stock ViT}. Four numbers isolate which tower binds. If substituting BiomedCLIP's text tower barely moves R@10, text-side effort is misallocated and 6E should be dropped.
@@ -150,13 +182,14 @@ Six one-at-a-time nulls have made single-lever probing expensive per bit of info
 Launch: `bash scripts/submit_phase6d_arms.sh` (dry run) → `--submit`. Every lever is env-overridable in `train_biomedclip_kd_h100.sh` and **defaults to the Phase-6B recipe**, so an unmodified invocation *is* 6D-0.
 - [ ] **6D-0** — Control: bs=64, LR-matched (`head_lr=4.24e-4`, `backbone_lr=1.41e-5`), 6000 steps, canonical recipe. Baseline for this block.
 - [ ] **6D-1** — `vit_unfreeze_blocks` ∈ {4, 6, 12}. The only lever with a measured positive (+2.5pp at 0→2). Config-only — `_get_vit_blocks()` (`:441-457`) is already generalised to any depth and `configure_optimizers` (`:899-909`) already builds the 4th param group. Watch `vit_lr=1e-6` — consider layer-wise decay only if 12 destabilises.
-- [ ] **6D-2** — KD-anchor decay: linear `alpha_kd_post → alpha_kd_floor` over `kd_decay_steps` post-unfreeze (new keys; default floor 0.0, decay 2000). Directly attacks the equilibrium identified above. Watch `pos_cosine_mean` and `val/clip_loss` for space collapse; fall back to floor 0.05 if it destabilises.
-- [ ] **6D-3** — SigLIP + multi-positive mask, **one arm** (both attack the same false-negative/batch-coupling failure; separating them is not informative). SigLIP: pairwise sigmoid loss with learnable `logit_bias` (init −10), decoupling the objective from batch size and retiring the dead negatives lever cleanly. Multi-positive: `text_hash` from the normalised report emitted by the dataset → in-batch `pos_mask` → averaged log-prob over the positive set instead of `arange(B)`. Log `false_neg_rate` regardless — it is worth having on its own.
+- [ ] **6D-2** — **CO-PRIORITY after 6C.** KD-anchor decay: linear `alpha_kd_post → alpha_kd_floor` over `kd_decay_steps` post-unfreeze (default floor 0.0, decay 2000). 6C showed the anchor is not holding the student at parity — it is pulling toward a 4.31% representation while CLIP builds an 11.72% one. Watch `pos_cosine_mean` and `val/clip_loss` for space collapse; arm **D2b** is the `alpha_kd_floor=0.05` fallback.
+- [ ] **6D-3** — **SigLIP only** — `MULTIPOS` dropped after 6C-3 measured 0.58 false-negative pairs per bs=64 batch (19% of batches contain even one). The multi-positive mask has nothing to fix on this dataset. SigLIP survives on its own rationale (pairwise sigmoid, no global softmax, decoupled from batch size) but with **downgraded expectations** — its headline justification in both external reviews was the false-negative problem that does not exist here. The mask stays implemented and `false_neg_rate` stays logged; both are re-usable if Phase 7 multi-source data changes the duplication profile.
 - [ ] **6D-4** — Stack: best-of-6D-1 + 6D-2 + 6D-3. The shot at the 12% target.
 - [ ] **6D-5** — Optional cheap ablation: `gamma_simcse=0`. SimCSE pulls the same projection head toward uniformity using two dropout views of one text, competing with CLIP. May be free gain.
 
-### Phase 6E — Bidirectional text encode ⏳ NOT STARTED (conditional on 6C-2)
-Run only if 6C-2 shows the text tower binds. Motivated by report structure, **not** by `cos_text_teacher` (see falsification above).
+### Phase 6E — Bidirectional text encode ⏸ DEPRIORITISED by 6C-2 (code shipped, unscheduled)
+The pre-registered gate fired against it: swapping BiomedCLIP's text tower in **costs 7.41pp** (0.1172 → 0.0431), so the student text tower is not the weak half and text-side capacity is not where the plateau lives. Code is implemented, tested and inert behind `BIDIRECTIONAL=false` — run it opportunistically after 6D if image-side levers stall, not as a scheduled arm.
+Be precise about what was and was not shown: 6C-2 answers "is BiomedCLIP's text tower better than ours?" (no). It does **not** answer "would a bidirectional student beat a causal student?" — 6E is *unsupported*, not *refuted*. Motivated by report structure, **never** by `cos_text_teacher` (falsified above).
 - [ ] **6E-1** — `bidirectional` flag on `HybridTextEncoder.encode`: forward pass + pass over the length-aware reversed sequence (right padding preserved), reverse-pass states gathered back to original positions, averaged before pooling. Costs 2× text-encode FLOPs, trivial next to the ViT. **Checkpoint-compatible — no new parameters, so existing ckpts and `evaluate_cxr_retrieval.py` keep working.**
 - [ ] **6E-2** — If 6E-1 wins: the in-layer version (bidirectional scan inside each Mamba/mLSTM block, concatenate directions, project back to `dim`). That is the publishable contribution; the cheap version exists to test the hypothesis before committing to it.
 
