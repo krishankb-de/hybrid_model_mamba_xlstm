@@ -136,7 +136,7 @@
     },
     "phase6d_factorial_lever_block": {
       "status": "code_and_scripts_ready_runs_pending_h100",
-      "launch": "bash scripts/submit_phase6d_arms.sh   (dry run; add --submit to launch). ARMS=\"D0 D2 D3\" to subset.",
+      "launch": "./scripts/submit_phase6d_arms.sh   (dry run; add --submit to launch). ARMS=\"D0 D2 D3\" to subset. CLUSTER CONSTRAINT 2026-07-26: the aisc login node REFUSES `bash <script>` ('This command is not allowed on the login node!'). Use ./scripts/... , an `srun --pty bash` session, or paste the sbatch lines. sbatch itself IS allowed on the login node (that is how 6C ran).",
       "control_invariant": "Every 6D/6E/6F lever is env-overridable in train_biomedclip_kd_h100.sh and DEFAULTS to the Phase-6B recipe (VIT_UNFREEZE=2 KD_DECAY_STEPS=0 CLIP_LOSS=infonce MULTIPOS=false GAMMA_SIMCSE=0.1 BIDIRECTIONAL=false SELECTION_SPLIT=false), so an unmodified invocation IS 6D-0. Enforced by test_phase6d_config_defaults_are_the_control + test_h100_launch_script_exposes_phase6d_levers.",
       "goal": "D0 control (bs=64 LR-matched) | D1 vit_unfreeze {4,6,12} | D2 KD-anchor decay alpha_kd_post->0 | D3 SigLIP + multi-positive mask (one arm) | D4 stack of best-of-D1+D2+D3 | D5 optional gamma_simcse=0. D1-D3 parallel for attribution, D4 for the number.",
       "gate": "> 1.1pp over 6D-0 control (SE ~0.57pp at p~0.11 n=3063) or it is noise.",

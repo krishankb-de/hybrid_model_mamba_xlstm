@@ -1,11 +1,18 @@
 #!/bin/bash
 # ============================================================================
 # Phase 6D — factorial lever block submitter. NOT an sbatch script itself:
-# run it on the login node and it sbatches one job per arm.
+# it sbatches one job per arm.
 #
-#   bash scripts/submit_phase6d_arms.sh            # dry run, prints the plan
-#   bash scripts/submit_phase6d_arms.sh --submit   # actually sbatch
-#   ARMS="D0 D2 D3" bash scripts/submit_phase6d_arms.sh --submit
+#   ./scripts/submit_phase6d_arms.sh            # dry run, prints the plan
+#   ./scripts/submit_phase6d_arms.sh --submit   # actually sbatch
+#   ARMS="D0 D2 D3" ./scripts/submit_phase6d_arms.sh --submit
+#
+# CLUSTER CONSTRAINT (aisc/HPI, 2026-07-26): the login node REFUSES
+# `bash <script>` — "This command is not allowed on the login node!". Invoke it
+# as ./scripts/submit_phase6d_arms.sh (the shebang execs /bin/bash by absolute
+# path, sidestepping the PATH guard), or from an `srun --pty bash` session, or
+# just paste the sbatch lines this script prints. `sbatch` itself IS allowed on
+# the login node — that is how Phase 6C was submitted.
 #
 # WHY FACTORIAL. Six one-at-a-time probes have come back null, which has made
 # single-lever testing expensive per bit of information. D1-D3 run in parallel

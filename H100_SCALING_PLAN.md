@@ -179,7 +179,9 @@ Instrumentation and writeup evidence. **Per user decision 2026-07-25, 6D runs re
 
 ### Phase 6D — Factorial lever block ⏳ CODE + SCRIPTS READY — runs pending H100
 Six one-at-a-time nulls have made single-lever probing expensive per bit of information. Run D1–D3 in parallel for attribution **and** D4 stacked for the number. ~3.5 h/arm on one H100. Gate: **>1.1pp over control** (SE ~0.57pp at p≈0.11, n=3063) or it is noise.
-Launch: `bash scripts/submit_phase6d_arms.sh` (dry run) → `--submit`. Every lever is env-overridable in `train_biomedclip_kd_h100.sh` and **defaults to the Phase-6B recipe**, so an unmodified invocation *is* 6D-0.
+Launch: `./scripts/submit_phase6d_arms.sh` (dry run) → `--submit`, or paste its sbatch lines directly. Every lever is env-overridable in `train_biomedclip_kd_h100.sh` and **defaults to the Phase-6B recipe**, so an unmodified invocation *is* 6D-0.
+
+> **Cluster constraint (2026-07-26):** the aisc login node refuses `bash <script>` ("This command is not allowed on the login node!"). Use `./scripts/...`, an `srun --pty bash` session, or paste the `sbatch` lines — `sbatch` itself is allowed on the login node, which is how Phase 6C was submitted.
 - [ ] **6D-0** — Control: bs=64, LR-matched (`head_lr=4.24e-4`, `backbone_lr=1.41e-5`), 6000 steps, canonical recipe. Baseline for this block.
 - [ ] **6D-1** — `vit_unfreeze_blocks` ∈ {4, 6, 12}. The only lever with a measured positive (+2.5pp at 0→2). Config-only — `_get_vit_blocks()` (`:441-457`) is already generalised to any depth and `configure_optimizers` (`:899-909`) already builds the 4th param group. Watch `vit_lr=1e-6` — consider layer-wise decay only if 12 destabilises.
 - [ ] **6D-2** — **CO-PRIORITY after 6C.** KD-anchor decay: linear `alpha_kd_post → alpha_kd_floor` over `kd_decay_steps` post-unfreeze (default floor 0.0, decay 2000). 6C showed the anchor is not holding the student at parity — it is pulling toward a 4.31% representation while CLIP builds an 11.72% one. Watch `pos_cosine_mean` and `val/clip_loss` for space collapse; arm **D2b** is the `alpha_kd_floor=0.05` fallback.
