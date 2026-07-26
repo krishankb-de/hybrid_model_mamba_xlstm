@@ -217,16 +217,24 @@ Instrumentation and writeup evidence. **Per user decision 2026-07-25, 6D runs re
 Depth is exhausted at 12 (ViT-B/16 has 12 blocks), but "amount of image adaptation" = depth × LR × scope, and only depth has been swept. `vit_lr` has sat at **1e-6** the entire project — three orders of magnitude below the head LR — so the winning arm is one where the whole tower is unfrozen but barely moving.
 - [ ] **6G-1** — `vit_lr` sweep at `VIT_UNFREEZE=12`: {3e-6, 1e-5, 3e-5}. Highest-value remaining experiment.
 - [ ] **6G-2** — Scope: `_get_vit_blocks` returns transformer blocks only, so `patch_embed`, `cls_token`, `pos_embed`, the final norm and the visual projection stay frozen even at depth 12. Add an opt-in full-tower unfreeze.
-- [x] **6G-3** — **AUTHORITATIVE RESULTS IN — STRETCH TIER CLEARED.**
+- [x] **6G-3** — **AUTHORITATIVE, FULLY LR-MATCHED DOSE-RESPONSE — STRETCH TIER CLEARED.**
 
-  | Arm | MIMIC i2t R@10 | i2t R@1 | i2t R@5 | t2i R@10 | paired cos |
-  |---|---|---|---|---|---|
-  | A100 70M baseline | 0.1045 | — | — | — | — |
-  | Phase 6 best (vit=2) | 0.1113 | 0.016 | — | 0.0983 | 0.386 |
-  | D1b (vit=6) | 0.1430 | 0.0206 | 0.0937 | 0.1394 | 0.4084 |
-  | **D1c (vit=12)** | **0.1714** | **0.0300** | **0.1032** | **0.1538** | **0.4230** |
+  All four arms at `bs=64`, `head_lr=4.24e-4`, `backbone_lr=1.41e-5`, 6000 steps (13.93 epochs), best-by-`val/total_loss` checkpoint, MIMIC `train[90%:]` N=3063:
 
-  **+6.01pp over the standing 0.1113 baseline, ~10.5× SE.** Monotone on authoritative numbers as well as in-training (0.1113 → 0.1430 → 0.1714), with paired cosine and R@1 rising in lockstep — R@1 nearly doubles. Floor 0.1045 ✅, target 0.12 ✅, **stretch 0.14 ✅**.
+  | `vit_unfreeze` | trainable ViT | i2t R@10 | i2t R@1 | i2t R@5 | t2i R@10 | paired cos | tier |
+  |---|---|---|---|---|---|---|---|
+  | 2 (D0) | 14.2M | 0.1107 | 0.0153 | 0.0637 | 0.1041 | 0.3824 | floor |
+  | 4 (D1a) | 28.4M | 0.1319 | 0.0196 | 0.0738 | 0.1166 | 0.3962 | target |
+  | 6 (D1b) | 42.5M | 0.1430 | 0.0206 | 0.0937 | 0.1394 | 0.4084 | stretch |
+  | **12 (D1c)** | **85.1M** | **0.1714** | **0.0300** | **0.1032** | **0.1538** | **0.4230** | **stretch** |
+
+  **Monotone in every column** — i2t R@1/R@5/R@10, t2i R@10, and paired cosine all rise with depth. **+6.07pp** from depth 2→12, ~10.6× the 0.57pp SE. Floor 0.1045 ✅, target 0.12 ✅, **stretch 0.14 ✅**.
+
+  **Control validated:** D0 (0.1107) reproduces the standing Phase-6 baseline (0.1113) to within 0.06pp, so the curve is a clean single-variable sweep rather than an artefact of the earlier LR/epoch confounds.
+
+  **Per-block returns diminish but do not saturate:** 1.06 pp/block (2→4), 0.56 (4→6), 0.47 (6→12). Depth is exhausted at 12, so the remaining dose axes are `vit_lr` and scope — hence 6G-1/6G-2.
+
+  Historical context: the earlier vit=2 numbers (0.1113 at `head_lr=6e-4`, 0.1172 at `3.0e-4`) are *not* part of this curve — they used different head LRs. Cite the LR-matched table above.
 
   Note the in-training/authoritative reconciliation *inverted* versus Phase 6: authoritative 0.1714 now slightly **exceeds** the in-training final (0.168). In Phase 6 the val-loss minimum (step 4500) sat well before the retrieval peak (~6000), costing ~1pp at selection time; with the stronger image tower both curves peak together at ~4750, so selecting on `val/total_loss` no longer costs anything.
 - [x] **6G-4** — **Indiana: 0.0485 i2t R@10** (t2i 0.0700, R@1 0.0094, paired cos 0.2730, N=743). Floor 0.0404 ✅ (target 0.055 not reached). **The cross-domain risk did not materialise** — unfreezing all 12 ViT blocks on 27.5K in-domain MIMIC pairs improved Indiana too, from the A100 baseline 0.0390 to 0.0485 (+0.95pp). Deep image adaptation is not an in-domain/cross-domain trade here; it is a genuine representation improvement. Phase 7 gate cleared.

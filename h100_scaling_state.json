@@ -168,6 +168,9 @@
         "D1c_vit12_indiana_i2t_R10": 0.0485,
         "D1c_vit12_indiana_t2i_R10": 0.0700,
         "D1b_vit6_mimic_i2t_R10": 0.1430,
+        "D1a_vit4_mimic_i2t_R10": 0.1319,
+        "D0_vit2_mimic_i2t_R10": 0.1107,
+        "lr_matched_dose_response_note": "All four at bs=64 head_lr=4.24e-4 backbone_lr=1.41e-5, 6000 steps, best-by-val/total_loss. vit 2/4/6/12 -> i2t R@10 0.1107/0.1319/0.1430/0.1714, R@1 0.0153/0.0196/0.0206/0.0300, R@5 0.0637/0.0738/0.0937/0.1032, t2i R@10 0.1041/0.1166/0.1394/0.1538, paired cosine 0.3824/0.3962/0.4084/0.4230. MONOTONE IN EVERY COLUMN. +6.07pp from depth 2->12 = ~10.6x SE. D0 (0.1107) reproduces the standing 0.1113 baseline to within 0.06pp, validating it as a clean control. Per-block returns diminish but do not saturate: 1.06/0.56/0.47 pp per block. NOTE the earlier vit=2 numbers (0.1113 at head_lr=6e-4, 0.1172 at 3.0e-4) are NOT part of this curve -- different head LRs; cite the LR-matched table.",
         "best_ckpt": "outputs/h100_6d_D1c/checkpoints/contrastive-step=004750-val/total_loss=2.6680.ckpt"
       },
       "goal": "Depth is exhausted at 12 (ViT-B/16 has 12 blocks) but 'amount of image adaptation' = depth x LR x scope, and ONLY depth has been swept. vit_lr has sat at 1e-6 for the entire project -- 3 orders of magnitude below head_lr -- so the winning arm is one where the whole tower is unfrozen but barely moving.",
