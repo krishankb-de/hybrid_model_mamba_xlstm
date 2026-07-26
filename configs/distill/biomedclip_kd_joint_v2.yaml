@@ -102,5 +102,27 @@ moco_momentum: 0.999
 # Unfreeze the last 2 BiomedCLIP image-tower blocks at a tiny LR. Scaffolding
 # exists in lightning_module.py (vit_unfreeze_blocks ctor kwarg, 4th param
 # group, _get_vit_blocks). Never enabled in any production config until now.
+#
+# PHASE 6D RESULT (2026-07-26) — THIS IS THE LEVER. Unfreeze depth is the only
+# thing that has ever moved MIMIC retrieval, and it moves it monotonically:
+#   depth  2 -> i2t R@10 0.116   (control)
+#   depth  4 -> 0.132
+#   depth  6 -> 0.150
+#   depth 12 -> 0.168   (+5.2pp over control, ~9x the 0.57pp SE)
+# val/clip_loss falls monotonically alongside (2.897 -> 2.585) and i2t R@1 nearly
+# doubles, so it is generalization, not a metric artifact. Ten other levers are
+# flat. The canonical value stays 2 for attribution against the historical runs;
+# override with VIT_UNFREEZE in the launch script.
 vit_unfreeze_blocks: 2
+# Phase 6G-1: vit_lr has been pinned here for the entire project — three orders
+# of magnitude below head_lr — so even the winning depth-12 arm is one where the
+# whole tower is unfrozen but barely moving. Depth is exhausted at 12 (ViT-B/16
+# has 12 blocks); LR is the untouched half of the dose. Sweep via VIT_LR.
 vit_lr: 1.0e-6
+# Phase 6G-2: which image-tower params the unfreeze covers.
+#   blocks (canonical) — the last N transformer blocks ONLY. Note this leaves
+#       patch_embed, cls_token, pos_embed, the final norm and the visual
+#       projection frozen even at depth 12, so "unfreeze everything" has never
+#       actually been tested.
+#   all — every image-tower parameter.
+vit_unfreeze_scope: "blocks"

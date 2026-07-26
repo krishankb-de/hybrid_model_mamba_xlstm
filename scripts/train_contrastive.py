@@ -732,6 +732,8 @@ def main(cfg: DictConfig):
                 distill_cfg.get("vit_unfreeze_blocks", cfg.model.get("vit_unfreeze_blocks", 0))
             ),
             vit_lr=float(distill_cfg.get("vit_lr", cfg.model.get("vit_lr", 1e-6))),
+            # Phase 6G-2: "blocks" (default) or "all" (whole image tower).
+            vit_unfreeze_scope=str(distill_cfg.get("vit_unfreeze_scope", "blocks")),
             moco_queue_size=int(distill_cfg.get("moco_queue_size", 0)),
             moco_momentum=float(distill_cfg.get("moco_momentum", 0.999)),
             # Phase 10B: frequency-decoupled KD.
@@ -759,8 +761,10 @@ def main(cfg: DictConfig):
         # silently-drifted override (hardcoded LRs, freq_kd default), so every
         # new knob goes in the SLURM log where the run can be audited from it.
         print(
-            f"  Phase 6D levers: vit_unfreeze_blocks="
+            f"  Phase 6D/6G levers: vit_unfreeze_blocks="
             f"{distill_cfg.get('vit_unfreeze_blocks', cfg.model.get('vit_unfreeze_blocks', 0))} "
+            f"vit_lr={distill_cfg.get('vit_lr', 1e-6)} "
+            f"vit_scope={distill_cfg.get('vit_unfreeze_scope', 'blocks')} "
             f"kd_decay_steps={distill_cfg.get('kd_decay_steps', 0)} "
             f"alpha_kd_floor={distill_cfg.get('alpha_kd_floor', 0.0)} "
             f"clip_loss_type={distill_cfg.get('clip_loss_type', 'infonce')} "

@@ -80,6 +80,15 @@ EXPERIMENT="${EXPERIMENT:-h100_kd_${MODEL_CONFIG}_bs${BATCH_SIZE}}"
 #   6E-1  BIDIRECTIONAL=true     second pass over the reversed sequence
 #   6F-1  SELECTION_SPLIT=true   disjoint selection split (not selection-on-test)
 VIT_UNFREEZE="${VIT_UNFREEZE:-2}"
+# 6G-1: vit_lr has been pinned at 1e-6 for the ENTIRE project — three orders of
+# magnitude below head_lr — so 6D's winning arm (depth 12, +5.2pp) is one where
+# the whole tower is unfrozen but barely moving. Depth is exhausted at 12
+# (ViT-B/16 has 12 blocks); LR is the untouched half of the dose.
+VIT_LR="${VIT_LR:-1e-6}"
+# 6G-2: "blocks" (default) unfreezes transformer blocks only — patch_embed,
+# cls_token, pos_embed, the final norm and the visual projection stay frozen even
+# at depth 12. "all" unfreezes the entire image tower.
+VIT_SCOPE="${VIT_SCOPE:-blocks}"
 KD_DECAY_STEPS="${KD_DECAY_STEPS:-0}"
 ALPHA_KD_FLOOR="${ALPHA_KD_FLOOR:-0.0}"
 CLIP_LOSS="${CLIP_LOSS:-infonce}"
@@ -112,7 +121,7 @@ fi
 
 echo "=== H100 joint contrastive: ${MODEL_CONFIG}, bs=${BATCH_SIZE} (true negatives) ==="
 echo "=== LRs: backbone=${BACKBONE_LR} head=${HEAD_LR} | max_steps=${MAX_STEPS} ==="
-echo "=== 6D levers: vit_unfreeze=${VIT_UNFREEZE} kd_decay=${KD_DECAY_STEPS}->${ALPHA_KD_FLOOR} clip_loss=${CLIP_LOSS} multipos=${MULTIPOS} gamma_simcse=${GAMMA_SIMCSE} bidirectional=${BIDIRECTIONAL} ==="
+echo "=== 6D levers: vit_unfreeze=${VIT_UNFREEZE} vit_lr=${VIT_LR} vit_scope=${VIT_SCOPE} kd_decay=${KD_DECAY_STEPS}->${ALPHA_KD_FLOOR} clip_loss=${CLIP_LOSS} multipos=${MULTIPOS} gamma_simcse=${GAMMA_SIMCSE} bidirectional=${BIDIRECTIONAL} ==="
 date; hostname
 mkdir -p logs "${MIMIC_CACHE_DIR}"
 
@@ -151,7 +160,8 @@ python scripts/train_contrastive.py \
   +distill=biomedclip_kd_joint_v2 \
   distill.freq_kd=false \
   distill.vit_unfreeze_blocks=${VIT_UNFREEZE} \
-  distill.vit_lr=1e-6 \
+  distill.vit_lr=${VIT_LR} \
+  distill.vit_unfreeze_scope=${VIT_SCOPE} \
   distill.backbone_lr=${BACKBONE_LR} \
   distill.head_lr=${HEAD_LR} \
   distill.gamma_simcse=${GAMMA_SIMCSE} \

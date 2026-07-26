@@ -326,6 +326,7 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         freeze_text_encoder_steps: int = 0,
         vit_unfreeze_blocks: int = 0,
         vit_lr: float = 1e-6,
+        vit_unfreeze_scope: str = "blocks",
         scheduler_name: str = "cosine",
         beta2_schedule: bool = False,
     ):
@@ -349,6 +350,15 @@ class HybridContrastiveLightningModule(HybridLightningModule):
         self._img_out = None
         self.vit_unfreeze_blocks = int(vit_unfreeze_blocks)
         self.vit_lr = float(vit_lr)
+        # Phase 6G-2: "blocks" (default, what every run through Phase 6D used)
+        # or "all" (whole image tower incl. patch_embed / pos_embed / final norm
+        # / visual projection, none of which the block-only path ever touched).
+        if vit_unfreeze_scope not in ("blocks", "all"):
+            raise ValueError(
+                "vit_unfreeze_scope must be 'blocks' or 'all', got {!r}".format(
+                    vit_unfreeze_scope)
+            )
+        self.vit_unfreeze_scope = vit_unfreeze_scope
         # Stage 2 safeguard: freeze the LM backbone for the first N steps so the
         # newly-initialised image-text projection can stabilise before yanking
         # the freshly-trained text encoder weights toward image space.
@@ -421,23 +431,50 @@ class HybridContrastiveLightningModule(HybridLightningModule):
                 f"({model.embed_dim}) — both should be 512 for BiomedCLIP."
             )
 
-            # Optionally unfreeze the last N ViT transformer blocks with low LR.
+            # Optionally unfreeze the ViT with low LR. Phase 6D established this
+            # is THE lever: depth 2->4->6->12 moved i2t R@10 0.116->0.132->0.150
+            # ->0.168 monotonically (+5.2pp, ~9x SE) while every text-side and
+            # objective lever stayed flat.
             if self.vit_unfreeze_blocks > 0:
-                blocks = self._get_vit_blocks()
-                for blk in blocks[-self.vit_unfreeze_blocks:]:
-                    for p in blk.parameters():
-                        p.requires_grad = True
+                if self.vit_unfreeze_scope == "all":
+                    targets = list(self.image_encoder.parameters())
+                    what = "the ENTIRE image tower"
+                else:
+                    blocks = self._get_vit_blocks()
+                    targets = [
+                        p for blk in blocks[-self.vit_unfreeze_blocks:]
+                        for p in blk.parameters()
+                    ]
+                    what = "last {} ViT blocks".format(self.vit_unfreeze_blocks)
+                for p in targets:
+                    p.requires_grad = True
                 self.image_encoder.train()
-                n_unfreeze = sum(
-                    p.numel() for blk in blocks[-self.vit_unfreeze_blocks:]
-                    for p in blk.parameters()
-                )
-                print(f"✓ Unfreezing last {self.vit_unfreeze_blocks} ViT blocks "
+                n_unfreeze = sum(p.numel() for p in targets)
+                print(f"✓ Unfreezing {what} "
                       f"({n_unfreeze/1e6:.1f}M params, lr={self.vit_lr})")
 
     # ------------------------------------------------------------------
     # ViT block discovery helper
     # ------------------------------------------------------------------
+    def _vit_trainable_params(self):
+        """Parameters the ViT param group should own, honouring the unfreeze scope.
+
+        Phase 6G-2: ``vit_unfreeze_scope`` controls WHAT gets unfrozen, as opposed
+        to ``vit_unfreeze_blocks`` which controls HOW MANY blocks:
+          "blocks" (default, and what every run through Phase 6D used) — the last
+              N transformer blocks only. Note this leaves patch_embed, cls_token,
+              pos_embed, the final norm and the visual projection FROZEN even at
+              depth 12, i.e. "unfreeze everything" was never actually tested.
+          "all" — every image-tower parameter.
+        """
+        if getattr(self, "vit_unfreeze_scope", "blocks") == "all":
+            return [p for p in self.image_encoder.parameters() if p.requires_grad]
+        blocks = self._get_vit_blocks()
+        return [
+            p for blk in blocks[-self.vit_unfreeze_blocks:]
+            for p in blk.parameters() if p.requires_grad
+        ]
+
     def _get_vit_blocks(self):
         """Return a list of transformer blocks from the image encoder.
 
@@ -465,11 +502,7 @@ class HybridContrastiveLightningModule(HybridLightningModule):
             # Phase 8: img_proj deleted — only the student model is trained here.
             main_params = list(self.model.parameters())
             # Group 2: unfrozen ViT blocks at vit_lr
-            blocks = self._get_vit_blocks()
-            vit_params = [
-                p for blk in blocks[-self.vit_unfreeze_blocks:]
-                for p in blk.parameters() if p.requires_grad
-            ]
+            vit_params = self._vit_trainable_params()
             param_groups = [
                 {"params": main_params, "lr": self.learning_rate,
                  "weight_decay": self.weight_decay},
@@ -894,6 +927,7 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         freeze_text_encoder_steps: int = 500,
         vit_unfreeze_blocks: int = 0,
         vit_lr: float = 1e-6,
+        vit_unfreeze_scope: str = "blocks",
         moco_queue_size: int = 0,
         moco_momentum: float = 0.999,
         freq_kd: bool = False,
@@ -919,6 +953,7 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
             freeze_text_encoder_steps=freeze_text_encoder_steps,
             vit_unfreeze_blocks=vit_unfreeze_blocks,
             vit_lr=vit_lr,
+            vit_unfreeze_scope=vit_unfreeze_scope,
             scheduler_name=scheduler_name,
             beta2_schedule=beta2_schedule,
         )
@@ -1054,11 +1089,7 @@ class JointMultiTaskLightningModule(HybridContrastiveLightningModule):
         ]
 
         if self.vit_unfreeze_blocks > 0 and self.image_encoder is not None:
-            blocks = self._get_vit_blocks()
-            vit_params = [
-                p for blk in blocks[-self.vit_unfreeze_blocks:]
-                for p in blk.parameters() if p.requires_grad
-            ]
+            vit_params = self._vit_trainable_params()
             if vit_params:
                 param_groups.append(
                     {"params": vit_params, "lr": self.vit_lr,

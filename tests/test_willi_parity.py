@@ -2182,3 +2182,46 @@ def test_phase6c_measurement_scripts_present_and_parse():
     # 6C-1 must use the SAME gallery as the authoritative eval or the teacher
     # number is not comparable to the student's 0.1113.
     assert 'split="train[90%:]"' in ref
+
+
+@pytest.mark.willi_parity
+def test_vit_unfreeze_scope_and_lr_are_sweepable():
+    """Phase 6G: depth was the ONLY image-side axis ever swept.
+
+    6D established unfreeze depth as the single lever that moves MIMIC retrieval
+    (0.116/0.132/0.150/0.168 at depth 2/4/6/12). Depth is now exhausted — ViT-B/16
+    has 12 blocks — so the remaining dose axes are LR and scope, and both were
+    hardcoded: vit_lr sat at 1e-6 for the entire project, and the unfreeze only
+    ever covered transformer blocks, leaving patch_embed / cls_token / pos_embed /
+    final norm / visual projection frozen even at depth 12.
+    """
+    sh = (REPO_ROOT / "scripts" / "train_biomedclip_kd_h100.sh").read_text()
+    assert 'VIT_LR="${VIT_LR:-1e-6}"' in sh, "vit_lr must be env-overridable"
+    assert 'VIT_SCOPE="${VIT_SCOPE:-blocks}"' in sh
+    assert "distill.vit_lr=${VIT_LR}" in sh, "vit_lr must not be hardcoded in the Hydra call"
+    assert "distill.vit_lr=1e-6 \\" not in sh
+    assert "distill.vit_unfreeze_scope=${VIT_SCOPE}" in sh
+
+    import yaml
+    cfg = yaml.safe_load(
+        (REPO_ROOT / "configs" / "distill" / "biomedclip_kd_joint_v2.yaml").read_text()
+    )
+    # Canonical values unchanged, so historical attribution still holds.
+    assert cfg["vit_unfreeze_blocks"] == 2
+    assert cfg["vit_lr"] == 1.0e-6
+    assert cfg["vit_unfreeze_scope"] == "blocks"
+
+    # Scope must be validated, not silently ignored.
+    from hybrid_xmamba.training.lightning_module import JointMultiTaskLightningModule
+    with pytest.raises(ValueError):
+        _tiny_joint_module(vit_unfreeze_scope="everything")
+
+    # "blocks" must keep the historical param-group behaviour exactly.
+    try:
+        mod = _tiny_joint_module(vit_unfreeze_scope="blocks")
+    except ImportError:
+        pytest.skip("open_clip not installed")
+    assert mod.vit_unfreeze_scope == "blocks"
+    # No image encoder in the tiny harness -> helper must not be reached, and the
+    # optimizer must still build.
+    assert mod.configure_optimizers()["optimizer"] is not None

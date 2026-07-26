@@ -177,7 +177,41 @@ Instrumentation and writeup evidence. **Per user decision 2026-07-25, 6D runs re
 - [ ] **6C-3** — `scripts/audit_mimic_duplicates.py` (CPU only): exact + whitespace/case-normalised report-text grouping over `train[:90%]` and `train[90%:]`. Outputs (a) the oracle R@10 ceiling on the eval gallery under arbitrary tie-breaking, (b) expected false-negative rate per batch size {32,64,128}. Decides whether 6D-3's multi-positive mask is worth having and whether a dedup-aware R@10 belongs in the headline.
 - [ ] **6C-4** — Reporting: surface i2t/t2i **R@1 and R@5** (already computed at `evaluate_cxr_retrieval.py:535-540`, just never carried into the state/writeup). R@1 ≈ 1.7% is far more sensitive to representation quality than R@10 and will show movement when R@10 does not. Add dedup-aware R@10 as a secondary metric.
 
-### Phase 6D — Factorial lever block ⏳ CODE + SCRIPTS READY — runs pending H100
+### Phase 6D — Factorial lever block ✅ ARMS RUN (2026-07-26) — **ViT depth is the lever**
+
+**In-training i2t R@10, N=3063, final @ep13 (peak in parens):**
+
+| Arm | Lever | i2t R@10 | i2t R@1 | t2i R@10 | val/clip_loss | cos_teacher |
+|---|---|---|---|---|---|---|
+| D0 | control, vit=2 | 0.116 (0.120) | 0.017 | 0.113 | 2.897 | 0.570 |
+| D1a | vit=4 | 0.132 (0.135) | 0.020 | 0.131 | 2.774 | 0.559 |
+| D1b | vit=6 | 0.150 | 0.029 | 0.151 | 2.687 | 0.555 |
+| **D1c** | **vit=12 (whole ViT-B/16)** | **0.168 (0.171)** | **0.030** | 0.165 | **2.585** | 0.544 |
+| D2 | KD decay 0.3→0 over 2k | 0.118 (0.120) | 0.016 | 0.114 | 2.934 | **0.194** |
+| D3 | SigLIP | 0.119 (0.120) | 0.016 | 0.120 | n/c | 0.546 |
+| D5 | γ_simcse=0 | 0.122 | 0.016 | 0.113 | 2.872 | 0.586 |
+
+**6D-1 is a decisive, monotone win.** 0.116 → 0.132 → 0.150 → 0.168 across unfreeze depth 2/4/6/12: **+5.2pp over control, ~9× the SE**. `val/clip_loss` falls monotonically alongside it (2.897 → 2.585) and R@1 nearly doubles, so this is generalization, not a tie-breaking or selection artifact — the eval images are never trained on. No OOM at bs=64 even with all 85.1M ViT params trainable. This corroborates the 6C conclusion exactly: **the image representation was the binding constraint all along.**
+
+**6D-2 falsifies the 6C-derived KD prediction — record this honestly.** From 6C we argued the α_kd=0.3 anchor was dragging `z_text` toward a 4.31%-quality representation and that releasing it should help. The mechanism worked precisely as designed — `cos_text_teacher` collapsed 0.570 → 0.194, so the anchor genuinely released — and retrieval did **not** move (+0.2pp, well inside noise). `val/clip_loss` was marginally *worse* (2.934 vs 2.897), so at α=0.3 the KD term acts as a mild regulariser rather than a drag. **The KD-anchor hypothesis is now dead in both directions** (not a ceiling, not a drag) and should not be revisited.
+
+**6D-3 (SigLIP, +0.3pp) and 6D-5 (γ_simcse=0, +0.6pp) are null.** Both under the 1.1pp bar. Combined with 6C-3 killing the false-negative premise, the entire objective-repair line of both external reviews is now empirically closed.
+
+**Running tally: 10 nulls, 1 dominant lever.** Stage-0 PPL, model scale, negatives, epochs, batch, head_lr ×2, KD decay, SigLIP, SimCSE — all flat. ViT adaptation depth — monotone and large.
+- [x] **6D-0** — control reproduces the Phase-6B recipe (0.116, matching the 6B arms).
+- [x] **6D-1** — vit_unfreeze {4,6,12}: monotone, **the** result of this phase.
+- [x] **6D-2** — KD decay: null; hypothesis retired.
+- [x] **6D-3** — SigLIP: null.
+- [x] **6D-5** — γ_simcse=0: null.
+- [ ] **6D-4** — stack: now redundant. D2/D3/D5 are all null, so the "stack" is just D1c. Fold γ_simcse=0 into the 6G sweep as a free rider rather than running a separate arm.
+
+### Phase 6G — ViT adaptation dose-response, continued ⏳ NEXT
+Depth is exhausted at 12 (ViT-B/16 has 12 blocks), but "amount of image adaptation" = depth × LR × scope, and only depth has been swept. `vit_lr` has sat at **1e-6** the entire project — three orders of magnitude below the head LR — so the winning arm is one where the whole tower is unfrozen but barely moving.
+- [ ] **6G-1** — `vit_lr` sweep at `VIT_UNFREEZE=12`: {3e-6, 1e-5, 3e-5}. Highest-value remaining experiment.
+- [ ] **6G-2** — Scope: `_get_vit_blocks` returns transformer blocks only, so `patch_embed`, `cls_token`, `pos_embed`, the final norm and the visual projection stay frozen even at depth 12. Add an opt-in full-tower unfreeze.
+- [ ] **6G-3** — Authoritative `evaluate_cxr_retrieval.py` on D1b + D1c (MIMIC) — the number for the writeup.
+- [ ] **6G-4** — **Indiana eval on D1c.** Prior evidence says ViT unfreeze 0→2 left Indiana untouched at 3.90%, but 12 blocks on 27.5K pairs is a far larger intervention and could overfit in-domain at the cost of cross-domain. This gates Phase 7.
+- [ ] **6G-5** — **Re-run D1c with `SELECTION_SPLIT=true`.** Arm-level comparison used `val/total_loss` on `train[90%:]`, which is the eval gallery — that is test-set selection at the arm level. The effect is 9× SE so it is not noise-mining, but the headline architectural claim of the thesis should be confirmed under a clean protocol. This is what Phase 6F was built for.
 Six one-at-a-time nulls have made single-lever probing expensive per bit of information. Run D1–D3 in parallel for attribution **and** D4 stacked for the number. ~3.5 h/arm on one H100. Gate: **>1.1pp over control** (SE ~0.57pp at p≈0.11, n=3063) or it is noise.
 Launch: `./scripts/submit_phase6d_arms.sh` (dry run) → `--submit`, or paste its sbatch lines directly. Every lever is env-overridable in `train_biomedclip_kd_h100.sh` and **defaults to the Phase-6B recipe**, so an unmodified invocation *is* 6D-0.
 
