@@ -215,8 +215,19 @@ Instrumentation and writeup evidence. **Per user decision 2026-07-25, 6D runs re
 
 ### Phase 6G — ViT adaptation dose-response, continued ⏳ NEXT
 Depth is exhausted at 12 (ViT-B/16 has 12 blocks), but "amount of image adaptation" = depth × LR × scope, and only depth has been swept. `vit_lr` has sat at **1e-6** the entire project — three orders of magnitude below the head LR — so the winning arm is one where the whole tower is unfrozen but barely moving.
-- [ ] **6G-1** — `vit_lr` sweep at `VIT_UNFREEZE=12`: {3e-6, 1e-5, 3e-5}. Highest-value remaining experiment.
-- [ ] **6G-2** — Scope: `_get_vit_blocks` returns transformer blocks only, so `patch_embed`, `cls_token`, `pos_embed`, the final norm and the visual projection stay frozen even at depth 12. Add an opt-in full-tower unfreeze.
+- [x] **6G-1** — **`vit_lr` is an INVERTED-U; 1e-6 was already near-optimal.** In-training, N=3063:
+
+  | vit_lr | R@10 final | R@10 peak | val/clip_loss | **train/clip_loss** | cos_teacher |
+  |---|---|---|---|---|---|
+  | 1e-6 (D1c ref) | 0.168 | 0.171 | **2.585** | 1.17 | 0.544 |
+  | 3e-6 | 0.174 | **0.183** @ep9 | 2.721 | 0.702 | 0.540 |
+  | 1e-5 | 0.149 | 0.168 | 3.412 | 0.113 | 0.685 |
+  | 3e-5 | 0.145 | 0.163 | 3.487 | **0.037** | 0.803 |
+
+  The mechanism is unambiguous overfitting: `train/clip_loss` collapses monotonically with vit_lr (1.17 → 0.70 → 0.11 → 0.04) while `val/clip_loss` rises (2.585 → 3.49). At 3e-5 the 85M-param image tower has effectively memorised the 27,570 training pairs. **Depth was the free lunch; LR is not.** Together with 6D this gives the full statement: image-tower adaptation has an *optimum* — too little (depth 2, 0.1107) and too much (lr 3e-5) both underperform.
+
+  **Mechanistic corroboration for the 6D-2 null:** `cos_text_teacher` *rises* with vit_lr (0.544 → 0.685 → 0.803). At high image-tower LR the ViT moves toward the text encoder rather than the text encoder toward the images, leaving `z_text` nearer its KD anchor. The two towers trade off against each other — which is why releasing the KD anchor (6D-2) changed nothing on its own.
+- [x] **6G-2** — **Scope is a NULL.** `all` (87.2M trainable) vs `blocks` (86.0M): R@10 0.170 vs 0.168, `val/clip_loss` 2.580 vs 2.585 — inside noise on both. `patch_embed`, `cls_token`, `pos_embed`, the final norm and the visual projection contribute nothing; the transformer blocks carry the entire adaptation. Keep `vit_unfreeze_scope: blocks` as canonical.
 - [x] **6G-3** — **AUTHORITATIVE, FULLY LR-MATCHED DOSE-RESPONSE — STRETCH TIER CLEARED.**
 
   All four arms at `bs=64`, `head_lr=4.24e-4`, `backbone_lr=1.41e-5`, 6000 steps (13.93 epochs), best-by-`val/total_loss` checkpoint, MIMIC `train[90%:]` N=3063:
@@ -238,7 +249,10 @@ Depth is exhausted at 12 (ViT-B/16 has 12 blocks), but "amount of image adaptati
 
   Note the in-training/authoritative reconciliation *inverted* versus Phase 6: authoritative 0.1714 now slightly **exceeds** the in-training final (0.168). In Phase 6 the val-loss minimum (step 4500) sat well before the retrieval peak (~6000), costing ~1pp at selection time; with the stronger image tower both curves peak together at ~4750, so selecting on `val/total_loss` no longer costs anything.
 - [x] **6G-4** — **Indiana: 0.0485 i2t R@10** (t2i 0.0700, R@1 0.0094, paired cos 0.2730, N=743). Floor 0.0404 ✅ (target 0.055 not reached). **The cross-domain risk did not materialise** — unfreezing all 12 ViT blocks on 27.5K in-domain MIMIC pairs improved Indiana too, from the A100 baseline 0.0390 to 0.0485 (+0.95pp). Deep image adaptation is not an in-domain/cross-domain trade here; it is a genuine representation improvement. Phase 7 gate cleared.
-- [ ] **6G-5** — **Re-run D1c with `SELECTION_SPLIT=true`.** Arm-level comparison used `val/total_loss` on `train[90%:]`, which is the eval gallery — that is test-set selection at the arm level. The effect is 9× SE so it is not noise-mining, but the headline architectural claim of the thesis should be confirmed under a clean protocol. This is what Phase 6F was built for.
+- [ ] **6G-5** — **Re-run D1c with `SELECTION_SPLIT=true`** (running; at ep12 → i2t R@10 0.256 on the N=1532 selection gallery, not comparable to N=3063 without the gallery-size correction, but consistent with the depth effect holding). Arm-level comparison used `val/total_loss` on `train[90%:]`, which is the eval gallery — test-set selection at the arm level. The effect is ~10× SE so it is not noise-mining, but the thesis headline should be confirmed under a clean protocol.
+
+  **6G-1 promoted this from formality to necessity.** The `vit_lr=3e-6` arm has **higher retrieval but worse val loss** than D1c (peak 0.183 vs 0.171; `val/total_loss` 2.858 vs 2.721) — retrieval and val-loss have diverged again, exactly the Phase-6 failure mode. Selecting on `val/total_loss` will not find that 0.183 peak, and selecting on retrieval against `train[90%:]` is selection-on-test. **The disjoint selection split is the only legitimate way to exploit a retrieval peak that the loss does not track**, so 6F should become the canonical protocol for any further tuning, and the best config re-run under it.
+- [ ] **6G-6** — Authoritative `evaluate_cxr_retrieval.py` on all four finished 6G arms. Decisive: the in-training ordering above is checkpoint-selection dependent and cannot be read as a final ranking.
 Six one-at-a-time nulls have made single-lever probing expensive per bit of information. Run D1–D3 in parallel for attribution **and** D4 stacked for the number. ~3.5 h/arm on one H100. Gate: **>1.1pp over control** (SE ~0.57pp at p≈0.11, n=3063) or it is noise.
 Launch: `./scripts/submit_phase6d_arms.sh` (dry run) → `--submit`, or paste its sbatch lines directly. Every lever is env-overridable in `train_biomedclip_kd_h100.sh` and **defaults to the Phase-6B recipe**, so an unmodified invocation *is* 6D-0.
 
