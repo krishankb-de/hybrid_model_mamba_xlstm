@@ -90,11 +90,24 @@ SELECTION_SPLIT="${SELECTION_SPLIT:-false}"
 
 # 6F: point the val loader at a slice disjoint from the test gallery. The
 # authoritative eval hardcodes train[90%:], so only the training/val slices move.
+#
+# TWO TRAPS, both hit on 2026-07-26 (jobs 2372273-5 died in argument parsing):
+#  (1) HF slice syntax contains '[', which is a Hydra override-grammar
+#      metacharacter. The shell strips "..." before exec, so Hydra receives a
+#      bare train[:90%] and rejects it with "mismatched input '['". The value
+#      must arrive at Hydra STILL QUOTED, hence the embedded single quotes.
+#  (2) These overrides were emitted unconditionally, so the bug fired on every
+#      arm even though SELECTION_SPLIT=false resolves to the yaml's own values.
+#      Now nothing is passed unless 6F is actually requested — the default path
+#      keeps the exact argv the Phase-6/6B runs used, which is what "6D-0 is
+#      bit-identical to the control" is supposed to mean.
+SPLIT_OVERRIDES=()
 if [ "${SELECTION_SPLIT}" = "true" ]; then
-  TRAIN_SPLIT='train[:85%]'; VAL_SPLIT='train[85%:90%]'
+  SPLIT_OVERRIDES=(
+    "dataset.train_split='train[:85%]'"
+    "dataset.validation_split='train[85%:90%]'"
+  )
   echo "=== 6F: disjoint selection split ON (train[:85%] / select train[85%:90%] / test train[90%:]) ==="
-else
-  TRAIN_SPLIT='train[:90%]'; VAL_SPLIT='train[90%:]'
 fi
 
 echo "=== H100 joint contrastive: ${MODEL_CONFIG}, bs=${BATCH_SIZE} (true negatives) ==="
@@ -159,8 +172,7 @@ python scripts/train_contrastive.py \
   dataset.num_workers=8 \
   dataset.pin_memory=true \
   dataset.cache_dir="${MIMIC_CACHE_DIR}" \
-  dataset.train_split="${TRAIN_SPLIT}" \
-  dataset.validation_split="${VAL_SPLIT}" \
+  ${SPLIT_OVERRIDES[@]+"${SPLIT_OVERRIDES[@]}"} \
   model.use_gradient_checkpointing=${GRAD_CKPT} \
   lm_checkpoint="${STAGE0_CKPT}" \
   experiment_name=${EXPERIMENT} \

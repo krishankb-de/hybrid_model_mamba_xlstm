@@ -17,6 +17,7 @@ Or directly (must be inside the willi_parity conda env):
 """
 
 import ast
+import re
 import sys
 import os
 from pathlib import Path
@@ -2111,14 +2112,61 @@ def test_h100_launch_script_exposes_phase6d_levers():
         "distill.use_multipos=${MULTIPOS}",
         "distill.gamma_simcse=${GAMMA_SIMCSE}",
         "++model.bidirectional_encode=${BIDIRECTIONAL}",
-        'dataset.train_split="${TRAIN_SPLIT}"',
-        'dataset.validation_split="${VAL_SPLIT}"',
+        '${SPLIT_OVERRIDES[@]+"${SPLIT_OVERRIDES[@]}"}',
     ):
         assert override in sh, "missing Hydra override: {}".format(override)
 
     # 6F must move ONLY the train/val slices; the test gallery is fixed.
     assert "train[:85%]" in sh and "train[85%:90%]" in sh
     assert "vit_unfreeze_blocks=2 \\" not in sh, "vit_unfreeze must not be hardcoded"
+
+
+@pytest.mark.willi_parity
+def test_split_overrides_parse_under_hydra_grammar():
+    """REGRESSION (2026-07-26, jobs 2372273-5 died in argument parsing).
+
+    HuggingFace slice syntax contains '[', which is a Hydra override-grammar
+    metacharacter. The shell strips "..." before exec, so an override written as
+        dataset.train_split="${TRAIN_SPLIT}"
+    reaches Hydra as a bare `train[:90%]` and is rejected with
+        mismatched input '[' expecting <EOF>
+    The value must arrive at Hydra STILL QUOTED.
+
+    This test parses the script's actual override strings with Hydra's own
+    parser, so the quoting cannot be "cleaned up" away again.
+    """
+    try:
+        from hydra.core.override_parser.overrides_parser import OverridesParser
+    except ImportError:                                       # pragma: no cover
+        pytest.skip("hydra not installed")
+
+    parser = OverridesParser.create()
+    sh = (REPO_ROOT / "scripts" / "train_biomedclip_kd_h100.sh").read_text()
+
+    # Every literal single-quoted override in the script must parse, and must
+    # round-trip to the slice string the dataloader expects.
+    literals = re.findall(r'"([\w.+]+=\'[^\']*\')"', sh)
+    assert literals, "expected quoted split overrides in the script"
+    parsed = {o.key_or_group: o.value() for o in parser.parse_overrides(literals)}
+    assert parsed["dataset.train_split"] == "train[:85%]"
+    assert parsed["dataset.validation_split"] == "train[85%:90%]"
+
+    # Pin WHY the quotes are there: the bare form must still be rejected.
+    with pytest.raises(Exception):
+        parser.parse_overrides(["dataset.train_split=train[:85%]"])
+
+    # The overrides must be emitted ONLY when 6F is requested. Passing them
+    # unconditionally is what turned a 6F-only bug into an all-arms outage, and
+    # it also breaks "6D-0 is bit-identical to the Phase-6B control" — the
+    # control must reproduce the original argv, not an equivalent-valued one.
+    assert "SPLIT_OVERRIDES=()" in sh
+    guarded = sh.split('if [ "${SELECTION_SPLIT}" = "true" ]; then')[1].split("fi")[0]
+    assert "dataset.train_split=" in guarded, (
+        "split overrides must live inside the SELECTION_SPLIT guard"
+    )
+    assert "TRAIN_SPLIT" not in sh.split("python scripts/train_contrastive.py")[1], (
+        "the python invocation must not reference a bare TRAIN_SPLIT variable"
+    )
 
 
 @pytest.mark.willi_parity
