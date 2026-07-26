@@ -19,10 +19,18 @@ Indiana gap is ablation-proven data-bound → only lever is diverse CXR data (us
 
 **Goal:** H100-native infra + 150M-v2 backbone + scaled contrastive negatives + multi-source CXR data → push MIMIC to stretch (≥12%) and recover Indiana (≥floor), with clean per-lever attribution.
 
-## Success bar (tiered)
+## Success bar (tiered) — **status 2026-07-26**
 - **Floor** (no regression): MIMIC i2t R@10 ≥ 10.45%; Indiana i2t ≥ 4.04% (recover); Stage-0 PPL ≤ 15.62.
 - **Target**: MIMIC ≥ 12% (old stretch); Indiana ≥ 5.5%; PPL ≤ 13.76.
 - **Stretch**: MIMIC ≥ 14%; Indiana ≥ 7%; PPL ≤ 13.10.
+
+| Metric | Best | Tier reached |
+|---|---|---|
+| MIMIC i2t R@10 | **0.1714** (D1c, vit_unfreeze=12) | **STRETCH** ✅ |
+| Indiana i2t R@10 | **0.0485** (D1c) | Floor ✅ (target 0.055 open) |
+| Stage-0 val PPL | **13.18** (Phase 5) | Target ✅, ~stretch (13.10) |
+
+The MIMIC headline is **8.23% → 10.45% (A100 refactor) → 17.14% (H100 + deep ViT adaptation)**. The single decisive intervention was image-tower adaptation depth; every text-side and objective-side lever was null.
 
 ## Resolved decisions (from user, 2026-07-07)
 - **SLURM**: long training → `--partition=aisc-batch` (7-day cap); eval/smoke → `--partition=aisc-shortrun` (1-day); `--gres=gpu:h100:X` (X=1..8). 7-day cap ⇒ full Stage-0 in ONE block (no requeue juggling).
@@ -209,8 +217,19 @@ Instrumentation and writeup evidence. **Per user decision 2026-07-25, 6D runs re
 Depth is exhausted at 12 (ViT-B/16 has 12 blocks), but "amount of image adaptation" = depth × LR × scope, and only depth has been swept. `vit_lr` has sat at **1e-6** the entire project — three orders of magnitude below the head LR — so the winning arm is one where the whole tower is unfrozen but barely moving.
 - [ ] **6G-1** — `vit_lr` sweep at `VIT_UNFREEZE=12`: {3e-6, 1e-5, 3e-5}. Highest-value remaining experiment.
 - [ ] **6G-2** — Scope: `_get_vit_blocks` returns transformer blocks only, so `patch_embed`, `cls_token`, `pos_embed`, the final norm and the visual projection stay frozen even at depth 12. Add an opt-in full-tower unfreeze.
-- [ ] **6G-3** — Authoritative `evaluate_cxr_retrieval.py` on D1b + D1c (MIMIC) — the number for the writeup.
-- [ ] **6G-4** — **Indiana eval on D1c.** Prior evidence says ViT unfreeze 0→2 left Indiana untouched at 3.90%, but 12 blocks on 27.5K pairs is a far larger intervention and could overfit in-domain at the cost of cross-domain. This gates Phase 7.
+- [x] **6G-3** — **AUTHORITATIVE RESULTS IN — STRETCH TIER CLEARED.**
+
+  | Arm | MIMIC i2t R@10 | i2t R@1 | i2t R@5 | t2i R@10 | paired cos |
+  |---|---|---|---|---|---|
+  | A100 70M baseline | 0.1045 | — | — | — | — |
+  | Phase 6 best (vit=2) | 0.1113 | 0.016 | — | 0.0983 | 0.386 |
+  | D1b (vit=6) | 0.1430 | 0.0206 | 0.0937 | 0.1394 | 0.4084 |
+  | **D1c (vit=12)** | **0.1714** | **0.0300** | **0.1032** | **0.1538** | **0.4230** |
+
+  **+6.01pp over the standing 0.1113 baseline, ~10.5× SE.** Monotone on authoritative numbers as well as in-training (0.1113 → 0.1430 → 0.1714), with paired cosine and R@1 rising in lockstep — R@1 nearly doubles. Floor 0.1045 ✅, target 0.12 ✅, **stretch 0.14 ✅**.
+
+  Note the in-training/authoritative reconciliation *inverted* versus Phase 6: authoritative 0.1714 now slightly **exceeds** the in-training final (0.168). In Phase 6 the val-loss minimum (step 4500) sat well before the retrieval peak (~6000), costing ~1pp at selection time; with the stronger image tower both curves peak together at ~4750, so selecting on `val/total_loss` no longer costs anything.
+- [x] **6G-4** — **Indiana: 0.0485 i2t R@10** (t2i 0.0700, R@1 0.0094, paired cos 0.2730, N=743). Floor 0.0404 ✅ (target 0.055 not reached). **The cross-domain risk did not materialise** — unfreezing all 12 ViT blocks on 27.5K in-domain MIMIC pairs improved Indiana too, from the A100 baseline 0.0390 to 0.0485 (+0.95pp). Deep image adaptation is not an in-domain/cross-domain trade here; it is a genuine representation improvement. Phase 7 gate cleared.
 - [ ] **6G-5** — **Re-run D1c with `SELECTION_SPLIT=true`.** Arm-level comparison used `val/total_loss` on `train[90%:]`, which is the eval gallery — that is test-set selection at the arm level. The effect is 9× SE so it is not noise-mining, but the headline architectural claim of the thesis should be confirmed under a clean protocol. This is what Phase 6F was built for.
 Six one-at-a-time nulls have made single-lever probing expensive per bit of information. Run D1–D3 in parallel for attribution **and** D4 stacked for the number. ~3.5 h/arm on one H100. Gate: **>1.1pp over control** (SE ~0.57pp at p≈0.11, n=3063) or it is noise.
 Launch: `./scripts/submit_phase6d_arms.sh` (dry run) → `--submit`, or paste its sbatch lines directly. Every lever is env-overridable in `train_biomedclip_kd_h100.sh` and **defaults to the Phase-6B recipe**, so an unmodified invocation *is* 6D-0.
