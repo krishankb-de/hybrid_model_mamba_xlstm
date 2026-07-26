@@ -2225,3 +2225,28 @@ def test_vit_unfreeze_scope_and_lr_are_sweepable():
     # No image encoder in the tiny harness -> helper must not be reached, and the
     # optimizer must still build.
     assert mod.configure_optimizers()["optimizer"] is not None
+
+
+@pytest.mark.willi_parity
+def test_eval_script_bakes_in_offline_and_populated_cache():
+    """REGRESSION (2026-07-26). MIMIC-CXR is a GATED HF repo, so any online
+    load_dataset 401s — the failure that killed job 2357924.
+
+    eval_h100.sh carried a header comment saying "run with HF_DATASETS_OFFLINE=1"
+    but never exported it, and its cache default pointed at
+    ${SCRATCH_ROOT}/mimic_cxr_cache, which is empty — the populated caches live
+    under /sc/home/$USER/dataset/. Both are now baked in, per dataset.
+    """
+    sh = (REPO_ROOT / "scripts" / "eval_h100.sh").read_text()
+    assert 'export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"' in sh
+    assert 'export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"' in sh
+    assert "/sc/home/$USER/dataset/mimic_cxr_cache" in sh
+    assert "/sc/home/$USER/dataset/indiana_cxr_cache" in sh
+    # Match the ASSIGNMENT, not the word — the fix comment quotes the old path.
+    assert 'EVAL_CACHE_DIR="${EVAL_CACHE_DIR:-${SCRATCH_ROOT}/mimic_cxr_cache}"' not in sh, (
+        "eval cache must not default to the empty scratch path"
+    )
+    # The training template must keep the same guarantees.
+    tr = (REPO_ROOT / "scripts" / "train_biomedclip_kd_h100.sh").read_text()
+    assert 'export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"' in tr
+    assert "/sc/home/$USER/dataset/mimic_cxr_cache" in tr
