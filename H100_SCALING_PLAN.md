@@ -281,7 +281,26 @@ Depth is exhausted at 12 (ViT-B/16 has 12 blocks), but "amount of image adaptati
 
   Defensible statement: **Indiana is unchanged within noise across every variant tested** (0.0390–0.0485). Deep ViT adaptation neither helped nor hurt cross-domain — no in-domain/cross-domain trade, but no gain either. Indiana remains as data-bound as the original ablations concluded, which *raises* the priority of Phase 7.
 
-- [ ] **6G-7** — (optional, 3.5 h) `VIT_UNFREEZE=2 SELECTION_SPLIT=true` — the honest depth-2 endpoint. Gives a clean-protocol depth 2 vs 12 delta and separates "less training data" from "honest selection" in the 2.55pp gap. Cheap, and it makes the headline claim protocol-independent.
+- [x] **6G-7** — **CLEAN-PROTOCOL DEPTH-2 ENDPOINT: 0.1081** (ckpt step 3750, MIMIC N=3063). Completes the 2×2:
+
+  | | vit=2 | vit=12 | **depth effect** |
+  |---|---|---|---|
+  | `val == test` selection | 0.1107 (D0) | 0.1714 (D1c) | **+6.07pp** (9.7 SE) |
+  | clean protocol | 0.1081 (6G-7) | 0.1459 (6G-5) | **+3.78pp** (6.2 SE) |
+  | **protocol cost** | **0.26pp** (0.5 SE) | **2.55pp** (3.8 SE) | |
+
+  **1. The depth effect is real but ~40% smaller than the original protocol implied** — 3.78pp, not 6.07pp. Still 6.2 SE, so it holds comfortably, but 6.07pp was inflated and must not be quoted as the effect size.
+
+  **2. Test-informed selection is NOT a constant offset — its value scales with overfitting.** At vit=2 the protocol costs nothing measurable (0.26pp, 0.5 SE); at vit=12 it costs 2.55pp (3.8 SE). Mechanistically clear: with 14.2M trainable image params the val-loss curve is flat and checkpoint choice is near-arbitrary; with 85.1M the model overfits, the curve acquires real structure, and choosing the checkpoint with the test set is worth something.
+
+  **3. Decomposition of the 2.55pp.** Both clean-split runs trained on 5.6% less data. At vit=2 the *combined* cost of less data + honest selection was only 0.26pp, so the data component is ≲0.3pp at both depths (assuming it does not scale with depth, which is reasonable but unproven). **≈2.2 of the 2.55pp at vit=12 is test-informed selection, not lost data.**
+
+  Methodological finding worth stating in the writeup: *the advantage a model gains from selecting checkpoints on its evaluation split grows with how much that model overfits* — here, from nil at 14M trainable image params to 2.2pp at 85M. It is rarely measured.
+
+**FINAL NUMBERS FOR THE WRITEUP.** Quote the clean protocol as primary:
+- **MIMIC i2t R@10: 10.81% (vit=2) → 14.59% (vit=12), +3.78pp, 6.2 SE** — clean protocol, stretch tier cleared.
+- Protocol-matched to all prior project numbers (`val == test`): 11.07% → 17.14%.
+- Indiana: flat within noise throughout (0.0390–0.0485, SE 0.76pp).
 Six one-at-a-time nulls have made single-lever probing expensive per bit of information. Run D1–D3 in parallel for attribution **and** D4 stacked for the number. ~3.5 h/arm on one H100. Gate: **>1.1pp over control** (SE ~0.57pp at p≈0.11, n=3063) or it is noise.
 Launch: `./scripts/submit_phase6d_arms.sh` (dry run) → `--submit`, or paste its sbatch lines directly. Every lever is env-overridable in `train_biomedclip_kd_h100.sh` and **defaults to the Phase-6B recipe**, so an unmodified invocation *is* 6D-0.
 
