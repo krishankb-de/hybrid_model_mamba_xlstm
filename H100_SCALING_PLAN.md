@@ -24,13 +24,15 @@ Indiana gap is ablation-proven data-bound → only lever is diverse CXR data (us
 - **Target**: MIMIC ≥ 12% (old stretch); Indiana ≥ 5.5%; PPL ≤ 13.76.
 - **Stretch**: MIMIC ≥ 14%; Indiana ≥ 7%; PPL ≤ 13.10.
 
-| Metric | Best | Tier reached |
-|---|---|---|
-| MIMIC i2t R@10 | **0.1714** (D1c, vit_unfreeze=12) | **STRETCH** ✅ |
-| Indiana i2t R@10 | **0.0485** (D1c) | Floor ✅ (target 0.055 open) |
-| Stage-0 val PPL | **13.18** (Phase 5) | Target ✅, ~stretch (13.10) |
+| Metric | Best (`val == test` selection) | Best (clean protocol) | Tier reached |
+|---|---|---|---|
+| MIMIC i2t R@10 | **0.1714** (D1c, vit_unfreeze=12) | **0.1459** (6G-5) | **STRETCH** ✅ both |
+| Indiana i2t R@10 | 0.0485 | 0.0390 | flat within noise (SE 0.76pp) |
+| Stage-0 val PPL | **13.18** (Phase 5) | — | Target ✅, ≈stretch (13.10) |
 
-The MIMIC headline is **8.23% → 10.45% (A100 refactor) → 17.14% (H100 + deep ViT adaptation)**. The single decisive intervention was image-tower adaptation depth; every text-side and objective-side lever was null.
+The MIMIC headline is **8.23% → 10.45% (A100 refactor) → 17.14%** on the protocol every prior number in this project used (`val == test` checkpoint selection), or **14.59%** under a fully clean protocol where nothing about the test set touches training or selection. **Quote 14.59% as the thesis headline and 17.14% as the protocol-matched comparison**; the 2.55pp gap between them is itself a reportable measurement of what test-informed selection buys.
+
+The single decisive intervention was **image-tower adaptation depth**; all ten text-side and objective-side levers were null, and the two remaining image-side axes (LR, scope) were already at or near their optimum. **Indiana never moved** on any lever — it is data-bound, which is what Phase 7 exists to address.
 
 ## Resolved decisions (from user, 2026-07-07)
 - **SLURM**: long training → `--partition=aisc-batch` (7-day cap); eval/smoke → `--partition=aisc-shortrun` (1-day); `--gres=gpu:h100:X` (X=1..8). 7-day cap ⇒ full Stage-0 in ONE block (no requeue juggling).
@@ -252,7 +254,34 @@ Depth is exhausted at 12 (ViT-B/16 has 12 blocks), but "amount of image adaptati
 - [ ] **6G-5** — **Re-run D1c with `SELECTION_SPLIT=true`** (running; at ep12 → i2t R@10 0.256 on the N=1532 selection gallery, not comparable to N=3063 without the gallery-size correction, but consistent with the depth effect holding). Arm-level comparison used `val/total_loss` on `train[90%:]`, which is the eval gallery — test-set selection at the arm level. The effect is ~10× SE so it is not noise-mining, but the thesis headline should be confirmed under a clean protocol.
 
   **6G-1 promoted this from formality to necessity.** The `vit_lr=3e-6` arm has **higher retrieval but worse val loss** than D1c (peak 0.183 vs 0.171; `val/total_loss` 2.858 vs 2.721) — retrieval and val-loss have diverged again, exactly the Phase-6 failure mode. Selecting on `val/total_loss` will not find that 0.183 peak, and selecting on retrieval against `train[90%:]` is selection-on-test. **The disjoint selection split is the only legitimate way to exploit a retrieval peak that the loss does not track**, so 6F should become the canonical protocol for any further tuning, and the best config re-run under it.
-- [ ] **6G-6** — Authoritative `evaluate_cxr_retrieval.py` on all four finished 6G arms. Decisive: the in-training ordering above is checkpoint-selection dependent and cannot be read as a final ranking.
+- [x] **6G-6** — **AUTHORITATIVE 6G RESULTS.** MIMIC `train[90%:]`, N=3063, best-by-`val/total_loss`:
+
+  | Arm | vit_lr | scope | best step | val/total_loss | **i2t R@10** | i2t R@1 | paired cos |
+  |---|---|---|---|---|---|---|---|
+  | **D1c** | 1e-6 | blocks | 4750 | 2.6680 | **0.1714** | 0.0300 | 0.4230 |
+  | scopeall | 1e-6 | all | 4500 | 2.6591 | 0.1704 | 0.0261 | 0.4244 |
+  | lr3e6 | 3e-6 | blocks | 3250 | **2.6285** | 0.1632 | 0.0317 | 0.4422 |
+  | lr1e5 | 1e-5 | blocks | 2500 | 2.6286 | 0.1606 | 0.0320 | 0.4589 |
+  | lr3e5 | 3e-5 | blocks | 1750 | 2.6635 | 0.1456 | 0.0310 | 0.4692 |
+  | **cleansplit** | 1e-6 | blocks | 3750 | 2.7438 | **0.1459** | 0.0242 | 0.4301 |
+
+  1. **`vit_lr=1e-6` confirmed optimal.** The 0.183 in-training peak at 3e-6 was *unreachable under honest selection* — its best-by-val-loss checkpoint evals to 0.1632, below D1c. The 6G-1 divergence resolved against the higher LR.
+  2. **Overfit onset moves earlier monotonically with LR:** best step 4750 → 3250 → 2500 → 1750 across 1e-6 → 3e-5. A clean measurement of the mechanism.
+  3. **`val/total_loss` is a poor CROSS-ARM proxy.** All five arms span 2.6285–2.6680 (0.04 nats) while retrieval spans 2.6pp, and the *lowest*-loss arm (lr3e6) is not the best retriever. Within-arm checkpoint selection on val loss is sound; across-arm selection on it would pick the wrong arm. The depth sweep's agreement between loss and retrieval (2.897→2.585 vs 0.1107→0.1714) was fortunate, not guaranteed.
+  4. **`paired cosine` rises with vit_lr (0.4230 → 0.4692) while retrieval falls.** Pulling matched pairs together is not the same as separating them from negatives. Paired cosine is logged as a health metric throughout this project and must not be read as a quality proxy.
+  5. **Scope confirmed null** — 0.1704 vs 0.1714, 0.1pp apart.
+
+- [x] **6G-5** — **CLEAN-SPLIT RESULT: MIMIC 0.1459, Indiana 0.0390.** Trained on `train[:85%]` (26,038 pairs), selected on `train[85%:90%]` (N=1532), evaluated on `train[90%:]` (N=3063) — nothing about the test set touched training or selection.
+
+  **MIMIC 0.1459 still clears STRETCH (0.14).** The 2.55pp gap to 0.1714 is **3.76 SE** — a real effect. It is the honest cost of test-informed checkpoint selection, confounded with 5.6% less training data; the two cannot be decomposed without 6G-7.
+
+  **Report both, with the protocol stated.** 0.1714 is comparable to every prior number in this project (all used `val == test`); **0.1459 is the defensible number under a clean protocol** and should be the thesis headline.
+
+**CORRECTION (2026-07-27) — Indiana is FLAT, not improved.** The 6G-4 entry above reported D1c's Indiana 0.0485 as "+0.95pp over the A100 baseline, cross-domain risk did not materialise." That over-read the number. At N=743, p≈0.045, **SE = 0.76pp**, so 0.0485 vs 0.0390 is **1.25 SE — not a difference**, and the clean-split run lands at exactly 0.0390.
+
+  Defensible statement: **Indiana is unchanged within noise across every variant tested** (0.0390–0.0485). Deep ViT adaptation neither helped nor hurt cross-domain — no in-domain/cross-domain trade, but no gain either. Indiana remains as data-bound as the original ablations concluded, which *raises* the priority of Phase 7.
+
+- [ ] **6G-7** — (optional, 3.5 h) `VIT_UNFREEZE=2 SELECTION_SPLIT=true` — the honest depth-2 endpoint. Gives a clean-protocol depth 2 vs 12 delta and separates "less training data" from "honest selection" in the 2.55pp gap. Cheap, and it makes the headline claim protocol-independent.
 Six one-at-a-time nulls have made single-lever probing expensive per bit of information. Run D1–D3 in parallel for attribution **and** D4 stacked for the number. ~3.5 h/arm on one H100. Gate: **>1.1pp over control** (SE ~0.57pp at p≈0.11, n=3063) or it is noise.
 Launch: `./scripts/submit_phase6d_arms.sh` (dry run) → `--submit`, or paste its sbatch lines directly. Every lever is env-overridable in `train_biomedclip_kd_h100.sh` and **defaults to the Phase-6B recipe**, so an unmodified invocation *is* 6D-0.
 
