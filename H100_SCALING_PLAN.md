@@ -251,7 +251,7 @@ Depth is exhausted at 12 (ViT-B/16 has 12 blocks), but "amount of image adaptati
 
   Note the in-training/authoritative reconciliation *inverted* versus Phase 6: authoritative 0.1714 now slightly **exceeds** the in-training final (0.168). In Phase 6 the val-loss minimum (step 4500) sat well before the retrieval peak (~6000), costing ~1pp at selection time; with the stronger image tower both curves peak together at ~4750, so selecting on `val/total_loss` no longer costs anything.
 - [x] **6G-4** — **Indiana: 0.0485 i2t R@10** (t2i 0.0700, R@1 0.0094, paired cos 0.2730, N=743). Floor 0.0404 ✅ (target 0.055 not reached). **The cross-domain risk did not materialise** — unfreezing all 12 ViT blocks on 27.5K in-domain MIMIC pairs improved Indiana too, from the A100 baseline 0.0390 to 0.0485 (+0.95pp). Deep image adaptation is not an in-domain/cross-domain trade here; it is a genuine representation improvement. Phase 7 gate cleared.
-- [ ] **6G-5** — **Re-run D1c with `SELECTION_SPLIT=true`** (running; at ep12 → i2t R@10 0.256 on the N=1532 selection gallery, not comparable to N=3063 without the gallery-size correction, but consistent with the depth effect holding). Arm-level comparison used `val/total_loss` on `train[90%:]`, which is the eval gallery — test-set selection at the arm level. The effect is ~10× SE so it is not noise-mining, but the thesis headline should be confirmed under a clean protocol.
+- [x] **6G-5 (motivation; result below)** — **Re-run D1c with `SELECTION_SPLIT=true`.** Arm-level comparison used `val/total_loss` on `train[90%:]`, which is the eval gallery — test-set selection at the arm level. The effect is ~10× SE so it is not noise-mining, but the thesis headline should be confirmed under a clean protocol.
 
   **6G-1 promoted this from formality to necessity.** The `vit_lr=3e-6` arm has **higher retrieval but worse val loss** than D1c (peak 0.183 vs 0.171; `val/total_loss` 2.858 vs 2.721) — retrieval and val-loss have diverged again, exactly the Phase-6 failure mode. Selecting on `val/total_loss` will not find that 0.183 peak, and selecting on retrieval against `train[90%:]` is selection-on-test. **The disjoint selection split is the only legitimate way to exploit a retrieval peak that the loss does not track**, so 6F should become the canonical protocol for any further tuning, and the best config re-run under it.
 - [x] **6G-6** — **AUTHORITATIVE 6G RESULTS.** MIMIC `train[90%:]`, N=3063, best-by-`val/total_loss`:
@@ -342,6 +342,13 @@ Only proven Indiana lever. **IU-Xray EXCLUDED from training (= Indiana eval; zer
 
 ### Phase 8 — Full eval + comparison + writeup
 - [ ] **8A** — Authoritative MIMIC + Indiana + STS (BIOSSES/STS-B) + PubMed PPL on best 150M ckpt.
+- [x] **8A-eff (tooling)** — **Efficiency-curve harness ready.** `scripts/performance_profile.py` gained a `--sweep` mode: latency / throughput / peak-memory vs sequence length across multiple configs, with fitted log-log **scaling exponents** (~1.0 = linear, ~2.0 = softmax attention), CSV + JSON output, per-point peak-memory reset, and OOM points recorded rather than fatal. `--backward` measures the training step. `scripts/profile_efficiency_h100.sh` (NEW) runs hybrid vs both single-family baselines at identical dim/depth, inference + training, L = 256…16384.
+
+  **Bug found and fixed:** the profiler resolved `--model` through `ModelRegistry`, which only ever registers `hybrid_350m/1_3b/7b/mamba_baseline/xlstm_baseline`. **Six of the nine names in its own `--model` choices list — every 70M and 150M config, including the active `hybrid_150m_v2` backbone — raised `ValueError` before a single measurement ran.** Configs now resolve from `configs/model/*.yaml` (the source of truth) with the registry as fallback. Pinned by `test_performance_profile_loads_every_advertised_model_config`.
+
+  Sweeping past `max_position_embeddings` (1024) is valid because `use_pos_embedding = False` (`hybrid_lm.py:43`) — there is no absolute position table to index out of. Pinned by `test_sequence_sweep_is_valid_past_max_position_embeddings` so that re-enabling it fails loudly.
+
+  No dataset or checkpoint needed — random token ids, fresh weights; throughput and memory do not depend on weight values. **Run:** `sbatch scripts/profile_efficiency_h100.sh` (add `SCALE=70m` for the 70M family).
 - [ ] **8B** — `analysis/h100_scaling_results.md` (NEW): 70M-A100 vs 150M-H100 table; per-lever ablation; honest limitations.
 - [ ] **8C** — Update `h100_scaling_state.json` final verdict + best ckpt path.
 

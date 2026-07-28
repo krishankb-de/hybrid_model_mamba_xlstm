@@ -2250,3 +2250,93 @@ def test_eval_script_bakes_in_offline_and_populated_cache():
     tr = (REPO_ROOT / "scripts" / "train_biomedclip_kd_h100.sh").read_text()
     assert 'export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"' in tr
     assert "/sc/home/$USER/dataset/mimic_cxr_cache" in tr
+
+
+@pytest.mark.willi_parity
+def test_performance_profile_loads_every_advertised_model_config():
+    """REGRESSION (2026-07-28). performance_profile.py resolved --model through
+    ModelRegistry, which only ever registers 350m/1_3b/7b/mamba_baseline/
+    xlstm_baseline. Every 70M and 150M name in its own --model choices list —
+    i.e. every config this project actually trains, including the active
+    hybrid_150m_v2 backbone — raised ValueError before a single measurement ran.
+
+    Configs now resolve from configs/model/<name>.yaml, which is the source of
+    truth, with the registry as fallback. The yamls carry training keys that are
+    not HybridConfig fields (learning_rate, warmup_steps, distill, ...), so the
+    loader must filter to the dataclass fields rather than splatting the dict.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "performance_profile", REPO_ROOT / "scripts" / "performance_profile.py"
+    )
+    pp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pp)
+
+    names = pp.available_configs()
+    for required in ("hybrid_70m", "hybrid_70m_v2", "hybrid_150m_v2",
+                     "mamba_70m_baseline", "xlstm_70m_baseline"):
+        assert required in names, "{} missing from profiler choices".format(required)
+
+    # Every advertised choice must actually construct — that is the bug.
+    for name in names:
+        cfg = pp.load_config(name)
+        assert cfg.dim > 0 and cfg.num_layers > 0, name
+
+    # Spot-check that yaml values win over dataclass defaults.
+    v2 = pp.load_config("hybrid_150m_v2")
+    assert v2.dim == 768 and v2.num_layers == 12
+    assert v2.norm_topology == "hybrid"
+    assert v2.pooling_strategy == "attention"
+    assert v2.max_position_embeddings == 1024
+
+
+@pytest.mark.willi_parity
+def test_efficiency_curve_slope_fit_is_correct():
+    """The scaling exponent is the whole point of the sweep, so pin the fit.
+
+    Latency ~ L^1 is the linear-scaling claim for Mamba/mLSTM; softmax attention
+    would show ~L^2. A wrong slope fit would silently misreport the headline
+    architectural result.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "performance_profile", REPO_ROOT / "scripts" / "performance_profile.py"
+    )
+    pp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pp)
+
+    xs = [256, 512, 1024, 2048]
+    assert abs(pp.fit_log_slope(xs, [x * 1.0 for x in xs]) - 1.0) < 1e-9
+    assert abs(pp.fit_log_slope(xs, [x ** 2.0 for x in xs]) - 2.0) < 1e-9
+    # Degenerate inputs must return None, not raise or emit a bogus exponent.
+    assert pp.fit_log_slope([256], [1.0]) is None
+    assert pp.fit_log_slope(xs, [None, None, None, None]) is None
+    assert pp.fit_log_slope([256, 256], [1.0, 2.0]) is None
+
+
+@pytest.mark.willi_parity
+def test_sequence_sweep_is_valid_past_max_position_embeddings():
+    """The efficiency curve sweeps L well past max_position_embeddings (1024).
+
+    That is only legitimate because HybridLanguageModel sets
+    use_pos_embedding = False (hybrid_lm.py:43) — there is no absolute position
+    table to index out of. If someone re-enables it, the sweep would start
+    indexing past the embedding and this test must fail loudly.
+    """
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    cfg = HybridConfig(
+        vocab_size=64, dim=32, num_layers=2, layer_pattern=["mamba", "mlstm"],
+        head_dim=16, num_heads=2, max_position_embeddings=16,
+    )
+    model = HybridLanguageModel(cfg)
+    assert model.embeddings.use_pos_embedding is False
+    model.eval()
+    # 4x max_position_embeddings must run rather than raise.
+    with torch.no_grad():
+        out = model(torch.randint(0, cfg.vocab_size, (1, 64)))
+    logits = out.logits if hasattr(out, "logits") else out
+    assert logits.shape[:2] == (1, 64)
