@@ -13,7 +13,7 @@ dataset_name: "cxr_mimic_full"
 # Populated by `pack`: train.parquet / validate.parquet / test.parquet under
 # this directory, using the OFFICIAL mimic-cxr-2.0.0-split.csv.gz split
 # (subject-disjoint by construction -- see Phase 8 "primary_eval_split").
-local_parquet_dir: "/sc/home/bhushkri/dataset/mimic_full"
+local_parquet_dir: "/sc/home/krishankumar.bhushan/dataset/mimic_full"
 
 # These select AMONG the three parquet files above (data_files keys "train" /
 # "validation" / "test" map to train.parquet / validate.parquet / test.parquet
@@ -40,7 +40,7 @@ eval_batch_size: 16
 num_workers: 4
 pin_memory: true
 streaming: false
-cache_dir: "/scratch/bhushkri/mimic_cxr_full_cache"   # unused by the local-parquet
+cache_dir: "/scratch/krishankumar.bhushan/mimic_cxr_full_cache"   # unused by the local-parquet
                                                         # branch (no HF network cache
                                                         # needed) but kept for parity
                                                         # with mimic_cxr.yaml's schema.

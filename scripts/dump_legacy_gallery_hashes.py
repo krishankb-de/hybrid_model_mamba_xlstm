@@ -46,7 +46,7 @@ def norm_hash(text: str) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--cache-dir", default="/scratch/bhushkri/mimic_cxr_cache")
+    ap.add_argument("--cache-dir", default="/scratch/krishankumar.bhushan/mimic_cxr_cache")
     ap.add_argument("--split", default="train[90%:]",
                      help="the legacy eval gallery slice this project's numbers used")
     ap.add_argument("--out", default="legacy_gallery_hashes.txt")
