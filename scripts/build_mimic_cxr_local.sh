@@ -37,19 +37,28 @@
 #   STAGE=pack     OUT=/sc/home/$USER/dataset/mimic_full EXCLUDE_HASHES=legacy_gallery_hashes.txt sbatch scripts/build_mimic_cxr_local.sh
 #
 # This cluster requires an explicit Slurm account (confirmed live, 2026-08-16:
-# sbatch refuses with "No Slurm account specified" otherwise). --account=aisc
-# (used by every GPU script in this repo) submitted but then sat PENDING with
-# reason QOSNotAllowed — the aisc account carries QOS=aisc, which is scoped to
-# the AISC partitions (aisc-batch/aisc-interactive/aisc-shortrun), not the
-# general cpu-batch/cpu-interactive partitions this script uses.
-# `sacctmgr show user $USER withassoc format=User,Account,Partition,QOS`
-# showed a second association: account=default, QOS=normal — the general-
-# partition account. Defaulted to that. Override at submit time if a
-# different allocation should be used:
-#   sbatch --account=<other_account> scripts/build_mimic_cxr_local.sh
+# sbatch refuses with "No Slurm account specified" otherwise). Two prior
+# defaults both failed for THIS user on THIS cluster:
+#   --account=aisc  on --partition=cpu-batch  -> PENDING forever, QOSNotAllowed
+#     (account=aisc carries QOS=aisc, scoped to the AISC partitions only)
+#   --account=default on --partition=cpu-batch -> AssocMaxSubmitJobLimit
+#     (that account/QOS combo has its own submit-limit policy on this cluster)
+# What actually ran (job 2457565, confirmed: auth succeeded, 3/4 small files
+# fetched before hitting an unrelated manual --time=00:10:00 override):
+#   sbatch --account=aisc --partition=aisc-batch --qos=aisc ...
+# Baked in below so no manual flags are needed at submit time. TRADEOFF, be
+# aware of it: aisc-batch is a GPU-capable partition (this job lands on a
+# node like gx17v1 without requesting/using its GPU) and per docs.sc.hpi.de
+# AISC partitions are "preempted at any time" -- a real risk for the
+# multi-hour `fetch` stage specifically, not just an inconvenience. Worth
+# raising with sc-helpdesk@hpi.de (see the courtesy-contact note above)
+# whether a non-preemptible CPU-only queue is available for this account.
+# Override at submit time if a different allocation should be used:
+#   sbatch --account=<other> --partition=<other> --qos=<other> scripts/build_mimic_cxr_local.sh
 # ============================================================================
-#SBATCH --partition=cpu-batch
-#SBATCH --account=default
+#SBATCH --partition=aisc-batch
+#SBATCH --account=aisc
+#SBATCH --qos=aisc
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=1-00:00:00

@@ -2706,23 +2706,28 @@ def test_gitignore_guards_credentialed_mimic_build():
 def test_build_mimic_cxr_local_slurm_wrapper_is_cpu_only_on_cpu_batch():
     """REGRESSION (2026-08-16, Phase 7E). The login node rejects ANY script
     execution outright (confirmed live — not just 'heavy' commands), and per
-    docs.sc.hpi.de external downloads belong on compute nodes: cpu-batch for
-    the long fetch stage, not an AISC GPU partition-worth-of-hardware (this
-    job needs zero GPU — requesting one would waste a shared resource for
-    pure network I/O) and not a Run Node (rx01/rx02 — explicitly not meant
-    for data acquisition). An explicit --account IS required (confirmed live,
-    2026-08-16: sbatch refuses with "No Slurm account specified" without
-    one). --account=aisc (used by every GPU script in this repo) was tried
-    first but sat PENDING with QOSNotAllowed — its QOS is scoped to the AISC
-    partitions, not the general cpu-batch/cpu-interactive ones this script
-    targets. `sacctmgr show user $USER withassoc` surfaced a second
-    association, account=default / QOS=normal, which is what this script
-    actually uses.
+    docs.sc.hpi.de external downloads belong on compute nodes, not a Run
+    Node (rx01/rx02 — explicitly not meant for data acquisition). This job
+    itself needs zero GPU (pure network I/O) — no --gpus line is requested.
+
+    Account/partition/QOS went through THREE failed defaults before landing
+    on one that actually runs, confirmed live via job 2457565 (auth
+    succeeded, 3/4 small files fetched before an unrelated manual --time
+    override killed it): --account=aisc on cpu-batch -> PENDING forever
+    (QOSNotAllowed, aisc's QOS is scoped to AISC partitions only);
+    --account=default on cpu-batch -> AssocMaxSubmitJobLimit. What works:
+    --account=aisc --partition=aisc-batch --qos=aisc together. TRADEOFF this
+    accepts: aisc-batch is a GPU-capable, preemptible-at-any-time partition
+    (docs.sc.hpi.de) for a job that never uses the GPU — not ideal
+    cluster citizenship, but the only combination proven to actually run for
+    this account; worth asking sc-helpdesk@hpi.de about a non-preemptible
+    CPU-only alternative before the long `fetch` stage.
     """
     sh = (REPO_ROOT / "scripts" / "build_mimic_cxr_local.sh").read_text()
-    assert "#SBATCH --partition=cpu-batch" in sh
+    assert "#SBATCH --partition=aisc-batch" in sh
     assert "#SBATCH --gpus" not in sh
-    assert "#SBATCH --account=default" in sh
+    assert "#SBATCH --account=aisc" in sh
+    assert "#SBATCH --qos=aisc" in sh
     assert "build_mimic_cxr_local.py meta" in sh
     assert "build_mimic_cxr_local.py manifest" in sh
     assert "build_mimic_cxr_local.py fetch" in sh
