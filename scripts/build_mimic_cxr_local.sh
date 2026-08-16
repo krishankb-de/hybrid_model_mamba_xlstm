@@ -37,14 +37,19 @@
 #   STAGE=pack     OUT=/sc/home/$USER/dataset/mimic_full EXCLUDE_HASHES=legacy_gallery_hashes.txt sbatch scripts/build_mimic_cxr_local.sh
 #
 # This cluster requires an explicit Slurm account (confirmed live, 2026-08-16:
-# sbatch refuses with "No Slurm account specified" otherwise). Defaulted to
-# aisc — every GPU script in this repo already submits successfully with
-# --account=aisc for this user, and it worked here too. Override at submit
-# time if a different allocation should be used for CPU-only jobs:
+# sbatch refuses with "No Slurm account specified" otherwise). --account=aisc
+# (used by every GPU script in this repo) submitted but then sat PENDING with
+# reason QOSNotAllowed — the aisc account carries QOS=aisc, which is scoped to
+# the AISC partitions (aisc-batch/aisc-interactive/aisc-shortrun), not the
+# general cpu-batch/cpu-interactive partitions this script uses.
+# `sacctmgr show user $USER withassoc format=User,Account,Partition,QOS`
+# showed a second association: account=default, QOS=normal — the general-
+# partition account. Defaulted to that. Override at submit time if a
+# different allocation should be used:
 #   sbatch --account=<other_account> scripts/build_mimic_cxr_local.sh
 # ============================================================================
 #SBATCH --partition=cpu-batch
-#SBATCH --account=aisc
+#SBATCH --account=default
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=1-00:00:00

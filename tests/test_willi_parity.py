@@ -2595,15 +2595,19 @@ def test_build_mimic_cxr_local_slurm_wrapper_is_cpu_only_on_cpu_batch():
     the long fetch stage, not an AISC GPU partition-worth-of-hardware (this
     job needs zero GPU — requesting one would waste a shared resource for
     pure network I/O) and not a Run Node (rx01/rx02 — explicitly not meant
-    for data acquisition). --account=aisc IS required though (confirmed live,
-    2026-08-16: sbatch refuses with "No Slurm account specified" without it)
-    — that's an accounting/billing requirement, orthogonal to which hardware
-    partition the job lands on.
+    for data acquisition). An explicit --account IS required (confirmed live,
+    2026-08-16: sbatch refuses with "No Slurm account specified" without
+    one). --account=aisc (used by every GPU script in this repo) was tried
+    first but sat PENDING with QOSNotAllowed — its QOS is scoped to the AISC
+    partitions, not the general cpu-batch/cpu-interactive ones this script
+    targets. `sacctmgr show user $USER withassoc` surfaced a second
+    association, account=default / QOS=normal, which is what this script
+    actually uses.
     """
     sh = (REPO_ROOT / "scripts" / "build_mimic_cxr_local.sh").read_text()
     assert "#SBATCH --partition=cpu-batch" in sh
     assert "#SBATCH --gpus" not in sh
-    assert "#SBATCH --account=aisc" in sh
+    assert "#SBATCH --account=default" in sh
     assert "build_mimic_cxr_local.py meta" in sh
     assert "build_mimic_cxr_local.py manifest" in sh
     assert "build_mimic_cxr_local.py fetch" in sh
