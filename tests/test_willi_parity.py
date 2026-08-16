@@ -2340,3 +2340,249 @@ def test_sequence_sweep_is_valid_past_max_position_embeddings():
         out = model(torch.randint(0, cfg.vocab_size, (1, 64)))
     logits = out.logits if hasattr(out, "logits") else out
     assert logits.shape[:2] == (1, 64)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 (H100_SCALING_PLAN.md) — local PhysioNet MIMIC-CXR-JPG build.
+# ---------------------------------------------------------------------------
+
+def _load_build_script():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "build_mimic_cxr_local", REPO_ROOT / "scripts" / "build_mimic_cxr_local.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_build_script_hash_matches_repo_leakage_join_convention():
+    """The Phase 8D leakage guard joins build_mimic_cxr_local.py's report_hash
+    against a dump of the legacy gallery's hashes (dump_legacy_gallery_hashes.py).
+    Both MUST use the identical normalisation + digest as the two conventions
+    already in this repo — normalize_report_text (evaluate_cxr_retrieval.py:414)
+    and the text_hash construction (train_contrastive.py:419-424) — or the join
+    silently drops to near-zero matches and the leakage guard does nothing while
+    reporting success.
+    """
+    import hashlib
+
+    mod = _load_build_script()
+
+    findings, impression = "The lungs are clear.", "No acute process."
+    text = "Findings: {} Impression: {}".format(findings, impression)
+
+    # evaluate_cxr_retrieval.normalize_report_text
+    norm = " ".join(text.lower().split())
+    expected_hex = hashlib.blake2b(norm.encode("utf-8"), digest_size=8).hexdigest()
+    assert mod.norm_hash(text) == expected_hex
+
+    # train_contrastive.py's text_hash (int64, mod 2**62) must be the same
+    # digest truncated, not an independently-computed value.
+    expected_int = int.from_bytes(
+        hashlib.blake2b(norm.encode("utf-8"), digest_size=8).digest(), "big"
+    ) % (2 ** 62)
+    assert int(mod.norm_hash(text), 16) % (2 ** 62) == expected_int
+
+    # Case/whitespace-insensitive, matching normalize_report_text's contract.
+    assert mod.norm_hash(text) == mod.norm_hash(
+        "FINDINGS:   The lungs   are clear.  Impression: No acute process.".replace(
+            "FINDINGS:   The lungs   are clear.  ", "Findings: The lungs are clear. "
+        )
+    )
+
+
+def test_extract_findings_impression_basic_and_custom_override():
+    """The vendored official section parser (Phase 8C) must separate FINDINGS
+    from IMPRESSION on a well-formed report, and must honour the
+    custom_mimic_cxr_rules() per-study overrides for known-malformed reports —
+    both code paths a homegrown regex would silently get wrong.
+    """
+    from scripts.mimic_cxr_vendor.extract import extract_findings_impression
+    from scripts.mimic_cxr_vendor.section_parser import custom_mimic_cxr_rules
+
+    report = (
+        "\n FINAL REPORT\n EXAMINATION:  CHEST (PA AND LAT)\n\n"
+        " INDICATION:  Cough.\n\n"
+        " COMPARISON:  None.\n\n"
+        " FINDINGS:\n\n"
+        " The lungs are clear.  No focal consolidation.\n\n"
+        " IMPRESSION:\n\n"
+        " No acute cardiopulmonary process.\n"
+    )
+    findings, impression = extract_findings_impression(report, "s99999999")
+    assert "lungs are clear" in findings.lower()
+    assert "no acute cardiopulmonary" in impression.lower()
+
+    # A study_id present in custom_mimic_cxr_rules()'s index-override table
+    # must take the override path, not the regex path, regardless of report
+    # content — this is what makes the ~30 known-malformed reports usable.
+    _, custom_indices = custom_mimic_cxr_rules()
+    override_stem, (start, end) = next(iter(custom_indices.items()))
+    probe_text = "x" * start + "TARGET_SPAN" + "x" * 200
+    if end <= len(probe_text):
+        f, i = extract_findings_impression(probe_text, override_stem)
+        assert f == ""  # index-override path has no separate findings section
+        assert i == probe_text[start:end]
+
+
+def test_cxr_mimic_full_config_present_and_consistent():
+    """New config key (CLAUDE.md: new module/config key -> parity assertion).
+    cxr_mimic_full.yaml must set local_parquet_dir (the signal
+    train_contrastive.load_mimic_cxr / evaluate_cxr_retrieval.build_dataloader
+    branch on) and keep every OTHER key schema-compatible with mimic_cxr.yaml
+    so an unmodified training/eval invocation is unaffected by this file
+    merely existing.
+    """
+    from omegaconf import OmegaConf
+
+    legacy = OmegaConf.load(REPO_ROOT / "configs" / "dataset" / "mimic_cxr.yaml")
+    full = OmegaConf.load(REPO_ROOT / "configs" / "dataset" / "cxr_mimic_full.yaml")
+
+    assert "local_parquet_dir" in full
+    assert "local_parquet_dir" not in legacy  # legacy path must stay the default
+
+    for key in ("tokenizer", "max_length", "teacher_max_length",
+                "findings_field", "impression_field", "concatenate_sections",
+                "image_size", "image_mean", "image_std"):
+        assert key in full, "cxr_mimic_full.yaml missing schema key: {}".format(key)
+
+
+def test_load_mimic_cxr_dispatches_to_local_parquet_when_configured():
+    """load_mimic_cxr must call load_dataset("parquet", data_files=...) when
+    dataset.local_parquet_dir is set, and must NOT touch the HF mirror path in
+    that case — the exact regression this branch exists to prevent is a typo
+    that silently falls through to the old itsanmolgupta network path.
+    """
+    import importlib.util
+
+    from omegaconf import OmegaConf
+
+    spec = importlib.util.spec_from_file_location(
+        "_tc_mod_local", REPO_ROOT / "scripts" / "train_contrastive.py"
+    )
+    tc = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(tc)
+    except Exception as e:                                    # pragma: no cover
+        pytest.skip("train_contrastive import failed: {}".format(e))
+
+    calls = []
+
+    def _fake_load_dataset(*args, **kwargs):
+        calls.append((args, kwargs))
+
+        class _FakeDS:
+            column_names = ["image", "findings", "impression"]
+
+            def __len__(self):
+                return 0
+
+            def filter(self, fn):
+                return self
+
+        return _FakeDS()
+
+    tc.load_dataset = _fake_load_dataset
+
+    cfg = OmegaConf.create({"dataset": {
+        "local_parquet_dir": "/fake/dir",
+        "train_split": "train", "validation_split": "validation", "test_split": "test",
+        "cache_dir": "/unused",
+    }})
+
+    try:
+        tc.load_mimic_cxr(cfg, "train", tokenizer=None, teacher_tokenizer=None)
+    except RuntimeError:
+        pass  # expected — the fake dataset is empty; we only care about the call args
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[0] == "parquet" or kwargs.get("path") == "parquet"
+    data_files = kwargs.get("data_files") or (args[1] if len(args) > 1 else None)
+    assert data_files is not None
+    assert data_files["train"] == "/fake/dir/train.parquet"
+    assert data_files["validation"] == "/fake/dir/validate.parquet"
+    assert data_files["test"] == "/fake/dir/test.parquet"
+
+
+def test_evaluate_cxr_retrieval_handles_str_image_paths():
+    """MIMICValDataset / IndianaEvalDataset both did
+    `if not isinstance(img, Image.Image): Image.fromarray(img)`, which CRASHES
+    on a str path — the exact shape a local-parquet build's "image" column
+    takes. REGRESSION (2026-08-16, Phase 8E): both must now Image.open() a str
+    before the fromarray fallback.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_ecr_mod", REPO_ROOT / "scripts" / "evaluate_cxr_retrieval.py"
+    )
+    ecr = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(ecr)
+    except Exception as e:                                    # pragma: no cover
+        pytest.skip("evaluate_cxr_retrieval import failed: {}".format(e))
+
+    tmp_img = tmp_path_factory_image()
+    try:
+        class _StubTok:
+            def __call__(self, text, **kw):
+                return {
+                    "input_ids": torch.zeros(1, 8, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 8, dtype=torch.long),
+                }
+
+        ds = ecr.MIMICValDataset(
+            [{"image": str(tmp_img), "findings": "clear", "impression": "normal"}],
+            _StubTok(), max_length=8,
+        )
+        item = ds[0]
+        assert item["pixel_values"].shape[0] == 3  # RGB after convert
+
+        ids = ecr.IndianaEvalDataset(
+            [{"image": str(tmp_img), "report": "clear lungs"}],
+            _StubTok(), max_length=8,
+        )
+        item2 = ids[0]
+        assert item2["pixel_values"].shape[0] == 3
+    finally:
+        os.remove(tmp_img)
+
+    # build_dataloader must accept the new params without a TypeError.
+    import inspect
+    sig = inspect.signature(ecr.build_dataloader)
+    assert "local_parquet_dir" in sig.parameters
+    assert "mimic_split" in sig.parameters
+
+
+def tmp_path_factory_image():
+    import tempfile
+    from PIL import Image as PILImage
+
+    fd, path = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    PILImage.new("L", (16, 16)).save(path, "JPEG")
+    return path
+
+
+def test_h100_scripts_expose_dataset_config_and_local_parquet_levers():
+    """Phase 8E: an env lever must exist to point training/eval at the local
+    PhysioNet build, defaulting to the legacy mirror so Phase 9A's Arm-0
+    reproduction control (and every prior run) is unaffected by its existence.
+    """
+    tr = (REPO_ROOT / "scripts" / "train_biomedclip_kd_h100.sh").read_text()
+    assert 'DATASET_CONFIG="${DATASET_CONFIG:-mimic_cxr}"' in tr
+    assert "dataset=${DATASET_CONFIG}" in tr
+    assert "dataset=mimic_cxr \\" not in tr, "must go through the DATASET_CONFIG lever, not a hardcoded value"
+
+    ev = (REPO_ROOT / "scripts" / "eval_h100.sh").read_text()
+    assert 'LOCAL_PARQUET_DIR="${LOCAL_PARQUET_DIR:-}"' in ev
+    assert "--local-parquet-dir" in ev
+
+
+def test_gitignore_guards_credentialed_mimic_build():
+    gi = (REPO_ROOT / ".gitignore").read_text()
+    assert "dataset/mimic_full/" in gi
+    assert "*.parquet" in gi

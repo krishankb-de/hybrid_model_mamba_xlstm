@@ -40,6 +40,11 @@ set -euo pipefail
 
 export MODEL_CONFIG="hybrid_150m_v2"
 export BATCH_SIZE="${BATCH_SIZE:-64}"
+# Phase 8/9: DATASET_CONFIG=cxr_mimic_full switches to the local PhysioNet
+# build. Not exported here on purpose — inherited from the caller's env if
+# set (e.g. `DATASET_CONFIG=cxr_mimic_full sbatch scripts/train_biomedclip_
+# kd_150m_h100.sh`), else train_biomedclip_kd_h100.sh's own default
+# (mimic_cxr, the legacy mirror / Arm-0 control) applies.
 
 # --- Batch-derived defaults (2026-07-21) -----------------------------------
 # Phase-6 post-mortem found TWO operator traps in the batch sweep:

@@ -1,0 +1,486 @@
+#!/usr/bin/env python3
+"""Build a compact, DUA-compliant local MIMIC-CXR image-text dataset from
+PhysioNet WITHOUT ever storing the full ~570 GB (JPG) / 4.7 TB (DICOM) source.
+
+Strategy: download in small chunks -> downscale in flight -> delete the
+originals. Peak disk stays ~4 GB regardless of how many studies are built.
+See H100_SCALING_PLAN.md Phase 8 for the full design discussion, including
+five corrections made to an earlier draft of this script (recorded there,
+not repeated here): the --cut-dirs off-by-one, wget --base unreliability,
+-N vs -c, silently-swallowed 401s, and .netrc-over-HTTPS portability. This
+version sidesteps all five by using `requests` (auto-reads ~/.netrc, no
+subprocess, no shell-quoting of credentials) instead of wget/curl.
+
+Emits, under --out:
+    files/p10/p10000032/s50414267.jpg      # one frontal image per study, WxW
+    train.parquet / validate.parquet / test.parquet   # official split
+    manifest.parquet                        # everything, incl. excluded rows
+    build_report.json                       # counts, so the thesis can cite them
+
+The parquet schema matches what scripts/train_contrastive.py already expects
+(MIMICJointDataset.__getitem__ needs zero changes -- it already branches on
+isinstance(image, str)):
+    image (str, absolute path)  findings (str)  impression (str)
+plus study_id / subject_id / dicom_id / view / split / report_hash for
+protocol work (Phase 8D leakage guard, Phase 6C-3 style duplicate audits).
+
+PREREQUISITES
+-------------
+1. PhysioNet credentialing + signed DUA for BOTH:
+     https://physionet.org/content/mimic-cxr/2.1.0/       (reports, 135 MB)
+     https://physionet.org/content/mimic-cxr-jpg/2.1.0/   (images + split + metadata)
+2. ~/.netrc on the box that will run `fetch`, chmod 600:
+     machine physionet.org
+     login YOUR_USERNAME
+     password YOUR_PASSWORD
+   `requests` reads this automatically (Session.trust_env, no auth= passed) --
+   the password never appears in argv, in a script, or in a SLURM log.
+3. Outbound HTTPS from wherever `meta`/`fetch` run. Compute nodes on aisc run
+   fully offline (HF_DATASETS_OFFLINE=1 HF_HUB_OFFLINE=1 everywhere else in
+   this repo) -- verify which host can both reach physionet.org AND hold a
+   multi-hour process before committing to a full run (H100_SCALING_PLAN.md
+   Phase 7E).
+
+USAGE
+-----
+    # 1. small files only: split csv, metadata csv, filename list, reports zip (~150 MB)
+    python build_mimic_cxr_local.py meta --out /sc/home/$USER/dataset/mimic_full
+
+    # 2. decide what to build (no network) -- writes manifest.parquet + build_report.json
+    python build_mimic_cxr_local.py manifest --out /sc/home/$USER/dataset/mimic_full \\
+        --views PA AP --size 320
+
+    # STOP AND READ build_report.json here. If with_findings is far below
+    # ~150k, the section parser mismatched the report format (it shouldn't --
+    # it's the official one -- but verify before spending hours on `fetch`).
+
+    # 3. smoke test (~15 min for 500 images), THEN the long one (resumable --
+    #    a killed job costs at most one in-flight chunk, rerun the same command)
+    python build_mimic_cxr_local.py fetch --out /sc/home/$USER/dataset/mimic_full \\
+        --size 320 --chunk 2000 --workers 8 --limit 500
+    python build_mimic_cxr_local.py fetch --out /sc/home/$USER/dataset/mimic_full \\
+        --size 320 --chunk 2000 --workers 8
+
+    # 4. leakage guard + write train/validate/test parquet
+    python build_mimic_cxr_local.py pack --out /sc/home/$USER/dataset/mimic_full \\
+        --exclude-hashes legacy_gallery_hashes.txt
+
+Add --limit N to any stage for a smoke test before committing to the full run.
+Run `fetch` under tmux/screen/an sbatch job -- it is multi-hour and a dropped
+SSH session should not kill it.
+"""
+
+import argparse
+import gzip
+import hashlib
+import json
+import os
+import shutil
+import sys
+import time
+import zipfile
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import pandas as pd
+import requests
+from PIL import Image
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from mimic_cxr_vendor.extract import extract_findings_impression  # noqa: E402
+
+CXR = "https://physionet.org/files/mimic-cxr/2.1.0"
+JPG = "https://physionet.org/files/mimic-cxr-jpg/2.1.0"
+
+SECTION_PARSER_COMMIT = "e8d26fff0fe1632f6cf53d31158e888cffb18ab8"
+CREATE_SECTION_FILES_COMMIT = "18cdc41ca483f98659a8e649081f17c10558c3c3"
+
+SMALL_FILES = [
+    (JPG + "/mimic-cxr-2.0.0-split.csv.gz", "mimic-cxr-2.0.0-split.csv.gz"),
+    (JPG + "/mimic-cxr-2.0.0-metadata.csv.gz", "mimic-cxr-2.0.0-metadata.csv.gz"),
+    (JPG + "/mimic-cxr-2.0.0-chexpert.csv.gz", "mimic-cxr-2.0.0-chexpert.csv.gz"),
+    (CXR + "/mimic-cxr-reports.zip", "mimic-cxr-reports.zip"),
+]
+
+_session = None  # type: Optional[requests.Session]
+
+
+def _get_session() -> requests.Session:
+    """Lazy singleton. `requests` auto-reads ~/.netrc when no auth= is passed
+    and Session.trust_env is True (the default) -- the password never touches
+    argv, a subprocess, or a log line."""
+    global _session
+    if _session is None:
+        _session = requests.Session()
+    return _session
+
+
+def _download(url: str, dest: Path, timeout: int = 60, retries: int = 3) -> int:
+    """Returns the HTTP status code (or -1 on a connection-level failure
+    after all retries). Streams to avoid holding large files in memory."""
+    sess = _get_session()
+    last_status = -1
+    for attempt in range(retries):
+        try:
+            resp = sess.get(url, timeout=timeout, stream=True)
+            last_status = resp.status_code
+            if resp.status_code == 200:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with open(dest, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=1 << 20):
+                        f.write(chunk)
+                resp.close()
+                return 200
+            resp.close()
+            if resp.status_code in (401, 403):
+                return resp.status_code  # auth failure -- retrying won't help
+        except requests.RequestException as e:
+            print("  [download] {} attempt {}/{}: {}".format(url, attempt + 1, retries, e),
+                  file=sys.stderr)
+        time.sleep(2 ** attempt)
+    return last_status
+
+
+# --------------------------------------------------------------------------- #
+# stage: meta
+# --------------------------------------------------------------------------- #
+def stage_meta(out: Path) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+
+    # Small companion file with no query params -- fetch it too, it is the
+    # partial-download filename manifest referenced by the PhysioNet page.
+    small = list(SMALL_FILES) + [(JPG + "/IMAGE_FILENAMES", "IMAGE_FILENAMES")]
+
+    for url, name in small:
+        dest = out / name
+        if dest.exists() and dest.stat().st_size > 0:
+            print("[meta] have {}".format(name))
+            continue
+        print("[meta] GET {}".format(name))
+        status = _download(url, dest)
+        if status != 200:
+            if dest.exists():
+                dest.unlink()
+            raise RuntimeError(
+                "[meta] {} -> HTTP {}. Check ~/.netrc (chmod 600, correct "
+                "PhysioNet username/password) and that both the mimic-cxr "
+                "AND mimic-cxr-jpg DUAs are signed on this account.".format(
+                    name, status
+                )
+            )
+
+    rep_dir = out / "reports"
+    if not rep_dir.exists():
+        print("[meta] unzipping reports ...")
+        with zipfile.ZipFile(out / "mimic-cxr-reports.zip") as z:
+            z.extractall(rep_dir)
+    print("[meta] done -> {}".format(out))
+
+
+# --------------------------------------------------------------------------- #
+# report parsing
+# --------------------------------------------------------------------------- #
+def report_path(root: Path, subject_id: int, study_id: int) -> Path:
+    s = "p{}".format(subject_id)
+    return root / "files" / s[:3] / s / "s{}.txt".format(study_id)
+
+
+def norm_hash(text: str) -> str:
+    """Case/whitespace-normalised blake2b, matching the EXACT convention
+    already used in this repo (normalize_report_text @ evaluate_cxr_retrieval.py:414,
+    the text_hash construction @ train_contrastive.py:419-424) so hashes here
+    are directly joinable against the legacy gallery for the Phase 8D leakage
+    guard without a second normalisation scheme to keep in sync."""
+    norm = " ".join((text or "").lower().split())
+    return hashlib.blake2b(norm.encode("utf-8"), digest_size=8).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# stage: manifest (no network)
+# --------------------------------------------------------------------------- #
+def stage_manifest(out: Path, views: List[str], size: int, limit: int) -> None:
+    split = pd.read_csv(out / "mimic-cxr-2.0.0-split.csv.gz")
+    meta = pd.read_csv(
+        out / "mimic-cxr-2.0.0-metadata.csv.gz",
+        usecols=["dicom_id", "subject_id", "study_id", "ViewPosition", "Rows", "Columns"],
+    )
+    df = split.merge(meta, on=["dicom_id", "subject_id", "study_id"], how="left")
+    n_all = len(df)
+
+    # 1. frontal views only. Laterals pair to the SAME report as the frontal,
+    #    which manufactures guaranteed in-batch false negatives (the thing
+    #    6C-3 measured this project's data does NOT currently have) and is a
+    #    different visual distribution.
+    df = df[df["ViewPosition"].isin(views)]
+    n_frontal = len(df)
+
+    # 2. one image per study -- the report is study-level, so >1 image/study
+    #    duplicates the text side. Prefer the earlier entry in `views`
+    #    (default PA over AP), then the largest image.
+    order = {v: i for i, v in enumerate(views)}
+    df = df.assign(
+        _v=df["ViewPosition"].map(order).fillna(99),
+        _px=-(df["Rows"].fillna(0) * df["Columns"].fillna(0)),
+    )
+    df = df.sort_values(["study_id", "_v", "_px"]).drop_duplicates("study_id")
+    df = df.drop(columns=["_v", "_px"])
+    n_study = len(df)
+
+    if limit:
+        df = df.head(limit)
+
+    # 3. attach report text via the VENDORED official section parser
+    #    (H100_SCALING_PLAN.md Phase 8C -- provenance is the reason this
+    #    build exists at all, so an unaudited regex here would forfeit it).
+    rep_root = out / "reports"
+    findings_col, impression_col = [], []
+    missing = 0
+    for sid, stid in zip(df["subject_id"], df["study_id"]):
+        p = report_path(rep_root, sid, stid)
+        if not p.exists():
+            findings_col.append("")
+            impression_col.append("")
+            missing += 1
+            continue
+        text = p.read_text(errors="ignore")
+        f, i = extract_findings_impression(text, "s{}".format(stid))
+        findings_col.append(f)
+        impression_col.append(i)
+    df["findings"] = findings_col
+    df["impression"] = impression_col
+
+    # 4. two counts, kept SEPARATE per Phase 8F -- the RRG literature
+    #    conditions on FINDINGS specifically; the retrieval chapter
+    #    concatenated both. Do not collapse this choice into one filter.
+    df["has_findings"] = df["findings"].str.len() > 0
+    df["has_text"] = (df["findings"].str.len() + df["impression"].str.len()) > 0
+    n_findings = int(df["has_findings"].sum())
+    n_text = int(df["has_text"].sum())
+
+    df["report_hash"] = [
+        norm_hash("Findings: {} Impression: {}".format(f, i))
+        for f, i in zip(df["findings"], df["impression"])
+    ]
+    df["rel_jpg"] = [
+        "files/p{}/p{}/s{}/{}.jpg".format(str(s)[:2], s, t, d)
+        for s, t, d in zip(df["subject_id"], df["study_id"], df["dicom_id"])
+    ]
+    df["local_jpg"] = [
+        str(out / "files" / "p{}".format(str(s)[:2]) / "p{}".format(s) / "s{}.jpg".format(t))
+        for s, t in zip(df["subject_id"], df["study_id"])
+    ]
+
+    df.to_parquet(out / "manifest.parquet", index=False)
+    split_counts = df[df["has_text"]]["split"].value_counts().to_dict()
+    rep = {
+        "rows_in_split_csv": n_all,
+        "after_frontal_filter": n_frontal,
+        "after_one_per_study": n_study,
+        "reports_missing_on_disk": missing,
+        "with_findings": n_findings,
+        "with_findings_or_impression": n_text,
+        "split_counts_with_text": {str(k): int(v) for k, v in split_counts.items()},
+        "views_kept": views,
+        "stored_resolution": size,
+        "est_stored_gb": round(n_text * (size / 320.0) ** 2 * 30e3 / 1e9, 2),
+        "est_transfer_gb": round(n_text * 1.48e6 / 1e9, 1),
+        "section_parser_commit": SECTION_PARSER_COMMIT,
+        "create_section_files_commit": CREATE_SECTION_FILES_COMMIT,
+    }
+    (out / "build_report.json").write_text(json.dumps(rep, indent=2))
+    print(json.dumps(rep, indent=2))
+    print("[manifest] -> {}".format(out / "manifest.parquet"))
+    if n_findings < 140000:
+        print(
+            "[manifest] WARNING: with_findings ({}) is well below the ~150-160k "
+            "expected from the official parser on the full corpus. If --limit "
+            "was not set, stop and check the report path convention "
+            "(files/pXX/pSUBJECT/sSTUDY.txt) before running `fetch`.".format(n_findings),
+            file=sys.stderr,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# stage: fetch
+# --------------------------------------------------------------------------- #
+def _resize_one(args: Tuple[str, str, int]) -> bool:
+    src, dst, size = args
+    try:
+        with Image.open(src) as im:
+            im = im.convert("L").resize((size, size), Image.BICUBIC)
+            Path(dst).parent.mkdir(parents=True, exist_ok=True)
+            im.save(dst, "JPEG", quality=90, optimize=True)
+        return True
+    except Exception as e:  # corrupt/truncated download -- skip, retry next run
+        print("[fetch] BAD {}: {}".format(src, e), file=sys.stderr)
+        return False
+
+
+def stage_fetch(out: Path, size: int, chunk: int, workers: int, limit: int) -> None:
+    df = pd.read_parquet(out / "manifest.parquet")
+    df = df[df["has_text"]]
+    if limit:
+        df = df.head(limit)
+
+    todo = df[~df["local_jpg"].map(lambda p: Path(p).exists())]
+    print(
+        "[fetch] {} target / {} still to do (~{:.0f} GB of transfer, none of it kept)".format(
+            len(df), len(todo), len(todo) * 1.48e6 / 1e9
+        )
+    )
+
+    stage = out / "_stage"
+    done = 0
+    for start in range(0, len(todo), chunk):
+        part = todo.iloc[start:start + chunk]
+        if stage.exists():
+            shutil.rmtree(stage)
+        stage.mkdir(parents=True)
+
+        # Absolute per-file URL + explicit destination -- no --cut-dirs, no
+        # wget --base list. Threaded (I/O-bound), status codes tallied so an
+        # all-401 chunk is distinguishable from a few tolerated 404s.
+        statuses = {}  # type: Dict[int, int]
+        staged_srcs = []  # type: List[Tuple[str, str]]  # (staged_path, rel_jpg)
+
+        def _fetch_one(rel_jpg: str) -> Tuple[str, int]:
+            dest = stage / rel_jpg
+            status = _download(JPG + "/" + rel_jpg, dest)
+            return rel_jpg, status
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(_fetch_one, r) for r in part["rel_jpg"]]
+            for fut in as_completed(futures):
+                rel_jpg, status = fut.result()
+                statuses[status] = statuses.get(status, 0) + 1
+                if status == 200:
+                    staged_srcs.append((str(stage / rel_jpg), rel_jpg))
+
+        ok = statuses.get(200, 0)
+        if ok == 0 and len(part) > 0:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise RuntimeError(
+                "[fetch] chunk at row {} converted 0 of {} images. Status "
+                "histogram: {}. A blanket 401/403 means ~/.netrc is missing, "
+                "wrong, or the mimic-cxr-jpg DUA is not signed on this "
+                "account -- fix that before rerunning (the run is resumable; "
+                "nothing before this chunk was lost).".format(start, len(part), statuses)
+            )
+        if statuses.get(401, 0) + statuses.get(403, 0) > 0:
+            print(
+                "[fetch] WARNING: {} auth failures in this chunk (of {} ok). "
+                "Investigate before the failures compound.".format(
+                    statuses.get(401, 0) + statuses.get(403, 0), ok
+                ),
+                file=sys.stderr,
+            )
+
+        rel_to_local = dict(zip(part["rel_jpg"], part["local_jpg"]))
+        jobs = [(src, rel_to_local[rel], size) for src, rel in staged_srcs]
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(_resize_one, jobs, chunksize=16))
+        done += sum(results)
+
+        shutil.rmtree(stage, ignore_errors=True)  # the whole point: originals never accumulate
+        pct = 100.0 * (start + len(part)) / max(len(todo), 1)
+        print("[fetch] {:5.1f}%  status={}  converted so far: {}".format(pct, statuses, done))
+
+    print("[fetch] complete: {} images at {}px".format(done, size))
+
+
+# --------------------------------------------------------------------------- #
+# stage: pack
+# --------------------------------------------------------------------------- #
+def stage_pack(out: Path, exclude_hashes: str, min_match_frac: float, allow_low_match: bool) -> None:
+    df = pd.read_parquet(out / "manifest.parquet")
+    df = df[df["has_text"]]
+    df = df[df["local_jpg"].map(lambda p: Path(p).exists())]
+    print("[pack] {} rows with both text and a fetched image".format(len(df)))
+
+    # Phase 8D leakage guard: subject-level exclusion, hash-joined against the
+    # legacy eval gallery (evaluate_cxr_retrieval.py's train[90%:] N=3063).
+    # MANDATORY recall check -- the legacy gallery was built by a mirror with
+    # an UNKNOWN section parser, so this join WILL silently under-match, and
+    # every miss is a leaked subject. <95% match is a FAIL by default: the
+    # legacy gallery becomes unusable as a comparison and the official split
+    # is the only defensible metric.
+    if exclude_hashes:
+        bad = {h.strip() for h in Path(exclude_hashes).read_text().split() if h.strip()}
+        hit = df["report_hash"].isin(bad)
+        matched = int(hit.sum())
+        total = len(bad)
+        match_frac = matched / total if total else 0.0
+        print(
+            "[pack] legacy-gallery hash join: {}/{} ({:.1%}) matched".format(
+                matched, total, match_frac
+            )
+        )
+        if match_frac < min_match_frac and not allow_low_match:
+            raise RuntimeError(
+                "[pack] leakage-guard match rate {:.1%} is below the required {:.0%}. "
+                "Per H100_SCALING_PLAN.md Phase 8D this is a HARD FAIL: the legacy "
+                "gallery's provenance cannot be trusted enough to guarantee subject "
+                "exclusion. Drop the legacy train[90%:] comparison and report only "
+                "the official subject-disjoint split, OR pass --allow-low-match to "
+                "proceed anyway (only if you have independently verified the miss "
+                "reason, e.g. via manual spot checks).".format(match_frac, min_match_frac)
+            )
+        subjects = set(df.loc[hit, "subject_id"])
+        keep = ~df["subject_id"].isin(subjects)
+        print(
+            "[pack] dropping {} rows across {} leaked subjects".format(
+                int((~keep).sum()), len(subjects)
+            )
+        )
+        df = df[keep]
+
+    cols = ["local_jpg", "findings", "impression", "study_id", "subject_id",
+            "dicom_id", "ViewPosition", "report_hash", "split"]
+    df = df[cols].rename(columns={"local_jpg": "image", "ViewPosition": "view"})
+
+    split_file = {"train": "train", "validate": "validate", "test": "test"}
+    for name, fname in split_file.items():
+        part = df[df["split"] == name].reset_index(drop=True)
+        part.to_parquet(out / "{}.parquet".format(fname), index=False)
+        print(
+            "[pack] {:9s} {:>7d} pairs  ({} subjects)".format(
+                name, len(part), part["subject_id"].nunique()
+            )
+        )
+    print("[pack] -> {}/*.parquet".format(out))
+
+
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("stage", choices=["meta", "manifest", "fetch", "pack"])
+    ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--size", type=int, default=320,
+                     help="stored square resolution (224 = exact, 320 = crop headroom)")
+    ap.add_argument("--views", nargs="+", default=["PA", "AP"])
+    ap.add_argument("--chunk", type=int, default=2000, help="images per download/resize batch")
+    ap.add_argument("--workers", type=int, default=8, help="download threads / resize processes")
+    ap.add_argument("--limit", type=int, default=0, help="smoke-test cap")
+    ap.add_argument("--exclude-hashes", default="",
+                     help="pack: file of report_hash values whose subjects to drop")
+    ap.add_argument("--min-match-frac", type=float, default=0.95,
+                     help="pack: minimum leakage-guard hash-match rate before failing")
+    ap.add_argument("--allow-low-match", action="store_true",
+                     help="pack: proceed even if --min-match-frac is not met (see error message)")
+    a = ap.parse_args()
+
+    if a.stage == "meta":
+        stage_meta(a.out)
+    elif a.stage == "manifest":
+        stage_manifest(a.out, a.views, a.size, a.limit)
+    elif a.stage == "fetch":
+        stage_fetch(a.out, a.size, a.chunk, a.workers, a.limit)
+    else:
+        stage_pack(a.out, a.exclude_hashes, a.min_match_frac, a.allow_low_match)
+
+
+if __name__ == "__main__":
+    main()

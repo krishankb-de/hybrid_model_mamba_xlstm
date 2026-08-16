@@ -435,12 +435,21 @@ class MIMICJointDataset(Dataset):
 
 
 def load_mimic_cxr(cfg, split, tokenizer, teacher_tokenizer=None):
-    """Load MIMIC-CXR from HuggingFace for joint training.
+    """Load MIMIC-CXR for joint training.
+
+    Two sources, selected by whether dataset.local_parquet_dir is set:
+      - local_parquet_dir: the Phase-8 PhysioNet build (build_mimic_cxr_local.py),
+        train.parquet/validate.parquet/test.parquet under that directory. "image"
+        is a local absolute path (str), handled by MIMICJointDataset/ImageTextDataset
+        without further changes — they already branch on isinstance(image, str).
+      - otherwise: the itsanmolgupta/mimic-cxr-dataset HF mirror (legacy path,
+        kept for the Arm-0 reproduction control and for runs that predate
+        credentialing).
 
     When teacher_tokenizer is provided, returns MIMICJointDataset (dual tokens + image).
     Otherwise returns ImageTextDataset (image + student tokens only).
     """
-    hf_repo = cfg.dataset.get("hf_repo_id", "itsanmolgupta/mimic-cxr-dataset")
+    local_dir = cfg.dataset.get("local_parquet_dir", None)
     split_map = {
         "train":      cfg.dataset.get("train_split", "train"),
         "validation": cfg.dataset.get("validation_split", "validation"),
@@ -448,16 +457,33 @@ def load_mimic_cxr(cfg, split, tokenizer, teacher_tokenizer=None):
     }
     hf_split = split_map.get(split, split)
 
-    ds = load_dataset(hf_repo, split=hf_split, cache_dir=cfg.dataset.cache_dir)
-    print(f"Loaded {hf_repo} (split={hf_split}): {len(ds)} samples, "
-          f"columns: {ds.column_names}")
+    if local_dir:
+        data_files = {
+            "train":      f"{local_dir}/train.parquet",
+            "validation": f"{local_dir}/validate.parquet",
+            "test":       f"{local_dir}/test.parquet",
+        }
+        # HF slice syntax (e.g. "train[:85%]") still works against a named
+        # data_files key, so Phase 9E's disjoint-selection-split override
+        # pattern (dataset.train_split='train[:85%]' dataset.validation_split=
+        # 'train[85%:90%]') carries over unchanged; "test" should stay the
+        # literal, unsliced official held-out split.
+        ds = load_dataset("parquet", data_files=data_files, split=hf_split)
+        print(f"Loaded local MIMIC-CXR-JPG build (split={hf_split}) from {local_dir}: "
+              f"{len(ds)} samples, columns: {ds.column_names}")
+    else:
+        hf_repo = cfg.dataset.get("hf_repo_id", "itsanmolgupta/mimic-cxr-dataset")
+        ds = load_dataset(hf_repo, split=hf_split, cache_dir=cfg.dataset.cache_dir)
+        print(f"Loaded {hf_repo} (split={hf_split}): {len(ds)} samples, "
+              f"columns: {ds.column_names}")
 
     ds = ds.filter(lambda x: x.get("image") is not None)
     print(f"After filtering None images: {len(ds)} samples")
     if len(ds) == 0:
         raise RuntimeError(
-            f"All samples have image=None in {hf_repo}. "
-            "Check hf_repo_id in mimic_cxr.yaml."
+            f"All samples have image=None in "
+            f"{'local build at ' + local_dir if local_dir else hf_repo}. "
+            "Check dataset config."
         )
 
     if teacher_tokenizer is not None:

@@ -37,6 +37,11 @@ set -euo pipefail
 SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 MODEL_CONFIG="${MODEL_CONFIG:-hybrid_70m_v2}"
+# Phase 8: DATASET_CONFIG=cxr_mimic_full switches to the local PhysioNet build
+# (build_mimic_cxr_local.py) instead of the gated itsanmolgupta HF mirror.
+# Default UNCHANGED so an unmodified invocation is still the control (needed
+# for Phase 9A's Arm-0 reproduction check against the legacy 0.1459 number).
+DATASET_CONFIG="${DATASET_CONFIG:-mimic_cxr}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
 # 2026-07-19: compile OFF by default. With compile_model=true the joint run died in
 # sanity-val with "CUDA error: Invalid access of peer GPU memory over nvlink or a
@@ -156,7 +161,7 @@ echo "Starting joint contrastive (canonical: freq_kd=false, moco=0)..."
 python scripts/train_contrastive.py \
   --config-name config_70m \
   model=${MODEL_CONFIG} \
-  dataset=mimic_cxr \
+  dataset=${DATASET_CONFIG} \
   +distill=biomedclip_kd_joint_v2 \
   distill.freq_kd=false \
   distill.vit_unfreeze_blocks=${VIT_UNFREEZE} \

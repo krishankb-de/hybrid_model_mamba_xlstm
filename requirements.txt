@@ -50,3 +50,11 @@ torch-tb-profiler>=0.4.0
 # Contrastive / medical CLIP (Stage 2)
 open-clip-torch>=2.24.0   # BiomedCLIP image encoder (frozen, used in clip mode)
 Pillow>=10.0.0            # Image loading for ImageTextDataset
+
+# Phase 8 (H100_SCALING_PLAN.md): local PhysioNet MIMIC-CXR-JPG build
+pandas>=2.0.0              # manifest/pack stages of build_mimic_cxr_local.py
+requests>=2.31.0           # PhysioNet fetch — reads ~/.netrc automatically, no
+                            # subprocess/credential-in-argv (already a transitive
+                            # dep via huggingface_hub; pinned directly since we
+                            # now import it in a shipped script)
+pyarrow>=14.0.0             # parquet read/write (also a transitive `datasets` dep)

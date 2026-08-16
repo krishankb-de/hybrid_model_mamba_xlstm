@@ -285,6 +285,8 @@ class IndianaEvalDataset(Dataset):
         img = item.get("image")
         if img is None:
             img = Image.new("RGB", (IMAGE_SIZE, IMAGE_SIZE))
+        elif isinstance(img, str):
+            img = Image.open(img)
         if not isinstance(img, Image.Image):
             img = Image.fromarray(img)
         if img.mode != "RGB":
@@ -331,6 +333,8 @@ class MIMICValDataset(Dataset):
         img = item.get("image")
         if img is None:
             img = Image.new("RGB", (IMAGE_SIZE, IMAGE_SIZE))
+        elif isinstance(img, str):
+            img = Image.open(img)
         if not isinstance(img, Image.Image):
             img = Image.fromarray(img)
         if img.mode != "RGB":
@@ -351,6 +355,8 @@ def build_dataloader(
     max_length: int = 256,
     batch_size: int = 32,
     num_workers: int = 4,
+    local_parquet_dir: Optional[str] = None,
+    mimic_split: str = "test",
 ) -> Tuple[DataLoader, int]:
     if dataset_name == "indiana":
         print(f"Loading Indiana/IU-Xray test split from {INDIANA_REPO} ...")
@@ -358,8 +364,20 @@ def build_dataloader(
         print(f"  {len(hf_ds)} pairs, columns: {hf_ds.column_names}")
         ds = IndianaEvalDataset(hf_ds, tokenizer, max_length)
     elif dataset_name == "mimic":
-        print(f"Loading MIMIC-CXR val slice (train[90%:]) from {MIMIC_REPO} ...")
-        hf_ds = load_dataset(MIMIC_REPO, split="train[90%:]", cache_dir=cache_dir)
+        if local_parquet_dir:
+            # Phase 8 PhysioNet build: official subject-disjoint split, three
+            # separate parquet files rather than a slice of one HF split.
+            data_files = {
+                "train":      f"{local_parquet_dir}/train.parquet",
+                "validation": f"{local_parquet_dir}/validate.parquet",
+                "test":       f"{local_parquet_dir}/test.parquet",
+            }
+            print(f"Loading MIMIC-CXR-JPG local build (split={mimic_split}) "
+                  f"from {local_parquet_dir} ...")
+            hf_ds = load_dataset("parquet", data_files=data_files, split=mimic_split)
+        else:
+            print(f"Loading MIMIC-CXR val slice (train[90%:]) from {MIMIC_REPO} ...")
+            hf_ds = load_dataset(MIMIC_REPO, split="train[90%:]", cache_dir=cache_dir)
         print(f"  {len(hf_ds)} pairs, columns: {hf_ds.column_names}")
         ds = MIMICValDataset(hf_ds, tokenizer, max_length)
     else:
@@ -534,6 +552,14 @@ def main() -> None:
                         help="Directory for JSON result file")
     parser.add_argument("--cache-dir", default="/scratch/bhushkri/indiana_cxr_cache",
                         help="HuggingFace cache directory")
+    parser.add_argument("--local-parquet-dir", default=None,
+                        help="Phase 8: dir with train/validate/test.parquet from "
+                             "build_mimic_cxr_local.py. Only used when --dataset mimic; "
+                             "overrides the itsanmolgupta HF mirror.")
+    parser.add_argument("--mimic-split", default="test", choices=["train", "validation", "test"],
+                        help="Only used with --local-parquet-dir. The official "
+                             "test split is the authoritative number; use 'validation' "
+                             "only for a Phase 9E-style disjoint checkpoint selection.")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--max-length", type=int, default=256)
@@ -569,6 +595,8 @@ def main() -> None:
         max_length=args.max_length,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        local_parquet_dir=args.local_parquet_dir,
+        mimic_split=args.mimic_split,
     )
     print(f"\nEncoding {n_samples} samples ...")
 

@@ -1,10 +1,28 @@
-# H100 Scale-Up Plan — Hybrid Mamba-xLSTM CXR Retrieval (Plan-of-Record)
+# H100 Plan-of-Record — Hybrid Mamba-xLSTM **CXR Report Generation**
 
 > Resumable plan-of-record. Read this + `h100_scaling_state.json` (gitignored, allowlisted) at session start.
 > **Builds on the COMPLETED `HYBRID_ARCH_REFACTOR_PLAN.md`** (broke the MIMIC ceiling 8.23%→10.45% i2t R@10). That plan is finished — historical reference only.
 > Full approved plan: `/Users/krish/.claude/plans/i-want-to-implement-twinkling-ullman.md`.
 >
-> **Current phase: Phase 6C — measurement block** (Phases 1/2/4/5/6/6B done; 6B was the 7th consecutive null — see the 2026-07-25 post-mortem below before proposing any new lever. Phase 3 deferred post-Phase-6.)
+> **Current phase: Phase 7 — PhysioNet credentialing (BLOCKING, on the critical path).**
+> Phases 1/2/4/5/6/6B/6C/6D/6G are **COMPLETE and CLOSED**. Phase 3 deferred (its lever was measured non-binding).
+
+---
+
+## ⚠️ OBJECTIVE PIVOT — 2026-08-16
+
+**The optimization target is now MEDICAL REPORT GENERATION, not retrieval.**
+
+A generated radiology report scored against ground truth by **ROUGE-L** and **CheXbert F1** is what every decision from here optimizes. Retrieval is **not discarded** — it becomes a **supporting chapter** of the thesis (a complete, closed, well-controlled body of evidence about what does and does not move a CXR image-text joint space), and it remains the pretraining objective that produces the aligned image tower the generator is conditioned on.
+
+**Why the pivot is well-founded on the evidence already in this file:**
+- Retrieval is *finished as a research question here*: 10 clean nulls, 1 dominant lever (ViT adaptation depth), and that lever is exhausted (depth saturated at 12/12 blocks; `vit_lr` is an inverted-U with 1e-6 already optimal; scope is null). There is no remaining untested axis with evidence behind it.
+- The two live constraints are both **data**, not method: Indiana is flat within noise on every variant (data-bound, 6G-4 + 2026-07-27 correction), and the image tower demonstrably **memorises** the 27,570-pair training set as soon as `vit_lr` rises (6G-1: `train/clip_loss` 1.17→0.04 while `val/clip_loss` 2.585→3.49).
+- Report generation is a **stronger MSc contribution** for the same architecture: it exercises the causal Mamba/mLSTM decoder — the actual novel component — as a *generator*, which retrieval never did (retrieval only ever used it as an encoder).
+
+**Retrieval's standing numbers are FINAL. Do not re-run retrieval arms to chase them.** Clean protocol: MIMIC i2t R@10 **10.81% → 14.59%** (+3.78pp, 6.2 SE). Protocol-matched: 11.07% → 17.14%.
+
+---
 
 ## Context
 
@@ -17,11 +35,27 @@ User now has **H100 (94/141GB)** + optional 2-4 H100 node. Three A100-era ceilin
 
 Indiana gap is ablation-proven data-bound → only lever is diverse CXR data (user has access).
 
-**Goal:** H100-native infra + 150M-v2 backbone + scaled contrastive negatives + multi-source CXR data → push MIMIC to stretch (≥12%) and recover Indiana (≥floor), with clean per-lever attribution.
+**Goal (superseded 2026-08-16, kept for the record):** H100-native infra + 150M-v2 backbone + scaled contrastive negatives + multi-source CXR data → push MIMIC to stretch (≥12%) and recover Indiana (≥floor), with clean per-lever attribution. **All three of those were delivered or measured null; see the closed phases below.**
 
-## Success bar (tiered) — **status 2026-07-26**
-- **Floor** (no regression): MIMIC i2t R@10 ≥ 10.45%; Indiana i2t ≥ 4.04% (recover); Stage-0 PPL ≤ 15.62.
-- **Target**: MIMIC ≥ 12% (old stretch); Indiana ≥ 5.5%; PPL ≤ 13.76.
+**Goal (current):** Use the credentialed full MIMIC-CXR-JPG build to (a) remove the data ceiling that binds both the image tower and Indiana, and (b) train and evaluate an **image-conditioned report generator** on the official subject-disjoint split, scored by ROUGE-L and CheXbert F1.
+
+## Success bar — PRIMARY (report generation) 🎯 NEW
+
+Scored on the **official MIMIC-CXR-JPG test split** (subject-disjoint by construction), generated report vs ground-truth report.
+
+| Tier | ROUGE-L | CheXbert F1 (micro, 14-label) | Rationale |
+|---|---|---|---|
+| **Floor** | ≥ 0.15 | ≥ 0.25 | beats a retrieval-nearest-neighbour baseline; proves the decoder conditions on the image at all |
+| **Target** | ≥ 0.22 | ≥ 0.40 | competitive with R2Gen-class published CNN-LSTM/transformer baselines |
+| **Stretch** | ≥ 0.26 | ≥ 0.50 | competitive with strong modern RRG systems |
+
+Secondary/reported-alongside: BLEU-4, METEOR, and a **retrieval-NN baseline** (retrieve the nearest training report with the Phase-6G model and emit it verbatim) — the single most important control, because a strong retrieval system can score deceptively well on n-gram metrics without generating anything.
+
+**Pre-registered before any number is produced:** the retrieval-NN baseline is run FIRST and its ROUGE-L/CheXbert F1 become the real floor. A generator that does not beat its own retrieval baseline has not contributed anything.
+
+## Success bar — SUPPORTING (retrieval) ✅ CLOSED 2026-07-27
+- **Floor**: MIMIC i2t R@10 ≥ 10.45%; Indiana i2t ≥ 4.04%; Stage-0 PPL ≤ 15.62.
+- **Target**: MIMIC ≥ 12%; Indiana ≥ 5.5%; PPL ≤ 13.76.
 - **Stretch**: MIMIC ≥ 14%; Indiana ≥ 7%; PPL ≤ 13.10.
 
 | Metric | Best (`val == test` selection) | Best (clean protocol) | Tier reached |
@@ -34,7 +68,42 @@ The MIMIC headline is **8.23% → 10.45% (A100 refactor) → 17.14%** on the pro
 
 The single decisive intervention was **image-tower adaptation depth**; all ten text-side and objective-side levers were null, and the two remaining image-side axes (LR, scope) were already at or near their optimum. **Indiana never moved** on any lever — it is data-bound, which is what Phase 7 exists to address.
 
-## Resolved decisions (from user, 2026-07-07)
+## DIAGNOSIS — "is it overfitting?" (read this before proposing a data or regularisation lever)
+
+Three statements in this file look contradictory. They are all true and they are about **different things**. Get this right or the Phase-9 arms will be mis-read.
+
+| Statement | Scope | Evidence |
+|---|---|---|
+| "overfitting is **not** binding" | **text tower + optimizer** | epochs 23→14 moved R@10 **+0.06pp** (0.1084→0.1090). 6B-3: lower `head_lr` **removed the late-epoch rollover entirely** (arm ends at its max, no decline) and the **plateau height did not move** (0.119 vs 0.122). |
+| "the image tower **memorises**" | **ViT at elevated `vit_lr`** | 6G-1: `train/clip_loss` 1.17 → 0.702 → 0.113 → **0.037** as `vit_lr` 1e-6→3e-5, while `val/clip_loss` **rises** 2.585 → 3.487. Overfit onset moves earlier monotonically: best step 4750 → 3250 → 2500 → **1750**. |
+| "the binding constraint is the **image representation**" | **the actual diagnosis** | 6C: every text-side and objective-side lever null; both positives ever recorded are image-side. |
+
+**6B-3 is the decisive experiment: it eliminated the overfitting *symptom* and the ceiling did not move.** Whatever sets the ceiling, it is not overfitting.
+
+**The real characterisation.** "Amount of image adaptation" = **depth × LR × scope**, and all three are now measured out: depth is **physically exhausted** (12/12 ViT-B/16 blocks), scope is **null** (0.1704 vs 0.1714), and LR is an **inverted-U with 1e-6 already optimal**. There is no dose left to give. The reason the optimum is pinned at 1e-6 — three orders of magnitude below `head_lr` — is **85.1M trainable image params against 27,570 images**.
+
+> **The model sits at the overfitting knee. It is not broken by overfitting; it is DOSE-LIMITED by it.**
+> There is mild, real overfitting at the canonical operating point (best step 4750/6000, mild late rise; the 6G-7 protocol cost of **2.55pp at vit=12 vs 0.26pp at vit=2** is precisely a measurement of how much). But no points are being *lost* to it — the loss is the points that turning the lever up **would have bought**.
+
+**Consequence for Phase 9 — this changes what counts as success:**
+- ❌ *"More data fixes overfitting"* → predicts the current number rises on its own.
+- ✅ **"More data moves the knee right"** → predicts the `vit_lr` optimum **shifts right of 1e-6 and the peak is higher**. That is 9C's pre-registered prediction and it is the correct test.
+- ⇒ **If 9B (data only, recipe unchanged) barely moves, that is NOT a failure** — it is the expected result under the correct mechanism. 9C is where the effect must appear.
+
+**Honest caveat on Indiana:** it is flat within noise on *every* variant tested (0.0390–0.0485, SE 0.76pp). That is a **domain-diversity** problem, not overfitting — and full MIMIC is more of the *same* domain. Expect partial help at best (more patients/scanners/pathologies); do not bank the Indiana gate on it. That is what 9G and VinDr-CXR are for.
+
+**After the pivot the constraint changes identity:** for report generation the blocker is neither overfitting nor data — **there is no image-conditioned decoder at all** (`hybrid_lm.py:147` `forward()` takes only `input_ids`). That is a capability gap, and it is Phase 10.
+
+## Resolved decisions (from user, 2026-08-16) — the pivot
+- **Objective**: medical **report generation**, scored by **ROUGE-L + CheXbert F1** against ground-truth reports. Retrieval → supporting chapter.
+- **Data**: build the full MIMIC-CXR corpus **from PhysioNet**, not from the third-party HF mirror. **Submit PhysioNet credentialing** (CITI "Data or Specimens Only Research" + DUA) — this is Phase 7 and it **blocks Phases 8–11**.
+- **Source project**: **MIMIC-CXR-JPG v2.1.0** (`377,110` JPGs, ~570 GB) — **NOT** MIMIC-CXR DICOM (4.7 TB). Reports come from **MIMIC-CXR v2.1.0** (`mimic-cxr-reports.zip`, ~135 MB). Both need the DUA signed separately under the same credentialing.
+- **Storage strategy**: chunked download → downscale in flight → delete originals. **~310–400 GB of network transfer, ~6 GB kept on disk.** Peak disk ~4 GB regardless of corpus size. Fits the 200 GB HPC quota with room to spare.
+- **Stored resolution**: **320 px square** (not 224) — costs ~3 GB more and preserves headroom for `RandomResizedCrop(224)`. Square resize is deliberate: it is bit-for-bit what `T.Resize((size,size))` already does, so Arm 0 stays a true reproduction control.
+- **Selection**: **frontal only (PA/AP), one image per study.** The report is study-level; pairing laterals to the same text duplicates the text side and mixes two visual distributions.
+- **Primary eval split**: the **official `mimic-cxr-2.0.0-split.csv.gz`** (subject-disjoint by construction). The legacy `train[90%:]` N=3063 gallery is retained only as a *continuity* number, and only if the leakage join can be verified (see 8D).
+
+## Resolved decisions (from user, 2026-07-07) — retrieval era, still binding where noted
 - **SLURM**: long training → `--partition=aisc-batch` (7-day cap); eval/smoke → `--partition=aisc-shortrun` (1-day); `--gres=gpu:h100:X` (X=1..8). 7-day cap ⇒ full Stage-0 in ONE block (no requeue juggling).
 - **Model**: scale to **150M v2** (port v2 arch; fresh Stage-0).
 - **Priority**: backbone + MIMIC (finish Stage-0 → push MIMIC to stretch).
@@ -56,13 +125,23 @@ The single decisive intervention was **image-tower adaptation depth**; all ten t
 | `configs/model/hybrid_150m_v2.yaml` (NEW) | 4 | 150M v2 arch |
 | `scripts/train_stage0_150m_h100.sh` (NEW) | 5 | 150M Stage-0 |
 | `scripts/train_biomedclip_kd_150m_h100.sh` (NEW) | 6 | batch-scaled contrastive |
-| `configs/dataset/cxr_multi.yaml` (NEW), `scripts/train_contrastive.py:339-451` | 7 | multi-source CXR + text adapter |
-| `analysis/h100_scaling_results.md` (NEW) | 8 | results |
+| `configs/dataset/cxr_multi.yaml` (NEW), `scripts/train_contrastive.py:339-451` | 9 | multi-source CXR + text adapter |
+| `analysis/h100_scaling_results.md` (NEW) | 12 | results |
 | `tests/test_willi_parity.py`, `test_layers.py` | 2-4 | per-phase asserts |
+| **`scripts/build_mimic_cxr_local.py` (NEW)** | **8** | **PhysioNet → local 320px parquet build (meta/manifest/fetch/pack)** |
+| **`configs/dataset/cxr_mimic_full.yaml` (NEW)** | **8** | **local-parquet dataset config** |
+| **`scripts/train_contrastive.py:437-465` (`load_mimic_cxr`)** | **8** | **add `local_parquet_dir` branch** |
+| **`scripts/evaluate_cxr_retrieval.py:63-64,284-291,331-337,362`** | **8** | **local branch + `str`→`Image.open` (MISSING today, see 8E)** |
+| **`hybrid_xmamba/models/hybrid_lm.py:147,230`** | **10** | **image conditioning: `inputs_embeds` / prefix on `forward` + `generate`** |
+| **`scripts/evaluate_report_generation.py` (NEW)** | **11** | **ROUGE-L / BLEU / CheXbert F1 / retrieval-NN baseline** |
 
 ---
 
 ## Phases
+
+> **PHASES 1–6G BELOW ARE THE SUPPORTING (RETRIEVAL) CHAPTER — COMPLETE AND CLOSED.**
+> They are kept verbatim as the experimental record. **Do not re-open, re-run, or re-litigate them.**
+> The active work starts at **Phase 7**. Jump there.
 
 ### Phase 1 — Plan-of-record + state (NO CODE) ✅ COMPLETE
 - [x] **1A** — Write `H100_SCALING_PLAN.md` at repo root (this file).
@@ -332,25 +411,109 @@ Be precise about what was and was not shown: 6C-2 answers "is BiomedCLIP's text 
 - **Two-stage text-only distillation to raise `cos_text_teacher`** — optimises a number that already reaches 0.89 under pure KD. Not the bottleneck.
 - **"Switch from last-token to mean pooling"** — moot; the v2 configs use attention pooling (`pooling_strategy: attention`), never last-token.
 - **`cos_text_teacher` as an architecture-adequacy gate** — falsified above. Any experiment gated on it draws a wrong conclusion.
+- **MIMIC-CXR DICOM (4.7 TB)** — wrong project. Use **MIMIC-CXR-JPG** (~570 GB, same 377,110 images, no `pydicom`, no windowing decisions to defend in a viva). Reports still come from MIMIC-CXR (the 135 MB `mimic-cxr-reports.zip`).
+- **Storing MIMIC-CXR-JPG at native resolution** — the model sees 224×224 and source images average ~2500×3056, so ~99% of every pixel array is discarded on load. Downscale in flight; that 99% never touches the 200 GB quota.
+- **Keeping `itsanmolgupta/mimic-cxr-dataset` as the data source once credentialed** — it is a third-party redistribution of credentialed data, and its provenance (which studies, which views, which section parser, whether it is subject-disjoint across the 90/10 cut) **cannot be stated**. That is a live viva vulnerability. Migrate to the PhysioNet build and do not cite dependence on the mirror.
+- **Pairing lateral views to the study-level report** — manufactures guaranteed in-batch false negatives (the thing 6C-3 measured this dataset does *not* currently have: 0.58 pairs per bs=64 batch) and mixes two visual distributions. Frontal-only, one per study.
+- **Re-running Stage 0 from scratch (asked 2026-08-16)** — **NO.** Three independent reasons. (1) **Backbone quality was measured not to transfer**: PPL 15.62 → 13.18 moved retrieval **flat** — null #1 of 10. (2) **Stage 0 trains on PubMed abstracts**; the full-MIMIC build changes nothing it sees. The two are orthogonal. (3) The 13.18 checkpoint is **hard-won** — four failed runs (collapse at steps 3k / 24k / 28k) resolved only by the fp32 Mamba-scan + mLSTM-exp-gate fix — and costs **~3 days of H100 wall**. Re-running re-exposes that fragility for zero expected gain.
+  ⚠️ **Honest nuance the pivot introduces:** that null was measured on retrieval, which uses the backbone as an **encoder** (pooled embedding). Report generation uses it as a **generator** — autoregressive decoding, exactly what LM pretraining optimises — so the null does **not** automatically carry over. That argues for *keeping* the 13.18 checkpoint, not rebuilding it. The legitimate cheap version of this lever is **10G below**, not a restart.
 
-### Phase 7 — Multi-source CXR data diversification → Indiana lever
-Only proven Indiana lever. **IU-Xray EXCLUDED from training (= Indiana eval; zero-leakage).**
-- [ ] **7A** — `configs/dataset/cxr_multi.yaml` (NEW): MIMIC + CheXpert + PadChest + VinDr-CXR + per-source weights.
-- [ ] **7B** — `scripts/train_contrastive.py`: generalize `MIMICJointDataset`/`load_mimic_cxr` (`:339-451`) → `CXRJointDataset` with per-source **text adapter** (free-text passthrough / label→prompt template / translated-EN). Mixed-source collate; dual-tokenize unchanged.
-- [ ] **7C** — Re-run Phase-6 best recipe on `cxr_multi`.
-- [ ] **7D** — Gate: Indiana i2t R@10 ≥ 4.04% floor (target 5.5%) while MIMIC holds ≥ Phase-6.
+---
 
-### Phase 8 — Full eval + comparison + writeup
-- [ ] **8A** — Authoritative MIMIC + Indiana + STS (BIOSSES/STS-B) + PubMed PPL on best 150M ckpt.
-- [x] **8A-eff (tooling)** — **Efficiency-curve harness ready.** `scripts/performance_profile.py` gained a `--sweep` mode: latency / throughput / peak-memory vs sequence length across multiple configs, with fitted log-log **scaling exponents** (~1.0 = linear, ~2.0 = softmax attention), CSV + JSON output, per-point peak-memory reset, and OOM points recorded rather than fatal. `--backward` measures the training step. `scripts/profile_efficiency_h100.sh` (NEW) runs hybrid vs both single-family baselines at identical dim/depth, inference + training, L = 256…16384.
+# ACTIVE WORK STARTS HERE
+
+### Phase 7 — PhysioNet credentialing ⏳ **BLOCKING — CRITICAL PATH, NO CODE**
+
+Everything in Phases 8–11 is gated on this. **It is not "a click"** — this project has *never* had PhysioNet credentialing (state note 2026-07-25: *"no PhysioNet credentialing yet, so full-MIMIC scale-up stays out of scope"*). Realistic lead time is **1–4 weeks**, dominated by human review, so it must start before any code is written and the rest of the plan must be sequenced around it.
+
+- [x] **7A/7B/7C** — **DONE (user, 2026-08-16).** CITI "Data or Specimens Only Research" training complete, PhysioNet credentialed account approved, DUA signed on both `mimic-cxr/2.1.0` and `mimic-cxr-jpg/2.1.0`. PhysioNet username: `bhushkri`.
+- [ ] **7D** — **Set up `~/.netrc` on the box that will run `fetch`** (the aisc box, not local) — chmod 600, contents:
+      ```
+      machine physionet.org
+      login bhushkri
+      password YOUR_PHYSIONET_PASSWORD
+      ```
+      **Do not put the password in a script, a chat message, argv, or a SLURM log.** `build_mimic_cxr_local.py` (Phase 8A) uses Python `requests`, which reads `~/.netrc` automatically when no `auth=` is passed (`Session.trust_env`, the default) — the password never appears in a process list or a log line. This also means the earlier `wget --user --ask-password` approach is superseded: `--ask-password` needs an interactive TTY and can't run under `sbatch`/`tmux` unattended for a multi-hour job.
+      Verify before building anything: `python scripts/build_mimic_cxr_local.py meta --out /tmp/mimic_smoke_test` and confirm it downloads the ~150 MB of small files without a 401 (delete `/tmp/mimic_smoke_test` after).
+- [ ] **7E** — **Verify the network path.** Compute nodes on aisc are offline (the whole pipeline runs `HF_DATASETS_OFFLINE=1 HF_HUB_OFFLINE=1`), and the login node refuses `bash <script>`. Establish *which* host has outbound HTTPS **and** can hold a multi-hour process: login node under `tmux`/`nohup` (check for process reapers), a dedicated transfer node, or an `sbatch` job on a partition with egress. **Answer this before running `fetch`** — it is the most likely thing to derail the build.
+- [ ] **7F** — **Quota check**: `quota -s` / `lfs quota` for both **bytes and inodes**. The build creates ~227k report `.txt` files + ~200k JPGs ≈ **430k inodes**, which can trip an inode cap long before the 200 GB byte cap. If inodes are tight, keep the reports zipped and parse from the archive.
+
+**Interim (unblocked, do while waiting):** Phase 10A/10B (decoder architecture + tests) and Phase 11A (metric harness) need **no data** and can be built and unit-tested against the existing 27.5k mirror. Do them during the credentialing wait rather than idling.
+
+### Phase 8 — Local MIMIC-CXR-JPG build (compact, DUA-compliant) ✅ CODE COMPLETE 2026-08-16 — network stages pending Phase 7E
+Target: **~190–210k frontal (image, report) pairs at 320 px ≈ 6 GB on disk**, from ~310–400 GB of streamed-and-discarded transfer. Approach reviewed and adopted 2026-08-16; the corrections identified in that review are implemented, not just noted (see 8B).
+- [x] **8A** — `scripts/build_mimic_cxr_local.py`, four stages: `meta` (small files ~150 MB) → `manifest` (no network; decides what to build) → `fetch` (chunked download → resize → **delete originals**; resumable) → `pack` (leakage guard + train/validate/test parquet). Emits `build_report.json`. `manifest` and `pack` integration-tested locally against synthetic PhysioNet-shaped fixtures (see 8H) — both run end-to-end correctly, including the hard-fail path.
+- [x] **8B** — **Implementation uses Python `requests`, not wget/curl — sidesteps all five originally-identified corrections rather than patching around them:**
+      1. No `--cut-dirs` at all (was the off-by-one risk). Every file is fetched by an **absolute URL** (`JPG + "/" + rel_jpg`) to an explicit destination — no directory-stripping arithmetic to get wrong.
+      2. No `wget --base=` / `-i` list — same reason.
+      3. No `-N` — not applicable.
+      4. **Implemented, not just noted**: `stage_fetch` tallies HTTP status codes per chunk and `raise`s if a chunk converts 0 of N (`build_mimic_cxr_local.py:_fetch`, tested by construction — see 8H), rather than silently spinning through empty chunks.
+      5. **`.netrc` via `requests`**, not wget/curl — `Session.trust_env` auto-reads `~/.netrc` when no `auth=` is passed. No subprocess, no shell-quoting, password never touches argv or a log line. See Phase 7D for setup.
+- [x] **8C** — **Official section parser VENDORED VERBATIM**, not reimplemented: `scripts/mimic_cxr_vendor/section_parser.py` is a byte-for-byte copy of `MIT-LCP/mimic-cxr@e8d26fff` `txt/section_parser.py` (fetched 2026-08-16, commit SHA recorded in the file header and in `build_report.json`). `scripts/mimic_cxr_vendor/extract.py` ports the per-study extraction logic (custom index/section-name overrides, last-matching-section lookup) from the companion CLI `MIT-LCP/mimic-cxr@18cdc41c` `txt/create_section_files.py`, refactored into a function so `manifest` can call it per-row instead of shelling out to a batch CLI. **Verified against a synthetic report** (`tests/test_willi_parity.py::test_extract_findings_impression_basic_and_custom_override`): correctly separates FINDINGS/IMPRESSION and correctly honours a `custom_mimic_cxr_rules()` index override.
+- [x] **8D** — **Leakage guard implemented as a hard gate, not a warning.** `pack --exclude-hashes <file> [--min-match-frac 0.95]`: hashes `report_hash` (blake2b, **verified byte-identical** to `normalize_report_text` @ `evaluate_cxr_retrieval.py:414` and to the `text_hash` construction @ `train_contrastive.py:419-424` — same normalisation, same digest, so it is not a second drifted scheme), joins to recover `subject_id`, drops every row from a matched subject, and **`raise`s (does not warn) if match rate < 95%** unless `--allow-low-match` is explicitly passed. Verified with a synthetic fixture: a 50% match rate correctly aborts with a clear error; the same fixture with `--min-match-frac 0.4` correctly proceeds and drops exactly the matched subject's row.
+      - `scripts/dump_legacy_gallery_hashes.py` (NEW) produces the `--exclude-hashes` input — loads the legacy `train[90%:]` gallery via the existing `MIMIC_REPO` constant and reproduces the identical text construction (`f"Findings: {findings} Impression: {impression}"`) `MIMICValDataset` uses, so the hashes are computed the same way on both sides of the join.
+      ⚠️ **The under-match risk from the original review still applies and is not eliminated by any of the above** — it protects against silently trusting a bad join, it does not make the join better. If it fails, drop the legacy gallery comparison; the official split becomes the sole metric.
+- [x] **8E** — Code wiring, all verified with parity tests (no network needed for any of these):
+      - `train_contrastive.py:437-490` (`load_mimic_cxr`) — `local_parquet_dir` branch added, dispatches to `load_dataset("parquet", data_files={train,validation,test}, split=...)`. `MIMICJointDataset.__getitem__` needed zero changes (already had the `isinstance(img, str)` branch).
+      - `evaluate_cxr_retrieval.py` — **both** `IndianaEvalDataset.__getitem__` and `MIMICValDataset.__getitem__` gained `elif isinstance(img, str): img = Image.open(img)` (the crash the original review missed). `build_dataloader` gained `local_parquet_dir` / `mimic_split` params with the same three-file dispatch. `main()` CLI gained `--local-parquet-dir` / `--mimic-split`.
+      - `eval_h100.sh` gained `LOCAL_PARQUET_DIR` / `MIMIC_SPLIT` env levers (empty default → legacy mirror, unaffected).
+      - `configs/dataset/cxr_mimic_full.yaml` (NEW) + `DATASET_CONFIG` env lever in `train_biomedclip_kd_h100.sh` (default `mimic_cxr` unchanged — **Phase 9A's Arm-0 control is unaffected by this file's existence**).
+      - Grayscale (`"L"`) JPEG storage confirmed safe on both read paths (training converts to RGB explicitly; eval has `if img.mode != "RGB": convert("RGB")`).
+- [x] **8F** — `manifest` stage emits `findings` and `impression` as **separate untruncated columns**, plus `has_findings` and `has_text` (findings-or-impression) flags, and `build_report.json` reports **both** counts (`with_findings`, `with_findings_or_impression`) plus a per-split breakdown. The findings-only-vs-both choice for Phase 10 training is therefore a config-time decision on already-separate columns, not a re-run.
+- [x] **8G** — `.gitignore` guards added: `dataset/mimic_full/`, `mimic_full/`, `*.parquet`, the small PhysioNet metadata files, `legacy_gallery_hashes.txt`. Build path (`/sc/home/bhushkri/dataset/mimic_full`, set as the default in `cxr_mimic_full.yaml`) is outside the repo regardless.
+- [x] **8H** — `bash scripts/validate_for_willi.sh` green: **99 passed** (was 92), 5 skipped, 9/9 gates. 7 new parity tests added covering the hash-join convention, the vendored extractor (incl. the custom-override path), the new config's schema, the `load_mimic_cxr` local-parquet dispatch (mocked `load_dataset`, verifies exact `data_files` paths), the `evaluate_cxr_retrieval.py` str-image fix (real temp JPEG round-tripped through both dataset classes), the env-lever wiring, and the `.gitignore` guard. **Beyond the required parity tests**, `manifest` and `pack` were run end-to-end against synthetic PhysioNet-shaped CSV/report fixtures (not part of the pytest suite — network-shaped integration checks) and produced correct output, including the hard-fail path on a deliberately-low leakage-guard match rate.
+      **What is NOT yet tested and cannot be from here**: `stage_meta` and `stage_fetch` need a real PhysioNet connection. Run the `meta` stage first (small, ~150 MB) as the real auth/connectivity smoke test once Phase 7E answers where the job can run.
+
+### Phase 9 — Retrieval on full data (supporting chapter, extended) ⏳ blocked on Phase 8
+Single-lever attribution preserved. **Arm 0 runs first and is non-negotiable** — it is 3.5 GPU-h against a confounded multi-day result.
+- [ ] **9A** — **Arm 0 — reproduction control.** Rebuild ONLY the same ~27.5k studies through the new pipeline, rerun the D1c recipe. **Gate: reproduce 0.1459 ± 1.1pp.** If it misses, the pipeline changed something (section parser, view selection, the extra resample) and that is found for 3.5 GPU-h instead of inside a confounded result.
+      ⚠️ **PROTOCOL TRAP — do not compare a full-MIMIC number on the official split against 0.1459 on the legacy gallery.** The official split is subject-disjoint *by construction*; the legacy `train[90%:]` gallery has **unknown provenance** and may itself leak subjects across its own 90/10 cut. The new protocol is therefore **harder**, and the number can go **down while the model gets better**. Arm 0 exists precisely to separate "the pipeline changed" from "the protocol got harder" from "the model changed". Never quote a cross-protocol delta.
+- [ ] **9B** — **Arm 1 — data only.** Full build, D1c recipe unchanged, same 6,000 steps. Note the epoch budget moves 13.93 → ~1.8 at identical GPU-hours: same compute, far less repetition.
+- [ ] **9C** — **Arm 2 — the actual hypothesis.** `vit_lr` ∈ {1e-6, 3e-6, 1e-5, 3e-5} on the full set. **Pre-registered prediction: the inverted-U optimum shifts right of 1e-6 and the peak is higher.**
+      ⚠️ **State the hypothesis narrowly.** This plan already established that *optimization-side* overfitting is NOT binding (epochs 23→14 = +0.06pp; lower LR removed the rollover without changing plateau height). What 6G-1 measured is that the **image tower specifically** memorises (`train/clip_loss` 1.17→0.04 while val rises). So the claim under test is *"more data relaxes the image-adaptation dose constraint"* — **not** "more data fixes overfitting". If the inverted-U does not move, that is a real and reportable result either way.
+- [ ] **9D** — **Image augmentation — the one untested free lever.** **Verified: there is no augmentation anywhere in this repo.** All four transform sites (`train_contrastive.py:186,300,368`, `evaluate_cxr_retrieval.py:250`) are `Resize → [Grayscale(3)] → ToTensor → Normalize`. An 85M-param ViT is being trained on 27,570 images with none — and 6G-1 measured that it memorises them. Add `RandomResizedCrop(224, scale=(0.8,1.0))` + mild rotation as **one parallel arm** (this is why 8 stores at 320 px). Not on the rejected-by-prior-evidence list; attacks exactly the mechanism 6G-1 identified.
+- [ ] **9E** — **Free methodological result:** rerun the 6G-7 2×2 (`{vit=2, vit=12} × {val==test, clean}`) on full data. The measured finding was that test-informed selection is worth 2.2pp at 85M trainable image params **because the model overfits**; with ~8× data that number should **shrink**. Measuring how selection-protocol advantage scales with data volume is a clean, rarely-published contribution and costs nothing extra.
+- [ ] **9F** — Indiana + official-split evals. Gate: Indiana i2t R@10 ≥ 4.04% floor (target 5.5%) with MIMIC held ≥ Phase-6G.
+- [ ] **9G** — *(optional, was Phase 7)* multi-source CheXpert/PadChest/VinDr via `cxr_multi.yaml` + `CXRJointDataset` text adapter. **Deprioritised**: full MIMIC is ~8× the data for a fraction of the engineering, and PhysioNet credentialing also unlocks **VinDr-CXR** directly. Revisit only if Indiana is still flat after 9F. **IU-Xray stays EXCLUDED from training (= Indiana eval; zero-leakage).**
+
+### Phase 10 — Image-conditioned report generator 🎯 NEW — the pivot's core work
+**Verified gap:** `HybridLanguageModel.forward()` (`hybrid_lm.py:147`) accepts **only `input_ids`** — no `inputs_embeds`, no `encoder_hidden_states`, no cross-attention. `generate()` (`:230`) likewise. **There is currently no way to condition the decoder on an image.** This is the single largest piece of new work in the pivot and the proposal under review does not mention it.
+- [ ] **10A** — `forward(..., inputs_embeds=None)` + `generate(..., prefix_embeds=None)` on `HybridLanguageModel`. Additive and default-`None`, so every existing Stage-0/contrastive checkpoint and eval path is untouched. Pin with a parity test asserting `inputs_embeds=None` is bit-identical to today.
+- [ ] **10B** — **Prefix conditioning first** (not cross-attention): project the BiomedCLIP ViT patch grid (197×768) through a small learned mapper to `k` prefix tokens in the decoder's `dim=768` space, prepend, train with cross-entropy on the report. Rationale: Mamba/mLSTM are recurrent — a prefix is absorbed into the state and needs **zero** changes to the SSM/TFLA kernels, whereas cross-attention would mean new per-layer modules and new Triton work. **Sweep `k` ∈ {8, 32, 64} — this is the depth-analogue lever and the most likely place a real effect lives.**
+- [ ] **10C** — Initialize the image tower from the **Phase-9 best contrastive checkpoint**, not stock BiomedCLIP. This is exactly where the retrieval chapter pays for itself, and 6C measured the size of that dividend: fine-tuned ViT 0.1172 vs stock 0.0232 with the same text tower. **Run stock-ViT as an ablation arm** — the delta is a headline result linking the two chapters.
+- [ ] **10D** — Decoder init from the Phase-5 Stage-0 backbone (val PPL 13.18). Train on `findings`; decide findings-only vs findings+impression per 8F and record it.
+- [ ] **10E** — `configs/model/hybrid_150m_v2_rrg.yaml` + `scripts/train_report_generation.py` + SLURM wrapper. Reuse `train_biomedclip_kd_h100.sh` env-lever conventions so an unmodified invocation is the control.
+- [ ] **10F** — Numerical gates: finite fwd/bwd, grad-norm bounded, no NaN over 50+ steps. ⚠️ **Stage-0 taught that 150M is spike-fragile** — the fp32 mLSTM-gate / Mamba-scan fix (2026-07-16) is load-bearing; keep `gradient_clip_val=0.5` and monitor `grad_norm` from step 0.
+- [ ] **10G** — *(optional arm, replaces "re-run Stage 0")* **Domain-adaptive continuation of the LM on MIMIC report text.** ~190k reports × ~250 tok ≈ **47M tokens** (vs Stage-0's 483M PubMed) — roughly one epoch, **hours not days**. Radiology report style is very distinct from abstract prose, and unlike the retrieval case the backbone here is used as a **generator**, so the Stage-0-quality null does not automatically apply. **Run as an ablation with the untouched 13.18 checkpoint as control** — never as the default. Blocked on Phase 8 (no report corpus until then).
+
+### Phase 11 — Report-generation evaluation 🎯 NEW
+- [ ] **11A** — `scripts/evaluate_report_generation.py`: **ROUGE-L** (primary), BLEU-1/4, METEOR. Fixed decoding config (greedy + beam=3, both reported), fixed `max_new_tokens`. **No data needed — build during the Phase-7 wait.**
+- [ ] **11B** — **CheXbert F1**: run the CheXbert labeler over generated and ground-truth reports; report micro/macro F1 over the 14 CheXpert labels and the 5-label subset the RRG literature uses. `mimic-cxr-2.0.0-chexpert.csv.gz` (already downloaded in 8A) gives the ground-truth labels as a cross-check on the labeler wiring. Offline weights must be staged — the compute nodes have no internet.
+- [ ] **11C** — **Retrieval-NN baseline, run BEFORE the generator.** Use the Phase-9 model to retrieve the nearest training report and emit it verbatim. n-gram metrics reward templated text heavily and MIMIC reports are heavily templated (6C-3: 2% of the gallery is exact-duplicate). **This baseline is the real floor**; a generator that does not beat it has contributed nothing.
+- [ ] **11D** — Report on the **official subject-disjoint test split**. Quote the legacy `train[90%:]` gallery only if 8D's recall check passed.
+- [ ] **11E** — Human-readable qualitative appendix: N=20 side-by-side generated/ground-truth pairs incl. failure cases. Cheap, and it is what a viva actually asks about.
+
+### Phase 12 — Full eval + comparison + writeup
+- [ ] **12A** — Authoritative MIMIC + Indiana retrieval + STS (BIOSSES/STS-B) + PubMed PPL on the best 150M ckpt (the supporting chapter's final table).
+- [x] **12A-eff (tooling)** — **Efficiency-curve harness ready.** `scripts/performance_profile.py` gained a `--sweep` mode: latency / throughput / peak-memory vs sequence length across multiple configs, with fitted log-log **scaling exponents** (~1.0 = linear, ~2.0 = softmax attention), CSV + JSON output, per-point peak-memory reset, and OOM points recorded rather than fatal. `--backward` measures the training step. `scripts/profile_efficiency_h100.sh` (NEW) runs hybrid vs both single-family baselines at identical dim/depth, inference + training, L = 256…16384.
 
   **Bug found and fixed:** the profiler resolved `--model` through `ModelRegistry`, which only ever registers `hybrid_350m/1_3b/7b/mamba_baseline/xlstm_baseline`. **Six of the nine names in its own `--model` choices list — every 70M and 150M config, including the active `hybrid_150m_v2` backbone — raised `ValueError` before a single measurement ran.** Configs now resolve from `configs/model/*.yaml` (the source of truth) with the registry as fallback. Pinned by `test_performance_profile_loads_every_advertised_model_config`.
 
   Sweeping past `max_position_embeddings` (1024) is valid because `use_pos_embedding = False` (`hybrid_lm.py:43`) — there is no absolute position table to index out of. Pinned by `test_sequence_sweep_is_valid_past_max_position_embeddings` so that re-enabling it fails loudly.
 
   No dataset or checkpoint needed — random token ids, fresh weights; throughput and memory do not depend on weight values. **Run:** `sbatch scripts/profile_efficiency_h100.sh` (add `SCALE=70m` for the 70M family).
-- [ ] **8B** — `analysis/h100_scaling_results.md` (NEW): 70M-A100 vs 150M-H100 table; per-lever ablation; honest limitations.
-- [ ] **8C** — Update `h100_scaling_state.json` final verdict + best ckpt path.
+- [x] **12A-eff (measured, 2026-07-28)** — H100 80GB HBM3, gx07, bf16, bs=4, jobs 2382432 (150M) / 2382434 (70M). Curves at `analysis/efficiency_{150m,70m}/{inference,training}/efficiency_curves.{csv,json}` **on the server — not yet pulled into the repo**.
+      1. **Linear scaling confirmed** to L=16,384. Asymptotic (L≥4096) exponents ≈1.0 for latency and memory across all three architectures. ⚠️ **The printed full-range exponents understate scaling** (xLSTM 0.652) because the H100 is underutilised at short sequences (150M xlstm: L=2048→92.0ms, L=4096→99.0ms — almost free), dragging the fit down. **Report asymptotic alongside full-range**: latency hybrid 1.012 / mamba 1.011 / xlstm 0.920; memory 0.965 / 0.965 / 0.880. *Not yet implemented in the tool — see open item below.*
+      2. **xLSTM is dramatically cheaper than Mamba.** 150M @ L=16384 inference: mamba 1105 ms / 41.99 GB / 59,280 tok/s; hybrid 925 ms / 42.00 GB / 70,882 tok/s; **xlstm 355 ms / 7.12 GB / 184,860 tok/s** — 5.9× less memory, 3.1× faster, *despite more parameters* (159.0M vs 140.5M non-emb).
+      3. **The hybrid's win is in TRAINING, not inference.** Inference peak = max over layers, so hybrid ≈ pure Mamba (42.00 vs 41.99 GB). Training peak = *sum* of saved activations, so composition matters: 150M @ L=2048 training — mamba 1348 ms / 67.5 GB vs **hybrid 1078 ms / 54.0 GB (25% faster, 25% less memory)**; xlstm 309 ms / 11.2 GB. Same pattern at 70M. **This is the concrete, defensible justification for the hybrid design over pure Mamba.**
+      4. **Training memory is the ceiling**: 150M hybrid and mamba both OOM at L=4096 on 80GB; xlstm reaches 8192. The exponent is clean linear (0.97–0.98) ⇒ constant-factor problem, not a complexity problem.
+      5. **Not a bottleneck at this project's lengths.** CXR reports ≤256 tok, PubMed ≤512. At L=256 (150M) the hybrid is the *fastest* of the three (18.08 vs 19.78 / 21.12 ms). **The curves are a separate architectural contribution — they do not explain any retrieval or generation number.**
+      6. ⚠️ **Caveat for the writeup:** the "~2.0 = quadratic attention" line in the tool's output is a **reference claim, not a measurement** — there is no attention/transformer baseline in this repo (verified by grep over `configs/model/` and `hybrid_xmamba/layers/`). Either add one at identical dim/depth or state the 2.0 as cited, never as measured.
+      7. Incidental: xLSTM shows a throughput regime change at L=4096 (150M 89,042 → 165,436 tok/s; 70M 132,806 → 246,309) — a TFLA kernel efficiency jump.
+
+      **Open tooling items (optional, not blocking):** report asymptotic exponents alongside full-range in `performance_profile.py`; add an attention baseline to actually measure the ~2.0 curve; add an autoregressive decode benchmark (fixed-size recurrent state vs growing KV cache) — that last one is now directly relevant, since Phase 10 makes generation the product.
+- [ ] **12B** — `analysis/h100_scaling_results.md` (NEW). Structure the writeup as: **(1) report generation** (primary — ROUGE-L / CheXbert F1 vs the retrieval-NN baseline); **(2) retrieval** (supporting chapter — the 10-nulls-1-lever attribution table, the ViT-depth dose-response, and the selection-protocol methodological finding); **(3) efficiency** (linear scaling; hybrid's training-memory advantage over pure Mamba); **(4) honest limitations.**
+- [ ] **12C** — Update `h100_scaling_state.json` final verdict + best ckpt path.
 
 ---
 
@@ -375,8 +538,16 @@ Only proven Indiana lever. **IU-Xray EXCLUDED from training (= Indiana eval; zer
 - MoCo queue post-KD-warmup is harmful → keep `moco_queue_size=0`.
 - freq-decoupled KD hurt Indiana → stays off (canonical).
 - Always reconcile in-training vs authoritative eval numbers before citing.
+- 150M is **spike-fragile**: the fp32 Mamba-scan / mLSTM-exp-gate fix (2026-07-16) is load-bearing; keep `gradient_clip_val=0.5`. Any new training objective (Phase 10) re-exposes this.
+- A run that reports success while doing nothing is the expensive failure mode (`--cut-dirs`, `check=False`). **Every long-running loop needs an assertion that it produced output.**
 
 ## Unresolved questions
-- CheXpert/VinDr label→prompt template wording — finalize in Phase 7 (start CheXzero-style; iterate if MIMIC regresses).
-- 150M `learning_rate`: **4.0e-4 chosen** (conservative √-width scale; bump to 5e-4 if Phase-5 loss descends slowly).
+- PhysioNet credentialing lead time — unknown until 7B is submitted; **everything downstream is gated on it**. Start Phase 10A/10B/11A meanwhile.
+- Report-gen text target: **findings-only** (RRG convention) vs findings+impression (what the retrieval chapter used)? Decide at 8F, record in `build_report.json`.
+- Prefix length `k` for image conditioning — sweep {8,32,64} at 10B; no prior.
+- Cross-attention (10B alternative) — deferred unless prefix conditioning underperforms; it means new per-layer modules and Triton work.
+- 8D hash-join recall vs the legacy gallery — if < 95%, the `train[90%:]` continuity number is dropped and the official split becomes the sole metric.
+- Where the ~310–400 GB fetch can actually run (7E) — login node under tmux vs transfer node vs egress-capable partition.
+- CheXbert labeler weights offline-staging on aisc (11B).
+- CheXpert/VinDr label→prompt template wording — only if 9G is revived.
 - Whether willi/A100 remains a target after H100 migration (if retired, drop py3.9 guards + `validate_for_willi.sh`).

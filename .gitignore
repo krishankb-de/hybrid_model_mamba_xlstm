@@ -88,6 +88,7 @@ multirun/
 !BIOMEDCLIP_KD_PLAN.md
 !HYBRID_ARCH_REFACTOR_PLAN.md
 !H100_SCALING_PLAN.md
+!MAMBA3_INTEGRATION_PLAN.md
 !CLAUDE.md
 !analysis/baseline_probe_report.md
 
@@ -96,8 +97,21 @@ multirun/
 !biomedclip_kd_state.json
 !hybrid_arch_refactor_state.json
 !h100_scaling_state.json
+!mamba3_integration_state.json
 
 
 
 # Multi-phase plan local state (regenerated from plan-of-record checkboxes)
 joint_training_state.json
+
+# Phase 8 (H100_SCALING_PLAN.md): local PhysioNet MIMIC-CXR-JPG build. DUA-
+# credentialed data — must never be committed/pushed/published, regardless
+# of whether it lands inside the repo tree by accident (it should live under
+# /sc/home/$USER/dataset/, outside it, but this guard is belt-and-suspenders).
+dataset/mimic_full/
+mimic_full/
+*.parquet
+mimic-cxr-reports.zip
+mimic-cxr-2.0.0-*.csv.gz
+IMAGE_FILENAMES
+legacy_gallery_hashes.txt

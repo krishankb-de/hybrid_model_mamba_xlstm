@@ -48,6 +48,11 @@ else
   EVAL_CACHE_DIR="${EVAL_CACHE_DIR:-/sc/home/$USER/dataset/mimic_cxr_cache}"
 fi
 OUTPUT_DIR="${OUTPUT_DIR:-$(dirname "${CKPT}")/eval_results}"
+# Phase 8: point retrieval eval at the local PhysioNet build instead of the
+# gated itsanmolgupta HF mirror. Empty by default so an unmodified invocation
+# stays on the legacy mirror (the Arm-0 reproduction control needs this).
+LOCAL_PARQUET_DIR="${LOCAL_PARQUET_DIR:-}"
+MIMIC_SPLIT="${MIMIC_SPLIT:-test}"
 
 echo "=== H100 eval (MODE=${MODE}) ==="
 date; hostname
@@ -81,12 +86,17 @@ if [ "${MODE}" = "ppl" ]; then
     --throughput \
     --output-dir "${OUTPUT_DIR}"
 elif [ "${MODE}" = "retrieval" ]; then
+  LOCAL_ARGS=()
+  if [ -n "${LOCAL_PARQUET_DIR}" ]; then
+    LOCAL_ARGS+=(--local-parquet-dir "${LOCAL_PARQUET_DIR}" --mimic-split "${MIMIC_SPLIT}")
+  fi
   python scripts/evaluate_cxr_retrieval.py \
     --checkpoint "${CKPT}" \
     --dataset "${DATASET}" \
     --cache-dir "${EVAL_CACHE_DIR}" \
     --batch-size 32 \
-    --output-dir "${OUTPUT_DIR}"
+    --output-dir "${OUTPUT_DIR}" \
+    ${LOCAL_ARGS[@]+"${LOCAL_ARGS[@]}"}
 else
   echo "ERROR: unknown MODE='${MODE}' (expected 'ppl' or 'retrieval')"; exit 1
 fi

@@ -1,0 +1,62 @@
+# Full local MIMIC-CXR-JPG build (PhysioNet direct, Phase 8 of H100_SCALING_PLAN.md).
+# ~190-210k frontal (image, findings, impression) pairs at 320px, built by
+# scripts/build_mimic_cxr_local.py into local_parquet_dir. Replaces the
+# credentialing-blocked itsanmolgupta/mimic-cxr-dataset HF mirror (mimic_cxr.yaml)
+# whose provenance cannot be stated -- see the Phase 7/8 "rejected" entries there.
+#
+# An unmodified training invocation still defaults to dataset=mimic_cxr; select
+# this config explicitly via DATASET_CONFIG=cxr_mimic_full (train_biomedclip_kd_h100.sh)
+# so the control arm is never silently switched.
+
+dataset_name: "cxr_mimic_full"
+
+# Populated by `pack`: train.parquet / validate.parquet / test.parquet under
+# this directory, using the OFFICIAL mimic-cxr-2.0.0-split.csv.gz split
+# (subject-disjoint by construction -- see Phase 8 "primary_eval_split").
+local_parquet_dir: "/sc/home/bhushkri/dataset/mimic_full"
+
+# These select AMONG the three parquet files above (data_files keys "train" /
+# "validation" / "test" map to train.parquet / validate.parquet / test.parquet
+# in scripts/train_contrastive.py:load_mimic_cxr). Percentage-slice syntax
+# (e.g. "train[:85%]") still works against the "train" file specifically for
+# a Phase 9E-style disjoint selection split -- "test" should stay a literal,
+# unsliced "test" for the official held-out set; do not carve a selection
+# split out of it.
+train_split: "train"
+validation_split: "validation"
+test_split: "test"
+
+# Tokenization — match Stage 0 pretraining tokenizer
+tokenizer: "gpt2"
+max_length: 256
+max_seq_length: 256
+
+# Teacher tokenization (PubMedBERT WordPiece); populated by distill config
+teacher_max_length: 512
+
+# Data loading
+batch_size: 16
+eval_batch_size: 16
+num_workers: 4
+pin_memory: true
+streaming: false
+cache_dir: "/scratch/bhushkri/mimic_cxr_full_cache"   # unused by the local-parquet
+                                                        # branch (no HF network cache
+                                                        # needed) but kept for parity
+                                                        # with mimic_cxr.yaml's schema.
+
+# Image preprocessing (BiomedCLIP ViT-B/16, CLIP normalisation). Images are
+# stored at 320px (build_mimic_cxr_local.py --size 320); Resize((224,224)) in
+# the transform pipeline still applies on load, matching mimic_cxr.yaml.
+image_size: 224
+image_mean: [0.48145466, 0.4578275, 0.40821073]
+image_std:  [0.26862954, 0.26130258, 0.27577711]
+
+# Contrastive training settings
+contrastive_mode: "joint"
+image_encoder_name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+
+# Text fields — same column names build_mimic_cxr_local.py's pack stage emits.
+findings_field: "findings"
+impression_field: "impression"
+concatenate_sections: true
