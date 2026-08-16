@@ -2437,6 +2437,48 @@ def test_download_still_writes_file_for_a_genuine_200(tmp_path):
     status = mod._download("https://physionet.org/files/foo", dest)
     assert status == 200
     assert dest.read_bytes() == b"hello world"
+    assert not dest.with_name(dest.name + ".part").exists()  # renamed away, not left behind
+
+
+def test_download_never_leaves_a_partial_file_at_dest_on_interruption(tmp_path):
+    """REGRESSION (2026-08-16, caught LIVE, not just in review). A SLURM kill
+    (time limit / preemption) mid-download previously left a truncated-but-
+    nonzero-size file directly at `dest`. Every resume check in this script
+    (`dest.exists() and dest.stat().st_size > 0`) then trusted it as
+    complete. This is exactly what happened: a `--time=00:10:00` override
+    killed a `mimic-cxr-reports.zip` download mid-stream, the next run's
+    `stage_meta` printed "[meta] have mimic-cxr-reports.zip" and skipped
+    re-fetching it, and the corruption only surfaced later as
+    `zipfile.BadZipFile: File is not a zip file` at unzip time. Fix:
+    `_download()` streams to a `.part` sibling and `Path.replace()`s into
+    `dest` only after the full body is consumed — an interruption anywhere
+    in that process must leave `dest` absent, never partial.
+    """
+    import requests
+
+    mod = _load_build_script()
+
+    class _FakeInterruptedResp:
+        status_code = 200
+        headers = {"Content-Type": "application/zip"}
+        url = "https://physionet.org/files/foo.zip"
+
+        def iter_content(self, chunk_size=None):
+            yield b"partial-bytes-before-the-job-was-killed"
+            raise requests.exceptions.ConnectionError("simulated interruption mid-stream")
+
+        def close(self):
+            pass
+
+    class _FakeSession:
+        def get(self, url, timeout=None, stream=None):
+            return _FakeInterruptedResp()
+
+    mod._get_session = lambda: _FakeSession()
+    dest = tmp_path / "foo.zip"
+    status = mod._download("https://physionet.org/files/foo.zip", dest, retries=1)
+    assert status != 200
+    assert not dest.exists(), "an interrupted download must never leave a partial file at dest"
 
 
 def test_fetch_aborts_on_session_expired_even_if_some_files_in_chunk_succeeded(monkeypatch, tmp_path):

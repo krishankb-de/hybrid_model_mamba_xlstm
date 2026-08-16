@@ -149,37 +149,83 @@ def _download(url: str, dest: Path, timeout: int = 60, retries: int = 3) -> int:
     """Returns the HTTP status code, SESSION_EXPIRED (498, a local sentinel
     meaning "this looked like a 200 but was actually a login page"), or -1
     on a connection-level failure after all retries. Streams to avoid
-    holding large files in memory."""
+    holding large files in memory.
+
+    IMPORTANT: 200 is returned ONLY after the full body has been consumed
+    AND atomically renamed into dest. A status LINE of 200 that then fails
+    mid-body (connection dropped, SLURM kill) must never be reported as a
+    successful 200 to the caller -- see the REGRESSION note below.
+    """
     sess = _get_session()
     last_status = -1
     for attempt in range(retries):
         try:
             resp = sess.get(url, timeout=timeout, stream=True)
-            last_status = resp.status_code
-            if resp.status_code == 200:
-                # A session cookie can expire mid-run. PhysioNet then 302s to
-                # /login/, and requests follows redirects by default -- so
-                # this arrives as an ordinary 200 with an HTML login page as
-                # the body. Check BEFORE streaming any bytes to disk, or a
-                # dead cookie silently writes login pages into .jpg/.csv.gz
-                # files, and the resume check (Path.exists()) would then
-                # skip them forever on every subsequent run.
-                ctype = resp.headers.get("Content-Type", "")
-                if "text/html" in ctype or "/login" in resp.url:
-                    resp.close()
-                    return SESSION_EXPIRED
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                with open(dest, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=1 << 20):
-                        f.write(chunk)
-                resp.close()
-                return 200
-            resp.close()
-            if resp.status_code in (401, 403):
-                return resp.status_code  # auth failure -- retrying won't help
         except requests.RequestException as e:
             print("  [download] {} attempt {}/{}: {}".format(url, attempt + 1, retries, e),
                   file=sys.stderr)
+            time.sleep(2 ** attempt)
+            continue
+
+        if resp.status_code == 200:
+            # A session cookie can expire mid-run. PhysioNet then 302s to
+            # /login/, and requests follows redirects by default -- so this
+            # arrives as an ordinary 200 with an HTML login page as the
+            # body. Check BEFORE streaming any bytes to disk, or a dead
+            # cookie silently writes login pages into .jpg/.csv.gz files,
+            # and the resume check (Path.exists()) would then skip them
+            # forever on every subsequent run.
+            ctype = resp.headers.get("Content-Type", "")
+            if "text/html" in ctype or "/login" in resp.url:
+                resp.close()
+                return SESSION_EXPIRED
+
+            # Stream to a .part sibling and Path.replace() into dest only
+            # after the full body is consumed. Path.replace() is an atomic
+            # rename on the same filesystem (POSIX guarantee), so dest
+            # either doesn't exist or is complete -- never partial. Without
+            # this, a SLURM kill (time limit / preemption) mid-write leaves
+            # a truncated-but-nonzero-size file at dest, and every caller's
+            # resume check (dest.exists() and dest.stat().st_size > 0) then
+            # trusts it as done.
+            #
+            # REGRESSION (caught live, 2026-08-16): a --time=00:10:00 kill
+            # mid-download of mimic-cxr-reports.zip left a corrupt zip that
+            # the next run's stage_meta happily skipped as "[meta] have
+            # mimic-cxr-reports.zip" -- the corruption only surfaced later
+            # as zipfile.BadZipFile at unzip time. Fixing that also
+            # surfaced a SECOND, worse bug in this function: the status
+            # code arrives with the response HEADERS, before the body is
+            # streamed, so a connection that dies partway through the body
+            # (same failure class, just interrupted a step earlier) would
+            # have this function return the status LINE's 200 even though
+            # dest was correctly never written -- silently reporting
+            # success for a download that produced nothing. The inner
+            # try/except below scopes body-streaming failures separately
+            # from the outer connection-attempt try/except so a body
+            # failure retries as a fresh request rather than exiting the
+            # loop with a stale, misleading "200".
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            part = dest.with_name(dest.name + ".part")
+            try:
+                with open(part, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=1 << 20):
+                        f.write(chunk)
+            except requests.RequestException as e:
+                resp.close()
+                print("  [download] {} attempt {}/{}: body stream interrupted: {}".format(
+                    url, attempt + 1, retries, e), file=sys.stderr)
+                last_status = -1
+                time.sleep(2 ** attempt)
+                continue
+            resp.close()
+            part.replace(dest)
+            return 200
+
+        last_status = resp.status_code
+        resp.close()
+        if resp.status_code in (401, 403):
+            return resp.status_code  # auth failure -- retrying won't help
         time.sleep(2 ** attempt)
     return last_status
 
