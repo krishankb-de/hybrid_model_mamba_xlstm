@@ -84,6 +84,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -111,6 +112,7 @@ SMALL_FILES = [
 ]
 
 _session = None  # type: Optional[requests.Session]
+_session_lock = threading.Lock()
 
 SESSION_EXPIRED = 498  # local sentinel (not a real HTTP status) -- see _download()
 
@@ -125,23 +127,39 @@ def _get_session() -> requests.Session:
     stale for this deployment. Session-cookie auth (~/.physionet_session) is
     the working path -- see the module docstring's PREREQUISITES. A leftover
     ~/.netrc for physionet.org is simply unused now, not actively read.
+
+    Thread-safe (REGRESSION, caught live 2026-08-16): stage_fetch calls this
+    from up to `workers` ThreadPoolExecutor threads concurrently on the first
+    chunk. The original check-then-set (`if _session is None: ... _session =
+    ...`) is not atomic, so multiple threads raced past the None check before
+    any of them finished creating a Session -- harmless correctness-wise
+    (every racing thread reads the same cookie file and sets the same
+    cookie), but printed "[auth] session cookie loaded" once per racing
+    thread (5 times, observed live) and meant later callers could end up
+    holding different Session objects, splitting the connection pool
+    needlessly. Double-checked locking: the fast path (session already
+    created) takes no lock, so this costs nothing after the first call.
     """
     global _session
-    if _session is None:
-        cookie_file = Path.home() / ".physionet_session"
-        if not cookie_file.exists():
-            raise RuntimeError(
-                "[auth] {} not found. PhysioNet does not accept HTTP Basic "
-                "Auth for this project -- log in at physionet.org in a "
-                "browser, copy the 'sessionid' cookie value (dev tools -> "
-                "Application/Storage -> Cookies -> physionet.org), then on "
-                "this machine: umask 077; printf '%s' 'SESSIONID_VALUE' > "
-                "{}; chmod 600 {}".format(cookie_file, cookie_file, cookie_file)
-            )
-        sid = cookie_file.read_text().strip()
-        _session = requests.Session()
-        _session.cookies.set("sessionid", sid, domain="physionet.org")
-        print("[auth] session cookie loaded from {} ({} chars)".format(cookie_file, len(sid)))
+    if _session is not None:
+        return _session
+    with _session_lock:
+        if _session is None:
+            cookie_file = Path.home() / ".physionet_session"
+            if not cookie_file.exists():
+                raise RuntimeError(
+                    "[auth] {} not found. PhysioNet does not accept HTTP Basic "
+                    "Auth for this project -- log in at physionet.org in a "
+                    "browser, copy the 'sessionid' cookie value (dev tools -> "
+                    "Application/Storage -> Cookies -> physionet.org), then on "
+                    "this machine: umask 077; printf '%s' 'SESSIONID_VALUE' > "
+                    "{}; chmod 600 {}".format(cookie_file, cookie_file, cookie_file)
+                )
+            sid = cookie_file.read_text().strip()
+            sess = requests.Session()
+            sess.cookies.set("sessionid", sid, domain="physionet.org")
+            print("[auth] session cookie loaded from {} ({} chars)".format(cookie_file, len(sid)))
+            _session = sess
     return _session
 
 
@@ -444,11 +462,23 @@ def stage_fetch(out: Path, size: int, chunk: int, workers: int, limit: int) -> N
 
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = [ex.submit(_fetch_one, r) for r in part["rel_jpg"]]
+            # Progress inside the download phase, not just after each full
+            # chunk completes -- a 2000-file chunk at real-world PhysioNet/
+            # shared-uplink throughput can take well over an hour, and with
+            # no output during that time it is impossible to tell "slow but
+            # working" from "hung" without shelling out to `du` on the
+            # staging dir. ~10 lines per chunk regardless of chunk size.
+            report_every = max(1, len(futures) // 10)
+            n_completed = 0
             for fut in as_completed(futures):
                 rel_jpg, status = fut.result()
                 statuses[status] = statuses.get(status, 0) + 1
                 if status == 200:
                     staged_srcs.append((str(stage / rel_jpg), rel_jpg))
+                n_completed += 1
+                if n_completed % report_every == 0 or n_completed == len(futures):
+                    print("[fetch]   downloading {}/{} in this chunk ({} ok so far)".format(
+                        n_completed, len(futures), statuses.get(200, 0)))
 
         # A cookie can expire MID-CHUNK: some files in this same chunk may
         # have succeeded before it did. That means `ok` can be > 0 even when

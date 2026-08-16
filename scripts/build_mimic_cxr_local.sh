@@ -8,10 +8,13 @@
 # with "This command is not allowed on the login node!" before it made a
 # single request. Per docs.sc.hpi.de/cluster/Resources/{Login-Nodes,
 # Storage/Data-Transfer}: external downloads belong on COMPUTE nodes via
-# Slurm — cpu-interactive (8h cap) for small/short stages, cpu-batch (7-day
-# cap) for the long fetch — not on a Run Node (rx01/rx02, explicitly NOT
-# meant for data acquisition) and not on the AISC GPU partitions (this job
-# needs zero GPU; requesting one would be pure waste on a shared resource).
+# Slurm -- not on a Run Node (rx01/rx02, explicitly NOT meant for data
+# acquisition). The docs' cpu-interactive/cpu-batch recommendation does NOT
+# work for this account (see the account/QOS note below) -- what actually
+# runs is aisc-batch/aisc-interactive with --account=aisc --qos=aisc
+# explicit. This job still needs zero GPU; it just happens to land on a
+# GPU-capable node without using the GPU, since that is the only queue this
+# account can submit non-interactive jobs to.
 #
 # This is a CPU-only, no-GPU job on purpose. Do not add --gpus.
 #
@@ -55,13 +58,23 @@
 # whether a non-preemptible CPU-only queue is available for this account.
 # Override at submit time if a different allocation should be used:
 #   sbatch --account=<other> --partition=<other> --qos=<other> scripts/build_mimic_cxr_local.sh
+#
+# --time=6-12:00:00 (was 1 day): measured LIVE on the full run (job 2457894,
+# 2026-08-16), the first 2000-image chunk took ~2h (0.9% of 218131 images) --
+# extrapolated, the full `fetch` is ~9 days at that rate, not ~1. A 1-day cap
+# means ~9 separate resubmits; this cuts it to ~2. Harmless for the fast
+# stages (meta/manifest/pack finish in minutes regardless of the cap) and
+# stays under aisc-batch's 7-day hard limit with margin. `fetch` is
+# resumable (todo is recomputed from which local_jpg files already exist),
+# so a timeout at any --time value only costs the in-flight chunk, never
+# correctness -- this only changes how often you have to resubmit.
 # ============================================================================
 #SBATCH --partition=aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=1-00:00:00
+#SBATCH --time=6-12:00:00
 #SBATCH --job-name=mimic_build
 #SBATCH --output=logs/%x_%j.log
 #SBATCH --error=logs/%x_%j.log

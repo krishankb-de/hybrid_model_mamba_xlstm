@@ -2481,6 +2481,54 @@ def test_download_never_leaves_a_partial_file_at_dest_on_interruption(tmp_path):
     assert not dest.exists(), "an interrupted download must never leave a partial file at dest"
 
 
+def test_get_session_is_thread_safe_and_created_exactly_once(tmp_path):
+    """REGRESSION (2026-08-16, caught LIVE): stage_fetch's ThreadPoolExecutor
+    calls _get_session() from up to `workers` threads concurrently on the
+    first chunk. The original check-then-set was not atomic; observed live
+    as FIVE duplicate "[auth] session cookie loaded" log lines from one
+    invocation. Harmless correctness-wise (every racing thread reads the
+    same cookie), but wasteful (needless extra Session objects splitting
+    the connection pool) and confusing in logs. Artificially slow down
+    Session construction to widen the race window -- this makes the test
+    fail reliably against the old unlocked code rather than passing by
+    scheduling luck, and pass reliably against the double-checked-locking
+    fix regardless of how the threads are scheduled.
+    """
+    import threading
+    import time as _time
+
+    mod = _load_build_script()
+    cookie_file = tmp_path / ".physionet_session"
+    cookie_file.write_text("abc123")
+    mod.Path.home = staticmethod(lambda: tmp_path)
+    mod._session = None
+
+    creations = []
+    orig_session_cls = mod.requests.Session
+
+    class _SlowCountingSession(orig_session_cls):
+        def __init__(self):
+            creations.append(1)
+            _time.sleep(0.02)  # widen the race window
+            super().__init__()
+
+    mod.requests.Session = _SlowCountingSession
+
+    results = []
+
+    def _call():
+        results.append(mod._get_session())
+
+    threads = [threading.Thread(target=_call) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(creations) == 1, "Session must be created exactly once even under concurrent first access"
+    assert all(r is results[0] for r in results), "every caller must receive the identical Session object"
+
+
 def test_fetch_aborts_on_session_expired_even_if_some_files_in_chunk_succeeded(monkeypatch, tmp_path):
     """REGRESSION (2026-08-16). A cookie can expire MID-CHUNK, so `ok` (the
     count of status==200) can be > 0 in the same chunk that also contains
