@@ -4,12 +4,7 @@ PhysioNet WITHOUT ever storing the full ~570 GB (JPG) / 4.7 TB (DICOM) source.
 
 Strategy: download in small chunks -> downscale in flight -> delete the
 originals. Peak disk stays ~4 GB regardless of how many studies are built.
-See H100_SCALING_PLAN.md Phase 8 for the full design discussion, including
-five corrections made to an earlier draft of this script (recorded there,
-not repeated here): the --cut-dirs off-by-one, wget --base unreliability,
--N vs -c, silently-swallowed 401s, and .netrc-over-HTTPS portability. This
-version sidesteps all five by using `requests` (auto-reads ~/.netrc, no
-subprocess, no shell-quoting of credentials) instead of wget/curl.
+See H100_SCALING_PLAN.md Phase 8 for the full design discussion.
 
 Emits, under --out:
     files/p10/p10000032/s50414267.jpg      # one frontal image per study, WxW
@@ -29,17 +24,29 @@ PREREQUISITES
 1. PhysioNet credentialing + signed DUA for BOTH:
      https://physionet.org/content/mimic-cxr/2.1.0/       (reports, 135 MB)
      https://physionet.org/content/mimic-cxr-jpg/2.1.0/   (images + split + metadata)
-2. ~/.netrc on the box that will run `fetch`, chmod 600:
-     machine physionet.org
-     login YOUR_USERNAME
-     password YOUR_PASSWORD
-   `requests` reads this automatically (Session.trust_env, no auth= passed) --
-   the password never appears in argv, in a script, or in a SLURM log.
-3. Outbound HTTPS from wherever `meta`/`fetch` run. Compute nodes on aisc run
-   fully offline (HF_DATASETS_OFFLINE=1 HF_HUB_OFFLINE=1 everywhere else in
-   this repo) -- verify which host can both reach physionet.org AND hold a
-   multi-hour process before committing to a full run (H100_SCALING_PLAN.md
-   Phase 7E).
+2. A session cookie in ~/.physionet_session, chmod 600, containing ONLY the
+   'sessionid' cookie value (no other structure -- unlike .netrc).
+
+   WHY NOT .netrc / HTTP Basic Auth: verified live 2026-08-16 that PhysioNet's
+   Django deployment does NOT honour HTTP Basic Auth for this project --
+   `curl -u user https://physionet.org/settings/profile/` returns 302 to
+   /login/ regardless of credential correctness, and the same account's
+   Authorization header against a /files/ URL returns 403, while the
+   identical URL with a valid session cookie returns 200. The
+   `wget --user --ask-password` recipe printed on PhysioNet project pages is
+   stale for this deployment. Get the cookie value from a logged-in browser
+   (dev tools -> Application/Storage -> Cookies -> physionet.org ->
+   'sessionid'), then on the machine that will run `meta`/`fetch`:
+     umask 077; printf '%s' 'SESSIONID_VALUE' > ~/.physionet_session
+     chmod 600 ~/.physionet_session
+   Treat this file with the same care as a password -- anyone holding a live
+   session cookie can act as you on physionet.org until it expires or you
+   log out. Refresh it (repeat the steps above) if a run reports the cookie
+   has expired.
+3. Outbound HTTPS from wherever `meta`/`fetch` run. On this project's
+   cluster (aisc), the login node refuses to execute anything at all --
+   route through scripts/build_mimic_cxr_local.sh (STAGE=... sbatch ...),
+   which targets the general cpu-batch/cpu-interactive partitions.
 
 USAGE
 -----
@@ -105,20 +112,44 @@ SMALL_FILES = [
 
 _session = None  # type: Optional[requests.Session]
 
+SESSION_EXPIRED = 498  # local sentinel (not a real HTTP status) -- see _download()
+
 
 def _get_session() -> requests.Session:
-    """Lazy singleton. `requests` auto-reads ~/.netrc when no auth= is passed
-    and Session.trust_env is True (the default) -- the password never touches
-    argv, a subprocess, or a log line."""
+    """PhysioNet's Django app does NOT honour HTTP Basic Auth (verified live,
+    2026-08-16: `curl -u user https://physionet.org/settings/profile/`
+    returns 302 to /login/ regardless of credentials, and the same account's
+    Authorization header against a /files/ URL returns 403, while the
+    identical URL with a valid session cookie returns 200). The
+    `wget --user --ask-password` recipe printed on PhysioNet project pages is
+    stale for this deployment. Session-cookie auth (~/.physionet_session) is
+    the working path -- see the module docstring's PREREQUISITES. A leftover
+    ~/.netrc for physionet.org is simply unused now, not actively read.
+    """
     global _session
     if _session is None:
+        cookie_file = Path.home() / ".physionet_session"
+        if not cookie_file.exists():
+            raise RuntimeError(
+                "[auth] {} not found. PhysioNet does not accept HTTP Basic "
+                "Auth for this project -- log in at physionet.org in a "
+                "browser, copy the 'sessionid' cookie value (dev tools -> "
+                "Application/Storage -> Cookies -> physionet.org), then on "
+                "this machine: umask 077; printf '%s' 'SESSIONID_VALUE' > "
+                "{}; chmod 600 {}".format(cookie_file, cookie_file, cookie_file)
+            )
+        sid = cookie_file.read_text().strip()
         _session = requests.Session()
+        _session.cookies.set("sessionid", sid, domain="physionet.org")
+        print("[auth] session cookie loaded from {} ({} chars)".format(cookie_file, len(sid)))
     return _session
 
 
 def _download(url: str, dest: Path, timeout: int = 60, retries: int = 3) -> int:
-    """Returns the HTTP status code (or -1 on a connection-level failure
-    after all retries). Streams to avoid holding large files in memory."""
+    """Returns the HTTP status code, SESSION_EXPIRED (498, a local sentinel
+    meaning "this looked like a 200 but was actually a login page"), or -1
+    on a connection-level failure after all retries. Streams to avoid
+    holding large files in memory."""
     sess = _get_session()
     last_status = -1
     for attempt in range(retries):
@@ -126,6 +157,17 @@ def _download(url: str, dest: Path, timeout: int = 60, retries: int = 3) -> int:
             resp = sess.get(url, timeout=timeout, stream=True)
             last_status = resp.status_code
             if resp.status_code == 200:
+                # A session cookie can expire mid-run. PhysioNet then 302s to
+                # /login/, and requests follows redirects by default -- so
+                # this arrives as an ordinary 200 with an HTML login page as
+                # the body. Check BEFORE streaming any bytes to disk, or a
+                # dead cookie silently writes login pages into .jpg/.csv.gz
+                # files, and the resume check (Path.exists()) would then
+                # skip them forever on every subsequent run.
+                ctype = resp.headers.get("Content-Type", "")
+                if "text/html" in ctype or "/login" in resp.url:
+                    resp.close()
+                    return SESSION_EXPIRED
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 with open(dest, "wb") as f:
                     for chunk in resp.iter_content(chunk_size=1 << 20):
@@ -162,12 +204,17 @@ def stage_meta(out: Path) -> None:
         if status != 200:
             if dest.exists():
                 dest.unlink()
-            raise RuntimeError(
-                "[meta] {} -> HTTP {}. Check ~/.netrc (chmod 600, correct "
-                "PhysioNet username/password) and that both the mimic-cxr "
-                "AND mimic-cxr-jpg DUAs are signed on this account.".format(
-                    name, status
+            if status == SESSION_EXPIRED:
+                raise RuntimeError(
+                    "[meta] {} -> PhysioNet redirected to /login/ (session "
+                    "cookie missing, expired, or wrong). Refresh "
+                    "~/.physionet_session with a current 'sessionid' cookie "
+                    "value from a logged-in browser session.".format(name)
                 )
+            raise RuntimeError(
+                "[meta] {} -> HTTP {}. Verify the mimic-cxr-jpg DUA is "
+                "signed on this account and ~/.physionet_session holds a "
+                "valid, current session cookie.".format(name, status)
             )
 
     rep_dir = out / "reports"
@@ -357,15 +404,37 @@ def stage_fetch(out: Path, size: int, chunk: int, workers: int, limit: int) -> N
                 if status == 200:
                     staged_srcs.append((str(stage / rel_jpg), rel_jpg))
 
+        # A cookie can expire MID-CHUNK: some files in this same chunk may
+        # have succeeded before it did. That means `ok` can be > 0 even when
+        # SESSION_EXPIRED also appears, so this check must be unconditional
+        # and come before the ok==0 check below, not folded into it.
+        expired = statuses.get(SESSION_EXPIRED, 0)
+        if expired > 0:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise RuntimeError(
+                "[fetch] chunk at row {} hit {} session-expired responses "
+                "(of {} files) -- PhysioNet redirected to /login/ mid-chunk. "
+                "STOP-EVERYTHING condition, not a per-file one: files "
+                "converted in earlier chunks are safe (this run is "
+                "resumable), but continuing past this risks writing HTML "
+                "login pages in as image files. Refresh "
+                "~/.physionet_session with a fresh 'sessionid' cookie and "
+                "resubmit -- it picks up where it stopped.".format(
+                    start, expired, len(part)
+                )
+            )
+
         ok = statuses.get(200, 0)
         if ok == 0 and len(part) > 0:
             shutil.rmtree(stage, ignore_errors=True)
             raise RuntimeError(
                 "[fetch] chunk at row {} converted 0 of {} images. Status "
-                "histogram: {}. A blanket 401/403 means ~/.netrc is missing, "
-                "wrong, or the mimic-cxr-jpg DUA is not signed on this "
-                "account -- fix that before rerunning (the run is resumable; "
-                "nothing before this chunk was lost).".format(start, len(part), statuses)
+                "histogram: {}. Verify ~/.physionet_session is present and "
+                "current, and that the mimic-cxr-jpg DUA is signed on this "
+                "account -- fix that before rerunning (the run is "
+                "resumable; nothing before this chunk was lost).".format(
+                    start, len(part), statuses
+                )
             )
         if statuses.get(401, 0) + statuses.get(403, 0) > 0:
             print(

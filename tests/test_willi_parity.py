@@ -2357,6 +2357,121 @@ def _load_build_script():
     return mod
 
 
+def test_get_session_requires_physionet_session_cookie_file(tmp_path):
+    """REGRESSION (2026-08-16). PhysioNet's Django deployment does NOT honour
+    HTTP Basic Auth for this project — verified live: `curl -u user
+    https://physionet.org/settings/profile/` returns 302 to /login/
+    regardless of credential correctness, while the identical /files/ URL
+    with a valid session cookie returns 200. _get_session() must therefore
+    require ~/.physionet_session and fail LOUDLY (not silently fall back to
+    a ~/.netrc Basic Auth path that is known not to work) when it is absent.
+    """
+    mod = _load_build_script()
+    orig_home = mod.Path.home
+    mod.Path.home = staticmethod(lambda: tmp_path)  # empty dir, no cookie file
+    mod._session = None
+    try:
+        with pytest.raises(RuntimeError, match="physionet_session"):
+            mod._get_session()
+    finally:
+        mod.Path.home = orig_home
+
+
+def test_download_detects_login_page_disguised_as_200_and_writes_nothing(tmp_path):
+    """REGRESSION (2026-08-16). A session cookie can expire mid-run. PhysioNet
+    then 302s to /login/, and `requests` follows redirects by default, so
+    this arrives as an ordinary 200 with an HTML login page as the body.
+    Without a guard, that body gets streamed straight into a .jpg/.csv.gz,
+    and the resume check (Path.exists()) then skips the corrupt file forever
+    on every subsequent run — a stop-everything bug discovered only when
+    training on garbage weeks later. _download() must detect this BEFORE
+    writing any bytes and never create the destination file.
+    """
+    mod = _load_build_script()
+
+    class _FakeLoginResp:
+        status_code = 200
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+        url = "https://physionet.org/login/?next=/files/foo"
+
+        def iter_content(self, chunk_size=None):
+            raise AssertionError("must not stream the body of a login-page response")
+
+        def close(self):
+            pass
+
+    class _FakeSession:
+        def get(self, url, timeout=None, stream=None):
+            return _FakeLoginResp()
+
+    mod._get_session = lambda: _FakeSession()
+    dest = tmp_path / "should_not_exist.jpg"
+    status = mod._download("https://physionet.org/files/foo", dest)
+    assert status == mod.SESSION_EXPIRED
+    assert not dest.exists()
+
+
+def test_download_still_writes_file_for_a_genuine_200(tmp_path):
+    """Companion to the SESSION_EXPIRED regression test above — the
+    login-page guard must not false-positive on a real, successful download
+    (e.g. Content-Type: application/gzip, no /login in the final URL)."""
+    mod = _load_build_script()
+
+    class _FakeOkResp:
+        status_code = 200
+        headers = {"Content-Type": "application/gzip"}
+        url = "https://physionet.org/files/foo"
+
+        def iter_content(self, chunk_size=None):
+            yield b"hello world"
+
+        def close(self):
+            pass
+
+    class _FakeSession:
+        def get(self, url, timeout=None, stream=None):
+            return _FakeOkResp()
+
+    mod._get_session = lambda: _FakeSession()
+    dest = tmp_path / "should_exist.gz"
+    status = mod._download("https://physionet.org/files/foo", dest)
+    assert status == 200
+    assert dest.read_bytes() == b"hello world"
+
+
+def test_fetch_aborts_on_session_expired_even_if_some_files_in_chunk_succeeded(monkeypatch, tmp_path):
+    """REGRESSION (2026-08-16). A cookie can expire MID-CHUNK, so `ok` (the
+    count of status==200) can be > 0 in the same chunk that also contains
+    SESSION_EXPIRED entries — the ok==0 abort guard alone would NOT catch
+    this. The SESSION_EXPIRED check in stage_fetch must be unconditional,
+    not folded into (or ordered after) the ok==0 check.
+    """
+    import pandas as pd
+
+    mod = _load_build_script()
+
+    out = tmp_path
+    manifest = pd.DataFrame({
+        "has_text": [True, True],
+        "local_jpg": [str(out / "a.jpg"), str(out / "b.jpg")],
+        "rel_jpg": ["files/a.jpg", "files/b.jpg"],
+    })
+    manifest.to_parquet(out / "manifest.parquet", index=False)
+
+    # First file "succeeds" (200), second is a login-page (SESSION_EXPIRED) —
+    # simulates the cookie expiring between the two downloads.
+    call_count = {"n": 0}
+
+    def fake_download(url, dest, timeout=60, retries=3):
+        call_count["n"] += 1
+        return 200 if call_count["n"] == 1 else mod.SESSION_EXPIRED
+
+    monkeypatch.setattr(mod, "_download", fake_download)
+
+    with pytest.raises(RuntimeError, match="session-expired"):
+        mod.stage_fetch(out, size=320, chunk=2000, workers=1, limit=0)
+
+
 def test_build_script_hash_matches_repo_leakage_join_convention():
     """The Phase 8D leakage guard joins build_mimic_cxr_local.py's report_hash
     against a dump of the legacy gallery's hashes (dump_legacy_gallery_hashes.py).

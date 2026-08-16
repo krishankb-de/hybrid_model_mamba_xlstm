@@ -115,3 +115,5 @@ mimic-cxr-reports.zip
 mimic-cxr-2.0.0-*.csv.gz
 IMAGE_FILENAMES
 legacy_gallery_hashes.txt
+.physionet_session
+*.physionet_session
