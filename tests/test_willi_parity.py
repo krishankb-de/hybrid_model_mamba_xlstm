@@ -2529,6 +2529,54 @@ def test_get_session_is_thread_safe_and_created_exactly_once(tmp_path):
     assert all(r is results[0] for r in results), "every caller must receive the identical Session object"
 
 
+def test_pack_study_hashes_filter_and_out_prefix(tmp_path):
+    """Phase 9A: pack --study-hashes packs only a hash-matched subset (e.g.
+    Arm-0's training set) out of whatever has actually been downloaded so
+    far in the SHARED mimic_full tree -- --study-hashes on fetch and pack
+    exist because copying manifest.parquet into a separate --out does NOT
+    isolate anything (local_jpg paths are baked in absolute at manifest-
+    generation time, found live 2026-08-17). --out-prefix keeps this from
+    clobbering the eventual production train/validate/test.parquet when
+    packing from the same --out directory.
+    """
+    import pandas as pd
+    from PIL import Image
+
+    mod = _load_build_script()
+    out = tmp_path
+
+    # Two rows match the hash filter; only one has actually been downloaded
+    # (local_jpg exists) -- pack's existing local_jpg.exists() filter runs
+    # BEFORE the hash filter, so only that one must survive.
+    img_a = out / "a.jpg"
+    Image.new("L", (10, 10)).save(img_a, "JPEG")
+    manifest = pd.DataFrame({
+        "has_text": [True, True, True],
+        "local_jpg": [str(img_a), str(out / "b_not_downloaded.jpg"), str(out / "c.jpg")],
+        "findings": ["f1", "f2", "f3"],
+        "impression": ["i1", "i2", "i3"],
+        "study_id": [1, 2, 3],
+        "subject_id": [10, 20, 30],
+        "dicom_id": ["d1", "d2", "d3"],
+        "ViewPosition": ["PA", "PA", "PA"],
+        "report_hash": ["hash_a", "hash_b", "hash_c"],
+        "split": ["train", "train", "test"],
+    })
+    manifest.to_parquet(out / "manifest.parquet", index=False)
+
+    hashes_file = out / "wanted.txt"
+    hashes_file.write_text("hash_a\nhash_b\n")  # b matches but was never downloaded
+
+    mod.stage_pack(out, exclude_hashes="", min_match_frac=0.95, allow_low_match=False,
+                    study_hashes=str(hashes_file), out_prefix="arm0_")
+
+    assert (out / "arm0_train.parquet").exists()
+    assert not (out / "train.parquet").exists(), "must not touch the production filename"
+    packed = pd.read_parquet(out / "arm0_train.parquet")
+    assert len(packed) == 1
+    assert packed.iloc[0]["study_id"] == 1
+
+
 def test_fetch_study_hashes_filter_restricts_to_matching_subset(monkeypatch, tmp_path):
     """Phase 9A: --study-hashes lets `fetch` target only a hash-matched
     subset of the manifest (e.g. the historical Arm-0 reproduction set),

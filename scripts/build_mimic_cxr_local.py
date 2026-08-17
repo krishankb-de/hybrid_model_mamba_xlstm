@@ -559,11 +559,31 @@ def stage_fetch(out: Path, size: int, chunk: int, workers: int, limit: int,
 # --------------------------------------------------------------------------- #
 # stage: pack
 # --------------------------------------------------------------------------- #
-def stage_pack(out: Path, exclude_hashes: str, min_match_frac: float, allow_low_match: bool) -> None:
+def stage_pack(out: Path, exclude_hashes: str, min_match_frac: float, allow_low_match: bool,
+               study_hashes: Optional[str] = None, out_prefix: str = "") -> None:
     df = pd.read_parquet(out / "manifest.parquet")
     df = df[df["has_text"]]
     df = df[df["local_jpg"].map(lambda p: Path(p).exists())]
     print("[pack] {} rows with both text and a fetched image".format(len(df)))
+
+    if study_hashes:
+        # Phase 9A: pack only a hash-matched subset (e.g. the Arm-0
+        # reproduction set), for training on the shared mimic_full tree
+        # without waiting for the full corpus to finish downloading.
+        # ROW-LEVEL match on purpose, NOT subject-level expansion like the
+        # leakage guard below -- Arm-0 wants to reproduce training on (as
+        # close as possible to) the SAME set of studies, not add every other
+        # study from any subject with a matching report.
+        wanted = {h.strip() for h in Path(study_hashes).read_text().split() if h.strip()}
+        before = len(df)
+        df = df[df["report_hash"].isin(wanted)]
+        print(
+            "[pack] --study-hashes filter: {} of {} downloaded-so-far rows matched "
+            "({} hashes requested). Partial fetch progress is fine here -- pack "
+            "already only includes rows with local_jpg present.".format(
+                len(df), before, len(wanted)
+            )
+        )
 
     # Phase 8D leakage guard: subject-level exclusion, hash-joined against the
     # legacy eval gallery (evaluate_cxr_retrieval.py's train[90%:] N=3063).
@@ -609,7 +629,10 @@ def stage_pack(out: Path, exclude_hashes: str, min_match_frac: float, allow_low_
     split_file = {"train": "train", "validate": "validate", "test": "test"}
     for name, fname in split_file.items():
         part = df[df["split"] == name].reset_index(drop=True)
-        part.to_parquet(out / "{}.parquet".format(fname), index=False)
+        # out_prefix avoids clobbering the main production pack's train/
+        # validate/test.parquet when this is a --study-hashes subset pack
+        # sharing the same OUT directory (e.g. "arm0_" -> arm0_train.parquet).
+        part.to_parquet(out / "{}{}.parquet".format(out_prefix, fname), index=False)
         print(
             "[pack] {:9s} {:>7d} pairs  ({} subjects)".format(
                 name, len(part), part["subject_id"].nunique()
@@ -640,6 +663,11 @@ def main() -> None:
                      help="pack: minimum leakage-guard hash-match rate before failing")
     ap.add_argument("--allow-low-match", action="store_true",
                      help="pack: proceed even if --min-match-frac is not met (see error message)")
+    ap.add_argument("--out-prefix", default="",
+                     help="pack: filename prefix for the output parquet files "
+                          "(e.g. 'arm0_' -> arm0_train.parquet), so a --study-hashes "
+                          "subset pack does not clobber the main train/validate/test.parquet "
+                          "when sharing the same --out directory")
     a = ap.parse_args()
 
     if a.stage == "meta":
@@ -649,7 +677,8 @@ def main() -> None:
     elif a.stage == "fetch":
         stage_fetch(a.out, a.size, a.chunk, a.workers, a.limit, a.study_hashes or None)
     else:
-        stage_pack(a.out, a.exclude_hashes, a.min_match_frac, a.allow_low_match)
+        stage_pack(a.out, a.exclude_hashes, a.min_match_frac, a.allow_low_match,
+                   a.study_hashes or None, a.out_prefix)
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@
 #
 # ENV: STAGE (meta|manifest|fetch|pack, required), OUT (build dir, required),
 #      SIZE, VIEWS, CHUNK, WORKERS, LIMIT, STUDY_HASHES, EXCLUDE_HASHES,
-#      MIN_MATCH_FRAC, SCRATCH_ROOT, VENV_ACTIVATE.
+#      MIN_MATCH_FRAC, OUT_PREFIX, SCRATCH_ROOT, VENV_ACTIVATE.
 #
 # Usage:
 #   STAGE=meta     OUT=/sc/home/$USER/dataset/mimic_full sbatch scripts/build_mimic_cxr_local.sh
@@ -39,9 +39,17 @@
 #   STAGE=fetch    OUT=/sc/home/$USER/dataset/mimic_full sbatch scripts/build_mimic_cxr_local.sh             # the long one; resumable, just resubmit
 #   STAGE=pack     OUT=/sc/home/$USER/dataset/mimic_full EXCLUDE_HASHES=legacy_gallery_hashes.txt sbatch scripts/build_mimic_cxr_local.sh
 #
-#   # Phase 9A Arm-0 early validation subset (separate OUT dir, see
-#   # scripts/dump_legacy_hashes.sh for producing STUDY_HASHES first):
-#   STAGE=fetch OUT=/sc/home/$USER/dataset/mimic_arm0_subset STUDY_HASHES=legacy_training_hashes.txt sbatch scripts/build_mimic_cxr_local.sh
+#   # Phase 9A Arm-0 early validation subset. IMPORTANT (found live 2026-08-17):
+#   # `manifest.parquet`'s local_jpg paths are baked in absolute at manifest-
+#   # generation time -- copying the file to a *different* --out does NOT
+#   # relocate them, so fetch/pack there would silently read/write into the
+#   # ORIGINAL out's files/ tree instead. Use the SAME --out as the main
+#   # build for both of these -- STUDY_HASHES prioritises which images fetch
+#   # downloads first within the one shared tree, and OUT_PREFIX keeps pack's
+#   # output from clobbering the eventual production train/validate/test.parquet:
+#   sbatch scripts/dump_legacy_hashes.sh   # produces legacy_training_hashes.txt
+#   STAGE=fetch OUT=/sc/home/$USER/dataset/mimic_full STUDY_HASHES=legacy_training_hashes.txt sbatch scripts/build_mimic_cxr_local.sh
+#   STAGE=pack  OUT=/sc/home/$USER/dataset/mimic_full STUDY_HASHES=legacy_training_hashes.txt OUT_PREFIX=arm0_ sbatch scripts/build_mimic_cxr_local.sh
 #
 # This cluster requires an explicit Slurm account (confirmed live, 2026-08-16:
 # sbatch refuses with "No Slurm account specified" otherwise). Two prior
@@ -98,6 +106,7 @@ LIMIT="${LIMIT:-0}"
 STUDY_HASHES="${STUDY_HASHES:-}"
 EXCLUDE_HASHES="${EXCLUDE_HASHES:-}"
 MIN_MATCH_FRAC="${MIN_MATCH_FRAC:-0.95}"
+OUT_PREFIX="${OUT_PREFIX:-}"
 
 echo "=== MIMIC-CXR-JPG local build (STAGE=${STAGE}) ==="
 date; hostname
@@ -125,7 +134,9 @@ case "${STAGE}" in
     ;;
   pack)
     python scripts/build_mimic_cxr_local.py pack --out "${OUT}" \
-      $( [ -n "${EXCLUDE_HASHES}" ] && echo "--exclude-hashes ${EXCLUDE_HASHES} --min-match-frac ${MIN_MATCH_FRAC}" )
+      $( [ -n "${EXCLUDE_HASHES}" ] && echo "--exclude-hashes ${EXCLUDE_HASHES} --min-match-frac ${MIN_MATCH_FRAC}" ) \
+      $( [ -n "${STUDY_HASHES}" ] && echo "--study-hashes ${STUDY_HASHES}" ) \
+      $( [ -n "${OUT_PREFIX}" ] && echo "--out-prefix ${OUT_PREFIX}" )
     ;;
   *)
     echo "ERROR: unknown STAGE='${STAGE}' (expected meta|manifest|fetch|pack)"; exit 1
