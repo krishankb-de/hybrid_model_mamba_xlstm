@@ -28,8 +28,8 @@
 # only if the helpdesk says it's fine to.
 #
 # ENV: STAGE (meta|manifest|fetch|pack, required), OUT (build dir, required),
-#      SIZE, VIEWS, CHUNK, WORKERS, LIMIT, EXCLUDE_HASHES, MIN_MATCH_FRAC,
-#      SCRATCH_ROOT, VENV_ACTIVATE.
+#      SIZE, VIEWS, CHUNK, WORKERS, LIMIT, STUDY_HASHES, EXCLUDE_HASHES,
+#      MIN_MATCH_FRAC, SCRATCH_ROOT, VENV_ACTIVATE.
 #
 # Usage:
 #   STAGE=meta     OUT=/sc/home/$USER/dataset/mimic_full sbatch scripts/build_mimic_cxr_local.sh
@@ -38,6 +38,10 @@
 #   STAGE=fetch    OUT=/sc/home/$USER/dataset/mimic_full LIMIT=500 sbatch scripts/build_mimic_cxr_local.sh   # smoke
 #   STAGE=fetch    OUT=/sc/home/$USER/dataset/mimic_full sbatch scripts/build_mimic_cxr_local.sh             # the long one; resumable, just resubmit
 #   STAGE=pack     OUT=/sc/home/$USER/dataset/mimic_full EXCLUDE_HASHES=legacy_gallery_hashes.txt sbatch scripts/build_mimic_cxr_local.sh
+#
+#   # Phase 9A Arm-0 early validation subset (separate OUT dir, see
+#   # scripts/dump_legacy_hashes.sh for producing STUDY_HASHES first):
+#   STAGE=fetch OUT=/sc/home/$USER/dataset/mimic_arm0_subset STUDY_HASHES=legacy_training_hashes.txt sbatch scripts/build_mimic_cxr_local.sh
 #
 # This cluster requires an explicit Slurm account (confirmed live, 2026-08-16:
 # sbatch refuses with "No Slurm account specified" otherwise). Two prior
@@ -91,6 +95,7 @@ VIEWS="${VIEWS:-PA AP}"
 CHUNK="${CHUNK:-2000}"
 WORKERS="${WORKERS:-8}"
 LIMIT="${LIMIT:-0}"
+STUDY_HASHES="${STUDY_HASHES:-}"
 EXCLUDE_HASHES="${EXCLUDE_HASHES:-}"
 MIN_MATCH_FRAC="${MIN_MATCH_FRAC:-0.95}"
 
@@ -115,7 +120,8 @@ case "${STAGE}" in
   fetch)
     python scripts/build_mimic_cxr_local.py fetch --out "${OUT}" \
       --size "${SIZE}" --chunk "${CHUNK}" --workers "${WORKERS}" \
-      $( [ "${LIMIT}" != "0" ] && echo "--limit ${LIMIT}" )
+      $( [ "${LIMIT}" != "0" ] && echo "--limit ${LIMIT}" ) \
+      $( [ -n "${STUDY_HASHES}" ] && echo "--study-hashes ${STUDY_HASHES}" )
     ;;
   pack)
     python scripts/build_mimic_cxr_local.py pack --out "${OUT}" \

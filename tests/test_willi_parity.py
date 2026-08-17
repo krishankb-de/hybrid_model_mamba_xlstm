@@ -2529,6 +2529,51 @@ def test_get_session_is_thread_safe_and_created_exactly_once(tmp_path):
     assert all(r is results[0] for r in results), "every caller must receive the identical Session object"
 
 
+def test_fetch_study_hashes_filter_restricts_to_matching_subset(monkeypatch, tmp_path):
+    """Phase 9A: --study-hashes lets `fetch` target only a hash-matched
+    subset of the manifest (e.g. the historical Arm-0 reproduction set),
+    reusing all existing chunking/resume/atomic-write/session-expiry logic
+    rather than a parallel code path. Verify the filter actually restricts
+    which rows get attempted, not just that it accepts the argument.
+    """
+    import pandas as pd
+
+    mod = _load_build_script()
+
+    out = tmp_path
+    manifest = pd.DataFrame({
+        "has_text": [True, True, True],
+        "local_jpg": [str(out / "a.jpg"), str(out / "b.jpg"), str(out / "c.jpg")],
+        "rel_jpg": ["files/a.jpg", "files/b.jpg", "files/c.jpg"],
+        "report_hash": ["hash_a", "hash_b", "hash_c"],
+    })
+    manifest.to_parquet(out / "manifest.parquet", index=False)
+
+    hashes_file = out / "wanted.txt"
+    # Includes a hash that matches nothing, on purpose -- must not error.
+    hashes_file.write_text("hash_b\nhash_c\nhash_does_not_exist\n")
+
+    attempted = []
+
+    def fake_download(url, dest, timeout=60, retries=3):
+        attempted.append(url)
+        return 404  # any non-200: records the attempt without reaching the
+        # ProcessPoolExecutor resize step, which a dynamically-loaded test
+        # module can't pickle across a spawned worker process (a test-
+        # harness limitation, not a real one -- production runs load the
+        # script normally and resize correctly, see the other fetch tests).
+
+    monkeypatch.setattr(mod, "_download", fake_download)
+    with pytest.raises(RuntimeError, match="converted 0 of"):
+        mod.stage_fetch(out, size=320, chunk=2000, workers=1, limit=0,
+                         study_hashes=str(hashes_file))
+
+    assert len(attempted) == 2, "only the 2 matching rows (b, c) should be attempted"
+    assert any("b.jpg" in u for u in attempted)
+    assert any("c.jpg" in u for u in attempted)
+    assert not any("/a.jpg" in u for u in attempted)
+
+
 def test_fetch_aborts_on_session_expired_even_if_some_files_in_chunk_succeeded(monkeypatch, tmp_path):
     """REGRESSION (2026-08-16). A cookie can expire MID-CHUNK, so `ok` (the
     count of status==200) can be > 0 in the same chunk that also contains

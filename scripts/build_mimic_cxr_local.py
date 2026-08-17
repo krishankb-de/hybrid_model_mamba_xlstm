@@ -428,9 +428,31 @@ def _resize_one(args: Tuple[str, str, int]) -> bool:
         return False
 
 
-def stage_fetch(out: Path, size: int, chunk: int, workers: int, limit: int) -> None:
+def stage_fetch(out: Path, size: int, chunk: int, workers: int, limit: int,
+                 study_hashes: Optional[str] = None) -> None:
     df = pd.read_parquet(out / "manifest.parquet")
     df = df[df["has_text"]]
+    if study_hashes:
+        # Phase 9A: restrict this fetch to a hash-matched subset of the
+        # manifest -- e.g. the historical Arm-0 reproduction set (the same
+        # ~27.5k studies the original Phase 6 experiments trained on),
+        # identified via dump_legacy_gallery_hashes.py --split "train[:90%]"
+        # against the LEGACY mirror. This lets that subset be downloaded and
+        # validated in hours, run separately from (and without touching) a
+        # main sequential `fetch` of the full corpus, which would otherwise
+        # scatter those specific studies across nearly all ~110 chunks and
+        # make the reproduction check unavailable until the run is nearly
+        # done -- defeating the point of a cheap early sanity check.
+        wanted = {h.strip() for h in Path(study_hashes).read_text().split() if h.strip()}
+        before = len(df)
+        df = df[df["report_hash"].isin(wanted)]
+        print(
+            "[fetch] --study-hashes filter: {} of {} manifest rows matched "
+            "({} hashes requested). Under-matching is expected -- the "
+            "legacy mirror's report text may not exactly match this "
+            "pipeline's parser output; see Phase 8D's leakage-guard notes "
+            "for the same caveat.".format(len(df), before, len(wanted))
+        )
     if limit:
         df = df.head(limit)
 
@@ -609,6 +631,9 @@ def main() -> None:
     ap.add_argument("--chunk", type=int, default=2000, help="images per download/resize batch")
     ap.add_argument("--workers", type=int, default=8, help="download threads / resize processes")
     ap.add_argument("--limit", type=int, default=0, help="smoke-test cap")
+    ap.add_argument("--study-hashes", default="",
+                     help="fetch: file of report_hash values to restrict this run to "
+                          "(e.g. Phase 9A Arm-0 reproduction subset)")
     ap.add_argument("--exclude-hashes", default="",
                      help="pack: file of report_hash values whose subjects to drop")
     ap.add_argument("--min-match-frac", type=float, default=0.95,
@@ -622,7 +647,7 @@ def main() -> None:
     elif a.stage == "manifest":
         stage_manifest(a.out, a.views, a.size, a.limit)
     elif a.stage == "fetch":
-        stage_fetch(a.out, a.size, a.chunk, a.workers, a.limit)
+        stage_fetch(a.out, a.size, a.chunk, a.workers, a.limit, a.study_hashes or None)
     else:
         stage_pack(a.out, a.exclude_hashes, a.min_match_frac, a.allow_low_match)
 
