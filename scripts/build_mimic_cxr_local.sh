@@ -84,6 +84,15 @@
 #SBATCH --partition=aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
+# ga03 is a DIFFERENT CPU ARCHITECTURE (ARM/Grace) than the gx-series x86 nodes
+# the .venv was built on. Confirmed live (job 2468301, 2026-08-19): a pack job
+# scheduled onto ga03 died instantly with ".venv/bin/python: cannot execute
+# binary file: Exec format error" -- an x86 Python binary cannot run on an ARM
+# CPU. It is already blacklisted in all three GPU scripts (eval_h100.sh,
+# train_biomedclip_kd_h100.sh, train_biomedclip_kd_150m_h100.sh); this wrapper
+# just never carried the same line. Nothing was corrupted -- the job faulted
+# before importing anything. Re-run after adding this landed clean on gx17v1.
+#SBATCH --exclude=ga03
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=6-12:00:00
