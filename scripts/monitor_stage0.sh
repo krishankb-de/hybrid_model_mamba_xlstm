@@ -10,6 +10,7 @@
 #   cat logs/monitor_stage0_<jobid>.log
 # ============================================================================
 #SBATCH --partition=aisc-batch
+#SBATCH --exclude=ga03   # ARM/Grace node; x86 .venv python -> "cannot execute binary file: Exec format error" (2026-08-19)
 #SBATCH --account=aisc
 #SBATCH --mem=8G
 #SBATCH --cpus-per-task=2

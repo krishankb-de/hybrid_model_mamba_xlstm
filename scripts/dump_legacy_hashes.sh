@@ -30,6 +30,7 @@
 #   # then: wc -l legacy_gallery_hashes.txt legacy_training_hashes.txt
 # ============================================================================
 #SBATCH --partition=aisc-batch
+#SBATCH --exclude=ga03   # ARM/Grace node; x86 .venv python -> "cannot execute binary file: Exec format error" (2026-08-19)
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
 #SBATCH --mem=8G
