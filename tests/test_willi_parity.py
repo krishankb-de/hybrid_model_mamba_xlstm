@@ -2747,6 +2747,37 @@ def test_cxr_mimic_full_config_present_and_consistent():
         assert key in full, "cxr_mimic_full.yaml missing schema key: {}".format(key)
 
 
+def test_cxr_mimic_arm0_config_is_full_pointed_at_arm0_symlink_dir():
+    """Phase 9A Arm-0 config (CLAUDE.md: new config file -> parity assertion).
+    cxr_mimic_arm0.yaml must be byte-for-byte identical to cxr_mimic_full.yaml
+    EXCEPT (a) dataset_name and (b) local_parquet_dir, which must point at an
+    'arm0' subdirectory. The loader hardcodes train/validate/test.parquet, so
+    that subdir is the symlink dir (arm0_train.parquet->train.parquet, ...) --
+    the only mechanism that selects the arm0_-prefixed pack output without a
+    code change. Any OTHER drift between the two would silently change the
+    Arm-0 recipe relative to the production build it is meant to control.
+    """
+    from omegaconf import OmegaConf
+
+    full = OmegaConf.load(REPO_ROOT / "configs" / "dataset" / "cxr_mimic_full.yaml")
+    arm0 = OmegaConf.load(REPO_ROOT / "configs" / "dataset" / "cxr_mimic_arm0.yaml")
+
+    assert arm0.get("dataset_name") == "cxr_mimic_arm0"
+    assert "local_parquet_dir" in arm0
+    # points at an arm0 subdir of whatever full's dir is (symlink dir for the
+    # arm0_-prefixed parquets), not the production tree itself.
+    assert str(arm0.local_parquet_dir).rstrip("/").endswith("/arm0")
+    assert str(arm0.local_parquet_dir).rstrip("/") == str(full.local_parquet_dir).rstrip("/") + "/arm0"
+
+    # Every OTHER key must match cxr_mimic_full exactly -- Arm-0 changes the
+    # data location, never the recipe/schema.
+    for key in full:
+        if key in ("dataset_name", "local_parquet_dir"):
+            continue
+        assert key in arm0, "cxr_mimic_arm0.yaml missing key present in full: {}".format(key)
+        assert arm0[key] == full[key], "cxr_mimic_arm0.yaml drifted from full at key: {}".format(key)
+
+
 def test_load_mimic_cxr_dispatches_to_local_parquet_when_configured():
     """load_mimic_cxr must call load_dataset("parquet", data_files=...) when
     dataset.local_parquet_dir is set, and must NOT touch the HF mirror path in
