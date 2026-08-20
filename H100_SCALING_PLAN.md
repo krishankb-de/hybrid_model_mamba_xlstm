@@ -4,8 +4,8 @@
 > **Builds on the COMPLETED `HYBRID_ARCH_REFACTOR_PLAN.md`** (broke the MIMIC ceiling 8.23%→10.45% i2t R@10). That plan is finished — historical reference only.
 > Full approved plan: `/Users/krish/.claude/plans/i-want-to-implement-twinkling-ullman.md`.
 >
-> **Current phase: Phase 7 — PhysioNet credentialing (BLOCKING, on the critical path).**
-> Phases 1/2/4/5/6/6B/6C/6D/6G are **COMPLETE and CLOSED**. Phase 3 deferred (its lever was measured non-binding).
+> **Current phase: Phase 10 — Image-conditioned report generator (on the 150M backbone).**
+> Phases 1/2/4/5/6/6B/6C/6D/6G/7/8 are **COMPLETE and CLOSED** (Phase 8's main `fetch`, job 2461245, still runs in the background — not blocking, needed later for Phase 12's production tables). Phase 3 deferred (its lever was measured non-binding). Phase 9 (full-data retrieval attribution: Arm 0/1/2) is **DEFERRED by user decision (2026-08-20)** — the `9A-smoke (150M)` pipeline-health run was accepted as sufficient in place of the strict 70M `0.1459` reproduction; 9A/9B/9C remain open but are not being pursued right now. See `h100_scaling_state.json` notes for the full rationale.
 
 ---
 
