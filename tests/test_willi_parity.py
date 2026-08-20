@@ -3144,3 +3144,100 @@ def test_image_prefix_mapper_output_shape_and_gradients():
         loss.backward()
         assert mapper.token_proj.weight.grad is not None, f"k={k}: no gradient for token_proj"
         assert torch.isfinite(mapper.token_proj.weight.grad).all(), f"k={k}: non-finite gradient"
+
+
+# ── 17. Phase 11A: report-generation metrics + decoding harness ───────────────
+
+@pytest.mark.willi_parity
+def test_rouge_l_score_known_value():
+    from scripts.evaluate_report_generation import rouge_l_score
+
+    hyp = "the cat sat on the mat".split()
+    ref = "the cat was on the mat".split()
+    # LCS = "the cat on the mat" (5 tokens) out of 6 in both -> p=r=5/6 -> F=5/6
+    score = rouge_l_score(hyp, ref)
+    assert abs(score - 5 / 6) < 1e-6, score
+
+    assert rouge_l_score([], ["a", "b"]) == 0.0
+    assert rouge_l_score(["a", "b"], []) == 0.0
+
+
+@pytest.mark.willi_parity
+def test_corpus_bleu_identical_and_disjoint():
+    from scripts.evaluate_report_generation import corpus_bleu
+
+    text = "the quick brown fox jumps over the lazy dog".split()
+    identical = corpus_bleu([text], [text], max_n=4)
+    assert abs(identical - 1.0) < 1e-6, identical
+
+    disjoint_hyp = ["zzz", "yyy", "xxx", "www"]
+    disjoint_ref = ["aaa", "bbb", "ccc", "ddd"]
+    disjoint = corpus_bleu([disjoint_hyp], [disjoint_ref], max_n=4)
+    assert disjoint == 0.0, disjoint
+
+
+@pytest.mark.willi_parity
+def test_meteor_score_corpus_returns_none_or_float():
+    from scripts.evaluate_report_generation import meteor_score_corpus
+
+    result = meteor_score_corpus(["the cat sat"], ["the cat sat"])
+    assert result is None or isinstance(result, float)
+
+
+@pytest.mark.willi_parity
+def test_greedy_decode_runs_and_returns_expected_shape():
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+    from hybrid_xmamba.models.prefix_mapper import ImagePrefixMapper
+    from scripts.evaluate_report_generation import greedy_decode
+
+    cfg = _tiny_cpu_config()
+    model = HybridLanguageModel(cfg)
+    model.eval()
+    mapper = ImagePrefixMapper(patch_dim=768, decoder_dim=cfg.dim, k=4)
+    mapper.eval()
+
+    prefix_embeds = mapper(torch.randn(1, 197, 768))
+    input_ids = torch.randint(0, 100, (1, 5))
+
+    out = greedy_decode(model, input_ids, prefix_embeds=prefix_embeds, max_new_tokens=6)
+    assert out.shape == (1, 11), out.shape
+    assert torch.isfinite(out.float()).all()
+
+
+@pytest.mark.willi_parity
+def test_beam_search_decode_requires_batch_size_one():
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+    from scripts.evaluate_report_generation import beam_search_decode
+
+    model = HybridLanguageModel(_tiny_cpu_config())
+    model.eval()
+    input_ids = torch.randint(0, 100, (2, 5))  # batch size 2 -> not supported
+
+    with pytest.raises(ValueError):
+        beam_search_decode(model, input_ids, beam_size=3, max_new_tokens=4)
+
+
+@pytest.mark.willi_parity
+def test_beam_search_decode_beam_size_one_matches_greedy():
+    """beam_size=1 must reduce to the same deterministic argmax path as
+    greedy_decode -- a correctness invariant for the new beam-search code
+    (model.generate() has no beam mode, so beam_search_decode is fresh logic
+    built directly on forward(inputs_embeds=...))."""
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+    from hybrid_xmamba.models.prefix_mapper import ImagePrefixMapper
+    from scripts.evaluate_report_generation import greedy_decode, beam_search_decode
+
+    cfg = _tiny_cpu_config()
+    model = HybridLanguageModel(cfg)
+    model.eval()
+    mapper = ImagePrefixMapper(patch_dim=768, decoder_dim=cfg.dim, k=4)
+    mapper.eval()
+
+    prefix_embeds = mapper(torch.randn(1, 197, 768))
+    input_ids = torch.randint(0, 100, (1, 5))
+
+    greedy_out = greedy_decode(model, input_ids, prefix_embeds=prefix_embeds, max_new_tokens=6)
+    beam_out = beam_search_decode(
+        model, input_ids, prefix_embeds=prefix_embeds, beam_size=1, max_new_tokens=6
+    )
+    assert torch.equal(greedy_out, beam_out), (greedy_out, beam_out)

@@ -58,3 +58,10 @@ requests>=2.31.0           # PhysioNet fetch — reads ~/.netrc automatically, n
                             # dep via huggingface_hub; pinned directly since we
                             # now import it in a shipped script)
 pyarrow>=14.0.0             # parquet read/write (also a transitive `datasets` dep)
+
+# Phase 11A (H100_SCALING_PLAN.md): report-generation eval metrics
+nltk>=3.8                  # METEOR only; ROUGE-L/BLEU are pure Python (no dep).
+                            # METEOR needs the wordnet corpus (nltk.download("wordnet")),
+                            # which requires internet -- compute nodes have none, so
+                            # evaluate_report_generation.py catches the missing-corpus
+                            # case and reports METEOR as skipped rather than failing.
