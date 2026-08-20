@@ -3241,3 +3241,153 @@ def test_beam_search_decode_beam_size_one_matches_greedy():
         model, input_ids, prefix_embeds=prefix_embeds, beam_size=1, max_new_tokens=6
     )
     assert torch.equal(greedy_out, beam_out), (greedy_out, beam_out)
+
+
+# ── 18. Phase 10E: ReportGenerationLightningModule ─────────────────────────────
+
+@pytest.mark.willi_parity
+def test_report_generation_step_produces_finite_loss_and_gradients():
+    """Training step must produce a finite loss with gradients flowing into
+    BOTH the prefix_mapper and the decoder backbone, using a precomputed
+    batch['patch_grid'] tensor -- no open_clip/BiomedCLIP weights needed
+    (image_encoder stays None; load_image_encoder() is never called)."""
+    from hybrid_xmamba.training.lightning_module import ReportGenerationLightningModule
+
+    cfg = _tiny_cpu_config()
+    mod = ReportGenerationLightningModule(
+        decoder_config=cfg,
+        image_patch_dim=768,
+        prefix_k=4,
+        decoder_lr=1e-5,
+        head_lr=3e-4,
+        weight_decay=0.01,
+        warmup_steps=2,
+        max_steps=10,
+        gradient_clip_val=0.5,
+    )
+    mod.train()
+
+    B, L = 3, 8
+    batch = {
+        "input_ids": torch.randint(0, 100, (B, L)),
+        "patch_grid": torch.randn(B, 197, 768),
+    }
+
+    loss = mod.training_step(batch, batch_idx=0)
+    assert torch.isfinite(loss), f"Loss not finite: {loss.item()}"
+
+    loss.backward()
+
+    for name, param in mod.prefix_mapper.named_parameters():
+        assert param.grad is not None, f"No grad for prefix_mapper.{name}"
+        assert torch.isfinite(param.grad).all(), f"Non-finite grad for prefix_mapper.{name}"
+
+    for name, param in mod.decoder.named_parameters():
+        if param.requires_grad:
+            assert param.grad is not None, f"No grad for decoder.{name}"
+            assert torch.isfinite(param.grad).all(), f"Non-finite grad for decoder.{name}"
+
+
+@pytest.mark.willi_parity
+def test_report_generation_prefix_masking_matches_manual_ignore_index_ce():
+    """Regression pin for the single assumption ReportGenerationLightningModule
+    relies on but never states explicitly in code: HybridLanguageModel.forward()
+    calls nn.CrossEntropyLoss() with NO ignore_index argument, so -100 at the
+    prefix label positions is excluded from the loss only because -100 is
+    PyTorch's documented default ignore_index. This reconstructs the loss
+    independently via F.cross_entropy(..., ignore_index=-100) over the exact
+    same logits/labels and asserts it matches _step()'s output -- if a future
+    edit ever adds an explicit ignore_index to hybrid_lm.py's loss (or changes
+    the shift convention), this test catches the mismatch."""
+    import torch.nn.functional as F
+    from hybrid_xmamba.training.lightning_module import ReportGenerationLightningModule
+
+    cfg = _tiny_cpu_config()
+    mod = ReportGenerationLightningModule(decoder_config=cfg, prefix_k=4)
+    mod.eval()
+
+    B, L = 2, 6
+    input_ids = torch.randint(0, 100, (B, L))
+    patch_grid = torch.randn(B, 197, 768)
+
+    with torch.no_grad():
+        step_loss = mod._step({"input_ids": input_ids, "patch_grid": patch_grid}, "val")
+
+        prefix_embeds = mod.prefix_mapper(patch_grid)
+        k = prefix_embeds.shape[1]
+        inputs_embeds = torch.cat([prefix_embeds, mod.decoder.embeddings(input_ids)], dim=1)
+        logits = mod.decoder(inputs_embeds=inputs_embeds, return_dict=True).logits
+
+        labels = torch.full((B, k + L), -100, dtype=input_ids.dtype)
+        labels[:, k:] = input_ids
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        manual_loss = F.cross_entropy(
+            shift_logits.view(-1, cfg.vocab_size), shift_labels.view(-1), ignore_index=-100,
+        )
+
+    assert torch.allclose(step_loss, manual_loss, atol=1e-5), (step_loss.item(), manual_loss.item())
+
+
+@pytest.mark.willi_parity
+def test_hybrid_150m_v2_rrg_config_matches_150m_v2_architecture():
+    """Phase 10E: hybrid_150m_v2_rrg.yaml must be architecturally IDENTICAL to
+    hybrid_150m_v2.yaml (checkpoint-loadable against a Stage-0/joint-trained
+    150M v2 backbone, per Phase 10D), plus the new image-prefix keys."""
+    import dataclasses
+    from omegaconf import OmegaConf
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+    from hybrid_xmamba.training.lightning_module import ReportGenerationLightningModule
+
+    raw = OmegaConf.to_container(
+        OmegaConf.load(REPO_ROOT / "configs" / "model" / "hybrid_150m_v2_rrg.yaml"),
+        resolve=True,
+    )
+    assert raw["dim"] == 768 and raw["num_layers"] == 12
+    assert raw["norm_topology"] == "hybrid"
+    assert raw["max_position_embeddings"] == 1024
+    assert list(raw["layer_pattern"]).count("mlstm") == 3
+
+    # New Phase 10 keys
+    assert raw["image_patch_dim"] == 768, "BiomedCLIP ViT-B/16 patch dim"
+    assert raw["prefix_k"] > 0
+    assert raw["gradient_clip_val"] == 0.5, "150M is spike-fragile — must not silently drift to 1.0"
+
+    fields = {f.name for f in dataclasses.fields(HybridConfig)}
+    decoder_cfg = HybridConfig(**{k: v for k, v in raw.items() if k in fields})
+    decoder = HybridLanguageModel(decoder_cfg)
+    n_params = sum(p.numel() for p in decoder.parameters())
+    assert 181e6 < n_params < 186e6, (
+        f"hybrid_150m_v2_rrg decoder param count {n_params/1e6:.2f}M outside [181, 186]M "
+        f"— should match hybrid_150m_v2.yaml exactly"
+    )
+
+    # Config values must actually wire into the Lightning module without error.
+    module = ReportGenerationLightningModule(
+        decoder_config=decoder_cfg,
+        image_patch_dim=raw["image_patch_dim"],
+        prefix_k=raw["prefix_k"],
+        decoder_lr=raw["decoder_lr"],
+        head_lr=raw["head_lr"],
+        weight_decay=raw["weight_decay"],
+        warmup_steps=raw["warmup_steps"],
+        max_steps=raw["max_steps"],
+        gradient_clip_val=raw["gradient_clip_val"],
+    )
+    assert module.prefix_mapper.k == raw["prefix_k"]
+
+
+@pytest.mark.willi_parity
+def test_train_report_generation_h100_slurm_wrapper_conventions():
+    """Phase 10E SLURM wrapper must follow the project's established conventions:
+    ga03 excluded (ARM/x86 mismatch), aisc-batch/account/qos, and a fail-fast
+    existence check on the decoder checkpoint (mirrors STAGE0_CKPT in
+    train_biomedclip_kd_h100.sh) rather than silently training from random init."""
+    sh = (REPO_ROOT / "scripts" / "train_report_generation_h100.sh").read_text()
+    assert "#SBATCH --partition=aisc-batch" in sh
+    assert "#SBATCH --account=aisc" in sh
+    assert "--exclude=ga03" in sh
+    assert "DECODER_CKPT" in sh
+    assert 'if [ ! -f "${DECODER_CKPT}" ]' in sh
+    assert "train_report_generation.py" in sh

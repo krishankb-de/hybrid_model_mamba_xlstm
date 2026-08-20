@@ -1425,5 +1425,192 @@ class MQARLightningModule(HybridLightningModule):
         # Log metrics
         self.log('val/loss', loss, prog_bar=True)
         self.log('val/mqar_accuracy', accuracy, prog_bar=True)
-        
+
         return loss
+
+
+class ReportGenerationLightningModule(pl.LightningModule):
+    """Phase 10E: image-conditioned radiology report generation (prefix-tuning).
+
+    Wraps a HybridLanguageModel decoder + an ImagePrefixMapper connector +
+    (optionally) a BiomedCLIP image tower. Loss is causal-LM cross-entropy
+    over report-token positions only — the prepended image-prefix positions
+    are label-masked with -100, which nn.CrossEntropyLoss's default
+    ignore_index already honours inside HybridLanguageModel.forward()
+    (Phase 10A) with no code change there needed.
+
+    The image encoder is loaded lazily via load_image_encoder() rather than
+    in __init__, so this module is CPU-unit-testable (see
+    tests/test_willi_parity.py) by passing a precomputed
+    batch["patch_grid"] tensor — no open_clip/BiomedCLIP weights required —
+    while still exercising the real ImagePrefixMapper + decoder forward/backward.
+
+    Args:
+        decoder_config: HybridConfig for the report-generation decoder.
+        image_patch_dim: ViT patch embedding dim (768 for BiomedCLIP ViT-B/16).
+        prefix_k: Number of image-prefix tokens (ImagePrefixMapper's k).
+        vit_unfreeze_blocks: Last-N ViT blocks to unfreeze once
+            load_image_encoder() is called (0 = fully frozen image tower).
+        decoder_lr / head_lr: Separate LRs for the pretrained decoder backbone
+            vs the newly-initialised prefix_mapper, mirroring the
+            backbone_lr/head_lr split used throughout this file for other
+            newly-added small modules on top of a pretrained backbone.
+        gradient_clip_val: Default 0.5, not 1.0 — H100_SCALING_PLAN.md notes
+            150M is spike-fragile; any new training objective re-exposes this.
+    """
+
+    def __init__(
+        self,
+        decoder_config,
+        image_patch_dim: int = 768,
+        prefix_k: int = 32,
+        prefix_dropout: float = 0.1,
+        vit_unfreeze_blocks: int = 0,
+        decoder_lr: float = 1e-5,
+        head_lr: float = 3e-4,
+        weight_decay: float = 0.01,
+        warmup_steps: int = 500,
+        max_steps: int = 10000,
+        gradient_clip_val: float = 0.5,
+    ):
+        super().__init__()
+        from hybrid_xmamba.models.prefix_mapper import ImagePrefixMapper
+
+        self.decoder = HybridLanguageModel(decoder_config)
+        self.prefix_mapper = ImagePrefixMapper(
+            patch_dim=image_patch_dim,
+            decoder_dim=decoder_config.dim,
+            k=prefix_k,
+            dropout=prefix_dropout,
+        )
+        self.prefix_k = prefix_k
+        self.vit_unfreeze_blocks = vit_unfreeze_blocks
+        self.decoder_lr = decoder_lr
+        self.head_lr = head_lr
+        self.weight_decay = weight_decay
+        self.warmup_steps = warmup_steps
+        self.max_steps = max_steps
+        self.gradient_clip_val = gradient_clip_val
+        self.vit_lr = 1e-6
+
+        # Not loaded here — see load_image_encoder(). None means batches
+        # must supply a precomputed "patch_grid" tensor directly.
+        self.image_encoder = None
+
+    def load_image_encoder(self, vit_lr: float = 1e-6):
+        """Load the frozen (or partially unfrozen) BiomedCLIP visual tower.
+
+        Mirrors HybridContrastiveLightningModule's CLIP-loading branch
+        (this file, ~line 373) but keeps the PRE-pooling patch grid via
+        .trunk.forward_features(...) instead of the pooled 512-d output
+        that CLIP-loss training uses.
+        """
+        import open_clip
+
+        biomedclip_id = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+        clip_model, _ = open_clip.create_model_from_pretrained('hf-hub:' + biomedclip_id)
+        self.image_encoder = clip_model.visual
+        self.image_encoder.eval()
+        for p in self.image_encoder.parameters():
+            p.requires_grad = False
+
+        self.vit_lr = vit_lr
+        if self.vit_unfreeze_blocks > 0:
+            blocks = list(self.image_encoder.trunk.blocks)
+            targets = [p for blk in blocks[-self.vit_unfreeze_blocks:] for p in blk.parameters()]
+            for p in targets:
+                p.requires_grad = True
+            self.image_encoder.train()
+
+    def _patch_grid(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """(B, 3, H, W) -> (B, N, patch_dim) pre-pooling ViT patch grid."""
+        if self.image_encoder is None:
+            raise RuntimeError(
+                "image_encoder not loaded — call load_image_encoder() first, "
+                "or pass batch['patch_grid'] directly (e.g. for CPU unit tests)."
+            )
+        return self.image_encoder.trunk.forward_features(pixel_values)
+
+    def _step(self, batch: Dict[str, torch.Tensor], split: str) -> torch.Tensor:
+        input_ids = batch["input_ids"]
+        B, L = input_ids.shape
+
+        patch_grid = batch["patch_grid"] if "patch_grid" in batch else self._patch_grid(batch["pixel_values"])
+        prefix_embeds = self.prefix_mapper(patch_grid)
+        k = prefix_embeds.shape[1]
+
+        token_embeds = self.decoder.embeddings(input_ids)
+        inputs_embeds = torch.cat([prefix_embeds, token_embeds], dim=1)
+
+        # Report tokens are right-padded to a fixed max_length (ImageTextDataset,
+        # scripts/train_contrastive.py), so pad positions must ALSO be excluded
+        # from the loss -- not just the prefix. Both share the same -100 sentinel;
+        # CrossEntropyLoss's default ignore_index=-100 excludes both automatically.
+        report_labels = input_ids.clone()
+        attention_mask = batch.get("attention_mask")
+        if attention_mask is not None:
+            report_labels = report_labels.masked_fill(attention_mask == 0, -100)
+
+        labels = torch.full((B, k + L), -100, dtype=input_ids.dtype, device=input_ids.device)
+        labels[:, k:] = report_labels
+
+        outputs = self.decoder(inputs_embeds=inputs_embeds, labels=labels, return_dict=True)
+        loss = outputs.loss
+
+        self.log(f"{split}/lm_loss", loss, prog_bar=(split == "train"),
+                  on_step=(split == "train"), on_epoch=True)
+        if split == "train":
+            # self.trainer raises RuntimeError (not None) when no Trainer is
+            # attached — e.g. a unit test calling training_step() directly.
+            try:
+                lr = self.trainer.optimizers[0].param_groups[0]["lr"]
+                self.log("train/lr", lr, on_step=True)
+            except RuntimeError:
+                pass
+        return loss
+
+    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
+        return self._step(batch, "train")
+
+    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
+        return self._step(batch, "val")
+
+    def configure_optimizers(self):
+        param_groups = [
+            {"params": [p for p in self.decoder.parameters() if p.requires_grad],
+             "lr": self.decoder_lr, "weight_decay": self.weight_decay},
+            {"params": list(self.prefix_mapper.parameters()),
+             "lr": self.head_lr, "weight_decay": self.weight_decay},
+        ]
+        if self.image_encoder is not None and self.vit_unfreeze_blocks > 0:
+            vit_params = [p for p in self.image_encoder.parameters() if p.requires_grad]
+            if vit_params:
+                param_groups.append({
+                    "params": vit_params, "lr": self.vit_lr, "weight_decay": self.weight_decay,
+                })
+
+        optimizer = torch.optim.AdamW(param_groups)
+
+        from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+        cosine = CosineAnnealingLR(
+            optimizer, T_max=max(self.max_steps - self.warmup_steps, 1), eta_min=self.head_lr * 0.1,
+        )
+        if self.warmup_steps > 0:
+            warmup = LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=self.warmup_steps)
+            scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[self.warmup_steps])
+        else:
+            scheduler = cosine
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step", "frequency": 1},
+        }
+
+    def on_before_optimizer_step(self, optimizer):
+        """Clip gradients (see HybridLightningModule for why this happens here
+        rather than via Trainer(gradient_clip_val=...))."""
+        if self.gradient_clip_val > 0:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.parameters(), max_norm=self.gradient_clip_val,
+            )
+            self.log('train/grad_norm', grad_norm, on_step=True)

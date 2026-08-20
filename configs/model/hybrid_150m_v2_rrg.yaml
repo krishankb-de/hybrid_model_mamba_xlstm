@@ -1,0 +1,69 @@
+# 150M hybrid v2 — report-generation (RRG) decoder variant (Phase 10, H100_SCALING_PLAN.md).
+# Identical architecture to hybrid_150m_v2.yaml (same decoder, checkpoint-loadable
+# against a Stage-0/contrastive-trained 150M v2 backbone per Phase 10D) plus the
+# image-prefix keys ReportGenerationLightningModule reads:
+#   image_patch_dim — ViT patch embedding dim (768 for BiomedCLIP ViT-B/16)
+#   prefix_k        — number of image-prefix tokens (ImagePrefixMapper's k);
+#                      the depth-analogue lever Phase 10B sweeps {8, 32, 64} over.
+# pooling_strategy/proj_head_dropout are HybridTextEncoder-only keys, irrelevant
+# to bare HybridLanguageModel generation — kept for schema parity, harmless.
+
+model_type: "hybrid_lm"
+
+# Architecture — identical to hybrid_150m_v2.yaml
+vocab_size: 50257
+dim: 768
+num_layers: 12
+layer_pattern: ["mamba", "mamba", "mamba", "mamba", "mlstm", "mlstm", "mlstm", "mamba", "mamba", "mamba", "mamba", "mamba"]
+
+# Mamba parameters
+state_size: 16
+conv_size: 4
+expand_factor: 2
+dt_rank: null
+use_fast_path: true
+
+# mLSTM parameters
+head_dim: 64
+num_heads: 12
+use_tfla: true
+proj_factor: 2
+
+# sLSTM parameters (unused by this pattern; kept for config completeness)
+slstm_hidden_dim: 768
+slstm_num_heads: 4
+use_exponential_gate: true
+
+# Shared parameters
+norm_type: "rms"
+use_mlp: true
+mlp_ratio: 4.0
+
+# Training parameters
+max_position_embeddings: 1024
+dropout: 0.1
+initializer_range: 0.02
+
+# Generation parameters
+use_cache: true
+tie_word_embeddings: false
+
+use_gradient_checkpointing: false
+proj_head_dropout: 0.1
+norm_topology: hybrid
+pooling_strategy: attention
+
+# Phase 10B — image prefix
+image_patch_dim: 768
+prefix_k: 32
+
+# Optimization — separate decoder/head LRs (see ReportGenerationLightningModule).
+# 150M is spike-fragile (H100_SCALING_PLAN.md): gradient_clip_val=0.5, not 1.0.
+decoder_lr: 1.0e-5
+head_lr: 3.0e-4
+weight_decay: 0.01
+warmup_steps: 500
+max_steps: 10000
+gradient_clip_val: 0.5
+
+distill: null
