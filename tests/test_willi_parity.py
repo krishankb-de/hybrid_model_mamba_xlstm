@@ -3027,3 +3027,120 @@ def test_build_mimic_cxr_local_slurm_wrapper_is_cpu_only_on_cpu_batch():
     assert "build_mimic_cxr_local.py manifest" in sh
     assert "build_mimic_cxr_local.py fetch" in sh
     assert "build_mimic_cxr_local.py pack" in sh
+
+
+# ── 16. Phase 10A: HybridLanguageModel image-conditioning hooks ───────────────
+
+def _tiny_cpu_config():
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    return HybridConfig(
+        vocab_size=100, dim=64, num_layers=2,
+        layer_pattern=["mamba", "mlstm"],
+        max_position_embeddings=64,
+        use_fast_path=False,
+        use_tfla=False,
+    )
+
+
+@pytest.mark.willi_parity
+def test_forward_inputs_embeds_matches_token_embedding_path():
+    """forward(inputs_embeds=embeddings(x)) must be a true drop-in equivalent
+    of forward(input_ids=x), not just 'doesn't crash' — the whole point of
+    the new kwarg is that Phase 10's image prefix flows through the exact
+    same code path as token embeddings.
+    """
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    model = HybridLanguageModel(_tiny_cpu_config())
+    model.eval()
+
+    input_ids = torch.randint(0, 100, (2, 16))
+
+    with torch.no_grad():
+        out_ids = model(input_ids, return_dict=True)
+        embeds = model.embeddings(input_ids)
+        out_embeds = model(inputs_embeds=embeds, return_dict=True)
+
+    assert torch.allclose(out_ids.logits, out_embeds.logits, atol=1e-5), (
+        "forward(inputs_embeds=...) diverges from forward(input_ids=...) — "
+        "the new kwarg is not a true drop-in for the embedding step"
+    )
+
+
+@pytest.mark.willi_parity
+def test_forward_requires_exactly_one_of_input_ids_or_inputs_embeds():
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    model = HybridLanguageModel(_tiny_cpu_config())
+    input_ids = torch.randint(0, 100, (2, 16))
+    embeds = torch.randn(2, 16, 64)
+
+    with pytest.raises(ValueError):
+        model(input_ids=input_ids, inputs_embeds=embeds)
+
+    with pytest.raises(ValueError):
+        model()
+
+
+@pytest.mark.willi_parity
+def test_generate_default_path_unchanged_when_prefix_embeds_none():
+    """Regression pin: generate() with prefix_embeds=None (the default) must
+    produce byte-identical output to before Phase 10A under a fixed seed —
+    the default branch is untouched code, only reached via an explicit
+    prefix_embeds=None check.
+    """
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    model = HybridLanguageModel(_tiny_cpu_config())
+    model.eval()
+    input_ids = torch.randint(0, 100, (2, 4))
+
+    torch.manual_seed(0)
+    out_a = model.generate(input_ids, max_new_tokens=5, temperature=1.0)
+    torch.manual_seed(0)
+    out_b = model.generate(input_ids, prefix_embeds=None, max_new_tokens=5, temperature=1.0)
+
+    assert torch.equal(out_a, out_b), "generate() default path changed under Phase 10A"
+    assert out_a.shape == (2, 4 + 5)
+
+
+@pytest.mark.willi_parity
+def test_generate_with_prefix_embeds_runs_and_returns_expected_shape():
+    """Smoke test for the new capability: prefix-conditioned generation runs
+    end-to-end and returns generated token ids only (the prefix contributes
+    no ids of its own)."""
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    cfg = _tiny_cpu_config()
+    model = HybridLanguageModel(cfg)
+    model.eval()
+
+    input_ids = torch.randint(0, 100, (2, 4))
+    prefix_embeds = torch.randn(2, 8, cfg.dim)
+
+    out = model.generate(input_ids, prefix_embeds=prefix_embeds, max_new_tokens=5)
+
+    assert out.shape == (2, 4 + 5), f"Unexpected shape: {out.shape}"
+    assert torch.isfinite(out.float()).all()
+
+
+@pytest.mark.willi_parity
+def test_image_prefix_mapper_output_shape_and_gradients():
+    """ImagePrefixMapper: synthetic (B, N, patch_dim) -> (B, k, decoder_dim),
+    for several k, with gradients flowing back to token_proj."""
+    from hybrid_xmamba.models.prefix_mapper import ImagePrefixMapper
+
+    B, N, patch_dim, decoder_dim = 3, 197, 768, 64
+
+    for k in (8, 32, 64):
+        mapper = ImagePrefixMapper(patch_dim=patch_dim, decoder_dim=decoder_dim, k=k)
+        patch_grid = torch.randn(B, N, patch_dim)
+
+        out = mapper(patch_grid)
+        assert out.shape == (B, k, decoder_dim), f"k={k}: unexpected shape {out.shape}"
+        assert torch.isfinite(out).all()
+
+        loss = out.sum()
+        loss.backward()
+        assert mapper.token_proj.weight.grad is not None, f"k={k}: no gradient for token_proj"
+        assert torch.isfinite(mapper.token_proj.weight.grad).all(), f"k={k}: non-finite gradient"

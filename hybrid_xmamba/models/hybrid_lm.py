@@ -146,7 +146,8 @@ class HybridLanguageModel(nn.Module):
     
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         cu_seqlens: Optional[torch.Tensor] = None,
@@ -156,7 +157,11 @@ class HybridLanguageModel(nn.Module):
         """Forward pass for language modeling.
 
         Args:
-            input_ids: Token IDs (B, L)
+            input_ids: Token IDs (B, L). Mutually exclusive with inputs_embeds.
+            inputs_embeds: Pre-computed hidden states (B, L, D) to use instead
+                of embedding input_ids — e.g. an image prefix concatenated with
+                token embeddings for Phase 10 image-conditioned generation.
+                Mutually exclusive with input_ids; exactly one must be given.
             labels: Target token IDs for loss computation (B, L)
             attention_mask: (B, L) — 1 for real tokens, 0 for padding. When
                 provided, padded positions are zero-masked at the embedding
@@ -169,8 +174,11 @@ class HybridLanguageModel(nn.Module):
         Returns:
             CausalLMOutput or tuple of (loss, logits, hidden_states)
         """
+        if (input_ids is None) == (inputs_embeds is None):
+            raise ValueError("Exactly one of input_ids or inputs_embeds must be provided")
+
         # Embedding
-        hidden_states = self.embeddings(input_ids)
+        hidden_states = self.embeddings(input_ids) if inputs_embeds is None else inputs_embeds
 
         # Zero out padded positions so recurrent state stays clean
         if attention_mask is not None:
@@ -230,60 +238,102 @@ class HybridLanguageModel(nn.Module):
     def generate(
         self,
         input_ids: torch.Tensor,
+        prefix_embeds: Optional[torch.Tensor] = None,
         max_new_tokens: int = 100,
         temperature: float = 1.0,
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
     ) -> torch.Tensor:
         """Generate text autoregressively.
-        
+
         Args:
             input_ids: Starting token IDs (B, L)
+            prefix_embeds: Optional (B, k, D) prefix hidden states prepended
+                before the input_ids embeddings — e.g. an image prefix from
+                Phase 10's ImagePrefixMapper. When None, behavior is identical
+                to the original input_ids-only path.
             max_new_tokens: Number of tokens to generate
             temperature: Sampling temperature
             top_k: Top-k sampling parameter
             top_p: Nucleus sampling parameter
-            
+
         Returns:
-            Generated token IDs (B, L + max_new_tokens)
+            Generated token IDs (B, L + max_new_tokens). The prefix (if given)
+            consumes context but contributes no ids of its own.
         """
         self.eval()
-        
+
+        if prefix_embeds is None:
+            with torch.no_grad():
+                for _ in range(max_new_tokens):
+                    # Forward pass
+                    outputs = self.forward(input_ids, return_dict=True)
+                    logits = outputs.logits
+
+                    # Get logits for last token
+                    next_token_logits = logits[:, -1, :] / temperature
+
+                    # Apply top-k filtering
+                    if top_k is not None:
+                        indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                        next_token_logits[indices_to_remove] = float('-inf')
+
+                    # Apply nucleus (top-p) filtering
+                    if top_p is not None:
+                        sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+                        cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+
+                        # Remove tokens with cumulative probability above threshold
+                        sorted_indices_to_remove = cumulative_probs > top_p
+                        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                        sorted_indices_to_remove[..., 0] = 0
+
+                        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                        next_token_logits[indices_to_remove] = float('-inf')
+
+                    # Sample from distribution
+                    probs = torch.softmax(next_token_logits, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1)
+
+                    # Append to sequence
+                    input_ids = torch.cat([input_ids, next_token], dim=1)
+
+            return input_ids
+
+        # Prefix-conditioned path (Phase 10): hidden_states carries the prefix
+        # + token embeddings; generated tokens are re-embedded and appended
+        # to hidden_states each step since there is no KV/state cache to grow.
+        generated_ids = input_ids
         with torch.no_grad():
+            hidden_states = torch.cat([prefix_embeds, self.embeddings(input_ids)], dim=1)
             for _ in range(max_new_tokens):
-                # Forward pass
-                outputs = self.forward(input_ids, return_dict=True)
+                outputs = self.forward(inputs_embeds=hidden_states, return_dict=True)
                 logits = outputs.logits
-                
-                # Get logits for last token
+
                 next_token_logits = logits[:, -1, :] / temperature
-                
-                # Apply top-k filtering
+
                 if top_k is not None:
                     indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
                     next_token_logits[indices_to_remove] = float('-inf')
-                
-                # Apply nucleus (top-p) filtering
+
                 if top_p is not None:
                     sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
                     cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-                    
-                    # Remove tokens with cumulative probability above threshold
+
                     sorted_indices_to_remove = cumulative_probs > top_p
                     sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                     sorted_indices_to_remove[..., 0] = 0
-                    
+
                     indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
                     next_token_logits[indices_to_remove] = float('-inf')
-                
-                # Sample from distribution
+
                 probs = torch.softmax(next_token_logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
-                
-                # Append to sequence
-                input_ids = torch.cat([input_ids, next_token], dim=1)
-        
-        return input_ids
+
+                generated_ids = torch.cat([generated_ids, next_token], dim=1)
+                hidden_states = torch.cat([hidden_states, self.embeddings(next_token)], dim=1)
+
+        return generated_ids
     
     def get_num_params(self, non_embedding: bool = True) -> int:
         """Get number of parameters.
