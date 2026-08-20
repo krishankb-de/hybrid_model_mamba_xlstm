@@ -2732,12 +2732,22 @@ def test_cxr_mimic_full_config_present_and_consistent():
     branch on) and keep every OTHER key schema-compatible with mimic_cxr.yaml
     so an unmodified training/eval invocation is unaffected by this file
     merely existing.
+
+    dataset_name must be the literal "mimic_cxr", NOT this file's own name.
+    scripts/train_contrastive.py's prepare_dataloader() dispatches on this
+    exact string BEFORE load_mimic_cxr ever inspects local_parquet_dir; any
+    other value raises "Unknown dataset for contrastive training" and never
+    reaches the local-parquet branch this config exists to select. Confirmed
+    live 2026-08-20 (job 2470516) -- dataset_name was "cxr_mimic_full" and
+    training died at dataloader-prep, first time this file was ever exercised
+    through actual training (Phase 8 only built the data).
     """
     from omegaconf import OmegaConf
 
     legacy = OmegaConf.load(REPO_ROOT / "configs" / "dataset" / "mimic_cxr.yaml")
     full = OmegaConf.load(REPO_ROOT / "configs" / "dataset" / "cxr_mimic_full.yaml")
 
+    assert full.get("dataset_name") == "mimic_cxr"
     assert "local_parquet_dir" in full
     assert "local_parquet_dir" not in legacy  # legacy path must stay the default
 
@@ -2750,29 +2760,33 @@ def test_cxr_mimic_full_config_present_and_consistent():
 def test_cxr_mimic_arm0_config_is_full_pointed_at_arm0_symlink_dir():
     """Phase 9A Arm-0 config (CLAUDE.md: new config file -> parity assertion).
     cxr_mimic_arm0.yaml must be byte-for-byte identical to cxr_mimic_full.yaml
-    EXCEPT (a) dataset_name and (b) local_parquet_dir, which must point at an
-    'arm0' subdirectory. The loader hardcodes train/validate/test.parquet, so
-    that subdir is the symlink dir (arm0_train.parquet->train.parquet, ...) --
-    the only mechanism that selects the arm0_-prefixed pack output without a
-    code change. Any OTHER drift between the two would silently change the
-    Arm-0 recipe relative to the production build it is meant to control.
+    EXCEPT local_parquet_dir, which must point at an 'arm0' subdirectory.
+    dataset_name is NOT a legitimate difference -- both files must carry the
+    literal "mimic_cxr" (see test_cxr_mimic_full_config_present_and_consistent
+    for why; using either file's own name there breaks training dispatch).
+    The loader hardcodes train/validate/test.parquet, so the arm0 subdir is
+    the symlink dir (arm0_train.parquet->train.parquet, ...) -- the only
+    mechanism that selects the arm0_-prefixed pack output without a code
+    change. Any OTHER drift between the two would silently change the Arm-0
+    recipe relative to the production build it is meant to control.
     """
     from omegaconf import OmegaConf
 
     full = OmegaConf.load(REPO_ROOT / "configs" / "dataset" / "cxr_mimic_full.yaml")
     arm0 = OmegaConf.load(REPO_ROOT / "configs" / "dataset" / "cxr_mimic_arm0.yaml")
 
-    assert arm0.get("dataset_name") == "cxr_mimic_arm0"
+    assert arm0.get("dataset_name") == "mimic_cxr"
+    assert arm0.get("dataset_name") == full.get("dataset_name")
     assert "local_parquet_dir" in arm0
     # points at an arm0 subdir of whatever full's dir is (symlink dir for the
     # arm0_-prefixed parquets), not the production tree itself.
     assert str(arm0.local_parquet_dir).rstrip("/").endswith("/arm0")
     assert str(arm0.local_parquet_dir).rstrip("/") == str(full.local_parquet_dir).rstrip("/") + "/arm0"
 
-    # Every OTHER key must match cxr_mimic_full exactly -- Arm-0 changes the
-    # data location, never the recipe/schema.
+    # Every OTHER key must match cxr_mimic_full exactly -- Arm-0 changes only
+    # the data location, never the dispatch name/recipe/schema.
     for key in full:
-        if key in ("dataset_name", "local_parquet_dir"):
+        if key == "local_parquet_dir":
             continue
         assert key in arm0, "cxr_mimic_arm0.yaml missing key present in full: {}".format(key)
         assert arm0[key] == full[key], "cxr_mimic_arm0.yaml drifted from full at key: {}".format(key)
@@ -2834,6 +2848,73 @@ def test_load_mimic_cxr_dispatches_to_local_parquet_when_configured():
     assert data_files["train"] == "/fake/dir/train.parquet"
     assert data_files["validation"] == "/fake/dir/validate.parquet"
     assert data_files["test"] == "/fake/dir/test.parquet"
+
+
+def test_prepare_dataloader_dispatches_local_parquet_configs_to_load_mimic_cxr():
+    """Regression for job 2470516 (2026-08-20): prepare_dataloader() has its
+    OWN outer dispatch (`if name == "mimic_cxr": ... elif ...: ... else: raise
+    ValueError("Unknown dataset for contrastive training")`) that runs BEFORE
+    load_mimic_cxr is ever called. test_load_mimic_cxr_dispatches_to_local_
+    parquet_when_configured above calls load_mimic_cxr directly, so it never
+    exercised this outer gate -- which is exactly how cxr_mimic_full.yaml (and
+    the arm0 config derived from it) shipped with dataset_name set to the
+    file's own name ("cxr_mimic_full") instead of the literal "mimic_cxr" the
+    dispatch requires, and training died with "Unknown dataset for contrastive
+    training: cxr_mimic_full" the first time it was actually run. This test
+    calls prepare_dataloader itself with dataset_name="mimic_cxr" (the
+    corrected value) + local_parquet_dir set, and asserts it reaches
+    load_mimic_cxr rather than the ValueError branch.
+    """
+    import importlib.util
+
+    from omegaconf import OmegaConf
+
+    spec = importlib.util.spec_from_file_location(
+        "_tc_mod_prep", REPO_ROOT / "scripts" / "train_contrastive.py"
+    )
+    tc = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(tc)
+    except Exception as e:                                    # pragma: no cover
+        pytest.skip("train_contrastive import failed: {}".format(e))
+
+    calls = []
+
+    def _fake_load_mimic_cxr(cfg, split, tokenizer, teacher_tokenizer=None):
+        calls.append(split)
+
+        class _FakeDS:
+            def __len__(self):
+                return 4  # nonzero: DataLoader's RandomSampler rejects len==0 eagerly
+
+            def __getitem__(self, idx):
+                return {}
+
+        return _FakeDS()
+
+    tc.load_mimic_cxr = _fake_load_mimic_cxr
+
+    cfg = OmegaConf.create({"dataset": {
+        "dataset_name": "mimic_cxr",
+        "local_parquet_dir": "/fake/dir",
+        "batch_size": 2, "eval_batch_size": 2, "num_workers": 0, "pin_memory": False,
+    }})
+
+    tc.prepare_dataloader(cfg, "train", tokenizer=None, teacher_tokenizer=None)
+
+    assert calls == ["train"], (
+        "prepare_dataloader did not dispatch dataset_name='mimic_cxr' to "
+        "load_mimic_cxr -- the exact regression from job 2470516"
+    )
+
+    # And the actual configs shipped for the local-parquet path must carry
+    # this literal value, not their own filename.
+    for fname in ("cxr_mimic_full.yaml", "cxr_mimic_arm0.yaml"):
+        c = OmegaConf.load(REPO_ROOT / "configs" / "dataset" / fname)
+        assert c.get("dataset_name") == "mimic_cxr", (
+            "{} must set dataset_name: mimic_cxr for prepare_dataloader's "
+            "dispatch to route into load_mimic_cxr".format(fname)
+        )
 
 
 def test_evaluate_cxr_retrieval_handles_str_image_paths():
