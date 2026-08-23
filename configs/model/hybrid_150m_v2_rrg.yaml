@@ -57,6 +57,15 @@ pooling_strategy: attention
 image_patch_dim: 768
 prefix_k: 32
 
+# Phase 10C — image-tower unfreeze (0 = frozen, the default until a Phase-9
+# best contrastive checkpoint exists). Read via ReportGenerationLightningModule
+# .load_image_encoder(); must be declared here (not just via cfg.model.get(...)
+# defaults in train_report_generation.py) since train_report_generation_h100.sh
+# sets both via a Hydra CLI override, which fails under strict-struct mode
+# against an undeclared key -- caught live 2026-08-23, job 2478622, smoke run.
+vit_unfreeze_blocks: 0
+vit_lr: 1.0e-6
+
 # Optimization — separate decoder/head LRs (see ReportGenerationLightningModule).
 # 150M is spike-fragile (H100_SCALING_PLAN.md): gradient_clip_val=0.5, not 1.0.
 decoder_lr: 1.0e-5

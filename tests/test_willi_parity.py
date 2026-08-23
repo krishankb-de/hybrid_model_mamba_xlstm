@@ -3353,6 +3353,26 @@ def test_hybrid_150m_v2_rrg_config_matches_150m_v2_architecture():
     assert raw["image_patch_dim"] == 768, "BiomedCLIP ViT-B/16 patch dim"
     assert raw["prefix_k"] > 0
     assert raw["gradient_clip_val"] == 0.5, "150M is spike-fragile — must not silently drift to 1.0"
+    assert raw["vit_unfreeze_blocks"] == 0, "10C default: frozen image tower"
+    assert raw["vit_lr"] > 0
+
+    # Regression pin for the live bug hit 2026-08-23 (job 2478622): Hydra's
+    # strict-struct mode rejects a CLI override for a key the config doesn't
+    # declare ("Could not override 'model.vit_unfreeze_blocks' ... Key
+    # 'vit_unfreeze_blocks' is not in struct"). Every `model.<key>=` override
+    # train_report_generation_h100.sh passes MUST have a matching key declared
+    # in this yaml, or the SLURM job fails at Hydra-compose time before any
+    # Python code runs.
+    import re
+    sh_text = (REPO_ROOT / "scripts" / "train_report_generation_h100.sh").read_text()
+    overridden_keys = re.findall(r"model\.([a-zA-Z_][a-zA-Z0-9_]*)=", sh_text)
+    assert overridden_keys, "expected at least one model.<key>= override in the wrapper"
+    for key in overridden_keys:
+        assert key in raw, (
+            f"train_report_generation_h100.sh overrides model.{key}=... but "
+            f"hybrid_150m_v2_rrg.yaml does not declare '{key}' — Hydra strict-struct "
+            f"mode will reject this at submit time."
+        )
 
     fields = {f.name for f in dataclasses.fields(HybridConfig)}
     decoder_cfg = HybridConfig(**{k: v for k, v in raw.items() if k in fields})
