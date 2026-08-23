@@ -3411,3 +3411,70 @@ def test_train_report_generation_h100_slurm_wrapper_conventions():
     assert "DECODER_CKPT" in sh
     assert 'if [ ! -f "${DECODER_CKPT}" ]' in sh
     assert "train_report_generation.py" in sh
+
+
+@pytest.mark.willi_parity
+def test_train_report_generation_h100_slurm_wrapper_hydra_overrides_compose():
+    """Regression pin for TWO live bugs hit back-to-back 2026-08-23 (jobs
+    2478622, 2478635): Hydra's strict-struct mode rejects a CLI override for
+    ANY key (model.<key>=, or a bare top-level key like decoder_checkpoint=)
+    that isn't declared somewhere in the composed config -- caught only at
+    submit time, after the DECODER_CKPT existence check already passed, deep
+    into the SLURM job. Rather than re-deriving the override list by hand
+    (fragile -- would have missed decoder_checkpoint same as the first fix
+    did), this replays the SLURM wrapper's OWN python invocation verbatim
+    through hydra.compose() with its own documented env-var defaults
+    substituted in, and asserts it composes without error -- the exact
+    failure mode hit live, reproduced offline."""
+    pytest.importorskip("hydra")
+    from hydra import compose, initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
+
+    sh = (REPO_ROOT / "scripts" / "train_report_generation_h100.sh").read_text()
+
+    # Literal stand-ins for every ${VAR} this script's invocation block
+    # references — NOT parsed from the script's own defaults (several have
+    # trailing inline comments or nested ${...} refs, e.g. EXPERIMENT embeds
+    # ${PREFIX_K}, that make robust regex-extraction more fragile than just
+    # supplying flat literals here; this test only needs each key to resolve
+    # to SOME syntactically valid value, not to reproduce the real default).
+    env_defaults = {
+        "MODEL_CONFIG": "hybrid_150m_v2_rrg", "DATASET_CONFIG": "cxr_mimic_full",
+        "MAX_STEPS": "50", "BATCH_SIZE": "16", "DECODER_LR": "1e-5", "HEAD_LR": "3e-4",
+        "GRAD_CLIP": "0.5", "PREFIX_K": "32", "VIT_UNFREEZE": "0", "VIT_LR": "1e-6",
+        "GRAD_CKPT": "false", "MIMIC_CACHE_DIR": "/tmp/mimic_cache",
+        "DECODER_CKPT": "./outputs/h100_stage0_150m_v2/checkpoints/stage0_model_only.pt",
+        "EXPERIMENT": "parity_check",
+    }
+
+    # Extract the python invocation block verbatim (between the `python
+    # scripts/train_report_generation.py \` line and the blank line ending it).
+    invocation = sh.split("python scripts/train_report_generation.py \\", 1)[1]
+    invocation = invocation.split("\n\necho", 1)[0]
+    tokens = [t.strip().rstrip("\\").strip() for t in invocation.splitlines()]
+    tokens = [t for t in tokens if t and t != "--config-name config"]
+
+    def resolve(tok: str) -> str:
+        key, _, value = tok.partition("=")
+        value = value.strip('"')
+        value = re.sub(
+            r"\$\{?([A-Z_][A-Z0-9_]*)\}?",
+            lambda m: env_defaults.get(m.group(1), m.group(0)),
+            value,
+        )
+        return f"{key}={value}"
+
+    overrides = [resolve(t) for t in tokens]
+    assert any(o.startswith("decoder_checkpoint=") for o in overrides), (
+        "sanity check: the override list should still contain decoder_checkpoint= "
+        "— if this fails, the parsing above drifted from the script's actual format"
+    )
+
+    GlobalHydra.instance().clear()
+    configs_dir = str(REPO_ROOT / "configs")
+    with initialize_config_dir(config_dir=configs_dir, version_base="1.3"):
+        cfg = compose(config_name="config", overrides=overrides)
+
+    assert cfg.decoder_checkpoint == env_defaults["DECODER_CKPT"]
+    assert cfg.model.vit_unfreeze_blocks == 0
+    assert cfg.model.prefix_k == 32

@@ -32,6 +32,12 @@ log_dir: "${output_dir}/logs"
 # Contrastive training mode: "simcse" (Stage 1) or "clip" (Stage 2)
 contrastive_mode: simcse
 
+# Phase 10E — decoder init checkpoint for report-generation training
+# (scripts/train_report_generation.py). Same declared-key requirement as
+# config_70m.yaml's lm_checkpoint: Hydra's strict-struct mode rejects a CLI
+# override for an undeclared key (caught live 2026-08-23, job 2478635).
+decoder_checkpoint: null
+
 # Reproducibility
 deterministic: false
 benchmark: true
