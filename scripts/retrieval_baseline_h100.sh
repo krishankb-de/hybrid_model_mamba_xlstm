@@ -1,0 +1,70 @@
+#!/bin/bash
+# ============================================================================
+# Phase 11C (H100_SCALING_PLAN.md) — retrieval-NN baseline: retrieve the
+# nearest TRAINING report by stock BiomedCLIP pooled-image cosine similarity
+# and emit it verbatim. "This baseline is the real floor; a generator that
+# does not beat it has contributed nothing." Must run BEFORE trusting any
+# --checkpoint mode generator number (see job 2478647/2482543's confirmed
+# template-memorization result, 2026-08-24).
+#
+# SLURM wrapper for scripts/evaluate_report_generation.py --retrieval-baseline,
+# same login-node-refuses-this-command constraint as inspect_report_generation_
+# h100.sh. Mirrors that script's conventions.
+#
+# No Phase-9 best contrastive checkpoint exists yet -- this embeds with STOCK
+# BiomedCLIP (matches 10C's current frozen-tower default); swap in a
+# fine-tuned checkpoint later without changing evaluate_report_generation.py.
+#
+# Embeds the WHOLE gallery (up to MAX_GALLERY) every run -- no caching yet.
+# For arm0 (~19881 images) this is a few minutes on H100; --time is generous.
+# ============================================================================
+#SBATCH --partition=aisc-batch
+#SBATCH --account=aisc
+#SBATCH --gpus=1
+#SBATCH --exclude=ga03,gx17v1,gx13v1   # ga03: ARM node, x86 .venv incompatible;
+                                        # gx13v1: faulty GPU (cudaErrorContained, 2026-07-19)
+#SBATCH --mem=32G
+#SBATCH --cpus-per-task=4
+#SBATCH --time=01:00:00
+#SBATCH --job-name=retrieval_baseline
+#SBATCH --output=logs/%x_%j.log
+#SBATCH --error=logs/%x_%j.log
+
+set -euo pipefail
+
+SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"
+VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
+
+TRAIN_PARQUET="${TRAIN_PARQUET:-/sc/home/$USER/dataset/mimic_full/arm0/train.parquet}"
+# Default to VALIDATION images, not train — same honesty rule as the
+# --checkpoint inspection wrapper (a query retrieving itself from its own
+# gallery would trivially score 1.0 and mean nothing).
+PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/arm0/validate.parquet}"
+NUM_SAMPLES="${NUM_SAMPLES:-10}"
+MAX_GALLERY="${MAX_GALLERY:-0}"   # 0 = full gallery
+
+echo "=== Phase 11C retrieval-NN baseline: gallery=${TRAIN_PARQUET} query=${PARQUET} ==="
+echo "=== num_samples=${NUM_SAMPLES} max_gallery=${MAX_GALLERY} ==="
+date; hostname
+mkdir -p logs
+
+cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"
+
+export HF_HOME="${SCRATCH_ROOT}/.hf"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
+export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export PYTHONUNBUFFERED=1
+
+source "${VENV_ACTIVATE}"
+python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
+python scripts/evaluate_report_generation.py \
+  --retrieval-baseline \
+  --train-parquet "${TRAIN_PARQUET}" \
+  --parquet "${PARQUET}" \
+  --num-samples "${NUM_SAMPLES}" \
+  --max-gallery "${MAX_GALLERY}"
+
+echo "=== END ==="
+date

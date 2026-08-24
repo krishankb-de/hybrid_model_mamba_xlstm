@@ -3453,6 +3453,21 @@ def test_generate_from_patch_grid_runs_and_returns_expected_shape(decode, kwargs
 
 
 @pytest.mark.willi_parity
+def test_nearest_neighbor_indices_picks_closest_by_cosine_similarity():
+    """Phase 11C (2026-08-24, built after both the no-augmentation and
+    augmented arm0 checkpoints were confirmed to generate byte-identical
+    boilerplate for different images): nearest_neighbor_indices() is the
+    testable core of run_retrieval_baseline() — pure cosine-similarity
+    argmax, no BiomedCLIP/network/data needed here."""
+    from scripts.evaluate_report_generation import nearest_neighbor_indices
+
+    gallery = torch.eye(4)  # 4 orthonormal "reports"
+    query = torch.tensor([[0.9, 0.1, 0.0, 0.0], [0.0, 0.0, 0.2, 0.9]])
+    idx = nearest_neighbor_indices(query, gallery)
+    assert idx.tolist() == [0, 3]
+
+
+@pytest.mark.willi_parity
 def test_report_generation_val_step_logs_flat_named_checkpoint_alias():
     """Regression pin for the live bug hit 2026-08-23 (job 2478647): Lightning
     does not sanitize '/' inside a ModelCheckpoint filename=... interpolation
@@ -3611,6 +3626,27 @@ def test_inspect_report_generation_h100_slurm_wrapper_conventions():
     # Defaults to VALIDATION images, not train — generations on train images
     # look artificially good even under genuine overfitting.
     assert "validate.parquet" in sh
+
+
+@pytest.mark.willi_parity
+def test_retrieval_baseline_h100_slurm_wrapper_conventions():
+    """Phase 11C wrapper (2026-08-24) for scripts/evaluate_report_generation.py
+    --retrieval-baseline, needed after the arm0 checkpoint (with AND without
+    Phase 9D augmentation) was confirmed to generate byte-identical boilerplate
+    rather than condition on the image — this baseline is the objective floor
+    any future generator number must be compared against. Same conventions as
+    the sibling inspection wrapper; queries VALIDATION against the TRAIN
+    gallery (never against itself)."""
+    sh = (REPO_ROOT / "scripts" / "retrieval_baseline_h100.sh").read_text()
+    assert "#SBATCH --partition=aisc-batch" in sh
+    assert "#SBATCH --account=aisc" in sh
+    assert "--exclude=ga03" in sh
+    assert "TRAIN_PARQUET" in sh
+    assert "evaluate_report_generation.py" in sh
+    assert "--retrieval-baseline" in sh
+    assert "--train-parquet" in sh
+    assert "validate.parquet" in sh
+    assert "train.parquet" in sh
 
 
 @pytest.mark.willi_parity

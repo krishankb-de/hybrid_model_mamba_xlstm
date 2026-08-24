@@ -6,8 +6,7 @@ work" list. It provides two independent pieces, both usable today:
 
   1. Corpus-level text metrics (rouge_l_score, corpus_bleu, meteor_score_corpus)
      over any (hypothesis, reference) string pairs — e.g. the retrieval-NN
-     baseline's output (Phase 11C) once that script exists, or real generator
-     output once Phase 10 training lands.
+     baseline's output (Phase 11C, below), or real generator output.
   2. A fixed decoding harness (greedy_decode, beam_search_decode with beam=3)
      built on Phase 10A's HybridLanguageModel.forward(inputs_embeds=...) /
      .generate(prefix_embeds=...) additive hooks — exercised end-to-end here
@@ -20,6 +19,16 @@ Lightning .ckpt and generates from real images — a qualitative check, NOT yet
 the full official-subject-disjoint-test-split scoring run Phase 11D's plan
 entry describes. Loader pattern follows scripts/evaluate_lm.py's convention
 (defensive key-prefix stripping, missing/unexpected key counts printed).
+CONFIRMED LIVE 2026-08-24 (jobs 2478647, 2482543): the arm0 checkpoint --
+with and without Phase 9D image augmentation -- generates byte-identical
+boilerplate for different images rather than conditioning on content.
+
+--retrieval-baseline mode (added 2026-08-24, Phase 11C) retrieves the nearest
+TRAINING report by stock BiomedCLIP pooled-image cosine similarity and emits
+it verbatim — "the real floor; a generator that does not beat it has
+contributed nothing" (H100_SCALING_PLAN.md). No Phase-9 best contrastive
+checkpoint exists yet, so this uses stock BiomedCLIP (matches 10C's current
+frozen-tower default).
 
 Usage:
     # Metrics over precomputed hypothesis/reference pairs (one line each, aligned)
@@ -36,6 +45,13 @@ Usage:
         --checkpoint outputs/h100_report_gen_arm0/checkpoints/last.ckpt \\
         --parquet /sc/home/$USER/dataset/mimic_full/arm0/validate.parquet \\
         --num-samples 10 --decode greedy
+
+    # Phase 11C retrieval-NN baseline — the real floor a generator must beat
+    python scripts/evaluate_report_generation.py \\
+        --retrieval-baseline \\
+        --train-parquet /sc/home/$USER/dataset/mimic_full/arm0/train.parquet \\
+        --parquet /sc/home/$USER/dataset/mimic_full/arm0/validate.parquet \\
+        --num-samples 10
 """
 
 import sys
@@ -265,6 +281,94 @@ def run_checkpoint_inspection(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 11C — retrieval-NN baseline. "Use the Phase-9 model to retrieve the
+# nearest training report and emit it verbatim... this baseline is the real
+# floor; a generator that does not beat it has contributed nothing"
+# (H100_SCALING_PLAN.md). No Phase-9 best contrastive checkpoint exists yet
+# (deferred, per the 2026-08-20 pivot decision) -- this uses STOCK BiomedCLIP
+# pooled-image cosine similarity instead, matching 10C's current frozen-tower
+# default; swap in a fine-tuned checkpoint later without changing this logic.
+# Split the same way as the --checkpoint mode: nearest_neighbor_indices() is
+# pure tensor math (CPU-unit-tested with synthetic embeddings); embedding real
+# images with real BiomedCLIP is the untested heavy path, evaluate_lm.py-style.
+# ---------------------------------------------------------------------------
+
+def nearest_neighbor_indices(query_embeds: torch.Tensor, gallery_embeds: torch.Tensor) -> torch.Tensor:
+    """(Q, D), (G, D) L2-normalized embeddings -> (Q,) argmax cosine-similarity
+    index into the gallery for each query. Pure tensor math, no I/O — the
+    testable core of run_retrieval_baseline()."""
+    sims = query_embeds @ gallery_embeds.T
+    return sims.argmax(dim=1)
+
+
+def run_retrieval_baseline(args) -> None:
+    """Phase 11C: for each query (validation) image, retrieve the training
+    report whose image has the highest BiomedCLIP cosine similarity and emit
+    it verbatim as the hypothesis. Same output format as --checkpoint mode
+    (generated/reference/ROUGE-L per sample + aggregate metrics) for direct
+    side-by-side comparison."""
+    import pandas as pd
+    from PIL import Image
+    import open_clip
+    from omegaconf import OmegaConf
+    from scripts.train_contrastive import build_image_transform
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    biomedclip_id = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+    clip_model, _ = open_clip.create_model_from_pretrained("hf-hub:" + biomedclip_id)
+    visual = clip_model.visual.to(device).eval()
+
+    # is_train=False unconditionally -- embedding for retrieval is inference,
+    # never training, regardless of which split the image happens to come from.
+    img_transform = build_image_transform(OmegaConf.create({"dataset": {}}), is_train=False)
+
+    @torch.no_grad()
+    def embed_images(image_paths: List[str], batch_size: int = 64) -> torch.Tensor:
+        embeds = []
+        for i in range(0, len(image_paths), batch_size):
+            batch = image_paths[i:i + batch_size]
+            imgs = torch.stack([img_transform(Image.open(p).convert("RGB")) for p in batch]).to(device)
+            feats = torch.nn.functional.normalize(visual(imgs), dim=-1)
+            embeds.append(feats.cpu())
+            print(f"  embedded {min(i + batch_size, len(image_paths))}/{len(image_paths)}")
+        return torch.cat(embeds, dim=0)
+
+    train_df = pd.read_parquet(args.train_parquet)
+    if args.max_gallery:
+        train_df = train_df.iloc[:args.max_gallery]
+    query_df = pd.read_parquet(args.parquet)
+    n = min(args.num_samples, len(query_df))
+    query_df = query_df.iloc[:n]
+
+    print(f"Embedding {len(train_df)} gallery (train) images...")
+    gallery_embeds = embed_images(train_df["image"].tolist())
+    print(f"Embedding {n} query images...")
+    query_embeds = embed_images(query_df["image"].tolist())
+
+    nn_idx = nearest_neighbor_indices(query_embeds, gallery_embeds)
+
+    hyps, refs = [], []
+    for i in range(n):
+        q_row = query_df.iloc[i]
+        g_row = train_df.iloc[nn_idx[i].item()]
+        retrieved = f"Findings: {g_row.get('findings', '')} Impression: {g_row.get('impression', '')}".strip()
+        reference = f"Findings: {q_row.get('findings', '')} Impression: {q_row.get('impression', '')}".strip()
+
+        print(f"\n--- sample {i} (query study_id={q_row.get('study_id', '?')}, "
+              f"nearest train study_id={g_row.get('study_id', '?')}) ---")
+        print(f"RETRIEVED: {retrieved}")
+        print(f"REFERENCE: {reference}")
+        print(f"ROUGE-L (single sample): {rouge_l_score(retrieved.split(), reference.split()):.3f}")
+        hyps.append(retrieved)
+        refs.append(reference)
+
+    metrics = compute_all_metrics(hyps, refs)
+    print(f"\n=== Aggregate retrieval-NN baseline over {n} samples ===")
+    print(json.dumps(metrics, indent=2))
+
+
+# ---------------------------------------------------------------------------
 # Metrics — pure Python, no network dependency (ROUGE-L, BLEU); METEOR is
 # nltk-backed and gracefully skipped if wordnet isn't staged locally (compute
 # nodes have no internet — same constraint noted for Phase 11B's CheXbert
@@ -430,10 +534,26 @@ def main():
                         help="Beam size when --decode beam (for --checkpoint mode)")
     parser.add_argument("--max-new-tokens", type=int, default=100,
                         help="Max tokens to generate per sample (for --checkpoint mode)")
+    parser.add_argument("--retrieval-baseline", action="store_true",
+                        help="Phase 11C: retrieve the nearest training report by stock "
+                             "BiomedCLIP image similarity instead of generating (--parquet "
+                             "is the query/validation set; --train-parquet is the gallery)")
+    parser.add_argument("--train-parquet", type=str, default=None,
+                        help="Path to the training parquet used as the retrieval gallery "
+                             "(for --retrieval-baseline)")
+    parser.add_argument("--max-gallery", type=int, default=0,
+                        help="Cap the gallery to the first N training rows, 0=all "
+                             "(for --retrieval-baseline)")
     args = parser.parse_args()
 
     if args.smoke_test:
         run_smoke_test()
+        return
+
+    if args.retrieval_baseline:
+        if not args.parquet or not args.train_parquet:
+            parser.error("--parquet and --train-parquet are required with --retrieval-baseline")
+        run_retrieval_baseline(args)
         return
 
     if args.checkpoint:
