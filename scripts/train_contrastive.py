@@ -162,6 +162,44 @@ class TextOnlyDatasetWithTeacher(Dataset):
         }
 
 
+def build_image_transform(cfg, is_train: bool = False) -> "T.Compose":
+    """CXR image transform, shared by ImageTextDataset and MIMICJointDataset.
+
+    Phase 9D's "untested free lever" (H100_SCALING_PLAN.md — 6G-1 measured the
+    retrieval ViT outright memorising this exact arm0-sized pool with zero
+    augmentation): when cfg.dataset.use_augmentation is set AND is_train, the
+    deterministic Resize is replaced with RandomResizedCrop + mild rotation.
+
+    Applied to Phase 10E's report-generation decoder first (2026-08-24, after
+    job 2478647's arm0 checkpoint was confirmed via --checkpoint mode to have
+    memorized boilerplate templates rather than condition on the image), NOT
+    to retrieval — use_augmentation defaults to False and is undeclared/false
+    in cxr_mimic_full.yaml and cxr_mimic_arm0.yaml, so every existing retrieval
+    call site (that closed chapter) stays BYTE-IDENTICAL unless a future arm
+    explicitly opts in. is_train also gates it off for val/test — augmenting
+    eval images would make evaluation nondeterministic and incomparable run to
+    run, which is never wanted regardless of the training-time question.
+    """
+    mean = cfg.dataset.get("image_mean", [0.48145466, 0.4578275, 0.40821073])
+    std = cfg.dataset.get("image_std", [0.26862954, 0.26130258, 0.27577711])
+    size = cfg.dataset.get("image_size", 224)
+    use_augmentation = cfg.dataset.get("use_augmentation", False)
+
+    if use_augmentation and is_train:
+        spatial = [
+            T.RandomResizedCrop(size, scale=(0.8, 1.0)),
+            T.RandomRotation(degrees=7),
+        ]
+    else:
+        spatial = [T.Resize((size, size))]
+
+    return T.Compose(spatial + [
+        T.Grayscale(num_output_channels=3),   # CXR is grayscale; BiomedCLIP expects 3-ch
+        T.ToTensor(),
+        T.Normalize(mean=mean, std=std),
+    ])
+
+
 class ImageTextDataset(Dataset):
     """Paired image-text dataset for CLIP-style alignment.
 
@@ -170,24 +208,14 @@ class ImageTextDataset(Dataset):
       - findings / impression (text)
     """
 
-    def __init__(self, hf_dataset, tokenizer, cfg):
+    def __init__(self, hf_dataset, tokenizer, cfg, is_train: bool = False):
         self.data = hf_dataset
         self.tokenizer = tokenizer
         self.max_length = cfg.dataset.max_length
         self.concat = cfg.dataset.get("concatenate_sections", True)
         self.findings_field = cfg.dataset.get("findings_field", "findings")
         self.impression_field = cfg.dataset.get("impression_field", "impression")
-
-        mean = cfg.dataset.get("image_mean", [0.48145466, 0.4578275, 0.40821073])
-        std  = cfg.dataset.get("image_std",  [0.26862954, 0.26130258, 0.27577711])
-        size = cfg.dataset.get("image_size", 224)
-
-        self.img_transform = T.Compose([
-            T.Resize((size, size)),
-            T.Grayscale(num_output_channels=3),   # CXR is grayscale; BiomedCLIP expects 3-ch
-            T.ToTensor(),
-            T.Normalize(mean=mean, std=std),
-        ])
+        self.img_transform = build_image_transform(cfg, is_train=is_train)
 
     def __len__(self):
         return len(self.data)
@@ -344,7 +372,7 @@ class MIMICJointDataset(Dataset):
     in a single batch so all three losses share one forward pass.
     """
 
-    def __init__(self, hf_dataset, student_tokenizer, teacher_tokenizer, cfg):
+    def __init__(self, hf_dataset, student_tokenizer, teacher_tokenizer, cfg, is_train: bool = False):
         self.data = hf_dataset
         self.student_tok = student_tokenizer
         # BiomedCLIP open_clip tokenizer is Callable[[List[str]], LongTensor]
@@ -360,16 +388,7 @@ class MIMICJointDataset(Dataset):
         self.findings_field = cfg.dataset.get("findings_field", "findings")
         self.impression_field = cfg.dataset.get("impression_field", "impression")
         self.concat = cfg.dataset.get("concatenate_sections", True)
-
-        mean = cfg.dataset.get("image_mean", [0.48145466, 0.4578275, 0.40821073])
-        std  = cfg.dataset.get("image_std",  [0.26862954, 0.26130258, 0.27577711])
-        size = cfg.dataset.get("image_size", 224)
-        self.img_transform = T.Compose([
-            T.Resize((size, size)),
-            T.Grayscale(num_output_channels=3),
-            T.ToTensor(),
-            T.Normalize(mean=mean, std=std),
-        ])
+        self.img_transform = build_image_transform(cfg, is_train=is_train)
 
     def __len__(self):
         return len(self.data)
@@ -486,9 +505,10 @@ def load_mimic_cxr(cfg, split, tokenizer, teacher_tokenizer=None):
             "Check dataset config."
         )
 
+    is_train = (split == "train")
     if teacher_tokenizer is not None:
-        return MIMICJointDataset(ds, tokenizer, teacher_tokenizer, cfg)
-    return ImageTextDataset(ds, tokenizer, cfg)
+        return MIMICJointDataset(ds, tokenizer, teacher_tokenizer, cfg, is_train=is_train)
+    return ImageTextDataset(ds, tokenizer, cfg, is_train=is_train)
 
 
 def load_indiana_cxr(cfg, split: str, tokenizer):

@@ -61,6 +61,13 @@ image_size: 224
 image_mean: [0.48145466, 0.4578275, 0.40821073]
 image_std:  [0.26862954, 0.26130258, 0.27577711]
 
+# Phase 9D's "untested free lever" (train-split-only RandomResizedCrop + mild
+# rotation, see train_contrastive.py's build_image_transform). Declared here
+# (not just as a Python-side default) so it's Hydra-CLI-overridable without
+# hitting strict-struct mode; defaults false so this closed-chapter retrieval
+# config's behavior is UNCHANGED unless a future arm explicitly opts in.
+use_augmentation: false
+
 # Contrastive training settings
 contrastive_mode: "joint"
 image_encoder_name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"

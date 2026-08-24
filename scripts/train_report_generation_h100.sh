@@ -50,6 +50,11 @@ VIT_UNFREEZE="${VIT_UNFREEZE:-0}"   # 0 = frozen image tower (10C default until
 VIT_LR="${VIT_LR:-1e-6}"
 GRAD_CKPT="${GRAD_CKPT:-false}"
 
+# Phase 9D — train-split-only image augmentation (RandomResizedCrop + mild
+# rotation). Default false; set true to test whether it fixes the template-
+# memorization pattern confirmed live 2026-08-24 (job 2478647's arm0 checkpoint).
+AUGMENT="${AUGMENT:-false}"
+
 # Phase 10D — decoder init checkpoint. No safe default; must be supplied.
 DECODER_CKPT="${DECODER_CKPT:-./outputs/h100_stage0_150m_v2/checkpoints/stage0_model_only.pt}"
 
@@ -97,6 +102,7 @@ python scripts/train_report_generation.py \
   dataset.num_workers=8 \
   dataset.pin_memory=true \
   dataset.cache_dir="${MIMIC_CACHE_DIR}" \
+  dataset.use_augmentation=${AUGMENT} \
   model.prefix_k=${PREFIX_K} \
   model.decoder_lr=${DECODER_LR} \
   model.head_lr=${HEAD_LR} \

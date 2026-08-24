@@ -2850,6 +2850,105 @@ def test_load_mimic_cxr_dispatches_to_local_parquet_when_configured():
     assert data_files["test"] == "/fake/dir/test.parquet"
 
 
+@pytest.mark.willi_parity
+@pytest.mark.parametrize("use_augmentation,is_train,expect_augmented", [
+    (False, True, False),
+    (True, False, False),
+    (True, True, True),
+])
+def test_build_image_transform_augmentation_gating(use_augmentation, is_train, expect_augmented):
+    """Phase 9D (2026-08-24, after job 2478647's arm0 checkpoint was confirmed
+    via --checkpoint mode to have memorized boilerplate templates rather than
+    condition on the image): RandomResizedCrop/RandomRotation must apply ONLY
+    when BOTH use_augmentation is set AND is_train — augmenting eval images
+    would make evaluation nondeterministic regardless of the training question,
+    and use_augmentation defaulting off/False keeps retrieval's closed-chapter
+    usage of this same helper byte-identical."""
+    from omegaconf import OmegaConf
+    import torchvision.transforms as T
+    from scripts.train_contrastive import build_image_transform
+
+    cfg = OmegaConf.create({"dataset": {"use_augmentation": use_augmentation, "image_size": 224}})
+    transform = build_image_transform(cfg, is_train=is_train)
+    types = [type(t) for t in transform.transforms]
+
+    assert (T.RandomResizedCrop in types) is expect_augmented
+    assert (T.RandomRotation in types) is expect_augmented
+    assert (T.Resize in types) is (not expect_augmented)
+
+
+@pytest.mark.willi_parity
+def test_build_image_transform_default_matches_pre_9d_pipeline():
+    """Regression pin: with use_augmentation absent (the default for every
+    existing dataset config, i.e. the state before 9D landed), build_image_
+    transform() must be byte-identical to the old hardcoded pipeline (Resize
+    -> Grayscale(3) -> ToTensor -> Normalize) — protects retrieval's closed
+    chapter from any accidental behavior change from this refactor."""
+    from omegaconf import OmegaConf
+    from PIL import Image
+    import torchvision.transforms as T
+    from scripts.train_contrastive import build_image_transform
+
+    cfg = OmegaConf.create({"dataset": {}})
+    transform = build_image_transform(cfg, is_train=True)  # is_train=True but use_augmentation unset
+
+    old_transform = T.Compose([
+        T.Resize((224, 224)),
+        T.Grayscale(num_output_channels=3),
+        T.ToTensor(),
+        T.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
+                    std=[0.26862954, 0.26130258, 0.27577711]),
+    ])
+
+    img = Image.new("RGB", (300, 400), color=(128, 64, 200))
+    torch.testing.assert_close(transform(img), old_transform(img))
+
+
+@pytest.mark.willi_parity
+def test_load_mimic_cxr_threads_is_train_only_for_train_split():
+    """load_mimic_cxr must pass is_train=True only when split=='train' —
+    validation/test must never get augmented, even with use_augmentation=True.
+    Reuses test_load_mimic_cxr_dispatches_to_local_parquet_when_configured's
+    import-by-path + fake load_dataset pattern."""
+    import importlib.util
+    from omegaconf import OmegaConf
+    import torchvision.transforms as T
+
+    spec = importlib.util.spec_from_file_location(
+        "_tc_mod_istrain", REPO_ROOT / "scripts" / "train_contrastive.py"
+    )
+    tc = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(tc)
+    except Exception as e:                                    # pragma: no cover
+        pytest.skip("train_contrastive import failed: {}".format(e))
+
+    class _FakeDS:
+        column_names = ["image", "findings", "impression"]
+
+        def __len__(self):
+            return 1
+
+        def filter(self, fn):
+            return self
+
+    tc.load_dataset = lambda *a, **k: _FakeDS()
+
+    cfg = OmegaConf.create({"dataset": {
+        "local_parquet_dir": "/fake/dir",
+        "train_split": "train", "validation_split": "validation", "test_split": "test",
+        "cache_dir": "/unused", "max_length": 32, "use_augmentation": True,
+    }})
+
+    train_ds = tc.load_mimic_cxr(cfg, "train", tokenizer=None, teacher_tokenizer=None)
+    val_ds = tc.load_mimic_cxr(cfg, "validation", tokenizer=None, teacher_tokenizer=None)
+
+    train_types = [type(t) for t in train_ds.img_transform.transforms]
+    val_types = [type(t) for t in val_ds.img_transform.transforms]
+    assert T.RandomResizedCrop in train_types, "train split must be augmented when use_augmentation=True"
+    assert T.RandomResizedCrop not in val_types, "validation split must NEVER be augmented"
+
+
 def test_prepare_dataloader_dispatches_local_parquet_configs_to_load_mimic_cxr():
     """Regression for job 2470516 (2026-08-20): prepare_dataloader() has its
     OWN outer dispatch (`if name == "mimic_cxr": ... elif ...: ... else: raise
@@ -3543,7 +3642,7 @@ def test_train_report_generation_h100_slurm_wrapper_hydra_overrides_compose():
         "MODEL_CONFIG": "hybrid_150m_v2_rrg", "DATASET_CONFIG": "cxr_mimic_full",
         "MAX_STEPS": "50", "BATCH_SIZE": "16", "DECODER_LR": "1e-5", "HEAD_LR": "3e-4",
         "GRAD_CLIP": "0.5", "PREFIX_K": "32", "VIT_UNFREEZE": "0", "VIT_LR": "1e-6",
-        "GRAD_CKPT": "false", "MIMIC_CACHE_DIR": "/tmp/mimic_cache",
+        "GRAD_CKPT": "false", "AUGMENT": "false", "MIMIC_CACHE_DIR": "/tmp/mimic_cache",
         "DECODER_CKPT": "./outputs/h100_stage0_150m_v2/checkpoints/stage0_model_only.pt",
         "EXPERIMENT": "parity_check",
     }
