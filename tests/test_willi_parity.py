@@ -3330,6 +3330,31 @@ def test_report_generation_prefix_masking_matches_manual_ignore_index_ce():
 
 
 @pytest.mark.willi_parity
+@pytest.mark.parametrize("decode,kwargs", [("greedy", {}), ("beam", {"beam_size": 2})])
+def test_generate_from_patch_grid_runs_and_returns_expected_shape(decode, kwargs):
+    """Phase 11A's --checkpoint mode (2026-08-23, added after the first real
+    Phase 10E arm0 checkpoint existed): generate_from_patch_grid() must run
+    end-to-end on a synthetic patch grid (no real checkpoint/BiomedCLIP/data
+    needed here — that heavy path is scripts/evaluate_report_generation.py's
+    load_report_generation_module(), not unit-tested, same as evaluate_lm.py's
+    loader) and seed generation with an EMPTY input_ids, matching how training
+    labels start immediately after the image prefix with no BOS token."""
+    from scripts.evaluate_report_generation import generate_from_patch_grid
+    from hybrid_xmamba.training.lightning_module import ReportGenerationLightningModule
+
+    cfg = _tiny_cpu_config()
+    module = ReportGenerationLightningModule(decoder_config=cfg, prefix_k=4)
+    module.eval()
+
+    patch_grid = torch.randn(1, 197, 768)
+    max_new_tokens = 6
+    out = generate_from_patch_grid(module, patch_grid, decode=decode, max_new_tokens=max_new_tokens, **kwargs)
+
+    assert out.shape == (1, max_new_tokens), out.shape
+    assert torch.isfinite(out.float()).all()
+
+
+@pytest.mark.willi_parity
 def test_hybrid_150m_v2_rrg_config_matches_150m_v2_architecture():
     """Phase 10E: hybrid_150m_v2_rrg.yaml must be architecturally IDENTICAL to
     hybrid_150m_v2.yaml (checkpoint-loadable against a Stage-0/joint-trained

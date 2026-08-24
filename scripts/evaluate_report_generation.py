@@ -14,11 +14,12 @@ work" list. It provides two independent pieces, both usable today:
      against a tiny random-init model + random prefix embeddings (--smoke-test)
      so the decoding code itself is proven correct before any checkpoint exists.
 
-Loading a real checkpoint and running generation over the official MIMIC test
-split is Phase 11D scope (needs the report corpus from Phase 8 and a trained
-Phase 10 generator) — deliberately not built here to avoid premature/duplicated
-checkpoint-loading infra; see scripts/evaluate_lm.py's loader for the pattern
-to reuse then.
+--checkpoint mode (added 2026-08-23, after the first real Phase 10E arm0
+checkpoint existed) loads a trained ReportGenerationLightningModule from a
+Lightning .ckpt and generates from real images — a qualitative check, NOT yet
+the full official-subject-disjoint-test-split scoring run Phase 11D's plan
+entry describes. Loader pattern follows scripts/evaluate_lm.py's convention
+(defensive key-prefix stripping, missing/unexpected key counts printed).
 
 Usage:
     # Metrics over precomputed hypothesis/reference pairs (one line each, aligned)
@@ -29,6 +30,12 @@ Usage:
     # Prove the decoding harness (prefix-conditioned greedy + beam=3) runs
     # end-to-end on a tiny random model — no checkpoint, no data required
     python scripts/evaluate_report_generation.py --smoke-test
+
+    # Qualitative check against a real trained checkpoint + real images
+    python scripts/evaluate_report_generation.py \\
+        --checkpoint outputs/h100_report_gen_arm0/checkpoints/last.ckpt \\
+        --parquet /sc/home/$USER/dataset/mimic_full/arm0/validate.parquet \\
+        --num-samples 10 --decode greedy
 """
 
 import sys
@@ -124,6 +131,137 @@ def beam_search_decode(
 
     best = max(beams, key=lambda c: c[2] / (c[1].shape[1] ** length_penalty))
     return best[1]
+
+
+# ---------------------------------------------------------------------------
+# Real-checkpoint loading + generation (--checkpoint mode). Split into a
+# heavy loader (needs a real checkpoint + BiomedCLIP weights, not unit-tested)
+# and a light decode step (generate_from_patch_grid, unit-tested with a
+# synthetic patch_grid — same pattern as
+# test_report_generation_step_produces_finite_loss_and_gradients).
+# ---------------------------------------------------------------------------
+
+def build_decoder_config(model_cfg: Dict) -> HybridConfig:
+    """Filter a raw model-yaml dict down to HybridConfig's declared fields —
+    same pattern as test_hybrid_150m_v2_rrg_config_matches_150m_v2_architecture."""
+    import dataclasses
+    fields = {f.name for f in dataclasses.fields(HybridConfig)}
+    return HybridConfig(**{k: v for k, v in model_cfg.items() if k in fields})
+
+
+def load_report_generation_module(checkpoint_path, model_config_name: str = "hybrid_150m_v2_rrg", device: str = "cpu"):
+    """Load a trained ReportGenerationLightningModule from a Lightning .ckpt
+    for inference. Mirrors evaluate_lm.py's checkpoint-loading convention
+    (defensive _orig_mod. prefix strip, missing/unexpected key counts printed)."""
+    from omegaconf import OmegaConf
+    from hybrid_xmamba.training.lightning_module import ReportGenerationLightningModule
+
+    model_cfg_path = PROJECT_ROOT / "configs" / "model" / f"{model_config_name}.yaml"
+    raw = OmegaConf.to_container(OmegaConf.load(model_cfg_path), resolve=True)
+    decoder_config = build_decoder_config(raw)
+
+    module = ReportGenerationLightningModule(
+        decoder_config=decoder_config,
+        image_patch_dim=int(raw.get("image_patch_dim", 768)),
+        prefix_k=int(raw.get("prefix_k", 32)),
+    )
+    module.load_image_encoder()  # registers image_encoder as a submodule so its
+                                  # keys (saved in the .ckpt — see 10E's note that
+                                  # the frozen ViT is checkpointed too) actually load.
+
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state_dict = ckpt.get("state_dict", ckpt)
+    state_dict = {
+        (k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v
+        for k, v in state_dict.items()
+    }
+    missing, unexpected = module.load_state_dict(state_dict, strict=False)
+    print(f"Loaded checkpoint: {checkpoint_path}")
+    print(f"  Missing keys: {len(missing)}, Unexpected: {len(unexpected)}")
+
+    module.to(device)
+    module.eval()
+    return module
+
+
+@torch.no_grad()
+def generate_from_patch_grid(
+    module,
+    patch_grid: torch.Tensor,
+    decode: str = "greedy",
+    beam_size: int = 3,
+    max_new_tokens: int = 100,
+) -> torch.Tensor:
+    """(1, N, patch_dim) ViT patch grid -> (1, max_new_tokens) generated token
+    ids. Seeds generation with an EMPTY input_ids (no BOS token) -- matches
+    training exactly, where report_labels start immediately after the k
+    image-prefix positions (ReportGenerationLightningModule._step); the model
+    has never seen a start-of-sequence marker, so inventing one here would be
+    a train/inference mismatch, not a neutral seed."""
+    device = patch_grid.device
+    prefix_embeds = module.prefix_mapper(patch_grid)
+    input_ids = torch.zeros((patch_grid.shape[0], 0), dtype=torch.long, device=device)
+    if decode == "greedy":
+        return greedy_decode(module.decoder, input_ids, prefix_embeds=prefix_embeds,
+                              max_new_tokens=max_new_tokens)
+    if decode == "beam":
+        return beam_search_decode(module.decoder, input_ids, prefix_embeds=prefix_embeds,
+                                   beam_size=beam_size, max_new_tokens=max_new_tokens)
+    raise ValueError(f"Unknown decode mode: {decode!r} (expected 'greedy' or 'beam')")
+
+
+def run_checkpoint_inspection(args) -> None:
+    """--checkpoint mode: generate from real images with a real trained
+    checkpoint and print generated-vs-reference text side by side. Qualitative
+    inspection tool, NOT the official-test-split 11D scoring run -- arm0's
+    own parquets are a legacy-training-hash subset, not the subject-disjoint
+    official split (see H100_SCALING_PLAN.md's cross_protocol_number_comparison
+    warning)."""
+    import pandas as pd
+    from PIL import Image
+    import torchvision.transforms as T
+    from transformers import AutoTokenizer
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    module = load_report_generation_module(args.checkpoint, args.model_config, device=device)
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+
+    # BiomedCLIP CLIP normalisation — matches cxr_mimic_arm0.yaml/cxr_mimic_full.yaml.
+    img_transform = T.Compose([
+        T.Resize((224, 224)),
+        T.Grayscale(num_output_channels=3),
+        T.ToTensor(),
+        T.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
+                    std=[0.26862954, 0.26130258, 0.27577711]),
+    ])
+
+    df = pd.read_parquet(args.parquet)
+    n = min(args.num_samples, len(df))
+    print(f"Loaded {len(df)} rows from {args.parquet}; inspecting first {n}\n")
+
+    hyps, refs = [], []
+    for i in range(n):
+        row = df.iloc[i]
+        img = Image.open(row["image"]).convert("RGB")
+        pixel_values = img_transform(img).unsqueeze(0).to(device)
+        patch_grid = module._patch_grid(pixel_values)
+        out_ids = generate_from_patch_grid(
+            module, patch_grid, decode=args.decode,
+            beam_size=args.beam_size, max_new_tokens=args.max_new_tokens,
+        )
+        generated = tokenizer.decode(out_ids[0].tolist(), skip_special_tokens=True)
+        reference = f"Findings: {row.get('findings', '')} Impression: {row.get('impression', '')}".strip()
+
+        print(f"--- sample {i} (study_id={row.get('study_id', '?')}) ---")
+        print(f"GENERATED: {generated}")
+        print(f"REFERENCE: {reference}")
+        print(f"ROUGE-L (single sample): {rouge_l_score(generated.split(), reference.split()):.3f}\n")
+        hyps.append(generated)
+        refs.append(reference)
+
+    metrics = compute_all_metrics(hyps, refs)
+    print(f"=== Aggregate over {n} samples ===")
+    print(json.dumps(metrics, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -276,10 +414,32 @@ def main():
     parser.add_argument("--smoke-test", action="store_true",
                         help="Run the decoding harness end-to-end on a tiny random model "
                              "(no checkpoint/data needed) instead of computing metrics")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Path to a trained ReportGenerationLightningModule .ckpt — "
+                             "generates from real images (--parquet) and prints "
+                             "generated-vs-reference text instead of computing metrics")
+    parser.add_argument("--model-config", type=str, default="hybrid_150m_v2_rrg",
+                        help="Model config name under configs/model/ (for --checkpoint mode)")
+    parser.add_argument("--parquet", type=str, default=None,
+                        help="Path to a validate.parquet/test.parquet (for --checkpoint mode)")
+    parser.add_argument("--num-samples", type=int, default=5,
+                        help="Number of samples to generate from (for --checkpoint mode)")
+    parser.add_argument("--decode", type=str, default="greedy", choices=["greedy", "beam"],
+                        help="Decoding strategy (for --checkpoint mode)")
+    parser.add_argument("--beam-size", type=int, default=3,
+                        help="Beam size when --decode beam (for --checkpoint mode)")
+    parser.add_argument("--max-new-tokens", type=int, default=100,
+                        help="Max tokens to generate per sample (for --checkpoint mode)")
     args = parser.parse_args()
 
     if args.smoke_test:
         run_smoke_test()
+        return
+
+    if args.checkpoint:
+        if not args.parquet:
+            parser.error("--parquet is required with --checkpoint")
+        run_checkpoint_inspection(args)
         return
 
     if not args.hyp_file or not args.ref_file:
