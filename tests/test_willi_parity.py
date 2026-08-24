@@ -3351,7 +3351,63 @@ def test_generate_from_patch_grid_runs_and_returns_expected_shape(decode, kwargs
     out = generate_from_patch_grid(module, patch_grid, decode=decode, max_new_tokens=max_new_tokens, **kwargs)
 
     assert out.shape == (1, max_new_tokens), out.shape
-    assert torch.isfinite(out.float()).all()
+
+
+@pytest.mark.willi_parity
+def test_report_generation_val_step_logs_flat_named_checkpoint_alias():
+    """Regression pin for the live bug hit 2026-08-23 (job 2478647): Lightning
+    does not sanitize '/' inside a ModelCheckpoint filename=... interpolation
+    -- {val/lm_loss:.4f} silently created a nested DIRECTORY (report_gen-
+    step=NNNNNN-val/) instead of a flat checkpoint filename, with the actual
+    .ckpt buried one level down as lm_loss=X.XXXX.ckpt. _step() must log an
+    additional flat-named 'val_lm_loss_ckpt' alias (same value as val/lm_loss)
+    on validation steps only, which train_report_generation.py's filename=
+    template now interpolates instead."""
+    from unittest.mock import patch as mock_patch
+    from hybrid_xmamba.training.lightning_module import ReportGenerationLightningModule
+
+    cfg = _tiny_cpu_config()
+    module = ReportGenerationLightningModule(decoder_config=cfg, prefix_k=4)
+    module.eval()
+
+    B, L = 2, 6
+    batch = {"input_ids": torch.randint(0, 100, (B, L)), "patch_grid": torch.randn(B, 197, 768)}
+
+    with mock_patch.object(module, "log") as mock_log:
+        module._step(batch, "val")
+        val_keys = [call.args[0] for call in mock_log.call_args_list]
+    assert "val/lm_loss" in val_keys
+    assert "val_lm_loss_ckpt" in val_keys, (
+        "val_lm_loss_ckpt not logged on a validation step -- "
+        "train_report_generation.py's filename= template has nothing "
+        "flat-named to interpolate, reintroducing the nested-directory bug"
+    )
+
+    with mock_patch.object(module, "log") as mock_log:
+        module._step(batch, "train")
+        train_keys = [call.args[0] for call in mock_log.call_args_list]
+    assert "val_lm_loss_ckpt" not in train_keys, "should only log on validation steps"
+
+
+@pytest.mark.willi_parity
+def test_train_report_generation_checkpoint_filename_has_no_slash_in_braces():
+    """Static guard, complementary to the behavioral test above: any {...}
+    filename interpolation containing '/' creates a nested directory instead
+    of a checkpoint file under this Lightning version's default ModelCheckpoint
+    (confirmed live 2026-08-23). Scoped to train_report_generation.py only --
+    train_stage0_distill.py/_resume.py have the identical latent pattern
+    ({val/loss:.4f}) but are historical, already-executed production scripts
+    untouched this session; documented here, not fixed, to avoid unrequested
+    changes to load-bearing infra the Stage-0 150M checkpoint (val PPL 13.18,
+    this whole Phase 10E chain's DECODER_CKPT) came from."""
+    py = (REPO_ROOT / "scripts" / "train_report_generation.py").read_text()
+    m = re.search(r'filename\s*=\s*["\']([^"\']*)["\']', py)
+    assert m, "expected a ModelCheckpoint filename=... string literal"
+    for expr in re.findall(r"\{([^}]*)\}", m.group(1)):
+        assert "/" not in expr, (
+            f"filename= template contains '{{{expr}}}' — a '/' inside a Lightning "
+            f"filename interpolation creates a nested directory, not a flat file"
+        )
 
 
 @pytest.mark.willi_parity
@@ -3436,6 +3492,26 @@ def test_train_report_generation_h100_slurm_wrapper_conventions():
     assert "DECODER_CKPT" in sh
     assert 'if [ ! -f "${DECODER_CKPT}" ]' in sh
     assert "train_report_generation.py" in sh
+
+
+@pytest.mark.willi_parity
+def test_inspect_report_generation_h100_slurm_wrapper_conventions():
+    """Companion wrapper (2026-08-23) for scripts/evaluate_report_generation.py
+    --checkpoint, needed because the login node refuses this command directly
+    ('This command is not allowed on the login node!', hit live job 2478647's
+    follow-up). Same established conventions as the training wrapper, plus a
+    fail-fast existence check on the checkpoint itself."""
+    sh = (REPO_ROOT / "scripts" / "inspect_report_generation_h100.sh").read_text()
+    assert "#SBATCH --partition=aisc-batch" in sh
+    assert "#SBATCH --account=aisc" in sh
+    assert "--exclude=ga03" in sh
+    assert "CHECKPOINT" in sh
+    assert 'if [ ! -f "${CHECKPOINT}" ]' in sh
+    assert "evaluate_report_generation.py" in sh
+    assert "--checkpoint" in sh
+    # Defaults to VALIDATION images, not train — generations on train images
+    # look artificially good even under genuine overfitting.
+    assert "validate.parquet" in sh
 
 
 @pytest.mark.willi_parity

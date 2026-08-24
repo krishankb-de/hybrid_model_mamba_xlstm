@@ -1559,6 +1559,17 @@ class ReportGenerationLightningModule(pl.LightningModule):
 
         self.log(f"{split}/lm_loss", loss, prog_bar=(split == "train"),
                   on_step=(split == "train"), on_epoch=True)
+        if split == "val":
+            # Flat-named alias purely for ModelCheckpoint's filename= template.
+            # A '/' inside a Lightning filename interpolation (e.g.
+            # {val/lm_loss:.4f}) is NOT sanitized -- it creates a literal
+            # nested directory instead of a flat filename (confirmed live
+            # 2026-08-23, job 2478647: outputs/.../checkpoints/report_gen-
+            # step=000250-val/ turned out to be a DIRECTORY, the actual
+            # checkpoint sitting inside it as lm_loss=X.XXXX.ckpt). monitor=
+            # keeps using "val/lm_loss" (a plain dict-key lookup, no filesystem
+            # implication); only the filename= template needs the flat key.
+            self.log("val_lm_loss_ckpt", loss, on_epoch=True)
         if split == "train":
             # self.trainer raises RuntimeError (not None) when no Trainer is
             # attached — e.g. a unit test calling training_step() directly.

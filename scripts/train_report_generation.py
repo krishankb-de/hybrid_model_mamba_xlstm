@@ -146,7 +146,13 @@ def main(cfg: DictConfig):
             mode="min",
             save_top_k=3,
             save_last=True,
-            filename="report_gen-{step:06d}-{val/lm_loss:.4f}",
+            # NOT {val/lm_loss:.4f} -- Lightning does not sanitize '/' inside a
+            # filename interpolation, so that produced a literal nested
+            # directory instead of a flat checkpoint file (confirmed live
+            # 2026-08-23, job 2478647). val_lm_loss_ckpt is a flat-named alias
+            # logged in ReportGenerationLightningModule._step() for exactly
+            # this; monitor= above is unaffected (a plain dict-key lookup).
+            filename="report_gen-{step:06d}-{val_lm_loss_ckpt:.4f}",
         ),
         LearningRateMonitor(logging_interval="step"),
         SignalCheckpointCallback(checkpoint_dir=cfg.checkpoint_dir),
