@@ -42,6 +42,10 @@ TRAIN_PARQUET="${TRAIN_PARQUET:-/sc/home/$USER/dataset/mimic_full/arm0/train.par
 PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/arm0/validate.parquet}"
 NUM_SAMPLES="${NUM_SAMPLES:-10}"
 MAX_GALLERY="${MAX_GALLERY:-0}"   # 0 = full gallery
+# Phase 11B (2026-08-28): opt-in CheXbert F1 alongside ROUGE-L/BLEU, off by
+# default -- same UNVERIFIED-until-run caveat as inspect_report_generation_h100.sh.
+CHEXBERT="${CHEXBERT:-false}"
+CHEXPERT_CSV="${CHEXPERT_CSV:-/sc/home/$USER/dataset/mimic_full/mimic-cxr-2.0.0-chexpert.csv.gz}"
 
 echo "=== Phase 11C retrieval-NN baseline: gallery=${TRAIN_PARQUET} query=${PARQUET} ==="
 echo "=== num_samples=${NUM_SAMPLES} max_gallery=${MAX_GALLERY} ==="
@@ -59,12 +63,18 @@ export PYTHONUNBUFFERED=1
 source "${VENV_ACTIVATE}"
 python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
+CHEXBERT_ARGS=()
+if [ "${CHEXBERT}" = "true" ]; then
+  CHEXBERT_ARGS+=(--chexbert --chexpert-csv "${CHEXPERT_CSV}")
+fi
+
 python scripts/evaluate_report_generation.py \
   --retrieval-baseline \
   --train-parquet "${TRAIN_PARQUET}" \
   --parquet "${PARQUET}" \
   --num-samples "${NUM_SAMPLES}" \
-  --max-gallery "${MAX_GALLERY}"
+  --max-gallery "${MAX_GALLERY}" \
+  ${CHEXBERT_ARGS[@]+"${CHEXBERT_ARGS[@]}"}
 
 echo "=== END ==="
 date

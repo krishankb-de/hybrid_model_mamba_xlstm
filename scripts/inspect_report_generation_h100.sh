@@ -37,6 +37,13 @@ NUM_SAMPLES="${NUM_SAMPLES:-10}"
 DECODE="${DECODE:-greedy}"
 BEAM_SIZE="${BEAM_SIZE:-3}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-100}"
+# Phase 11B (2026-08-28): opt-in CheXbert F1 alongside ROUGE-L/BLEU, off by
+# default since it needs f1chexbert + network on first use (UNVERIFIED
+# against real weights as of this writing -- see evaluate_report_generation.py's
+# label_reports_with_chexbert docstring). CHEXPERT_CSV enables the ground-
+# truth labeler-wiring cross-check when set alongside CHEXBERT=true.
+CHEXBERT="${CHEXBERT:-false}"
+CHEXPERT_CSV="${CHEXPERT_CSV:-/sc/home/$USER/dataset/mimic_full/mimic-cxr-2.0.0-chexpert.csv.gz}"
 
 echo "=== Phase 11A checkpoint inspection: ${CHECKPOINT} ==="
 echo "=== parquet=${PARQUET} num_samples=${NUM_SAMPLES} decode=${DECODE} ==="
@@ -59,6 +66,11 @@ if [ ! -f "${CHECKPOINT}" ]; then
   exit 1
 fi
 
+CHEXBERT_ARGS=()
+if [ "${CHEXBERT}" = "true" ]; then
+  CHEXBERT_ARGS+=(--chexbert --chexpert-csv "${CHEXPERT_CSV}")
+fi
+
 python scripts/evaluate_report_generation.py \
   --checkpoint "${CHECKPOINT}" \
   --model-config "${MODEL_CONFIG}" \
@@ -66,7 +78,8 @@ python scripts/evaluate_report_generation.py \
   --num-samples "${NUM_SAMPLES}" \
   --decode "${DECODE}" \
   --beam-size "${BEAM_SIZE}" \
-  --max-new-tokens "${MAX_NEW_TOKENS}"
+  --max-new-tokens "${MAX_NEW_TOKENS}" \
+  ${CHEXBERT_ARGS[@]+"${CHEXBERT_ARGS[@]}"}
 
 echo "=== END ==="
 date

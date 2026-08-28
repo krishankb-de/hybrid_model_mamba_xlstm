@@ -65,3 +65,12 @@ nltk>=3.8                  # METEOR only; ROUGE-L/BLEU are pure Python (no dep).
                             # which requires internet -- compute nodes have none, so
                             # evaluate_report_generation.py catches the missing-corpus
                             # case and reports METEOR as skipped rather than failing.
+
+# Phase 11B (H100_SCALING_PLAN.md): CheXbert F1, --chexbert flag only
+f1chexbert>=0.0.2           # downloads chexbert.pth on first use (needs network --
+                            # confirmed OK per sc-helpdesk@hpi.de's 1 Gbit/s compute-
+                            # node uplink, same as the PhysioNet fetch). UNVERIFIED
+                            # against real weights as of this writing --
+                            # label_reports_with_chexbert() catches any import/API/
+                            # download failure and reports CheXbert F1 as skipped
+                            # rather than failing, same pattern as nltk/METEOR above.
