@@ -18,7 +18,7 @@
                                         # gx13v1: faulty GPU (cudaErrorContained, 2026-07-19)
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=4
-#SBATCH --time=00:30:00
+#SBATCH --time=02:30:00
 #SBATCH --job-name=inspect_report_gen
 #SBATCH --output=logs/%x_%j.log
 #SBATCH --error=logs/%x_%j.log
