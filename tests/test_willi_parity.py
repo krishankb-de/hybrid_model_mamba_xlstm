@@ -3782,3 +3782,104 @@ def test_retrieval_baseline_h100_slurm_wrapper_exposes_chexbert_lever():
     assert 'CHEXBERT="${CHEXBERT:-false}"' in sh
     assert "--chexbert" in sh
     assert '${CHEXBERT_ARGS[@]+"${CHEXBERT_ARGS[@]}"}' in sh
+
+
+@pytest.mark.willi_parity
+def test_write_hyps_refs_writes_one_report_per_line_sanitizing_newlines(tmp_path):
+    """Phase 11B (2026-08-29): dumps for the isolated-venv CheXbert scorer.
+    A report containing an embedded newline (real MIMIC findings/impression
+    text can have literal paragraph breaks) must be collapsed to one line —
+    otherwise it would silently split across multiple lines on write and
+    desync the hyp/ref alignment when a reader does .splitlines() (the same
+    convention --hyp-file/--ref-file already relies on)."""
+    from scripts.evaluate_report_generation import write_hyps_refs
+
+    hyps = ["Findings: clear lungs.\nImpression: normal.", "no acute process"]
+    refs = ["Findings:   clear   lungs.", "Impression:\nno acute process"]
+
+    dump_dir = tmp_path / "dump"
+    write_hyps_refs(str(dump_dir), hyps, refs)
+
+    hyp_lines = (dump_dir / "hyps.txt").read_text().splitlines()
+    ref_lines = (dump_dir / "refs.txt").read_text().splitlines()
+    assert hyp_lines == ["Findings: clear lungs. Impression: normal.", "no acute process"]
+    assert ref_lines == ["Findings: clear lungs.", "Impression: no acute process"]
+    assert len(hyp_lines) == len(ref_lines) == len(hyps)
+
+
+@pytest.mark.willi_parity
+def test_dump_dir_flag_present_on_evaluate_report_generation_parser():
+    """Phase 11B (2026-08-29): --dump-dir must exist and default to None (off)
+    so existing invocations without it are unaffected."""
+    sh = (REPO_ROOT / "scripts" / "evaluate_report_generation.py").read_text()
+    assert '"--dump-dir"' in sh
+    assert "write_hyps_refs(args.dump_dir, hyps, refs)" in sh
+
+
+@pytest.mark.willi_parity
+def test_score_chexbert_standalone_parser_builds_without_importing_f1chexbert(monkeypatch):
+    """score_chexbert_standalone.py must be parseable/CLI-testable even when
+    f1chexbert isn't installed in THIS env (it's meant for a separate,
+    isolated venv) -- so f1chexbert must be imported inside main(), not at
+    module level, and build_parser() must work standalone."""
+    import sys
+    monkeypatch.setitem(sys.modules, "f1chexbert", None)
+
+    from scripts.score_chexbert_standalone import build_parser
+
+    args = build_parser().parse_args(["--hyp-file", "h.txt", "--ref-file", "r.txt"])
+    assert args.hyp_file == "h.txt"
+    assert args.ref_file == "r.txt"
+    assert args.output_dir is None
+
+
+@pytest.mark.willi_parity
+def test_score_chexbert_standalone_mismatched_line_counts_raises(tmp_path, monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "f1chexbert", None)
+
+    from scripts.score_chexbert_standalone import main
+
+    hyp_file = tmp_path / "h.txt"
+    ref_file = tmp_path / "r.txt"
+    hyp_file.write_text("one\ntwo\n")
+    ref_file.write_text("only one\n")
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["score_chexbert_standalone.py", "--hyp-file", str(hyp_file), "--ref-file", str(ref_file)],
+    )
+    with pytest.raises(SystemExit):
+        main()
+
+
+@pytest.mark.willi_parity
+def test_inspect_report_generation_h100_slurm_wrapper_exposes_dump_dir_lever():
+    sh = (REPO_ROOT / "scripts" / "inspect_report_generation_h100.sh").read_text()
+    assert 'DUMP_DIR="${DUMP_DIR:-}"' in sh
+    assert "--dump-dir" in sh
+
+
+@pytest.mark.willi_parity
+def test_retrieval_baseline_h100_slurm_wrapper_exposes_dump_dir_lever():
+    sh = (REPO_ROOT / "scripts" / "retrieval_baseline_h100.sh").read_text()
+    assert 'DUMP_DIR="${DUMP_DIR:-}"' in sh
+    assert "--dump-dir" in sh
+
+
+@pytest.mark.willi_parity
+def test_setup_chexbert_venv_h100_slurm_wrapper_pins_transformers_below_5():
+    """Phase 11B (2026-08-29): f1chexbert's tokenize() calls the legacy
+    tokenizer.encode_plus(...), removed in transformers>=5.0 -- this isolated
+    venv must pin below that, independent of the main .venv's floor
+    (transformers>=4.35.0 in requirements.txt, no ceiling)."""
+    sh = (REPO_ROOT / "scripts" / "setup_chexbert_venv_h100.sh").read_text()
+    assert '"transformers<5"' in sh
+    assert "f1chexbert" in sh
+
+
+@pytest.mark.willi_parity
+def test_score_chexbert_h100_slurm_wrapper_requires_dump_dir():
+    sh = (REPO_ROOT / "scripts" / "score_chexbert_h100.sh").read_text()
+    assert "${DUMP_DIR:?" in sh
+    assert "score_chexbert_standalone.py" in sh

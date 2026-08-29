@@ -43,6 +43,10 @@ MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-100}"
 # chexbert.pth on first use -- see evaluate_report_generation.py's
 # compute_chexbert_metrics docstring.
 CHEXBERT="${CHEXBERT:-false}"
+# Phase 11B (2026-08-29): dump hyps.txt/refs.txt for later CheXbert scoring in
+# the isolated venv (see score_chexbert_h100.sh) instead of/in addition to
+# --chexbert above. Off by default.
+DUMP_DIR="${DUMP_DIR:-}"
 
 echo "=== Phase 11A checkpoint inspection: ${CHECKPOINT} ==="
 echo "=== parquet=${PARQUET} num_samples=${NUM_SAMPLES} decode=${DECODE} ==="
@@ -68,6 +72,9 @@ fi
 CHEXBERT_ARGS=()
 if [ "${CHEXBERT}" = "true" ]; then
   CHEXBERT_ARGS+=(--chexbert)
+fi
+if [ -n "${DUMP_DIR}" ]; then
+  CHEXBERT_ARGS+=(--dump-dir "${DUMP_DIR}")
 fi
 
 python scripts/evaluate_report_generation.py \

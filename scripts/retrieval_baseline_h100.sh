@@ -46,6 +46,10 @@ MAX_GALLERY="${MAX_GALLERY:-0}"   # 0 = full gallery
 # opt-in CheXbert F1 alongside ROUGE-L/BLEU, off by default -- needs the
 # f1chexbert package (pip install f1chexbert) + network for chexbert.pth.
 CHEXBERT="${CHEXBERT:-false}"
+# Phase 11B (2026-08-29): dump hyps.txt/refs.txt for later CheXbert scoring in
+# the isolated venv (see score_chexbert_h100.sh) instead of/in addition to
+# --chexbert above. Off by default.
+DUMP_DIR="${DUMP_DIR:-}"
 
 echo "=== Phase 11C retrieval-NN baseline: gallery=${TRAIN_PARQUET} query=${PARQUET} ==="
 echo "=== num_samples=${NUM_SAMPLES} max_gallery=${MAX_GALLERY} ==="
@@ -66,6 +70,9 @@ python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 CHEXBERT_ARGS=()
 if [ "${CHEXBERT}" = "true" ]; then
   CHEXBERT_ARGS+=(--chexbert)
+fi
+if [ -n "${DUMP_DIR}" ]; then
+  CHEXBERT_ARGS+=(--dump-dir "${DUMP_DIR}")
 fi
 
 python scripts/evaluate_report_generation.py \

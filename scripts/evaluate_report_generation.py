@@ -49,6 +49,19 @@ ground-truth-CSV cross-check (comparing our own labeling of the reference
 text against mimic-cxr-2.0.0-chexpert.csv.gz) is NOT implementable against
 this package's public API and has been dropped, not merely deferred.
 
+2026-08-29: f1chexbert==0.0.2 (last released 2023) is INCOMPATIBLE with a
+modern `transformers` install -- its tokenize() helper calls the legacy
+`tokenizer.encode_plus(...)` method, removed in transformers>=5.0. The main
+.venv used for report generation/training needs a recent transformers (GPT-2
+tokenizer, BiomedCLIP text tower, BioMedLM teacher), so downgrading it just to
+satisfy this one old package is the wrong tradeoff. FIX: run CheXbert scoring
+in a SEPARATE, isolated venv pinned to `transformers<5` (see
+score_chexbert_standalone.py + score_chexbert_h100.sh), decoupled from this
+script and the main venv entirely via plain hyps.txt/refs.txt files -- hence
+the new --dump-dir flag below, which writes those files from --checkpoint or
+--retrieval-baseline mode so their generated text can be scored in that
+separate venv without re-running generation.
+
 Usage:
     # Metrics over precomputed hypothesis/reference pairs (one line each, aligned)
     python scripts/evaluate_report_generation.py \\
@@ -71,6 +84,13 @@ Usage:
         --train-parquet /sc/home/$USER/dataset/mimic_full/arm0/train.parquet \\
         --parquet /sc/home/$USER/dataset/mimic_full/arm0/validate.parquet \\
         --num-samples 10
+
+    # Dump this run's hyps/refs for later CheXbert scoring in an isolated venv
+    # (see score_chexbert_standalone.py) instead of --chexbert here
+    python scripts/evaluate_report_generation.py \\
+        --checkpoint outputs/h100_report_gen_full/checkpoints/last.ckpt \\
+        --parquet /sc/home/$USER/dataset/mimic_full/validate.parquet \\
+        --num-samples 1433 --dump-dir results/report_gen_full_n1433
 """
 
 import sys
@@ -245,6 +265,24 @@ def generate_from_patch_grid(
     raise ValueError(f"Unknown decode mode: {decode!r} (expected 'greedy' or 'beam')")
 
 
+def write_hyps_refs(dump_dir: str, hyps: List[str], refs: List[str]) -> None:
+    """Write hyps.txt/refs.txt under dump_dir, one report per line, aligned by
+    line number -- lets a separate process (e.g. score_chexbert_standalone.py
+    in an isolated venv) score this run's generated text without re-running
+    generation. Embedded newlines within a single report (MIMIC findings/
+    impression text can contain literal paragraph breaks) are collapsed to a
+    single space first -- otherwise a multi-line report would silently split
+    across multiple lines and desync the hyp/ref alignment on read-back via
+    .splitlines() (the same convention --hyp-file/--ref-file already uses).
+    Pure I/O, no torch/hybrid_xmamba/f1chexbert needed -- testable directly."""
+    out_dir = Path(dump_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sanitize = lambda s: " ".join(s.split())
+    (out_dir / "hyps.txt").write_text("\n".join(sanitize(h) for h in hyps) + "\n")
+    (out_dir / "refs.txt").write_text("\n".join(sanitize(r) for r in refs) + "\n")
+    print(f"  Dumped {len(hyps)} hyp/ref pairs to {out_dir}/hyps.txt, {out_dir}/refs.txt")
+
+
 def run_checkpoint_inspection(args) -> None:
     """--checkpoint mode: generate from real images with a real trained
     checkpoint and print generated-vs-reference text side by side. Qualitative
@@ -293,6 +331,9 @@ def run_checkpoint_inspection(args) -> None:
         print(f"ROUGE-L (single sample): {rouge_l_score(generated.split(), reference.split()):.3f}\n")
         hyps.append(generated)
         refs.append(reference)
+
+    if args.dump_dir:
+        write_hyps_refs(args.dump_dir, hyps, refs)
 
     metrics = compute_all_metrics(hyps, refs, chexbert=args.chexbert)
     print(f"=== Aggregate over {n} samples ===")
@@ -381,6 +422,9 @@ def run_retrieval_baseline(args) -> None:
         print(f"ROUGE-L (single sample): {rouge_l_score(retrieved.split(), reference.split()):.3f}")
         hyps.append(retrieved)
         refs.append(reference)
+
+    if args.dump_dir:
+        write_hyps_refs(args.dump_dir, hyps, refs)
 
     metrics = compute_all_metrics(hyps, refs, chexbert=args.chexbert)
     print(f"\n=== Aggregate retrieval-NN baseline over {n} samples ===")
@@ -612,6 +656,11 @@ def main():
                              "f1chexbert package. Degrades to 'skipped' if the "
                              "package/weights aren't available (see "
                              "compute_chexbert_metrics docstring)")
+    parser.add_argument("--dump-dir", type=str, default=None,
+                        help="Write hyps.txt/refs.txt here (one report per line) for "
+                             "--checkpoint or --retrieval-baseline mode, so a separate "
+                             "process/venv can score them later (e.g. CheXbert via "
+                             "score_chexbert_standalone.py -- see module docstring)")
     args = parser.parse_args()
 
     if args.smoke_test:
