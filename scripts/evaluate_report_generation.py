@@ -33,13 +33,21 @@ frozen-tower default).
 --chexbert (added 2026-08-28, Phase 11B) is an opt-in flag, usable alongside
 --checkpoint, --retrieval-baseline, or --hyp-file/--ref-file: micro/macro F1
 over the 14 CheXpert labels + the 5-label RRG subset, via the f1chexbert
-package (pip install f1chexbert; downloads chexbert.pth on first use).
-UNVERIFIED against real weights as of this writing — degrades to a printed
-"skipped" message on any failure rather than crashing, same pattern as
-METEOR's nltk/wordnet guard. Pass --chexpert-csv (path to the Phase 8A
-mimic-cxr-2.0.0-chexpert.csv.gz) alongside --chexbert in --checkpoint/
---retrieval-baseline mode to also cross-check our labeling of the reference
-text against the official ground-truth labels (labeler-wiring sanity check).
+package (pip install f1chexbert; auto-downloads chexbert.pth on first use).
+CONFIRMED LIVE 2026-08-29 (job 2492037): a first version of this integration
+guessed a wrong f1chexbert API (an imagined per-report `.get_label()` method)
+-- it degraded to a clean "skipped: ModuleNotFoundError" (f1chexbert wasn't
+installed) rather than crashing or silently mis-scoring, exactly per its
+design contract, but would still have called the wrong API once installed.
+Fixed against the real, verified API: `F1CheXbert()(hyps=[...], refs=[...])`
+returns (accuracy, accuracy_per_sample, chexbert_all, chexbert_5) where
+chexbert_all/chexbert_5 are sklearn classification_report(output_dict=True)
+dicts (per-label + "micro avg"/"macro avg" entries) -- it computes CheXbert
+F1 end-to-end internally, so no separate label-matrix math is needed here.
+No per-report label vector is exposed publicly, so the originally-planned
+ground-truth-CSV cross-check (comparing our own labeling of the reference
+text against mimic-cxr-2.0.0-chexpert.csv.gz) is NOT implementable against
+this package's public API and has been dropped, not merely deferred.
 
 Usage:
     # Metrics over precomputed hypothesis/reference pairs (one line each, aligned)
@@ -266,7 +274,7 @@ def run_checkpoint_inspection(args) -> None:
     n = min(args.num_samples, len(df))
     print(f"Loaded {len(df)} rows from {args.parquet}; inspecting first {n}\n")
 
-    hyps, refs, study_ids = [], [], []
+    hyps, refs = [], []
     for i in range(n):
         row = df.iloc[i]
         img = Image.open(row["image"]).convert("RGB")
@@ -285,18 +293,10 @@ def run_checkpoint_inspection(args) -> None:
         print(f"ROUGE-L (single sample): {rouge_l_score(generated.split(), reference.split()):.3f}\n")
         hyps.append(generated)
         refs.append(reference)
-        study_ids.append(row.get("study_id"))
 
-    metrics = compute_all_metrics(hyps, refs, chexbert=args.chexbert, device=device)
+    metrics = compute_all_metrics(hyps, refs, chexbert=args.chexbert)
     print(f"=== Aggregate over {n} samples ===")
     print(json.dumps(metrics, indent=2))
-
-    if args.chexbert and args.chexpert_csv:
-        print("\n=== Phase 11B ground-truth labeler cross-check ===")
-        agreement = chexbert_ref_vs_ground_truth_agreement(
-            refs, study_ids, args.chexpert_csv, device=device
-        )
-        print(json.dumps(agreement, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +367,7 @@ def run_retrieval_baseline(args) -> None:
 
     nn_idx = nearest_neighbor_indices(query_embeds, gallery_embeds)
 
-    hyps, refs, study_ids = [], [], []
+    hyps, refs = [], []
     for i in range(n):
         q_row = query_df.iloc[i]
         g_row = train_df.iloc[nn_idx[i].item()]
@@ -381,18 +381,10 @@ def run_retrieval_baseline(args) -> None:
         print(f"ROUGE-L (single sample): {rouge_l_score(retrieved.split(), reference.split()):.3f}")
         hyps.append(retrieved)
         refs.append(reference)
-        study_ids.append(q_row.get("study_id"))
 
-    metrics = compute_all_metrics(hyps, refs, chexbert=args.chexbert, device=device)
+    metrics = compute_all_metrics(hyps, refs, chexbert=args.chexbert)
     print(f"\n=== Aggregate retrieval-NN baseline over {n} samples ===")
     print(json.dumps(metrics, indent=2))
-
-    if args.chexbert and args.chexpert_csv:
-        print("\n=== Phase 11B ground-truth labeler cross-check ===")
-        agreement = chexbert_ref_vs_ground_truth_agreement(
-            refs, study_ids, args.chexpert_csv, device=device
-        )
-        print(json.dumps(agreement, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -462,162 +454,38 @@ def corpus_bleu(hyps: List[List[str]], refs: List[List[str]], max_n: int = 4) ->
 
 
 # ---------------------------------------------------------------------------
-# Phase 11B — CheXbert F1. micro/macro F1 over the 14 CheXpert labels (+ the
-# 5-label RRG-literature subset) between CheXbert-labeled generated vs
-# reference reports. Split the same way as 11C: the label-matrix F1 math is
-# pure counting, CPU-unit-tested with synthetic label arrays
-# (binary_f1_from_labels); the actual text->label step needs real CheXbert
-# weights and is untested-by-design here (evaluate_lm.py/embed_images-style)
-# -- backed by the `f1chexbert` package (pip install f1chexbert; downloads
-# chexbert.pth on first use). NOT verified against real weights as of this
-# writing -- the first live cluster run IS the integration test. Any failure
-# (package missing, download failure, API mismatch) degrades to a printed
-# "skipped" message, same pattern as meteor_score_corpus's nltk/wordnet
-# guard -- never crashes the surrounding ROUGE/BLEU computation.
-#
-# CHEXPERT_14_LABELS matches the column names in mimic-cxr-2.0.0-chexpert.csv.gz
-# (fetched in Phase 8A); CHEXBERT_5_LABELS is the standard 5-label RRG subset
-# (Irvin et al. 2019 CheXpert "competition" labels).
+# Phase 11B — CheXbert F1 (14-label + the 5-label RRG-literature subset)
+# between generated vs reference reports, via the `f1chexbert` package
+# (pip install f1chexbert; auto-downloads chexbert.pth on first use).
+# `F1CheXbert()(hyps=hyps, refs=refs)` computes labeling AND scoring
+# end-to-end -- no separate label-matrix math needed here (unlike 11C's
+# nearest_neighbor_indices split, there is no CPU-testable pure-math core
+# to extract, since the real API exposes only the aggregate call, not raw
+# per-report labels). Untested-by-design (evaluate_lm.py/embed_images-style)
+# -- needs real weights. Any failure (package missing, download failure,
+# API mismatch) degrades to a printed "skipped" message and None, same
+# contract as meteor_score_corpus's nltk/wordnet guard -- never crashes the
+# surrounding ROUGE/BLEU computation.
 # ---------------------------------------------------------------------------
 
-CHEXPERT_14_LABELS = [
-    "Atelectasis", "Cardiomegaly", "Consolidation", "Edema",
-    "Enlarged Cardiomediastinum", "Fracture", "Lung Lesion", "Lung Opacity",
-    "No Finding", "Pleural Effusion", "Pleural Other", "Pneumonia",
-    "Pneumothorax", "Support Devices",
-]
-
-CHEXBERT_5_LABELS = ["Atelectasis", "Cardiomegaly", "Consolidation", "Edema", "Pleural Effusion"]
-
-
-def load_chexpert_ground_truth_labels(csv_path: str, study_ids: List[int]) -> Dict[int, List[int]]:
-    """mimic-cxr-2.0.0-chexpert.csv.gz -> {study_id: [0/1 x 14]} binary
-    positive-vs-not-positive labels for the given study_ids (U-Zeros
-    convention: 1.0 -> 1, {0.0, -1.0, NaN} -> 0 -- the standard encoding for
-    RRG CheXbert-F1 reporting). Only study_ids actually present in the CSV are
-    returned -- callers must handle misses."""
-    import pandas as pd
-    df = pd.read_csv(csv_path, usecols=["study_id"] + CHEXPERT_14_LABELS)
-    df = df[df["study_id"].isin(set(study_ids))]
-    out = {}
-    for _, row in df.iterrows():
-        out[int(row["study_id"])] = [1 if row[label] == 1.0 else 0 for label in CHEXPERT_14_LABELS]
-    return out
-
-
-def binary_f1_from_labels(
-    pred: List[List[int]], true: List[List[int]], label_names: List[str]
-) -> Dict:
-    """(N, L) binary 0/1 label matrices -> per-label precision/recall/F1 plus
-    micro F1 (pooled TP/FP/FN across labels) and macro F1 (mean of per-label
-    F1). Pure counting, no I/O, no model -- the CPU-testable core, split out
-    from the heavy real-CheXbert labeling path (label_reports_with_chexbert)
-    the same way nearest_neighbor_indices is split from embed_images."""
-    per_label = {}
-    tp_total = fp_total = fn_total = 0
-    f1s = []
-    for j, name in enumerate(label_names):
-        tp = fp = fn = 0
-        for p_row, t_row in zip(pred, true):
-            p, t = p_row[j], t_row[j]
-            if p == 1 and t == 1:
-                tp += 1
-            elif p == 1 and t == 0:
-                fp += 1
-            elif p == 0 and t == 1:
-                fn += 1
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-        per_label[name] = {"precision": precision, "recall": recall, "f1": f1, "support": tp + fn}
-        tp_total += tp
-        fp_total += fp
-        fn_total += fn
-        f1s.append(f1)
-
-    micro_p = tp_total / (tp_total + fp_total) if (tp_total + fp_total) > 0 else 0.0
-    micro_r = tp_total / (tp_total + fn_total) if (tp_total + fn_total) > 0 else 0.0
-    micro_f1 = 2 * micro_p * micro_r / (micro_p + micro_r) if (micro_p + micro_r) > 0 else 0.0
-    macro_f1 = sum(f1s) / len(label_names) if label_names else 0.0
-
-    return {
-        "per_label": per_label,
-        "micro_f1": micro_f1,
-        "macro_f1": macro_f1,
-        "num_examples": len(pred),
-    }
-
-
-def label_reports_with_chexbert(texts: List[str], device: str = "cpu") -> Optional[List[List[int]]]:
-    """List[str] -> (N, 14) 0/1 label matrix (order = CHEXPERT_14_LABELS) via
-    the CheXbert labeler (f1chexbert package -- downloads chexbert.pth on
-    first use, needs network; per sc-helpdesk@hpi.de compute nodes have a
-    1 Gbit/s uplink, confirmed live by the PhysioNet fetch, so this should
-    work directly from an aisc-batch job with no separate staging step).
-    Returns None (never raises) on ANY failure -- missing package, download
-    failure, API mismatch -- so a broken integration degrades to 'skipped'
-    exactly like meteor_score_corpus, rather than crashing the whole eval.
-    UNVERIFIED AGAINST REAL WEIGHTS as of this writing."""
+def compute_chexbert_metrics(hyps: List[str], refs: List[str]) -> Optional[Dict]:
+    """hyps/refs: report text, one pair per example -> CheXbert F1 (14-label
+    + 5-label RRG subset). Returns None (never raises) on any failure --
+    missing package, download failure, API mismatch -- so callers treat this
+    the same as a None METEOR score (not computed, not zero)."""
     try:
         from f1chexbert import F1CheXbert
-        labeler = F1CheXbert(device=device)
-        labels = []
-        for t in texts:
-            raw = labeler.get_label(t)
-            labels.append([1 if int(v) == 1 else 0 for v in raw])
-        return labels
+        labeler = F1CheXbert()
+        accuracy, accuracy_per_sample, chexbert_all, chexbert_5 = labeler(hyps=hyps, refs=refs)
     except Exception as e:
-        print(f"  CheXbert labeling skipped: {type(e).__name__}: {e}")
+        print(f"  CheXbert F1 skipped: {type(e).__name__}: {e}")
         return None
 
-
-def compute_chexbert_metrics(hyps: List[str], refs: List[str], device: str = "cpu") -> Optional[Dict]:
-    """Label both hyps and refs with CheXbert, then micro/macro F1 over the
-    14-label set and the 5-label RRG subset. Returns None if labeling fails
-    (see label_reports_with_chexbert) -- callers treat this the same as a
-    None METEOR score (not computed, not zero)."""
-    hyp_labels = label_reports_with_chexbert(hyps, device=device)
-    if hyp_labels is None:
-        return None
-    ref_labels = label_reports_with_chexbert(refs, device=device)
-    if ref_labels is None:
-        return None
-
-    full = binary_f1_from_labels(hyp_labels, ref_labels, CHEXPERT_14_LABELS)
-    idx5 = [CHEXPERT_14_LABELS.index(name) for name in CHEXBERT_5_LABELS]
-    hyp5 = [[row[i] for i in idx5] for row in hyp_labels]
-    ref5 = [[row[i] for i in idx5] for row in ref_labels]
-    subset5 = binary_f1_from_labels(hyp5, ref5, CHEXBERT_5_LABELS)
-
-    return {"chexbert_14": full, "chexbert_5": subset5}
-
-
-def chexbert_ref_vs_ground_truth_agreement(
-    refs: List[str], study_ids: List[int], chexpert_csv: str, device: str = "cpu"
-) -> Optional[Dict]:
-    """Cross-check: label the REFERENCE text with our own CheXbert wiring and
-    compare against the OFFICIAL ground-truth labels shipped in
-    mimic-cxr-2.0.0-chexpert.csv.gz for the same study -- a sanity check that
-    the labeler is wired correctly (H100_SCALING_PLAN.md's 11B entry), NOT a
-    generator-quality metric. Skips study_ids missing from the CSV."""
-    ground_truth = load_chexpert_ground_truth_labels(chexpert_csv, study_ids)
-    matched_refs, matched_gt = [], []
-    for ref, sid in zip(refs, study_ids):
-        if sid in ground_truth:
-            matched_refs.append(ref)
-            matched_gt.append(ground_truth[sid])
-    if not matched_refs:
-        print("  CheXbert ground-truth cross-check skipped: no study_ids matched the CSV")
-        return None
-
-    our_labels = label_reports_with_chexbert(matched_refs, device=device)
-    if our_labels is None:
-        return None
-
-    agreement = binary_f1_from_labels(our_labels, matched_gt, CHEXPERT_14_LABELS)
-    agreement["num_matched"] = len(matched_refs)
-    agreement["num_requested"] = len(study_ids)
-    return agreement
+    return {
+        "accuracy": accuracy,
+        "chexbert_14": chexbert_all,
+        "chexbert_5": chexbert_5,
+    }
 
 
 def meteor_score_corpus(hyps: List[str], refs: List[str]) -> Optional[float]:
@@ -635,7 +503,7 @@ def meteor_score_corpus(hyps: List[str], refs: List[str]) -> Optional[float]:
 
 
 def compute_all_metrics(
-    hyps: List[str], refs: List[str], chexbert: bool = False, device: str = "cpu"
+    hyps: List[str], refs: List[str], chexbert: bool = False
 ) -> Dict[str, Optional[float]]:
     """hyps/refs: whitespace-tokenized text, one pair per example. CheXbert F1
     (Phase 11B) is opt-in via chexbert=True -- it needs real weights/network
@@ -656,7 +524,7 @@ def compute_all_metrics(
         "num_examples": len(hyps),
     }
     if chexbert:
-        result["chexbert"] = compute_chexbert_metrics(hyps, refs, device=device)
+        result["chexbert"] = compute_chexbert_metrics(hyps, refs)
     return result
 
 
@@ -743,14 +611,7 @@ def main():
                              "5-label RRG subset) between hyps and refs, via the "
                              "f1chexbert package. Degrades to 'skipped' if the "
                              "package/weights aren't available (see "
-                             "label_reports_with_chexbert docstring)")
-    parser.add_argument("--chexpert-csv", type=str, default=None,
-                        help="Path to mimic-cxr-2.0.0-chexpert.csv.gz (Phase 8A). "
-                             "With --chexbert in --checkpoint/--retrieval-baseline "
-                             "mode, also cross-checks our CheXbert labeling of the "
-                             "reference text against these official ground-truth "
-                             "labels (labeler-wiring sanity check, not a generator "
-                             "quality metric)")
+                             "compute_chexbert_metrics docstring)")
     args = parser.parse_args()
 
     if args.smoke_test:
@@ -777,8 +638,7 @@ def main():
     if len(hyps) != len(refs):
         parser.error("--hyp-file has {} lines but --ref-file has {}".format(len(hyps), len(refs)))
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    results = compute_all_metrics(hyps, refs, chexbert=args.chexbert, device=device)
+    results = compute_all_metrics(hyps, refs, chexbert=args.chexbert)
 
     sep = "=" * 60
     print("\n" + sep)
@@ -797,9 +657,9 @@ def main():
             print("  CheXbert F1 : (skipped — see printed reason above)")
         else:
             print("  CheXbert F1 (14-label) micro/macro : {:.4f} / {:.4f}".format(
-                cb["chexbert_14"]["micro_f1"], cb["chexbert_14"]["macro_f1"]))
+                cb["chexbert_14"]["micro avg"]["f1-score"], cb["chexbert_14"]["macro avg"]["f1-score"]))
             print("  CheXbert F1 (5-label)  micro/macro : {:.4f} / {:.4f}".format(
-                cb["chexbert_5"]["micro_f1"], cb["chexbert_5"]["macro_f1"]))
+                cb["chexbert_5"]["micro avg"]["f1-score"], cb["chexbert_5"]["macro avg"]["f1-score"]))
 
     if args.output_dir:
         out_dir = Path(args.output_dir)

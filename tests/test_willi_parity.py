@@ -3717,94 +3717,25 @@ def test_train_report_generation_h100_slurm_wrapper_hydra_overrides_compose():
 
 
 # ---------------------------------------------------------------------------
-# Phase 11B — CheXbert F1 (2026-08-28). binary_f1_from_labels and
-# load_chexpert_ground_truth_labels are pure/CPU-only and fully tested here,
-# same split as nearest_neighbor_indices vs embed_images (11C): the actual
-# text->label step (label_reports_with_chexbert) needs real CheXbert weights
-# and is untested-by-design, verified only by monkeypatching the import to
-# fail and asserting the None/"skipped" degradation path, never by asserting
-# real labeler output.
+# Phase 11B — CheXbert F1. compute_chexbert_metrics wraps the real, verified
+# f1chexbert API (F1CheXbert()(hyps=..., refs=...) -> (accuracy,
+# accuracy_per_sample, chexbert_all, chexbert_5), confirmed live 2026-08-29
+# against job 2492037's log and the package's own PyPI README -- an earlier
+# version of this code guessed a wrong API and would have crashed once the
+# package was installed; it only avoided that because the package wasn't
+# installed yet, degrading to a clean "skipped: ModuleNotFoundError" as
+# designed. There is no CPU-testable pure-math core to extract (unlike 11C's
+# nearest_neighbor_indices split) since f1chexbert's public API exposes only
+# the aggregate scoring call, not raw per-report labels -- so the only thing
+# testable without real weights is the None/"skipped" degradation path.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.willi_parity
-def test_binary_f1_from_labels_known_value():
-    from scripts.evaluate_report_generation import binary_f1_from_labels
-
-    pred = [[1, 0], [1, 1]]
-    true = [[1, 1], [0, 1]]
-    result = binary_f1_from_labels(pred, true, ["a", "b"])
-
-    assert abs(result["per_label"]["a"]["f1"] - 2 / 3) < 1e-6
-    assert abs(result["per_label"]["b"]["f1"] - 2 / 3) < 1e-6
-    assert abs(result["micro_f1"] - 2 / 3) < 1e-6
-    assert abs(result["macro_f1"] - 2 / 3) < 1e-6
-    assert result["num_examples"] == 2
-
-
-@pytest.mark.willi_parity
-def test_binary_f1_from_labels_perfect_and_disjoint():
-    from scripts.evaluate_report_generation import binary_f1_from_labels
-
-    labels = [[1, 0], [0, 1]]
-    perfect = binary_f1_from_labels(labels, labels, ["a", "b"])
-    assert abs(perfect["micro_f1"] - 1.0) < 1e-6
-    assert abs(perfect["macro_f1"] - 1.0) < 1e-6
-
-    disjoint = binary_f1_from_labels([[1, 0]], [[0, 1]], ["a", "b"])
-    assert disjoint["micro_f1"] == 0.0
-    assert disjoint["macro_f1"] == 0.0
-
-
-@pytest.mark.willi_parity
-def test_load_chexpert_ground_truth_labels_binarizes_and_filters(tmp_path):
-    from scripts.evaluate_report_generation import (
-        CHEXPERT_14_LABELS,
-        load_chexpert_ground_truth_labels,
-    )
-    import pandas as pd
-
-    rows = [
-        {"study_id": 100, "Atelectasis": 1.0, "Cardiomegaly": 0.0},
-        {"study_id": 200, "Atelectasis": -1.0, "Edema": 1.0},
-        {"study_id": 300, "Atelectasis": 1.0},  # not requested — must be excluded
-    ]
-    df = pd.DataFrame(rows)
-    for label in CHEXPERT_14_LABELS:
-        if label not in df.columns:
-            df[label] = float("nan")
-    csv_path = tmp_path / "chexpert.csv.gz"
-    df.to_csv(csv_path, index=False, compression="gzip")
-
-    out = load_chexpert_ground_truth_labels(str(csv_path), study_ids=[100, 200])
-
-    assert set(out.keys()) == {100, 200}  # 300 excluded — not requested
-    atel_idx = CHEXPERT_14_LABELS.index("Atelectasis")
-    card_idx = CHEXPERT_14_LABELS.index("Cardiomegaly")
-    edema_idx = CHEXPERT_14_LABELS.index("Edema")
-    # U-Zeros: 1.0 -> 1, everything else (0.0, -1.0 uncertain, NaN) -> 0
-    assert out[100][atel_idx] == 1
-    assert out[100][card_idx] == 0
-    assert out[200][atel_idx] == 0  # uncertain (-1.0) is NOT positive
-    assert out[200][edema_idx] == 1
-    assert all(v == 0 for i, v in enumerate(out[100]) if i not in (atel_idx, card_idx))
-
-
-@pytest.mark.willi_parity
-def test_label_reports_with_chexbert_returns_none_when_package_unavailable(monkeypatch):
+def test_compute_chexbert_metrics_returns_none_when_package_unavailable(monkeypatch):
     """f1chexbert is an optional dep (guarded, same as nltk for METEOR) --
     forcing the import to fail (sys.modules[name] = None is the documented
     way to make a subsequent `import f1chexbert` raise ImportError) must
     degrade to None, never raise, matching meteor_score_corpus's contract."""
-    import sys
-    from scripts.evaluate_report_generation import label_reports_with_chexbert
-
-    monkeypatch.setitem(sys.modules, "f1chexbert", None)
-    result = label_reports_with_chexbert(["Findings: clear lungs."])
-    assert result is None
-
-
-@pytest.mark.willi_parity
-def test_compute_chexbert_metrics_returns_none_when_labeling_unavailable(monkeypatch):
     import sys
     from scripts.evaluate_report_generation import compute_chexbert_metrics
 
@@ -3833,38 +3764,15 @@ def test_compute_all_metrics_chexbert_flag_gates_key_presence(monkeypatch):
 
 
 @pytest.mark.willi_parity
-def test_chexbert_ref_vs_ground_truth_agreement_skips_when_no_study_ids_match(tmp_path):
-    from scripts.evaluate_report_generation import (
-        CHEXPERT_14_LABELS,
-        chexbert_ref_vs_ground_truth_agreement,
-    )
-    import pandas as pd
-
-    df = pd.DataFrame([{"study_id": 999, "Atelectasis": 1.0}])
-    for label in CHEXPERT_14_LABELS:
-        if label not in df.columns:
-            df[label] = float("nan")
-    csv_path = tmp_path / "chexpert.csv.gz"
-    df.to_csv(csv_path, index=False, compression="gzip")
-
-    result = chexbert_ref_vs_ground_truth_agreement(
-        refs=["a report"], study_ids=[111], chexpert_csv=str(csv_path)
-    )
-    assert result is None  # 111 not in the CSV — nothing to cross-check
-
-
-@pytest.mark.willi_parity
 def test_inspect_report_generation_h100_slurm_wrapper_exposes_chexbert_lever():
-    """Phase 11B (2026-08-28) opt-in CheXbert F1 lever, off by default. Pins
-    the set -u-safe empty-array-expansion pattern (${ARR[@]+"${ARR[@]}"})
-    already established in eval_h100.sh/train_biomedclip_kd_h100.sh — the
-    bare ${ARR[@]} form this script initially used breaks under set -u with
-    bash <4.4 when CHEXBERT=false leaves the array empty."""
+    """Phase 11B opt-in CheXbert F1 lever, off by default. Pins the set -u
+    -safe empty-array-expansion pattern (${ARR[@]+"${ARR[@]}"}) already
+    established in eval_h100.sh/train_biomedclip_kd_h100.sh — the bare
+    ${ARR[@]} form breaks under set -u with bash <4.4 when CHEXBERT=false
+    leaves the array empty."""
     sh = (REPO_ROOT / "scripts" / "inspect_report_generation_h100.sh").read_text()
     assert 'CHEXBERT="${CHEXBERT:-false}"' in sh
-    assert "CHEXPERT_CSV" in sh
     assert "--chexbert" in sh
-    assert "--chexpert-csv" in sh
     assert '${CHEXBERT_ARGS[@]+"${CHEXBERT_ARGS[@]}"}' in sh
 
 
@@ -3872,7 +3780,5 @@ def test_inspect_report_generation_h100_slurm_wrapper_exposes_chexbert_lever():
 def test_retrieval_baseline_h100_slurm_wrapper_exposes_chexbert_lever():
     sh = (REPO_ROOT / "scripts" / "retrieval_baseline_h100.sh").read_text()
     assert 'CHEXBERT="${CHEXBERT:-false}"' in sh
-    assert "CHEXPERT_CSV" in sh
     assert "--chexbert" in sh
-    assert "--chexpert-csv" in sh
     assert '${CHEXBERT_ARGS[@]+"${CHEXBERT_ARGS[@]}"}' in sh

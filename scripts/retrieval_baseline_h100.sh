@@ -42,10 +42,10 @@ TRAIN_PARQUET="${TRAIN_PARQUET:-/sc/home/$USER/dataset/mimic_full/arm0/train.par
 PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/arm0/validate.parquet}"
 NUM_SAMPLES="${NUM_SAMPLES:-10}"
 MAX_GALLERY="${MAX_GALLERY:-0}"   # 0 = full gallery
-# Phase 11B (2026-08-28): opt-in CheXbert F1 alongside ROUGE-L/BLEU, off by
-# default -- same UNVERIFIED-until-run caveat as inspect_report_generation_h100.sh.
+# Phase 11B (2026-08-28, fixed 2026-08-29 against the real f1chexbert API):
+# opt-in CheXbert F1 alongside ROUGE-L/BLEU, off by default -- needs the
+# f1chexbert package (pip install f1chexbert) + network for chexbert.pth.
 CHEXBERT="${CHEXBERT:-false}"
-CHEXPERT_CSV="${CHEXPERT_CSV:-/sc/home/$USER/dataset/mimic_full/mimic-cxr-2.0.0-chexpert.csv.gz}"
 
 echo "=== Phase 11C retrieval-NN baseline: gallery=${TRAIN_PARQUET} query=${PARQUET} ==="
 echo "=== num_samples=${NUM_SAMPLES} max_gallery=${MAX_GALLERY} ==="
@@ -65,7 +65,7 @@ python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
 CHEXBERT_ARGS=()
 if [ "${CHEXBERT}" = "true" ]; then
-  CHEXBERT_ARGS+=(--chexbert --chexpert-csv "${CHEXPERT_CSV}")
+  CHEXBERT_ARGS+=(--chexbert)
 fi
 
 python scripts/evaluate_report_generation.py \
