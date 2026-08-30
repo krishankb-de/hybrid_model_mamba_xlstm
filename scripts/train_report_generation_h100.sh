@@ -16,8 +16,12 @@
 # Phase 13B — multi-GPU DDP lever (NUM_GPUS). The #SBATCH --gpus=1 default
 # below is NOT overridden by the NUM_GPUS env var (SLURM parses #SBATCH
 # comment directives statically, before this script's shell runs) -- to
-# actually get more GPUs allocated you MUST pass matching sbatch CLI flags,
-# e.g.: NUM_GPUS=4 sbatch --gpus=4 --gres=gpu:h100:4 scripts/train_report_generation_h100.sh
+# actually get more GPUs allocated you MUST pass a matching sbatch CLI flag:
+# NUM_GPUS=4 sbatch --gpus=4 scripts/train_report_generation_h100.sh
+# --gpus alone, matching every other *_h100.sh script in this repo. Do NOT
+# also pass --gres=gpu:h100:N -- combining --gpus (untyped GRES) with a typed
+# --gres for the same resource is rejected by sbatch ("Invalid GRES
+# specification (with and without type identification)", hit live 2026-08-30).
 # NUM_GPUS only controls which trainer= Hydra config this script selects
 # (h100_single_gpu vs h100_multi_ddp); it does not request GPUs by itself.
 # This is a plain LM cross-entropy loss (no in-batch-negatives semantics),
@@ -119,7 +123,7 @@ nvidia-smi
 AVAIL_GPUS=$(python -c "import torch; print(torch.cuda.device_count())")
 if [ "${AVAIL_GPUS}" -lt "${NUM_GPUS}" ]; then
   echo "ERROR: NUM_GPUS=${NUM_GPUS} requested but only ${AVAIL_GPUS} GPU(s) allocated to this job."
-  echo "Pass matching sbatch flags, e.g.: NUM_GPUS=${NUM_GPUS} sbatch --gpus=${NUM_GPUS} --gres=gpu:h100:${NUM_GPUS} scripts/train_report_generation_h100.sh"
+  echo "Pass a matching sbatch flag, e.g.: NUM_GPUS=${NUM_GPUS} sbatch --gpus=${NUM_GPUS} scripts/train_report_generation_h100.sh (--gpus alone, not --gres too)"
   exit 1
 fi
 
