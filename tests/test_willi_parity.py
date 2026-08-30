@@ -3906,8 +3906,12 @@ def test_setup_chexbert_venv_h100_slurm_wrapper_is_rerunnable_in_place():
     virtual environment already exists" on a bare rerun against a VENV_DIR a
     prior invocation already created -- exactly the situation a dependency-pin
     fix (like the scikit-learn<1.8 one above) needs, since the fix only takes
-    effect in a rebuilt venv. Both the uv and python -m venv fallback branches
-    must pass --clear so this script can be resubmitted in place."""
+    effect in a rebuilt venv. First fix (`--clear`) was ITSELF not reliable on
+    this cluster's NFS-backed home filesystem -- job 2494771 hit `Failed to
+    remove directory .../lib: Directory not empty (os error 39)` from uv's own
+    internal removal logic against the large existing site-packages tree.
+    Final fix: an explicit `rm -rf "${VENV_DIR}"` before venv creation,
+    predictable and independent of either tool's internal --clear behavior."""
     sh = (REPO_ROOT / "scripts" / "setup_chexbert_venv_h100.sh").read_text()
-    assert "uv venv" in sh and "--clear" in sh
-    assert sh.count("--clear") >= 2  # uv branch + python -m venv fallback branch
+    assert 'rm -rf "${VENV_DIR}"' in sh
+    assert "uv venv" in sh

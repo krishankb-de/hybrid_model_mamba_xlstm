@@ -55,6 +55,22 @@ mkdir -p logs
 
 cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"
 
+# This script must be RERUNNABLE in place -- e.g. after fixing a bad
+# dependency pin (found live 2026-08-30: job 2493922 already created
+# VENV_DIR once, so a bare rerun's `uv venv` errored with "A virtual
+# environment already exists"). `uv venv --clear` (tried next) is NOT a
+# reliable fix for that on this cluster's NFS-backed home filesystem --
+# job 2494771 hit `Failed to remove directory .../lib: Directory not empty
+# (os error 39)` from uv's own internal removal logic against the large
+# existing site-packages tree. Do the removal ourselves with a plain rm -rf
+# instead, which is predictable and matches this repo's existing explicit-
+# cleanup convention (see the /tmp/mimic_smoke_test cleanup in Phase 8's
+# build notes) rather than depending on a tool's internal --clear behavior.
+if [ -d "${VENV_DIR}" ]; then
+  echo "Removing existing ${VENV_DIR} for a clean rebuild..."
+  rm -rf "${VENV_DIR}"
+fi
+
 if ! command -v uv &> /dev/null; then
   echo "Installing uv..."
   curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -63,12 +79,7 @@ fi
 
 if command -v uv &> /dev/null; then
   echo "uv: $(uv --version)"
-  # --clear: this script must be RERUNNABLE in place -- e.g. after fixing a
-  # bad dependency pin (found live 2026-08-30: `uv venv` errors out with "A
-  # virtual environment already exists" on a bare rerun, since job 2493922
-  # already created VENV_DIR once). Without --clear the fix in a version pin
-  # here would never actually reach a rebuilt venv.
-  uv venv --python "${PY_VERSION}" --clear "${VENV_DIR}"
+  uv venv --python "${PY_VERSION}" "${VENV_DIR}"
   source "${VENV_DIR}/bin/activate"
   # CPU-only torch is enough -- this venv only runs BERT-classifier forward
   # passes over report text, no training, no image tower.
@@ -76,7 +87,7 @@ if command -v uv &> /dev/null; then
   uv pip install "transformers<5" "scikit-learn<1.8" f1chexbert
 else
   echo "uv unavailable — falling back to python -m venv"
-  python${PY_VERSION} -m venv --clear "${VENV_DIR}" || python3 -m venv --clear "${VENV_DIR}"
+  python${PY_VERSION} -m venv "${VENV_DIR}" || python3 -m venv "${VENV_DIR}"
   source "${VENV_DIR}/bin/activate"
   pip install --upgrade pip
   pip install torch --index-url https://download.pytorch.org/whl/cpu
