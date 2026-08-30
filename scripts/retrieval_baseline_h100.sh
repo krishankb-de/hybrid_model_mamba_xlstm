@@ -35,11 +35,21 @@ set -euo pipefail
 SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 
-TRAIN_PARQUET="${TRAIN_PARQUET:-/sc/home/$USER/dataset/mimic_full/arm0/train.parquet}"
+# 2026-08-30: these defaulted to the arm0/ subset (19881-image gallery) long
+# after full-data Phase 8 pack + Phase 10E training (job 2491338,
+# EXPERIMENT=h100_report_gen_full) landed, silently making the DEFAULT
+# invocation of this script compare against the wrong, much-smaller arm0
+# floor -- caught live when job 2494817 (run with only DUMP_DIR set, no
+# TRAIN_PARQUET/PARQUET override) reproduced the arm0 retrieval numbers
+# (rouge_l 0.369) instead of the intended full-data ones (rouge_l 0.188,
+# jobs 2491600/2491687). arm0 is CLOSED/historical per CLAUDE.md's Phase 9
+# note -- full data is the active target, so the default should point there.
+# Override back to arm0/... explicitly if an arm0 comparison is ever needed.
+TRAIN_PARQUET="${TRAIN_PARQUET:-/sc/home/$USER/dataset/mimic_full/train.parquet}"
 # Default to VALIDATION images, not train — same honesty rule as the
 # --checkpoint inspection wrapper (a query retrieving itself from its own
 # gallery would trivially score 1.0 and mean nothing).
-PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/arm0/validate.parquet}"
+PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/validate.parquet}"
 NUM_SAMPLES="${NUM_SAMPLES:-10}"
 MAX_GALLERY="${MAX_GALLERY:-0}"   # 0 = full gallery
 # Phase 11B (2026-08-28, fixed 2026-08-29 against the real f1chexbert API):

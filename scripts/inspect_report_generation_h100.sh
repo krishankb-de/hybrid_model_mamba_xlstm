@@ -28,11 +28,18 @@ set -euo pipefail
 SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 
-CHECKPOINT="${CHECKPOINT:-./outputs/h100_report_gen_arm0/checkpoints/last.ckpt}"
+# 2026-08-30: both defaults below pointed at the arm0/ subset artifacts long
+# after full-data Phase 8 pack + Phase 10E training (job 2491338,
+# EXPERIMENT=h100_report_gen_full) landed -- every real full-data run so far
+# has depended on the invoker remembering to override CHECKPOINT and PARQUET
+# by hand. arm0 is CLOSED/historical per CLAUDE.md's Phase 9 note -- full
+# data is the active target, so the default should point there. Override
+# back to the arm0/... paths explicitly if an arm0-specific check is needed.
+CHECKPOINT="${CHECKPOINT:-./outputs/h100_report_gen_full/checkpoints/last.ckpt}"
 MODEL_CONFIG="${MODEL_CONFIG:-hybrid_150m_v2_rrg}"
 # Default to VALIDATION images, not train -- generations on train images look
 # artificially good even under genuine overfitting; validation is the honest check.
-PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/arm0/validate.parquet}"
+PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/validate.parquet}"
 NUM_SAMPLES="${NUM_SAMPLES:-10}"
 DECODE="${DECODE:-greedy}"
 BEAM_SIZE="${BEAM_SIZE:-3}"

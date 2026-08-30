@@ -3915,3 +3915,39 @@ def test_setup_chexbert_venv_h100_slurm_wrapper_is_rerunnable_in_place():
     sh = (REPO_ROOT / "scripts" / "setup_chexbert_venv_h100.sh").read_text()
     assert 'rm -rf "${VENV_DIR}"' in sh
     assert "uv venv" in sh
+
+
+@pytest.mark.willi_parity
+def test_inspect_report_generation_h100_slurm_wrapper_defaults_to_full_data_not_arm0():
+    """Found live 2026-08-30: CHECKPOINT and PARQUET both still defaulted to
+    the arm0/ subset artifacts long after full-data Phase 8 pack + Phase 10E
+    training (job 2491338, EXPERIMENT=h100_report_gen_full) landed. arm0 is
+    CLOSED/historical per CLAUDE.md's Phase 9 note -- the default invocation
+    of this script must point at full data, not silently fall back to the
+    much-smaller closed arm0 arm."""
+    sh = (REPO_ROOT / "scripts" / "inspect_report_generation_h100.sh").read_text()
+    assert 'CHECKPOINT:-./outputs/h100_report_gen_full/checkpoints/last.ckpt' in sh
+    assert 'PARQUET:-/sc/home/$USER/dataset/mimic_full/validate.parquet' in sh
+    # arm0 may still be mentioned in explanatory comments (it's referenced as
+    # the historical bug this pins), but never inside a default assignment.
+    assert "arm0" not in sh.split("CHECKPOINT=")[1].split("\n")[0]
+    assert "arm0" not in sh.split("PARQUET=")[1].split("\n")[0]
+
+
+@pytest.mark.willi_parity
+def test_retrieval_baseline_h100_slurm_wrapper_defaults_to_full_data_not_arm0():
+    """Found live 2026-08-30 (job 2494817): running this script with only
+    DUMP_DIR set (no TRAIN_PARQUET/PARQUET override, as the plan's own
+    NEXT-ACTION instructions assumed would be enough) silently reproduced the
+    CLOSED arm0 retrieval-NN numbers (rouge_l ~0.369) instead of the intended
+    full-data floor (rouge_l ~0.188, jobs 2491600/2491687), because
+    TRAIN_PARQUET/PARQUET still defaulted to arm0/train.parquet and
+    arm0/validate.parquet. Fixed: defaults now point at the full-data
+    train.parquet/validate.parquet directly under mimic_full/."""
+    sh = (REPO_ROOT / "scripts" / "retrieval_baseline_h100.sh").read_text()
+    assert 'TRAIN_PARQUET="${TRAIN_PARQUET:-/sc/home/$USER/dataset/mimic_full/train.parquet}"' in sh
+    assert 'PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/validate.parquet}"' in sh
+    # arm0 may still be mentioned in explanatory comments (it's referenced as
+    # the historical bug this pins), but never inside a default assignment.
+    assert "arm0" not in sh.split("TRAIN_PARQUET=")[-1].split("\n")[0]
+    assert "arm0" not in sh.split('PARQUET="${PARQUET:-')[-1].split("\n")[0]
