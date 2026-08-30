@@ -62,6 +62,16 @@ the new --dump-dir flag below, which writes those files from --checkpoint or
 --retrieval-baseline mode so their generated text can be scored in that
 separate venv without re-running generation.
 
+2026-08-30: CONFIRMED LIVE that --dump-dir works end-to-end at n=1433 (job
+2493923) -- ROUGE-L/BLEU reproduced bit-for-bit against every earlier run of
+this eval, and hyps.txt/refs.txt were written correctly. The isolated venv's
+own CheXbert scoring step then hit a FOURTH f1chexbert-package bug (unrelated
+to this file): scikit-learn>=1.8.0 changed a private API f1chexbert depends
+on from a 3-tuple to a 4-tuple return, breaking its own unpack. Fixed with a
+version pin in scripts/setup_chexbert_venv_h100.sh (scikit-learn<1.8), not a
+change here -- see that script's docstring and H100_SCALING_PLAN.md's 11B
+entry for the full root-cause writeup.
+
 Usage:
     # Metrics over precomputed hypothesis/reference pairs (one line each, aligned)
     python scripts/evaluate_report_generation.py \\

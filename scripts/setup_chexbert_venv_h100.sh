@@ -16,6 +16,19 @@
 #
 # Mirrors setup_env_h100.sh's uv-first / python-m-venv-fallback pattern.
 #
+# 2026-08-29 (later): a FOURTH f1chexbert-package bug, found the same way as
+# the other three -- by running it and reading the traceback, then diffing
+# scikit-learn's own source across tags. f1chexbert's forward() does
+# `y_type, y_true, y_pred = _check_targets(...)`, a 3-value unpack of a
+# PRIVATE sklearn.metrics._classification API. Confirmed via
+# raw.githubusercontent.com/scikit-learn/scikit-learn/<tag>/sklearn/metrics/_classification.py
+# that _check_targets returned exactly (y_type, y_true, y_pred) through
+# tag 1.7.2, then scikit-learn 1.8.0 added a sample_weight param/return,
+# making it a 4-tuple -- "ValueError: too many values to unpack (expected 3)".
+# f1chexbert has no sklearn upper pin, so `uv pip install f1chexbert` silently
+# pulled >=1.8.0. Fixed below with a version pin, same remedy as the
+# transformers<5 pin above -- not a code patch to this repo or to f1chexbert.
+#
 # Usage:   sbatch scripts/setup_chexbert_venv_h100.sh
 # Watch:   squeue --me   ;   tail -f logs/setup_chexbert_venv_h100_<jobid>.log
 # ============================================================================
@@ -55,22 +68,23 @@ if command -v uv &> /dev/null; then
   # CPU-only torch is enough -- this venv only runs BERT-classifier forward
   # passes over report text, no training, no image tower.
   uv pip install torch --index-url https://download.pytorch.org/whl/cpu
-  uv pip install "transformers<5" f1chexbert
+  uv pip install "transformers<5" "scikit-learn<1.8" f1chexbert
 else
   echo "uv unavailable — falling back to python -m venv"
   python${PY_VERSION} -m venv "${VENV_DIR}" || python3 -m venv "${VENV_DIR}"
   source "${VENV_DIR}/bin/activate"
   pip install --upgrade pip
   pip install torch --index-url https://download.pytorch.org/whl/cpu
-  pip install "transformers<5" f1chexbert
+  pip install "transformers<5" "scikit-learn<1.8" f1chexbert
 fi
 
 echo ""
 echo "=== Import smoke test ==="
-python -c "import sys, torch, transformers, f1chexbert; \
+python -c "import sys, torch, transformers, sklearn, f1chexbert; \
 print('python', sys.version.split()[0]); \
 print('torch', torch.__version__); \
 print('transformers', transformers.__version__); \
+print('scikit-learn', sklearn.__version__); \
 print('f1chexbert OK')"
 
 echo ""

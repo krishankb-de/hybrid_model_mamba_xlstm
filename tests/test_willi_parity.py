@@ -3883,3 +3883,18 @@ def test_score_chexbert_h100_slurm_wrapper_requires_dump_dir():
     sh = (REPO_ROOT / "scripts" / "score_chexbert_h100.sh").read_text()
     assert "${DUMP_DIR:?" in sh
     assert "score_chexbert_standalone.py" in sh
+
+
+@pytest.mark.willi_parity
+def test_setup_chexbert_venv_h100_slurm_wrapper_pins_scikit_learn_below_1_8():
+    """Phase 11B (2026-08-29, later): f1chexbert's forward() does
+    `y_type, y_true, y_pred = _check_targets(...)`, a 3-value unpack of the
+    PRIVATE sklearn.metrics._classification._check_targets API. Confirmed by
+    diffing scikit-learn's own source across tags: _check_targets returned
+    exactly (y_type, y_true, y_pred) through tag 1.7.2, then 1.8.0 added a
+    sample_weight param/return, making it a 4-tuple --
+    "ValueError: too many values to unpack (expected 3)". f1chexbert has no
+    sklearn upper pin, so an unpinned install pulls the incompatible >=1.8.0.
+    This isolated venv must pin below that."""
+    sh = (REPO_ROOT / "scripts" / "setup_chexbert_venv_h100.sh").read_text()
+    assert '"scikit-learn<1.8"' in sh
