@@ -12,6 +12,18 @@
 # which is deliberate (same pattern as STAGE0_CKPT in train_biomedclip_kd_h100.sh).
 #
 # PREFIX_K is the depth-analogue lever Phase 10B calls out to sweep {8,32,64}.
+#
+# Phase 13B — multi-GPU DDP lever (NUM_GPUS). The #SBATCH --gpus=1 default
+# below is NOT overridden by the NUM_GPUS env var (SLURM parses #SBATCH
+# comment directives statically, before this script's shell runs) -- to
+# actually get more GPUs allocated you MUST pass matching sbatch CLI flags,
+# e.g.: NUM_GPUS=4 sbatch --gpus=4 --gres=gpu:h100:4 scripts/train_report_generation_h100.sh
+# NUM_GPUS only controls which trainer= Hydra config this script selects
+# (h100_single_gpu vs h100_multi_ddp); it does not request GPUs by itself.
+# This is a plain LM cross-entropy loss (no in-batch-negatives semantics),
+# so DDP is a clean throughput win here -- unlike the contrastive/CLIP
+# trainer, which needs the still-unbuilt Phase 3 all_gather to get anything
+# beyond throughput out of extra GPUs (see h100_multi_ddp.yaml's header).
 # ============================================================================
 #SBATCH --partition=aisc-batch
 #SBATCH --account=aisc
@@ -58,11 +70,35 @@ AUGMENT="${AUGMENT:-false}"
 # Phase 10D — decoder init checkpoint. No safe default; must be supplied.
 DECODER_CKPT="${DECODER_CKPT:-./outputs/h100_stage0_150m_v2/checkpoints/stage0_model_only.pt}"
 
+# Phase 13A — optional fine-tuned image-tower checkpoint (a Phase 9
+# contrastive .ckpt). Empty (default) keeps the stock BiomedCLIP tower,
+# identical behaviour to before this lever existed.
+IMAGE_ENCODER_CKPT="${IMAGE_ENCODER_CKPT:-}"
+
+# Phase 13B — multi-GPU DDP lever. See the header comment above: this alone
+# does NOT request GPUs from SLURM, it only picks which trainer= config to
+# hand to Hydra once GPUs are allocated. Pair with matching --gpus/--gres
+# sbatch CLI flags.
+#
+# EPOCH-BUDGET WARNING (same discipline as train_biomedclip_kd_h100.sh's
+# comment on MAX_STEPS): under DDP, effective global batch = BATCH_SIZE x
+# NUM_GPUS -- Lightning's trainer.max_steps counts GLOBAL optimizer steps,
+# so raising NUM_GPUS with MAX_STEPS unchanged also raises total samples
+# seen (confounds a "more GPUs = faster" test with a "bigger effective
+# batch" test). To hold the SAME epoch budget as a single-GPU run, divide
+# MAX_STEPS by NUM_GPUS; to deliberately target MORE epochs, compute
+# MAX_STEPS from (target_epochs * train_pairs) / (BATCH_SIZE * NUM_GPUS).
+NUM_GPUS="${NUM_GPUS:-1}"
+TRAINER_CFG="h100_single_gpu"
+if [ "${NUM_GPUS}" -gt 1 ]; then
+  TRAINER_CFG="h100_multi_ddp"
+fi
+
 MIMIC_CACHE_DIR="${MIMIC_CACHE_DIR:-/sc/home/$USER/dataset/mimic_cxr_cache}"
 EXPERIMENT="${EXPERIMENT:-h100_report_gen_150m_v2_k${PREFIX_K}}"
 
 echo "=== Phase 10E report generation: ${MODEL_CONFIG} on ${DATASET_CONFIG}, prefix_k=${PREFIX_K} ==="
-echo "=== LRs: decoder=${DECODER_LR} head=${HEAD_LR} grad_clip=${GRAD_CLIP} | max_steps=${MAX_STEPS} ==="
+echo "=== LRs: decoder=${DECODER_LR} head=${HEAD_LR} grad_clip=${GRAD_CLIP} | max_steps=${MAX_STEPS} | num_gpus=${NUM_GPUS} (trainer=${TRAINER_CFG}) ==="
 date; hostname
 mkdir -p logs "${MIMIC_CACHE_DIR}"
 
@@ -80,19 +116,36 @@ source "${VENV_ACTIVATE}"
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA unavailable'; print('GPU:', torch.cuda.get_device_name(0), f'{torch.cuda.get_device_properties(0).total_memory/1024**3:.0f}GB')"
 nvidia-smi
 
+AVAIL_GPUS=$(python -c "import torch; print(torch.cuda.device_count())")
+if [ "${AVAIL_GPUS}" -lt "${NUM_GPUS}" ]; then
+  echo "ERROR: NUM_GPUS=${NUM_GPUS} requested but only ${AVAIL_GPUS} GPU(s) allocated to this job."
+  echo "Pass matching sbatch flags, e.g.: NUM_GPUS=${NUM_GPUS} sbatch --gpus=${NUM_GPUS} --gres=gpu:h100:${NUM_GPUS} scripts/train_report_generation_h100.sh"
+  exit 1
+fi
+
 if [ ! -f "${DECODER_CKPT}" ]; then
   echo "ERROR: Decoder checkpoint not found: ${DECODER_CKPT}"
   echo "Phase 10D: point DECODER_CKPT at the Stage-0/joint-trained 150M backbone."
   exit 1
 fi
 echo "Decoder checkpoint: ${DECODER_CKPT}"
+if [ -n "${IMAGE_ENCODER_CKPT}" ] && [ ! -f "${IMAGE_ENCODER_CKPT}" ]; then
+  echo "ERROR: IMAGE_ENCODER_CKPT set but not found: ${IMAGE_ENCODER_CKPT}"
+  exit 1
+fi
+echo "Image encoder checkpoint: ${IMAGE_ENCODER_CKPT:-<stock BiomedCLIP, unchanged default>}"
+
+EXTRA_ARGS=()
+if [ -n "${IMAGE_ENCODER_CKPT}" ]; then
+  EXTRA_ARGS+=("image_encoder_checkpoint=${IMAGE_ENCODER_CKPT}")
+fi
 
 echo "Starting report-generation training..."
 python scripts/train_report_generation.py \
   --config-name config \
   model=${MODEL_CONFIG} \
   dataset=${DATASET_CONFIG} \
-  trainer=h100_single_gpu \
+  trainer=${TRAINER_CFG} \
   trainer.max_steps=${MAX_STEPS} \
   trainer.accumulate_grad_batches=1 \
   trainer.val_check_interval=250 \
@@ -113,7 +166,8 @@ python scripts/train_report_generation.py \
   decoder_checkpoint="${DECODER_CKPT}" \
   experiment_name=${EXPERIMENT} \
   output_dir=./outputs/${EXPERIMENT} \
-  wandb.enabled=false
+  wandb.enabled=false \
+  ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 
 echo "=== END: best ckpt in ./outputs/${EXPERIMENT}/checkpoints/ ==="
 date

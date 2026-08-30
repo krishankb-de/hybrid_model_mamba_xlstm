@@ -3681,6 +3681,10 @@ def test_train_report_generation_h100_slurm_wrapper_hydra_overrides_compose():
         "GRAD_CKPT": "false", "AUGMENT": "false", "MIMIC_CACHE_DIR": "/tmp/mimic_cache",
         "DECODER_CKPT": "./outputs/h100_stage0_150m_v2/checkpoints/stage0_model_only.pt",
         "EXPERIMENT": "parity_check",
+        # Phase 13B: NUM_GPUS=1 (this test's scenario) resolves TRAINER_CFG to
+        # h100_single_gpu inside the script itself, before the invocation
+        # block; substitute that resolved value directly here.
+        "TRAINER_CFG": "h100_single_gpu",
     }
 
     # Extract the python invocation block verbatim (between the `python
@@ -3688,7 +3692,11 @@ def test_train_report_generation_h100_slurm_wrapper_hydra_overrides_compose():
     invocation = sh.split("python scripts/train_report_generation.py \\", 1)[1]
     invocation = invocation.split("\n\necho", 1)[0]
     tokens = [t.strip().rstrip("\\").strip() for t in invocation.splitlines()]
-    tokens = [t for t in tokens if t and t != "--config-name config"]
+    # "=" filter drops Phase 13A's trailing `${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}`
+    # bash empty-array-safe expansion (no literal "=" in that syntax) -- it is
+    # not a static Hydra override token, it expands to nothing when
+    # IMAGE_ENCODER_CKPT is unset (this test's scenario).
+    tokens = [t for t in tokens if t and t != "--config-name config" and "=" in t]
 
     def resolve(tok: str) -> str:
         key, _, value = tok.partition("=")
@@ -3714,6 +3722,12 @@ def test_train_report_generation_h100_slurm_wrapper_hydra_overrides_compose():
     assert cfg.decoder_checkpoint == env_defaults["DECODER_CKPT"]
     assert cfg.model.vit_unfreeze_blocks == 0
     assert cfg.model.prefix_k == 32
+    # Phase 13A: image_encoder_checkpoint is declared (config.yaml) and
+    # defaults to null when IMAGE_ENCODER_CKPT is unset, same as this test's
+    # scenario -- unlike decoder_checkpoint, EXTRA_ARGS only adds it to the
+    # invocation when the env var is actually set (see the dedicated lever
+    # test below for that conditional path).
+    assert cfg.image_encoder_checkpoint is None
 
 
 # ---------------------------------------------------------------------------
@@ -3951,3 +3965,116 @@ def test_retrieval_baseline_h100_slurm_wrapper_defaults_to_full_data_not_arm0():
     # the historical bug this pins), but never inside a default assignment.
     assert "arm0" not in sh.split("TRAIN_PARQUET=")[-1].split("\n")[0]
     assert "arm0" not in sh.split('PARQUET="${PARQUET:-')[-1].split("\n")[0]
+
+
+# ---------------------------------------------------------------------------
+# Phase 13 — closing the CheXbert F1 gap (H100_SCALING_PLAN.md, 2026-08-30).
+# 13A: optional fine-tuned image-tower checkpoint for report-gen training.
+# 13B: multi-GPU DDP lever for the decoder trainer (plain LM loss, no
+# in-batch-negatives semantics, so DDP is a clean throughput win here --
+# unlike the still-unbuilt Phase 3 all_gather needed for the contrastive/CLIP
+# trainer to get anything beyond throughput out of extra GPUs).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.willi_parity
+def test_load_image_tower_checkpoint_strips_prefix_and_loads_nonstrict(tmp_path):
+    """Pure-function test of the Phase 13A checkpoint-loading helper against a
+    tiny nn.Module stand-in -- no open_clip/network needed, matching
+    ReportGenerationLightningModule's existing no-open_clip-required
+    CPU-testability design. Verifies: (1) only "image_encoder."-prefixed keys
+    are pulled from a Lightning-style checkpoint dict and the prefix is
+    stripped before load_state_dict; (2) unrelated keys (e.g. "decoder.*"
+    from the same checkpoint) are correctly ignored, not misapplied; (3) the
+    load is non-strict, so a stand-in with an extra untouched param doesn't
+    raise."""
+    import torch.nn as nn
+    from hybrid_xmamba.training.lightning_module import load_image_tower_checkpoint
+
+    class TinyTower(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.zeros(4))
+            self.untouched = nn.Parameter(torch.ones(2))
+
+    tower = TinyTower()
+    fine_tuned_weight = torch.arange(4, dtype=torch.float32)
+    ckpt_path = tmp_path / "fake_contrastive.ckpt"
+    torch.save({
+        "state_dict": {
+            "image_encoder.weight": fine_tuned_weight,
+            "decoder.some_other_param": torch.zeros(3),  # must be ignored
+        }
+    }, ckpt_path)
+
+    missing, unexpected = load_image_tower_checkpoint(tower, str(ckpt_path))
+
+    assert torch.equal(tower.weight, fine_tuned_weight), "fine-tuned weight was not applied"
+    assert torch.equal(tower.untouched, torch.ones(2)), "untouched param must be unaffected"
+    assert "untouched" in missing, "non-strict load must report the un-supplied param as missing"
+    assert not unexpected, f"decoder.* key must not leak through as unexpected: {unexpected}"
+
+
+@pytest.mark.willi_parity
+def test_train_report_generation_h100_slurm_wrapper_exposes_image_encoder_ckpt_lever():
+    """Phase 13A: IMAGE_ENCODER_CKPT is an optional env lever (empty default =
+    stock BiomedCLIP, unchanged behaviour), fail-fast-checked for existence
+    only when set (mirrors DECODER_CKPT's unconditional check), and only
+    added to the Hydra invocation when non-empty (set -u-safe empty-array
+    expansion, same pattern as CHEXBERT_ARGS in inspect_report_generation_h100.sh
+    / retrieval_baseline_h100.sh)."""
+    sh = (REPO_ROOT / "scripts" / "train_report_generation_h100.sh").read_text()
+    assert 'IMAGE_ENCODER_CKPT="${IMAGE_ENCODER_CKPT:-}"' in sh
+    assert 'if [ -n "${IMAGE_ENCODER_CKPT}" ] && [ ! -f "${IMAGE_ENCODER_CKPT}" ]' in sh
+    assert 'EXTRA_ARGS+=("image_encoder_checkpoint=${IMAGE_ENCODER_CKPT}")' in sh
+    assert '${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}' in sh
+
+
+@pytest.mark.willi_parity
+def test_config_yaml_declares_image_encoder_checkpoint_key():
+    """Same declared-key requirement as decoder_checkpoint (config.yaml
+    comment, live bug 2026-08-23 job 2478635): Hydra's strict-struct mode
+    rejects a CLI override for an undeclared top-level key, so
+    image_encoder_checkpoint= must be pre-declared here, not just assumed."""
+    cfg_text = (REPO_ROOT / "configs" / "config.yaml").read_text()
+    assert "image_encoder_checkpoint: null" in cfg_text
+
+
+@pytest.mark.willi_parity
+def test_train_report_generation_h100_slurm_wrapper_exposes_multi_gpu_lever():
+    """Phase 13B: NUM_GPUS selects h100_single_gpu (default, 1 GPU) vs
+    h100_multi_ddp (>1), and the script fails fast if fewer GPUs were
+    actually allocated than requested rather than silently training on 1 --
+    NUM_GPUS alone does not request GPUs from SLURM (that's a separate
+    --gpus/--gres sbatch CLI flag), so this mismatch is a real, easy-to-hit
+    user error the script must catch."""
+    sh = (REPO_ROOT / "scripts" / "train_report_generation_h100.sh").read_text()
+    assert 'NUM_GPUS="${NUM_GPUS:-1}"' in sh
+    assert 'TRAINER_CFG="h100_single_gpu"' in sh
+    assert 'TRAINER_CFG="h100_multi_ddp"' in sh
+    assert 'if [ "${NUM_GPUS}" -gt 1 ]' in sh
+    assert "trainer=${TRAINER_CFG}" in sh
+    assert 'AVAIL_GPUS=$(python -c "import torch; print(torch.cuda.device_count())")' in sh
+    assert 'if [ "${AVAIL_GPUS}" -lt "${NUM_GPUS}" ]' in sh
+
+
+@pytest.mark.willi_parity
+def test_h100_multi_ddp_trainer_config_exposes_keys_train_report_generation_reads():
+    """train_report_generation.py's pl.Trainer(...) construction reads
+    accelerator/devices/precision/strategy/max_steps/val_check_interval/
+    check_val_every_n_epoch/log_every_n_steps/accumulate_grad_batches/
+    default_root_dir from cfg.trainer -- h100_multi_ddp.yaml must supply all
+    of these (composing trainer=h100_multi_ddp must not KeyError partway
+    through Trainer construction on an H100 box this repo cannot smoke-test
+    from here)."""
+    import yaml
+
+    trainer_cfg = yaml.safe_load((REPO_ROOT / "configs" / "trainer" / "h100_multi_ddp.yaml").read_text())
+    required = {
+        "accelerator", "devices", "precision", "strategy", "max_steps",
+        "val_check_interval", "check_val_every_n_epoch", "log_every_n_steps",
+        "accumulate_grad_batches", "default_root_dir",
+    }
+    missing = required - set(trainer_cfg.keys())
+    assert not missing, f"h100_multi_ddp.yaml missing keys train_report_generation.py reads: {missing}"
+    assert trainer_cfg["strategy"] == "ddp"
+    assert trainer_cfg["devices"] == -1

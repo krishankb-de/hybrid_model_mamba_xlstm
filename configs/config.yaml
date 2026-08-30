@@ -38,6 +38,12 @@ contrastive_mode: simcse
 # override for an undeclared key (caught live 2026-08-23, job 2478635).
 decoder_checkpoint: null
 
+# Phase 13 — optional fine-tuned image-tower checkpoint for report-generation
+# training (ReportGenerationLightningModule.load_image_encoder()). null keeps
+# stock BiomedCLIP weights (unchanged default behaviour). Declared here for
+# the same reason as decoder_checkpoint above.
+image_encoder_checkpoint: null
+
 # Reproducibility
 deterministic: false
 benchmark: true

@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 
@@ -1429,6 +1429,34 @@ class MQARLightningModule(HybridLightningModule):
         return loss
 
 
+def load_image_tower_checkpoint(image_encoder: nn.Module, checkpoint_path: str) -> Tuple[List[str], List[str]]:
+    """Load a fine-tuned image tower's weights onto an already-constructed
+    encoder (e.g. BiomedCLIP's .visual module), non-strict.
+
+    Pulled out of ReportGenerationLightningModule.load_image_encoder() as a
+    pure function purely so it's CPU-unit-testable against any nn.Module
+    stand-in, without needing open_clip/network access to exercise the
+    prefix-stripping + non-strict-load logic itself (matches this class's
+    existing no-open_clip-needed CPU-testability design, see the class
+    docstring below).
+
+    Args:
+        image_encoder: the module to load weights INTO (mutated in place).
+        checkpoint_path: path to a HybridContrastiveLightningModule .ckpt
+            (or a bare state dict) whose "image_encoder."-prefixed keys are
+            the tower's weights.
+
+    Returns:
+        (missing_keys, unexpected_keys) from load_state_dict(strict=False).
+    """
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state = ckpt.get("state_dict", ckpt)
+    prefix = "image_encoder."
+    tower_state = {k[len(prefix):]: v for k, v in state.items() if k.startswith(prefix)}
+    missing, unexpected = image_encoder.load_state_dict(tower_state, strict=False)
+    return list(missing), list(unexpected)
+
+
 class ReportGenerationLightningModule(pl.LightningModule):
     """Phase 10E: image-conditioned radiology report generation (prefix-tuning).
 
@@ -1497,19 +1525,36 @@ class ReportGenerationLightningModule(pl.LightningModule):
         # must supply a precomputed "patch_grid" tensor directly.
         self.image_encoder = None
 
-    def load_image_encoder(self, vit_lr: float = 1e-6):
+    def load_image_encoder(self, vit_lr: float = 1e-6, image_encoder_checkpoint: Optional[str] = None):
         """Load the frozen (or partially unfrozen) BiomedCLIP visual tower.
 
         Mirrors HybridContrastiveLightningModule's CLIP-loading branch
         (this file, ~line 373) but keeps the PRE-pooling patch grid via
         .trunk.forward_features(...) instead of the pooled 512-d output
         that CLIP-loss training uses.
+
+        Args:
+            image_encoder_checkpoint: optional path to a
+                HybridContrastiveLightningModule .ckpt (e.g. a full-data
+                Phase 9 contrastive run). Its "image_encoder.*"-prefixed
+                state dict keys are loaded onto the stock BiomedCLIP
+                architecture in place of the pretrained weights, non-strict
+                (so a checkpoint saved with a different vit_unfreeze_blocks
+                still loads: only the unfrozen blocks it actually trained
+                will differ from stock). None (default) keeps stock weights,
+                unchanged behaviour.
         """
         import open_clip
 
         biomedclip_id = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
         clip_model, _ = open_clip.create_model_from_pretrained('hf-hub:' + biomedclip_id)
         self.image_encoder = clip_model.visual
+
+        if image_encoder_checkpoint:
+            missing, unexpected = load_image_tower_checkpoint(self.image_encoder, image_encoder_checkpoint)
+            print(f"Loaded fine-tuned image encoder from: {image_encoder_checkpoint}")
+            print(f"  Missing: {len(missing)}, unexpected: {len(unexpected)}")
+
         self.image_encoder.eval()
         for p in self.image_encoder.parameters():
             p.requires_grad = False

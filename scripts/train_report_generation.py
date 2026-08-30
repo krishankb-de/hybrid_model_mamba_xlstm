@@ -134,7 +134,13 @@ def main(cfg: DictConfig):
         missing, unexpected = module.decoder.load_state_dict(state, strict=False)
         print(f"  Loaded. Missing keys: {len(missing)}, Unexpected: {len(unexpected)}")
 
-    module.load_image_encoder(vit_lr=float(cfg.model.get("vit_lr", 1e-6)))
+    image_encoder_ckpt = cfg.get("image_encoder_checkpoint", None)
+    if image_encoder_ckpt:
+        print(f"Image tower: fine-tuned checkpoint {image_encoder_ckpt}")
+    module.load_image_encoder(
+        vit_lr=float(cfg.model.get("vit_lr", 1e-6)),
+        image_encoder_checkpoint=image_encoder_ckpt,
+    )
 
     num_params = sum(p.numel() for p in module.parameters() if p.requires_grad)
     print(f"Trainable parameters: {num_params:,} ({num_params/1e6:.1f}M)")
