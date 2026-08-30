@@ -3898,3 +3898,16 @@ def test_setup_chexbert_venv_h100_slurm_wrapper_pins_scikit_learn_below_1_8():
     This isolated venv must pin below that."""
     sh = (REPO_ROOT / "scripts" / "setup_chexbert_venv_h100.sh").read_text()
     assert '"scikit-learn<1.8"' in sh
+
+
+@pytest.mark.willi_parity
+def test_setup_chexbert_venv_h100_slurm_wrapper_is_rerunnable_in_place():
+    """Found live 2026-08-30 (job 2494759): `uv venv` errors out with "A
+    virtual environment already exists" on a bare rerun against a VENV_DIR a
+    prior invocation already created -- exactly the situation a dependency-pin
+    fix (like the scikit-learn<1.8 one above) needs, since the fix only takes
+    effect in a rebuilt venv. Both the uv and python -m venv fallback branches
+    must pass --clear so this script can be resubmitted in place."""
+    sh = (REPO_ROOT / "scripts" / "setup_chexbert_venv_h100.sh").read_text()
+    assert "uv venv" in sh and "--clear" in sh
+    assert sh.count("--clear") >= 2  # uv branch + python -m venv fallback branch
