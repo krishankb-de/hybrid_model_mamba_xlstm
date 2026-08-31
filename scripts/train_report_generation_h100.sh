@@ -98,6 +98,16 @@ if [ "${NUM_GPUS}" -gt 1 ]; then
   TRAINER_CFG="h100_multi_ddp"
 fi
 
+# Phase 13F — oversample training reports positive for the 3 CheXpert labels
+# the 13B checkpoint never predicts (Lung Lesion/Pneumothorax/Pleural Other,
+# F1=0.0 on both eval splits). Default off (identical behaviour to before
+# this lever existed); reads configs/dataset/cxr_mimic_full.yaml's
+# chexpert_csv/rare_finding_labels, only oversample_weight is overridable
+# here (which 3 labels to target is a rarer edit -- do it in the YAML,
+# CLI-list overrides with spaces in label names are painful).
+OVERSAMPLE_RARE="${OVERSAMPLE_RARE:-false}"
+OVERSAMPLE_WEIGHT="${OVERSAMPLE_WEIGHT:-5.0}"
+
 MIMIC_CACHE_DIR="${MIMIC_CACHE_DIR:-/sc/home/$USER/dataset/mimic_cxr_cache}"
 EXPERIMENT="${EXPERIMENT:-h100_report_gen_150m_v2_k${PREFIX_K}}"
 
@@ -138,6 +148,7 @@ if [ -n "${IMAGE_ENCODER_CKPT}" ] && [ ! -f "${IMAGE_ENCODER_CKPT}" ]; then
   exit 1
 fi
 echo "Image encoder checkpoint: ${IMAGE_ENCODER_CKPT:-<stock BiomedCLIP, unchanged default>}"
+echo "Oversample rare findings: ${OVERSAMPLE_RARE} (weight=${OVERSAMPLE_WEIGHT})"
 
 EXTRA_ARGS=()
 if [ -n "${IMAGE_ENCODER_CKPT}" ]; then
@@ -160,6 +171,8 @@ python scripts/train_report_generation.py \
   dataset.pin_memory=true \
   dataset.cache_dir="${MIMIC_CACHE_DIR}" \
   dataset.use_augmentation=${AUGMENT} \
+  dataset.oversample_rare_findings=${OVERSAMPLE_RARE} \
+  dataset.oversample_weight=${OVERSAMPLE_WEIGHT} \
   model.prefix_k=${PREFIX_K} \
   model.decoder_lr=${DECODER_LR} \
   model.head_lr=${HEAD_LR} \

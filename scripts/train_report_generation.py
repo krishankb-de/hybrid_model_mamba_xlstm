@@ -25,6 +25,7 @@ Example (once data + a decoder checkpoint exist):
 import os
 import sys
 from pathlib import Path
+from typing import List
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -35,7 +36,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from transformers import AutoTokenizer
 
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
@@ -48,6 +49,40 @@ from scripts.train_contrastive import load_mimic_cxr
 torch.set_float32_matmul_precision("high")
 
 
+def compute_rare_finding_sample_weights(
+    study_ids: List[int],
+    chexpert_csv: str,
+    rare_labels: List[str],
+    oversample_weight: float,
+) -> List[float]:
+    """Phase 13F: per-row WeightedRandomSampler weights that oversample
+    training reports whose ground-truth CheXpert label is positive for one
+    of `rare_labels` -- e.g. Lung Lesion/Pneumothorax/Pleural Other, the 3
+    labels the 13B checkpoint never predicts at all (F1=0.0 on both eval
+    splits). U-Zeros convention (mimic-cxr-2.0.0-chexpert.csv.gz): 1.0 ->
+    positive, {0.0, -1.0, NaN} -> not-positive -- matches the convention the
+    now-removed evaluate_report_generation.py ground-truth cross-check used
+    (git history, commit cadcc6b). A study_id with no row in the CSV (should
+    not happen for the official build, but not asserted here) gets weight
+    1.0, i.e. NOT oversampled -- conservative, never inflates an unknown-label
+    row above baseline.
+
+    Pure function (no dataset/dataloader construction) so it's CPU-unit-
+    testable against a tiny on-disk CSV fixture, independent of the actual
+    MIMIC-CXR-JPG images/HF Dataset machinery.
+    """
+    import pandas as pd
+
+    df = pd.read_csv(chexpert_csv, usecols=["study_id"] + rare_labels)
+    df = df[df["study_id"].isin(set(study_ids))]
+    positive_study_ids = {
+        int(row["study_id"])
+        for _, row in df.iterrows()
+        if any(row[label] == 1.0 for label in rare_labels)
+    }
+    return [oversample_weight if sid in positive_study_ids else 1.0 for sid in study_ids]
+
+
 def prepare_report_gen_dataloader(cfg: DictConfig, split: str, tokenizer) -> DataLoader:
     """{input_ids, attention_mask, pixel_values} batches from the Phase 8
     local MIMIC-CXR-JPG parquet build, via train_contrastive.py's
@@ -55,10 +90,25 @@ def prepare_report_gen_dataloader(cfg: DictConfig, split: str, tokenizer) -> Dat
     """
     dataset = load_mimic_cxr(cfg, split, tokenizer, teacher_tokenizer=None)
     batch_size = cfg.dataset.batch_size if split == "train" else cfg.dataset.eval_batch_size
+
+    sampler = None
+    shuffle = (split == "train")
+    if split == "train" and cfg.dataset.get("oversample_rare_findings", False):
+        study_ids = list(dataset.data["study_id"])
+        weights = compute_rare_finding_sample_weights(
+            study_ids=study_ids,
+            chexpert_csv=cfg.dataset.chexpert_csv,
+            rare_labels=list(cfg.dataset.get("rare_finding_labels", [])),
+            oversample_weight=float(cfg.dataset.get("oversample_weight", 1.0)),
+        )
+        sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+        shuffle = False  # sampler and shuffle are mutually exclusive on DataLoader
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=(split == "train"),
+        shuffle=shuffle,
+        sampler=sampler,
         num_workers=cfg.dataset.num_workers,
         pin_memory=cfg.dataset.pin_memory,
         drop_last=(split == "train"),

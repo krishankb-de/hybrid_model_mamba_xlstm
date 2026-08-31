@@ -76,3 +76,19 @@ image_encoder_name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
 findings_field: "findings"
 impression_field: "impression"
 concatenate_sections: true
+
+# Phase 13F — training-set oversampling for CheXpert-14 labels the report-gen
+# decoder never predicts (Lung Lesion / Pneumothorax / Pleural Other all at
+# F1=0.0 on both validate and official-test-split evals as of the 13B
+# checkpoint). Report-generation-only (scripts/train_report_generation.py's
+# prepare_report_gen_dataloader); the contrastive/retrieval trainer does not
+# read these keys. Declared here (not just a Python-side default), same
+# strict-struct-mode reason as use_augmentation above, so it's
+# Hydra-CLI-overridable; defaults false/off so behavior is UNCHANGED unless
+# explicitly enabled. chexpert_csv points at the file build_mimic_cxr_local.py's
+# stage_meta() already fetches into local_parquet_dir alongside the split/
+# metadata CSVs (fetched, never consumed by the build pipeline until now).
+oversample_rare_findings: false
+chexpert_csv: "/sc/home/krishankumar.bhushan/dataset/mimic_full/mimic-cxr-2.0.0-chexpert.csv.gz"
+rare_finding_labels: ["Lung Lesion", "Pneumothorax", "Pleural Other"]
+oversample_weight: 5.0

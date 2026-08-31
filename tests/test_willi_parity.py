@@ -3685,6 +3685,8 @@ def test_train_report_generation_h100_slurm_wrapper_hydra_overrides_compose():
         # h100_single_gpu inside the script itself, before the invocation
         # block; substitute that resolved value directly here.
         "TRAINER_CFG": "h100_single_gpu",
+        # Phase 13F
+        "OVERSAMPLE_RARE": "false", "OVERSAMPLE_WEIGHT": "5.0",
     }
 
     # Extract the python invocation block verbatim (between the `python
@@ -3728,6 +3730,9 @@ def test_train_report_generation_h100_slurm_wrapper_hydra_overrides_compose():
     # invocation when the env var is actually set (see the dedicated lever
     # test below for that conditional path).
     assert cfg.image_encoder_checkpoint is None
+    # Phase 13F
+    assert cfg.dataset.oversample_rare_findings is False
+    assert cfg.dataset.oversample_weight == 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -4078,3 +4083,71 @@ def test_h100_multi_ddp_trainer_config_exposes_keys_train_report_generation_read
     assert not missing, f"h100_multi_ddp.yaml missing keys train_report_generation.py reads: {missing}"
     assert trainer_cfg["strategy"] == "ddp"
     assert trainer_cfg["devices"] == -1
+
+
+# ---------------------------------------------------------------------------
+# Phase 13F — oversample training reports positive for the 3 CheXpert labels
+# the 13B checkpoint never predicts (Lung Lesion/Pneumothorax/Pleural Other,
+# F1=0.0 on both eval splits).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.willi_parity
+def test_compute_rare_finding_sample_weights_oversamples_positive_studies(tmp_path):
+    """Pure-function test against a tiny on-disk CSV fixture -- no HF Dataset/
+    network needed. Verifies: (1) U-Zeros convention (1.0=positive, {0.0,
+    -1.0, NaN}=not-positive) is applied per-column; (2) a study positive for
+    ANY of the target rare labels gets the oversample weight, not just one
+    matching column; (3) a study with NO row in the CSV at all defaults to
+    weight 1.0 (conservative -- never inflates an unknown-label row); (4)
+    weights are returned in the SAME order as the input study_ids list, not
+    CSV row order."""
+    import pandas as pd
+    from scripts.train_report_generation import compute_rare_finding_sample_weights
+
+    csv_path = tmp_path / "mimic-cxr-2.0.0-chexpert.csv.gz"
+    pd.DataFrame({
+        "study_id": [10, 20, 30, 40],
+        "Lung Lesion":    [1.0, 0.0, -1.0, float("nan")],
+        "Pneumothorax":   [0.0, 1.0, 0.0, 0.0],
+        "Pleural Other":  [0.0, 0.0, 0.0, 0.0],
+    }).to_csv(csv_path, index=False, compression="gzip")
+
+    # study_ids intentionally out of CSV order, plus one (99) absent from the CSV.
+    study_ids = [40, 30, 99, 20, 10]
+    weights = compute_rare_finding_sample_weights(
+        study_ids=study_ids,
+        chexpert_csv=str(csv_path),
+        rare_labels=["Lung Lesion", "Pneumothorax", "Pleural Other"],
+        oversample_weight=5.0,
+    )
+
+    assert weights == [1.0, 1.0, 1.0, 5.0, 5.0], weights
+
+
+@pytest.mark.willi_parity
+def test_train_report_generation_h100_slurm_wrapper_exposes_oversample_rare_lever():
+    """OVERSAMPLE_RARE/OVERSAMPLE_WEIGHT are optional env levers, default off
+    (identical behaviour to before this lever existed), always passed to the
+    Hydra invocation (both keys are declared with safe defaults in
+    configs/dataset/cxr_mimic_full.yaml, so no EXTRA_ARGS empty-guard is
+    needed here -- unlike IMAGE_ENCODER_CKPT, which has no such default)."""
+    sh = (REPO_ROOT / "scripts" / "train_report_generation_h100.sh").read_text()
+    assert 'OVERSAMPLE_RARE="${OVERSAMPLE_RARE:-false}"' in sh
+    assert 'OVERSAMPLE_WEIGHT="${OVERSAMPLE_WEIGHT:-5.0}"' in sh
+    assert "dataset.oversample_rare_findings=${OVERSAMPLE_RARE}" in sh
+    assert "dataset.oversample_weight=${OVERSAMPLE_WEIGHT}" in sh
+
+
+@pytest.mark.willi_parity
+def test_cxr_mimic_full_config_declares_oversample_rare_keys():
+    """Same declared-key requirement as decoder_checkpoint/image_encoder_checkpoint
+    (Hydra strict-struct mode rejects a CLI override for an undeclared key) --
+    all 4 Phase 13F keys must be declared in configs/dataset/cxr_mimic_full.yaml,
+    not just assumed present."""
+    cfg_text = (REPO_ROOT / "configs" / "dataset" / "cxr_mimic_full.yaml").read_text()
+    assert "oversample_rare_findings: false" in cfg_text
+    assert "chexpert_csv:" in cfg_text
+    assert "rare_finding_labels:" in cfg_text
+    assert "oversample_weight:" in cfg_text
+    for label in ("Lung Lesion", "Pneumothorax", "Pleural Other"):
+        assert label in cfg_text

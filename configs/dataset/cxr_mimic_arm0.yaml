@@ -80,3 +80,14 @@ image_encoder_name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
 findings_field: "findings"
 impression_field: "impression"
 concatenate_sections: true
+
+# Phase 13F — see the identical note in cxr_mimic_full.yaml. chexpert_csv
+# intentionally points at the SAME file as cxr_mimic_full.yaml (not an arm0/
+# copy): mimic-cxr-2.0.0-chexpert.csv.gz is the single official ground-truth
+# label file keyed by study_id, valid regardless of which train/validate/test
+# parquet subset is in use -- there is no arm0-specific version of it, unlike
+# local_parquet_dir. Defaults false/off, so behavior is unchanged either way.
+oversample_rare_findings: false
+chexpert_csv: "/sc/home/krishankumar.bhushan/dataset/mimic_full/mimic-cxr-2.0.0-chexpert.csv.gz"
+rare_finding_labels: ["Lung Lesion", "Pneumothorax", "Pleural Other"]
+oversample_weight: 5.0
