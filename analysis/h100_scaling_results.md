@@ -169,7 +169,8 @@ Phase 13D above.
 |---|---|---|---|
 | MIMIC i2t R@10 | **17.14%** (D1c, `vit_unfreeze=12`) | **14.59%** (clean split) | Stretch, both protocols |
 | Indiana i2t R@10 | 4.85% | 3.90% | flat within noise (SE 0.76pp) |
-| Stage-0 val PPL | 13.18 | — | Target, ≈Stretch |
+| Stage-0 val PPL (**= PubMed PPL** — Stage-0 trains on `dataset=pubmed`) | 13.18 | — | Target, ≈Stretch |
+| STS (BIOSSES / STS-B Spearman ρ) | *not yet run* | — | eval mode shipped 2026-09-03 (`MODE=sts`, `eval_h100.sh`), never executed live |
 
 Headline trajectory: **8.23% → 10.45% (A100 architecture refactor) → 17.14%** (H100 +
 deep ViT adaptation) on the protocol every prior number in this project used; quote
@@ -256,6 +257,12 @@ checkpoint, and do not explain any retrieval or generation number above.
    means the two things that mattered (decode strategy, image-tower data volume/dose)
    were both cheap, well-understood, single-lever interventions rather than novel
    modeling contributions specific to this project's architecture.
+9. **STS (BIOSSES/STS-B) was never actually run**, on any checkpoint. The eval mode
+   (`MODE=sts`, `eval_h100.sh`) was shipped 2026-09-03 but has not been executed live —
+   the general-domain/biomedical sentence-similarity quality of any checkpoint in this
+   project is an open, unmeasured question. PubMed PPL, by contrast, *was* already
+   measured all along — Stage-0's own validation PPL (13.18) is on PubMed text, it had
+   simply never been labeled as "PubMed PPL" in prior writeups.
 
 ---
 

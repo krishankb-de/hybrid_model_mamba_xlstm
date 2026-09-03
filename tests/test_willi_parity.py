@@ -4151,3 +4151,41 @@ def test_cxr_mimic_full_config_declares_oversample_rare_keys():
     assert "oversample_weight:" in cfg_text
     for label in ("Lung Lesion", "Pneumothorax", "Pleural Other"):
         assert label in cfg_text
+
+
+# ---------------------------------------------------------------------------
+# Phase 12A — MODE=sts on eval_h100.sh (BIOSSES/STS-B/MedSTS via
+# evaluate_sts.py), the last genuinely missing measurement for the closed
+# retrieval chapter's authoritative table.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.willi_parity
+def test_eval_h100_slurm_wrapper_exposes_sts_mode():
+    """MODE=sts must dispatch to evaluate_sts.py with --datasets all, and must
+    NOT default to the gated-repo-safe offline HF env vars MODE=ppl/retrieval
+    use -- BIOSSES/STS-B/MedSTS are public HF datasets that need real network
+    access to download, unlike mimic-cxr."""
+    sh = (REPO_ROOT / "scripts" / "eval_h100.sh").read_text()
+    assert 'elif [ "${MODE}" = "sts" ]; then' in sh
+    assert "evaluate_sts.py" in sh
+    assert '--datasets all' in sh
+    assert 'export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-0}"' in sh
+    assert 'export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"' in sh
+    assert "expected 'ppl', 'retrieval', or 'sts'" in sh
+
+
+@pytest.mark.willi_parity
+def test_eval_h100_slurm_wrapper_sts_mode_does_not_change_other_modes_offline_default():
+    """Regression guard for the exact bug this change could introduce: the
+    MODE=sts branch must be conditional, not a global default flip -- ppl and
+    retrieval must still default HF_DATASETS_OFFLINE/HF_HUB_OFFLINE to 1
+    (test_eval_script_bakes_in_offline_and_populated_cache pins the literal
+    strings; this test pins the if/else structure around them so a future
+    edit can't collapse the branches back into one unconditional default)."""
+    sh = (REPO_ROOT / "scripts" / "eval_h100.sh").read_text()
+    assert 'if [ "${MODE}" = "sts" ]; then' in sh
+    # The offline-default lines must appear inside the else branch, i.e. after
+    # the sts-mode online-default lines in the same if/else block.
+    sts_idx = sh.index('export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-0}"')
+    offline_idx = sh.index('export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"')
+    assert sts_idx < offline_idx, "sts (online) default must precede the else (offline) default"

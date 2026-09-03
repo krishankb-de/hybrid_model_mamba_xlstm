@@ -1,10 +1,18 @@
 #!/bin/bash
 # ============================================================================
-# H100 evaluation template (aisc-shortrun). Two modes via MODE env var:
+# H100 evaluation template (aisc-shortrun). Three modes via MODE env var:
 #   MODE=ppl        (default) — PubMed val perplexity via evaluate_lm.py
 #                                (Stage-0 gate; port of eval_stage0_lm.sh).
 #   MODE=retrieval           — MIMIC/Indiana CXR retrieval via
 #                                evaluate_cxr_retrieval.py (Phase 6/7 gate).
+#   MODE=sts                 — BIOSSES/STS-B/MedSTS Spearman rho via
+#                                evaluate_sts.py (Phase 12A). Needs a
+#                                JOINT-trained checkpoint with projection_head.*
+#                                keys (train_contrastive.py contrastive_mode=
+#                                joint output, e.g. a Phase 6/13C/13D tower
+#                                checkpoint) -- a bare Stage-0 LM-only
+#                                checkpoint has no projection head and will
+#                                fail load_encoder()'s missing-key check.
 #
 # evaluate_lm.py / evaluate_cxr_retrieval.py auto-detect layer_pattern +
 # norm_topology from the --model-config yaml (refactor fixes), so pass only
@@ -67,8 +75,17 @@ export HF_DATASETS_CACHE="$HF_HOME/datasets"
 # HF_DATASETS_OFFLINE=1" since this script was written, but it never actually
 # set it — so every retrieval eval depended on the caller remembering. Bake it
 # in, matching train_biomedclip_kd_h100.sh. Override to 0 to (re)download.
-export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
-export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+# MODE=sts pulls PUBLIC HF datasets (glue/stsb, BIOSSES) that need real network
+# access, unlike the gated mimic-cxr repo MODE=retrieval defaults offline to
+# avoid -- default sts to online, everything else keeps the existing offline
+# default so this change cannot silently affect ppl/retrieval behaviour.
+if [ "${MODE}" = "sts" ]; then
+  export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-0}"
+  export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+else
+  export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
+  export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+fi
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export PYTHONUNBUFFERED=1   # flush output to the log live (else block-buffered → looks frozen)
 
@@ -97,8 +114,13 @@ elif [ "${MODE}" = "retrieval" ]; then
     --batch-size 32 \
     --output-dir "${OUTPUT_DIR}" \
     ${LOCAL_ARGS[@]+"${LOCAL_ARGS[@]}"}
+elif [ "${MODE}" = "sts" ]; then
+  python scripts/evaluate_sts.py \
+    --checkpoint "${CKPT}" \
+    --datasets all \
+    --output-dir "${OUTPUT_DIR}"
 else
-  echo "ERROR: unknown MODE='${MODE}' (expected 'ppl' or 'retrieval')"; exit 1
+  echo "ERROR: unknown MODE='${MODE}' (expected 'ppl', 'retrieval', or 'sts')"; exit 1
 fi
 
 echo "=== END: results in ${OUTPUT_DIR} ==="

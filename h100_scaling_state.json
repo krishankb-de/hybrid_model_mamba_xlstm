@@ -1,6 +1,6 @@
 {
-  "current_phase": "phase12_writeup_done",
-  "last_updated": "2026-09-03T20:00:00+0200",
+  "current_phase": "phase12a_sts_eval_staged",
+  "last_updated": "2026-09-03T21:00:00+0200",
   "OBJECTIVE_PIVOT_2026_08_16": {
     "new_primary_objective": "MEDICAL REPORT GENERATION scored by ROUGE-L + CheXbert F1 against ground-truth radiology reports. NOT retrieval.",
     "retrieval_status": "SUPPORTING CHAPTER -- complete, closed, numbers FINAL. Do not re-run retrieval arms to chase them. Clean protocol MIMIC i2t R@10 10.81% -> 14.59% (+3.78pp, 6.2 SE); protocol-matched (val==test) 11.07% -> 17.14%; Indiana flat within noise throughout (0.0390-0.0485, SE 0.76pp).",
@@ -511,7 +511,7 @@
     "verdict": "PRE-REGISTERED FLOOR TIER CLEARED, TARGET TIER PARTIALLY CLEARED. The generator beats the retrieval-NN floor on ROUGE-L, BLEU, exact-match accuracy, CheXbert-14-micro, CheXbert-5-micro, and CheXbert-5-macro -- 3 of 4 CheXbert sub-metrics outright, by the widest margins of the whole project. Target tier's CheXbert bar (>=0.40 14-micro) is cleared (0.4736); Target tier's ROUGE-L bar (>=0.22) is not reached (0.1899), the closest approach achieved but short by ~14% relative. CheXbert-14-macro still trails the floor by 7.1% (down from 17.5% at the pre-Phase-13 checkpoint), driven by a small number of very-low-support rare findings that resisted every lever tried, including a dedicated oversampling attempt (13F) that failed honestly at two doses. No architecture change or new loss function was needed -- decode strategy and image-tower data volume/vit_lr were the two levers that actually moved the result, both cheap and well-understood.",
     "writeup": "analysis/h100_scaling_results.md",
     "open_items": [
-      "12A: STS (BIOSSES/STS-B) + PubMed PPL on the best 150M checkpoint never measured -- genuine gap, not fabricated",
+      "12A: STS (BIOSSES/STS-B) never run on any checkpoint -- MODE=sts eval mode shipped 2026-09-03 (eval_h100.sh + evaluate_sts.py), staged but not yet executed live. PubMed PPL is NOT actually a gap -- Stage-0's existing val PPL (13.18) IS on PubMed text (train_stage0_h100.sh:78 uses dataset=pubmed), just never labeled as such.",
       "Template/boilerplate generation rate never re-measured on the final (13D) checkpoint",
       "vit_lr=3e-5 arm of the Phase 13D sweep never run (skipped on trend extrapolation)",
       "Indiana (cross-domain) never revisited for report generation, only for retrieval"
