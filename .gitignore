@@ -91,6 +91,7 @@ multirun/
 !MAMBA3_INTEGRATION_PLAN.md
 !CLAUDE.md
 !analysis/baseline_probe_report.md
+!analysis/h100_scaling_results.md
 
 
 #Json state files for tracking progress of training plans (regenerated from plan-of-record checkboxes)
