@@ -1,6 +1,6 @@
 {
-  "current_phase": "phase13_final_writeup",
-  "last_updated": "2026-09-03T19:00:00+0200",
+  "current_phase": "phase12_writeup_done",
+  "last_updated": "2026-09-03T20:00:00+0200",
   "OBJECTIVE_PIVOT_2026_08_16": {
     "new_primary_objective": "MEDICAL REPORT GENERATION scored by ROUGE-L + CheXbert F1 against ground-truth radiology reports. NOT retrieval.",
     "retrieval_status": "SUPPORTING CHAPTER -- complete, closed, numbers FINAL. Do not re-run retrieval arms to chase them. Clean protocol MIMIC i2t R@10 10.81% -> 14.59% (+3.78pp, 6.2 SE); protocol-matched (val==test) 11.07% -> 17.14%; Indiana flat within noise throughout (0.0390-0.0485, SE 0.76pp).",
@@ -479,5 +479,42 @@
     "rerunning_stage0_from_scratch": "ASKED 2026-08-16 -- NO. (1) Backbone quality was MEASURED not to transfer: PPL 15.62 -> 13.18 moved retrieval FLAT, null #1 of 10. (2) Stage 0 trains on PUBMED ABSTRACTS; the full-MIMIC build changes nothing it sees -- the two are orthogonal. (3) The 13.18 checkpoint is hard-won (four failed runs, collapse at steps 3k/24k/28k, resolved only by the fp32 Mamba-scan + mLSTM-exp-gate fix) and costs ~3 DAYS of H100 wall; re-running re-exposes that fragility for zero expected gain. HONEST NUANCE THE PIVOT INTRODUCES: the null was measured on RETRIEVAL, which uses the backbone as an ENCODER (pooled embedding); report generation uses it as a GENERATOR (autoregressive decoding = exactly what LM pretraining optimises), so the null does NOT automatically carry over. That argues for KEEPING the 13.18 checkpoint, not rebuilding it. The legitimate cheap version is Phase 10G (domain-adaptive continuation on ~47M tokens of MIMIC report text, hours not days, run as an ablation against the untouched 13.18 control).",
     "cross_protocol_number_comparison": "NEVER compare a full-MIMIC number on the OFFICIAL split against 0.1459 on the LEGACY train[90%:] gallery. The official split is subject-disjoint BY CONSTRUCTION; the legacy gallery has UNKNOWN PROVENANCE and may leak subjects across its own 90/10 cut. The new protocol is HARDER, so the number can go DOWN while the model gets BETTER. Phase 9A (Arm 0) exists precisely to separate 'the pipeline changed' from 'the protocol got harder' from 'the model changed'.",
     "reopening_retrieval_arms": "Retrieval is CLOSED as of 2026-08-16. 10 nulls, 1 lever, and that lever is exhausted (depth saturated at 12/12, vit_lr inverted-U with 1e-6 optimal, scope null). The Phase-9 arms exist to extend the SUPPORTING chapter onto full data, not to chase a higher R@10. The optimization target is ROUGE-L / CheXbert F1."
+  },
+  "final_verdict": {
+    "date": "2026-09-03",
+    "primary_objective": "medical report generation (ROUGE-L + CheXbert F1), official MIMIC-CXR-JPG test split",
+    "best_checkpoint": {
+      "decoder": "outputs/h100_report_gen_full_ext_4gpu_tower13d/checkpoints/last.ckpt",
+      "image_tower": "outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt",
+      "decode_strategy": "beam search, beam_size=3 (strictly beats greedy on every metric measured)"
+    },
+    "headline_numbers_official_test_split_n2663": {
+      "rouge_l": 0.1899,
+      "bleu_1": 0.2469,
+      "bleu_4": 0.0542,
+      "exact_match_accuracy": 0.2163,
+      "chexbert_14_micro": 0.4736,
+      "chexbert_14_macro": 0.28,
+      "chexbert_5_micro": 0.5522,
+      "chexbert_5_macro": 0.4487
+    },
+    "retrieval_floor_official_test_split_n2663": {
+      "rouge_l": 0.1636,
+      "bleu_1": 0.2372,
+      "bleu_4": 0.033,
+      "exact_match_accuracy": 0.1735,
+      "chexbert_14_micro": 0.4296,
+      "chexbert_14_macro": 0.3014,
+      "chexbert_5_micro": 0.4856,
+      "chexbert_5_macro": 0.4284
+    },
+    "verdict": "PRE-REGISTERED FLOOR TIER CLEARED, TARGET TIER PARTIALLY CLEARED. The generator beats the retrieval-NN floor on ROUGE-L, BLEU, exact-match accuracy, CheXbert-14-micro, CheXbert-5-micro, and CheXbert-5-macro -- 3 of 4 CheXbert sub-metrics outright, by the widest margins of the whole project. Target tier's CheXbert bar (>=0.40 14-micro) is cleared (0.4736); Target tier's ROUGE-L bar (>=0.22) is not reached (0.1899), the closest approach achieved but short by ~14% relative. CheXbert-14-macro still trails the floor by 7.1% (down from 17.5% at the pre-Phase-13 checkpoint), driven by a small number of very-low-support rare findings that resisted every lever tried, including a dedicated oversampling attempt (13F) that failed honestly at two doses. No architecture change or new loss function was needed -- decode strategy and image-tower data volume/vit_lr were the two levers that actually moved the result, both cheap and well-understood.",
+    "writeup": "analysis/h100_scaling_results.md",
+    "open_items": [
+      "12A: STS (BIOSSES/STS-B) + PubMed PPL on the best 150M checkpoint never measured -- genuine gap, not fabricated",
+      "Template/boilerplate generation rate never re-measured on the final (13D) checkpoint",
+      "vit_lr=3e-5 arm of the Phase 13D sweep never run (skipped on trend extrapolation)",
+      "Indiana (cross-domain) never revisited for report generation, only for retrieval"
+    ]
   }
 }
