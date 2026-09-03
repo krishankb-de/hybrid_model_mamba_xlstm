@@ -1,6 +1,7 @@
 # H100 Scaling Results — Hybrid Mamba-xLSTM CXR Report Generation
 
-**Status:** Phase 13 arc complete (2026-09-03). Final report-generation checkpoint:
+**Status:** Phase 13 arc complete, Phase 12 writeup complete, Phase 12A (STS/PubMed PPL)
+closed (2026-09-03). Final report-generation checkpoint:
 `outputs/h100_report_gen_full_ext_4gpu_tower13d/checkpoints/last.ckpt`.
 Full resumable history: `H100_SCALING_PLAN.md` + `h100_scaling_state.json` at repo root.
 
@@ -170,7 +171,7 @@ Phase 13D above.
 | MIMIC i2t R@10 | **17.14%** (D1c, `vit_unfreeze=12`) | **14.59%** (clean split) | Stretch, both protocols |
 | Indiana i2t R@10 | 4.85% | 3.90% | flat within noise (SE 0.76pp) |
 | Stage-0 val PPL (**= PubMed PPL** — Stage-0 trains on `dataset=pubmed`) | 13.18 | — | Target, ≈Stretch |
-| STS (BIOSSES / STS-B Spearman ρ) | *not yet run* | — | eval mode shipped 2026-09-03 (`MODE=sts`, `eval_h100.sh`), never executed live |
+| STS (BIOSSES / STS-B-val Spearman ρ) | 0.3829 / 0.4472 | — | see note below |
 
 Headline trajectory: **8.23% → 10.45% (A100 architecture refactor) → 17.14%** (H100 +
 deep ViT adaptation) on the protocol every prior number in this project used; quote
@@ -195,6 +196,16 @@ more training data would shift the inverted-U's optimum right and raise its peak
 further ahead of `1e-6` with more data, exactly as predicted, before `1e-5` finally
 showed the regression the small-dataset sweep saw much earlier. This is a genuine
 cross-chapter validation of the retrieval chapter's own predictive framework.
+
+**STS note (2026-09-03, `13D`'s tower checkpoint, first measurement of any kind in this
+project)**: BIOSSES ρ=0.3829, STS-B (validation) ρ=0.4472. `evaluate_sts.py` prints a
+`FAIL` against a decision gate (BIOSSES≥0.50, STS-B≥0.60), but that gate belongs to a
+different, never-executed pipeline design — a dedicated sequential Stage-1
+SimCSE-only checkpoint. This project's actual checkpoint is **jointly** trained, with
+SimCSE as one minor auxiliary loss (`gamma_simcse=0.1`) alongside the CLIP/KD objectives
+the `vit_lr` sweep was actually optimized for — the gate is not a meaningful pass/fail
+bar for this checkpoint lineage, and the numbers are reported here as a baseline
+text-embedding-quality reference, not a failed target.
 
 ---
 
@@ -257,12 +268,14 @@ checkpoint, and do not explain any retrieval or generation number above.
    means the two things that mattered (decode strategy, image-tower data volume/dose)
    were both cheap, well-understood, single-lever interventions rather than novel
    modeling contributions specific to this project's architecture.
-9. **STS (BIOSSES/STS-B) was never actually run**, on any checkpoint. The eval mode
-   (`MODE=sts`, `eval_h100.sh`) was shipped 2026-09-03 but has not been executed live —
-   the general-domain/biomedical sentence-similarity quality of any checkpoint in this
-   project is an open, unmeasured question. PubMed PPL, by contrast, *was* already
-   measured all along — Stage-0's own validation PPL (13.18) is on PubMed text, it had
-   simply never been labeled as "PubMed PPL" in prior writeups.
+9. **STS is modest (BIOSSES ρ=0.38, STS-B ρ=0.45) relative to a gate that doesn't
+   actually apply to this checkpoint.** This project's text encoder was never
+   specifically optimized for sentence-similarity quality — SimCSE was always a minor
+   auxiliary loss in a joint objective dominated by CLIP/KD terms. Whether a dedicated
+   SimCSE pretraining stage (the sequential Stage-1 design this project never executed)
+   would meaningfully improve these numbers is untested. PubMed PPL, by contrast, *was*
+   already measured all along — Stage-0's own validation PPL (13.18) is on PubMed text,
+   it had simply never been labeled as "PubMed PPL" in prior writeups.
 
 ---
 
