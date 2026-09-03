@@ -4189,3 +4189,28 @@ def test_eval_h100_slurm_wrapper_sts_mode_does_not_change_other_modes_offline_de
     sts_idx = sh.index('export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-0}"')
     offline_idx = sh.index('export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"')
     assert sts_idx < offline_idx, "sts (online) default must precede the else (offline) default"
+
+
+@pytest.mark.willi_parity
+def test_evaluate_sts_uses_script_free_dataset_mirrors():
+    """REGRESSION (2026-09-03, first live MODE=sts run, job 2505439): both
+    original dataset sources crashed -- BIOSSES's bigbio/biosses/nguyenthanhdo
+    candidates all relied on HF's legacy "dataset loading script" mechanism
+    ("Dataset scripts are no longer supported"), and STS-B's bare
+    `load_dataset("glue", "stsb", split=...)` call was UNGUARDED (no
+    try/except), so its equivalent failure crashed the whole job instead of
+    falling through to a fallback -- confirmed live via an
+    hf_file_system.resolve_path crash on glue's legacy standalone YAML.
+    Fixed: mteb/biosses-sts and mteb/stsbenchmark-sts (script-free parquet
+    mirrors, sentence1/sentence2/score schema) are now tried FIRST for both,
+    and _load_stsb gained the same per-candidate try/except loop BIOSSES
+    already had, so a first-source failure degrades to the next candidate
+    instead of crashing the process."""
+    src = (REPO_ROOT / "scripts" / "evaluate_sts.py").read_text()
+    assert '"mteb/biosses-sts"' in src
+    assert '"mteb/stsbenchmark-sts"' in src
+    # STS-B must no longer be a single unguarded load_dataset call -- pin the
+    # per-candidate try/except loop structure the fix introduced.
+    stsb_body = src.split("def _load_stsb(")[1].split("\ndef ")[0]
+    assert "for dataset_id, kwargs in" in stsb_body
+    assert "except Exception as exc:" in stsb_body

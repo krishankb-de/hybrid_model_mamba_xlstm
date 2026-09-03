@@ -127,8 +127,18 @@ def load_encoder(checkpoint_path: str, device: str = "cuda") -> HybridTextEncode
 # ---------------------------------------------------------------------------
 
 def _load_biosses() -> Optional[Tuple[List[Tuple[str, str]], List[float]]]:
-    """Try several HF dataset paths for BIOSSES. Returns (pairs, scores) or None."""
+    """Try several HF dataset paths for BIOSSES. Returns (pairs, scores) or None.
+
+    `bigbio/biosses`/`biosses`/`nguyenthanhdo/biosses` all rely on the legacy
+    HF "dataset loading script" mechanism, which `datasets` has since
+    dropped ("Dataset scripts are no longer supported", confirmed live
+    2026-09-03) -- kept as fallbacks only in case an older `datasets` pin
+    ever runs this again. `mteb/biosses-sts` is the current script-free
+    parquet mirror (fields: sentence1/sentence2/score, score range 0-4,
+    single "test" split of 100 rows) and is tried first.
+    """
     candidates = [
+        ("mteb/biosses-sts", {"split": "test"}),
         ("bigbio/biosses", {"name": "biosses_source", "split": "train"}),
         ("biosses", {"split": "train"}),
         ("nguyenthanhdo/biosses", {"split": "train"}),
@@ -154,15 +164,34 @@ def _load_biosses() -> Optional[Tuple[List[Tuple[str, str]], List[float]]]:
 
 
 def _load_stsb(split: str = "validation") -> Tuple[List[Tuple[str, str]], List[float]]:
-    ds = load_dataset("glue", "stsb", split=split)
-    pairs, scores = [], []
-    for row in ds:
-        s1, s2 = str(row.get("sentence1") or ""), str(row.get("sentence2") or "")
-        if s1 and s2:
-            pairs.append((s1, s2))
-            scores.append(float(row.get("label") or 0.0))
-    print(f"  STS-B ({split}): {len(pairs)} pairs")
-    return pairs, scores
+    """`glue`/`stsb` relies on the legacy HF "dataset loading script"
+    mechanism, which `datasets` has since dropped (confirmed live
+    2026-09-03: a `glue.py`-resolution crash inside `hf_file_system`, not a
+    graceful failure). `mteb/stsbenchmark-sts` is the current script-free
+    parquet mirror (fields: sentence1/sentence2/score plus metadata, score
+    range 0-5, train/validation/test splits) and is tried first; `glue`/
+    `stsb` stays as a fallback only in case an older `datasets` pin ever
+    runs this again.
+    """
+    last_exc: Optional[Exception] = None
+    for dataset_id, kwargs in (
+        ("mteb/stsbenchmark-sts", {"split": split}),
+        ("glue", {"name": "stsb", "split": split}),
+    ):
+        try:
+            ds = load_dataset(dataset_id, **kwargs)
+            pairs, scores = [], []
+            for row in ds:
+                s1, s2 = str(row.get("sentence1") or ""), str(row.get("sentence2") or "")
+                if s1 and s2:
+                    pairs.append((s1, s2))
+                    scores.append(float(row.get("score") if row.get("score") is not None else row.get("label") or 0.0))
+            print(f"  STS-B ({split}, {dataset_id}): {len(pairs)} pairs")
+            return pairs, scores
+        except Exception as exc:
+            print(f"  STS-B {dataset_id} failed: {exc}")
+            last_exc = exc
+    raise RuntimeError(f"STS-B: all sources failed for split={split!r}") from last_exc
 
 
 def _load_medstsrel() -> Optional[Tuple[List[Tuple[str, str]], List[float]]]:
