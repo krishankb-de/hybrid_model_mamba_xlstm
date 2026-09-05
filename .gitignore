@@ -88,17 +88,18 @@ multirun/
 !BIOMEDCLIP_KD_PLAN.md
 !HYBRID_ARCH_REFACTOR_PLAN.md
 !H100_SCALING_PLAN.md
-!MAMBA3_INTEGRATION_PLAN.md
+!MAMBA3_PLAN.md
 !CLAUDE.md
 !analysis/baseline_probe_report.md
 !analysis/h100_scaling_results.md
+!analysis/mamba3_results.md
 
 
 #Json state files for tracking progress of training plans (regenerated from plan-of-record checkboxes)
 !biomedclip_kd_state.json
 !hybrid_arch_refactor_state.json
 !h100_scaling_state.json
-!mamba3_integration_state.json
+!mamba3_state.json
 
 
 
