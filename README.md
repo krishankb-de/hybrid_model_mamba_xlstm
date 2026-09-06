@@ -7,7 +7,7 @@ A research implementation of a hybrid architecture combining **Mamba** (Selectiv
 
 ## 🔬 This branch: `h100_scaling_mamba3` — Mamba-3 backbone upgrade
 
-**Status: M0–M3 complete, 28/62 checkboxes.** Plan of record: [`MAMBA3_PLAN.md`](MAMBA3_PLAN.md);
+**Status: M0–M3 complete, 32/62 checkboxes.** Plan of record: [`MAMBA3_PLAN.md`](MAMBA3_PLAN.md);
 live state: [`mamba3_state.json`](mamba3_state.json). Branched from `h100_scaling` @ `20a1d27`.
 **This branch is never merged without an explicit instruction** — `h100_scaling` keeps the approved
 results reproducible.
@@ -129,7 +129,7 @@ not transfer, but neither is a win assumed. That is what the M7 screen measures.
 | M1 | Pin the defect, then fix it on the legacy path (produces arm A1) | ✅ 9/9 |
 | M2 | Mamba3Block = exactly Mamba-2 SSD (+ the sequential oracle) | ✅ 10/10 |
 | M3 | Exponential-trapezoidal | ✅ 3/3 |
-| M4 | Complex-valued state (RoPE trick) | ⬜ 0/5 |
+| M4 | Complex-valued state (RoPE trick) | 🔄 4/5 |
 | M5 | Flags folded into arm definitions (no milestone of its own) | ⬜ 0/3 |
 | M6 | O(1) recurrent decode cache | ⬜ 0/5 |
 | M7 | Timing probe + short-run screen  — H100 | ⬜ 0/8 |

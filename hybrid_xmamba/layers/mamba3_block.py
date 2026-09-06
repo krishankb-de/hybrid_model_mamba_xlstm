@@ -38,6 +38,7 @@ import torch.nn.functional as F
 
 from hybrid_xmamba.kernels.ssd import ssd_chunked_scan
 from hybrid_xmamba.layers.normalization import RMSNorm
+from hybrid_xmamba.layers.rotary import apply_rotary, cumulative_angles
 
 
 def heavy_tail_activation(x: torch.Tensor) -> torch.Tensor:
@@ -98,6 +99,7 @@ class Mamba3Block(nn.Module):
         dt_max: float = 1e-1,
         dt_init_floor: float = 1e-4,
         dt_limit: float = 1.0,
+        theta_max: float = 1.0,
         use_outproj_norm: bool = False,
         use_hybrid_norm: bool = False,  # accepted for interface parity; BCNorm is unconditional
         **unused,
@@ -143,6 +145,11 @@ class Mamba3Block(nn.Module):
         self.dt_max = dt_max
         self.dt_init_floor = dt_init_floor
         self.dt_limit = dt_limit
+        # theta = theta_max * tanh(proj(x)) bounds the angular rate, and with the
+        # projection slice near zero at init the rotation starts as ~identity -- so a
+        # rope-on arm and a rope-off arm are comparable at step 0 rather than starting
+        # from different places.
+        self.theta_max = theta_max
 
         # Rotation angles are shared across heads and cover half of `d_state` by default, so each
         # angle drives one 2-D rotation pair (Prop. 2's block-diagonal R).
@@ -276,8 +283,15 @@ class Mamba3Block(nn.Module):
         return self.out_proj(y * self.activation(z))
 
     def _scan(self, xs, dt, A, B, C, trap_raw, angles, cu_seqlens):
-        """SSD scan, plus the exponential-trapezoidal term when enabled. M4 adds the rotation."""
-        del angles  # consumed by M4
+        """SSD scan, plus the trapezoidal term and the complex-state rotation when enabled."""
+        if self.use_rope:
+            # Rotate BEFORE the trapezoid shifts anything (paper Prop. 4): the beta term's
+            # B_{t-1} must carry its own Theta_{t-1}, which is what shifting an already-rotated
+            # stream gives. Rotating after the shift would pair B_{t-1} with Theta_t.
+            theta = self.theta_max * torch.tanh(angles.float())
+            theta_angles = cumulative_angles(dt[..., :1], theta, cu_seqlens=cu_seqlens)
+            B = apply_rotary(B, theta_angles, self.rope_fraction)
+            C = apply_rotary(C, theta_angles, self.rope_fraction)
         if self.B_bias is not None:
             B = B.repeat_interleave(self.nheads // self.ngroups, dim=2) + self.B_bias
             C = C.repeat_interleave(self.nheads // self.ngroups, dim=2) + self.C_bias

@@ -368,14 +368,14 @@ Test-first: M1-A/B/C must **fail on HEAD**.
 - [x] **M3-C** vs the fp64 3-term oracle, rel-err ≤ 1e-6.
 
 ### M4 — Complex-valued state (RoPE trick)
-- [ ] **M4-A** `rotary.py`: `Θ = cumsum(Δ·θ)` **in float64** (~2 MB, negligible), `remainder(·, 2π)` before
+- [x] **M4-A** `rotary.py`: `Θ = cumsum(Δ·θ)` **in float64** (~2 MB, negligible), `remainder(·, 2π)` before
       fp32 `sin/cos`, **Θ reset per document segment**, `θ = θ_max·tanh(angle_proj)`, `rope_fraction=0.5`.
-- [ ] **M4-B** **Bit-identity: rope off reproduces M3 exactly.**
-- [ ] **M4-C** Rotate-then-shift ordering test (Prop. 4).
+- [x] **M4-B** **Bit-identity: rope off reproduces M3 exactly.**
+- [x] **M4-C** Rotate-then-shift ordering test (Prop. 4).
 - [ ] **M4-D** **Capability test — the paper's headline claim.** Parity + modular arithmetic on a tiny model
       (Table 5b): Mamba-3 ≈100%, Mamba-2/Mamba-1 ≈ chance. Cheap CPU test, and the cleanest standalone
       contribution in the plan.
-- [ ] **M4-E** Angle-drift test: fp32 path vs fp64 sequential rotation < 1e-6 at L=1024;
+- [x] **M4-E** Angle-drift test: fp32 path vs fp64 sequential rotation < 1e-6 at L=1024;
       alarm if `Θ.abs().max() > 1e3` rad.
 
 ### M5 — Flags folded into arm definitions (no milestone of its own)

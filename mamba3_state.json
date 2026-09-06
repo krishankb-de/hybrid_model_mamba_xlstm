@@ -1,6 +1,6 @@
 {
   "current_phase": "M4_complex_state",
-  "last_updated": "2026-09-06T04:06:54+02:00",
+  "last_updated": "2026-09-06T04:24:48+02:00",
   "status": "M0-M3 complete. Trapezoid landed with an exact lambda=1 bit-identity control. M4 next: complex state via the RoPE trick.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
@@ -389,18 +389,18 @@
     },
     "M4": {
       "title": "Complex-valued state (RoPE trick)",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "M4-A": {
-          "done": false,
+          "done": true,
           "desc": "rotary.py: Θ = cumsum(Δ·θ) in float64 (~2 MB, negligible), remainder(·, 2π) before"
         },
         "M4-B": {
-          "done": false,
+          "done": true,
           "desc": "Bit-identity: rope off reproduces M3 exactly."
         },
         "M4-C": {
-          "done": false,
+          "done": true,
           "desc": "Rotate-then-shift ordering test (Prop. 4)."
         },
         "M4-D": {
@@ -408,11 +408,16 @@
           "desc": "Capability test — the paper's headline claim. Parity + modular arithmetic on a tiny model"
         },
         "M4-E": {
-          "done": false,
+          "done": true,
           "desc": "Angle-drift test: fp32 path vs fp64 sequential rotation < 1e-6 at L=1024;"
         }
       },
-      "evidence": {},
+      "evidence": {
+        "m4a": "hybrid_xmamba/layers/rotary.py: Theta=cumsum(dt*theta) in fp64, wrapped to [0,2pi), per-document reset; theta=theta_max*tanh(proj) for a near-identity warm start",
+        "m4b_bit_identity": "zero-angle rope vs rope-off: torch.equal=True with and without cu_seqlens; non-zero angles change the output",
+        "m4c_ordering": "rotate-then-shift vs shift-then-rotate differ by 2.07e-01, so Prop. 4's ordering is a real constraint, not a nicety",
+        "m4e_drift": "max|Theta| reaches 87.5 rad at L=4096; fp64 path holds 2.38e-07 (the fp32 output floor) while a naive fp32 cumsum drifts to 6.51e-06 and grows with length"
+      },
       "verdict": null
     },
     "M5": {
@@ -599,7 +604,8 @@
     "2026-09-06: Added scripts/preflight_mamba3_h100.sh: the aisc login node refuses to execute python, so the M7-A2 pre-flight is an sbatch job (CPU, ~2 min) that checks all three arm fingerprints, the [181,186]M param band, Delta at init, and the CPU suite. README run instructions corrected -- they had wrongly told the user to run python on lx01.",
     "2026-09-06: M3 complete (exponential-trapezoidal). ALSO fixed a live FM5 bug found by the ARCH fingerprint on aisc job 2513007: every training entry point built HybridConfig from a hand-written kwarg list, so scan_impl/tfla_impl/dt_init_strategy reached the yaml but not the model and the A1 arm trained with its defects intact. Replaced with HybridConfig.from_hydra() everywhere.",
     "2026-09-06: current_phase -> M4_complex_state",
-    "2026-09-06: Storage: found save_top_k hard-coded at 3 in train_stage0_distill.py:484, so the SAVE_TOP_K env override never took effect -- 8.4 GB per 150M arm, 67 GB across an 8-arm screen against a 200 GB quota. Now read from config; screen arms should use SAVE_TOP_K=0 (last.ckpt only, preserving --requeue)."
+    "2026-09-06: Storage: found save_top_k hard-coded at 3 in train_stage0_distill.py:484, so the SAVE_TOP_K env override never took effect -- 8.4 GB per 150M arm, 67 GB across an 8-arm screen against a 200 GB quota. Now read from config; screen arms should use SAVE_TOP_K=0 (last.ckpt only, preserving --requeue).",
+    "2026-09-06: M4-A/B/C/E done (complex state via the RoPE trick). M4-D (parity capability) still running."
   ],
   "open_questions": []
 }

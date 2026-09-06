@@ -1009,3 +1009,120 @@ def test_stage0_checkpoint_retention_is_configurable():
     assert "save_last=True" in src, (
         "save_last must stay on: aisc-batch is preemptible and --requeue resumes from last.ckpt"
     )
+
+
+# ---------------------------------------------------------------------------
+# M4: complex-valued state via the RoPE trick (paper Sec 3.2, Prop. 2-4)
+# ---------------------------------------------------------------------------
+# A real, non-negative transition cannot express rotational state dynamics, which is the formal
+# reason Mamba-2 cannot compute parity. Making the transition complex fixes that, and Prop. 3
+# shows the complex system equals a real one with a data-dependent rotation applied to B and C --
+# so the rotation lives outside the scan and the SSD kernel is untouched.
+
+
+def _rope_offset(block):
+    """Byte offset of the rotation-angle slice inside in_proj's output."""
+    return sum(block._split[:7])
+
+
+def _zero_rope_slice(block):
+    with torch.no_grad():
+        o, n = _rope_offset(block), block._split[7]
+        block.in_proj.weight[o:o + n].zero_()
+
+
+@pytest.mark.parametrize("with_documents", [False, True])
+def test_zero_angle_rope_is_bit_identical_to_rope_off(with_documents):
+    """M4-B: the control. cos(0)==1.0 and sin(0)==0.0 exactly, so this is an equality, not a
+    tolerance -- which is what lets a measured PPL difference be attributed to the rotation."""
+    torch.manual_seed(0)
+    on = _m3_block(use_rope=True).eval()
+    torch.manual_seed(0)
+    off = _m3_block(use_rope=False).eval()
+    off.load_state_dict(on.state_dict())
+    _zero_rope_slice(on)
+    _zero_rope_slice(off)
+
+    x = torch.randn(2, 96, 128)
+    kw = {}
+    if with_documents:
+        ids = torch.zeros(2, 96, dtype=torch.long)
+        ids[:, 41:] = 1
+        kw["cu_seqlens"] = ids
+    with torch.no_grad():
+        assert torch.equal(on(x, **kw), off(x, **kw))
+
+
+def test_rope_changes_the_output_when_the_angles_are_not_zero():
+    """M4-B: the other half -- the flag must not be a no-op once angles are real."""
+    torch.manual_seed(0)
+    on = _m3_block(use_rope=True).eval()
+    torch.manual_seed(0)
+    off = _m3_block(use_rope=False).eval()
+    off.load_state_dict(on.state_dict())
+    _zero_rope_slice(off)
+    with torch.no_grad():
+        o, n = _rope_offset(on), on._split[7]
+        on.in_proj.weight[o:o + n].normal_(0, 0.5)
+        x = torch.randn(2, 96, 128)
+        assert (on(x) - off(x)).abs().max() > 1e-5, "rotation had no effect on the output"
+
+
+def test_rotate_then_shift_is_not_the_same_as_shift_then_rotate():
+    """M4-C: Prop. 4's ordering constraint, which is easy to get backwards.
+
+    Under the trapezoidal rule the beta term carries `B_{t-1}`, and that must be rotated by
+    `Theta_{t-1}` -- its own angle -- not by `Theta_t`. Shifting an already-rotated stream gives
+    the former; rotating an already-shifted stream gives the latter. They differ by ~0.2 here, so
+    the wrong order is a real bug rather than a rounding difference.
+    """
+    from hybrid_xmamba.layers.rotary import apply_rotary, cumulative_angles
+
+    torch.manual_seed(0)
+    dt = torch.rand(1, 8, 1) * 0.1 + 0.05
+    theta = torch.randn(1, 8, 2)
+    angles = cumulative_angles(dt, theta)
+    B = torch.randn(1, 8, 1, 8)
+
+    def shift(v):
+        return torch.cat([torch.zeros_like(v[:, :1]), v[:, :-1]], dim=1)
+
+    assert not torch.allclose(shift(apply_rotary(B, angles)), apply_rotary(shift(B), angles))
+
+
+@pytest.mark.parametrize("seq_len", [512, 4096])
+def test_angle_accumulation_stays_accurate_at_length(seq_len):
+    """M4-E: Theta accumulates, and at this repo's Delta it gets large.
+
+    With Delta ~ 0.7 and theta of order 1, Theta passes 50 rad by position 512 and ~90 by 4096.
+    A naive fp32 cumsum drifts with length; accumulating in float64 and wrapping into [0, 2pi)
+    before the fp32 sin/cos costs ~2 MB and keeps the error flat at the fp32 output floor.
+    """
+    from hybrid_xmamba.layers.rotary import TWO_PI, cumulative_angles
+
+    torch.manual_seed(0)
+    dt = torch.rand(1, seq_len, 1) * 0.9 + 0.1
+    theta = torch.randn(1, seq_len, 16)
+    exact = torch.remainder((dt.double() * theta.double()).cumsum(1), TWO_PI)
+    ours = cumulative_angles(dt, theta).double()
+    naive = torch.remainder((dt * theta).cumsum(1), TWO_PI).double()
+
+    assert (ours - exact).abs().max() < 1e-6
+    assert (ours - exact).abs().max() < (naive - exact).abs().max(), (
+        "the fp64 accumulator is no better than a naive fp32 cumsum -- check the dtype path"
+    )
+    assert 0.0 <= ours.min() and ours.max() < TWO_PI, "angles are not wrapped into [0, 2pi)"
+
+
+def test_rope_angles_reset_per_document():
+    """M4-A: a packed document must not inherit the previous document's accumulated phase."""
+    from hybrid_xmamba.layers.rotary import cumulative_angles
+
+    torch.manual_seed(0)
+    dt = torch.rand(2, 64, 1) * 0.1 + 1e-3
+    theta = torch.randn(2, 64, 8)
+    ids = torch.zeros(2, 64, dtype=torch.long)
+    ids[:, 20:], ids[:, 40:] = 1, 2
+    segmented = cumulative_angles(dt, theta, cu_seqlens=ids)
+    standalone = cumulative_angles(dt[:, 20:40], theta[:, 20:40])
+    assert torch.allclose(segmented[:, 20:40], standalone, atol=1e-9)
