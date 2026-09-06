@@ -4275,7 +4275,7 @@ def test_screen_arms_job_array_reads_the_shared_arm_ladder():
     assert "%A_%a" in sh, "array tasks must not all write to the same log file"
 
     assert 'ARMS="${ARMS:-A2 A3 A4 A5 A6}"' in sh, "default set must skip the early-started arms"
-    assert 'python scripts/mamba3_arms.py env "${ARM}"' in sh, "the ladder has one definition"
+    assert "export ARM" in sh, "the arm is handed to the wrapper, which resolves it on the node"
     code = "\n".join(ln for ln in sh.splitlines() if not ln.lstrip().startswith("#"))
     assert "model.mamba3_" not in code, (
         "levers must come from mamba3_arms.py, not be hand-written here"
@@ -4301,3 +4301,31 @@ def test_stage0_h100_passes_extra_hydra_overrides_through():
     assert "\n  ${EXTRA_OVERRIDES}\n" in sh, "must be word-split into separate Hydra arguments"
     wrapper = (REPO_ROOT / "scripts" / "train_stage0_150m_h100.sh").read_text()
     assert 'export EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"' in wrapper
+
+
+@pytest.mark.willi_parity
+def test_150m_wrapper_resolves_the_arm_on_the_compute_node():
+    """The aisc login node refuses to execute python, so an arm can only be resolved inside
+    the job.
+
+    Regression pin for job 2513581 (2026-09-06). The documented launch was
+    `eval "$(python scripts/mamba3_arms.py env A2)" && sbatch ...`. On lx01 that python call
+    printed "This command is not allowed on the login node!"; the shell word-split the
+    sentence into `This: command not found`, `Please: command not found`, `HINT:: command not
+    found`; the eval exported NOTHING; and sbatch ran the wrapper's own defaults --
+    hybrid_150m_v2, 120,000 steps, save_top_k=3. A silent second A0 at ten times the intended
+    length, wearing the experiment name of the arm it was supposed to be.
+
+    Resolving on the compute node removes the class rather than the instance: there is no
+    pre-submit step left to fail, and a bad arm name exits non-zero instead of falling back to
+    a default that happens to be a valid architecture.
+    """
+    sh = (REPO_ROOT / "scripts" / "train_stage0_150m_h100.sh").read_text()
+    assert 'if [ -n "${ARM:-}" ]; then' in sh
+    assert 'python scripts/mamba3_arms.py env "${ARM}"' in sh, "one definition of the ladder"
+    assert "FATAL: could not resolve arm" in sh and "exit 1" in sh, (
+        "an unknown arm must fail the job, not silently train the wrapper's default"
+    )
+    # Resolution must precede the ${VAR:-default} exports, or the defaults win and the arm is
+    # silently ignored -- the same failure in a new costume.
+    assert sh.index('if [ -n "${ARM:-}" ]; then') < sh.index('export MODEL_CONFIG=')

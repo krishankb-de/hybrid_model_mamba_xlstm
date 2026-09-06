@@ -58,17 +58,13 @@ echo "=== M7-B screen: arm ${ARM} (array task ${IDX} of ${#ARM_LIST[@]}) ==="
 date; hostname
 echo "branch: $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
 
-source "${VENV_ACTIVATE:-.venv/bin/activate}"
-
-# The single definition of the ladder decides config, seed and levers. Nothing here
-# hand-writes a `model.mamba3_*=` override, which is the point.
-eval "$(python scripts/mamba3_arms.py env "${ARM}" \
-          --steps "${STEPS}" --warmup "${WARMUP_STEPS}" --save-top-k "${SAVE_TOP_K_SCREEN}")"
-echo "arm ${ARM}: MODEL_CONFIG=${MODEL_CONFIG} SEED=${SEED} EXPERIMENT=${EXPERIMENT}"
-echo "arm ${ARM}: EXTRA_OVERRIDES=${EXTRA_OVERRIDES:-<none>}"
-
-# Delegate to the 150M wrapper so the stability settings that took five attempts to find
-# are inherited rather than restated (LR 4e-4, grad-clip 0.5, 80GB-safe bs/accum).
+# The 150M wrapper resolves ARM itself, on the compute node -- never here, and never
+# before sbatch. The aisc login node refuses to execute python, so a pre-submit
+# `eval "$(python scripts/mamba3_arms.py env A2)"` silently exports nothing and the job
+# runs the wrapper's defaults; that is how job 2513581 became a second A0 at 120,000
+# steps on 2026-09-06.
+export ARM STEPS WARMUP_STEPS
+export SAVE_TOP_K="${SAVE_TOP_K_SCREEN}"
 bash scripts/train_stage0_150m_h100.sh
 
 echo "=== arm ${ARM} finished ==="

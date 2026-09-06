@@ -444,7 +444,7 @@ chunk boundaries (`tfla_interface.py:110-117`), so an exact mLSTM `step()` is de
       forwards only). Report O(L²) → O(L).
 
 ### M7 — Timing probe + short-run screen (**the cheap decision gate**) — H100
-- [ ] **M7-A** ⚠ **Do this before anything else costs money.** (i) Run **A0 twice with different seeds** at
+- [x] **M7-A** ⚠ **Do this before anything else costs money.** (i) Run **A0 twice with different seeds** at
       screen length; measure |ΔPPL| = the noise floor. (ii) 200-step timing probe **with and without the
       BioMedLM teacher** (2 × 15 min) — the 2.7B teacher is ~10:1 of per-step FLOPs and contributes nothing
       to ranking. If seed noise ≥ the expected 1-3% effect, **the screen cannot rank arms** — change the
@@ -453,7 +453,7 @@ chunk boundaries (`tfla_interface.py:110-117`), so an exact mLSTM `step()` is de
       teacher, so dropping it for A2–A6 would break the paired comparison the screen depends on. The early
       start bought ~22 GPU-h of overlapped queue time and spent the teacher-off saving; that trade is
       already made. The probe still has value for a future 70M screen, not for this one.
-- [ ] **M7-A2** **Early-start the Mamba-1 arms.** A0, A0-seed and A1 need only M1's flags, so they can
+- [x] **M7-A2** **Early-start the Mamba-1 arms.** A0, A0-seed and A1 need only M1's flags, so they can
       queue while M2–M6 are still being built locally — ~22 GPU-h of queue time overlapped with
       development, and it validates the screen harness before the expensive arms exist.
 - [x] **M7-B0** `scripts/screen_arms_h100.sh` as a **SLURM job array** (`--array=0-7`), arm selected by
@@ -469,6 +469,32 @@ chunk boundaries (`tfla_interface.py:110-117`), so an exact mLSTM `step()` is de
       Every arm is submitted from `scripts/mamba3_arms.py` (M5) so seed, step count and levers cannot
       drift between arms: `eval "$(python scripts/mamba3_arms.py env A5)" && sbatch ...`. A0-seed is the
       one arm allowed to differ in seed — that is what it measures.
+**M7-A RESULT (2026-09-06, jobs 2513005 / 2513006) — the screen is underpowered, as FM6 warned.**
+
+| A0 seed 42 | A0 seed 1234 | \|Δ\| | Δ log-loss |
+|---|---|---|---|
+| val PPL **19.387** (loss 2.887) | val PPL **18.933** (loss 2.864) | **0.454 PPL = 2.37%** | 0.023 nats |
+
+The plan's own trigger was "if seed noise ≥ the expected 1-3% effect, the screen cannot rank arms."
+It is 2.37%. With n=2 the SD estimate is 0.321 PPL, so the pre-registered *2× SD* bar an arm must
+clear is **0.642 PPL (3.35%)**. Consequences, decided before any arm's number exists:
+
+1. **The A2-vs-A0 headline is the weak comparison** and stays weak — the two differ in operator *and*
+   in RNG stream, so nothing pairs. |Δ| < 0.45 PPL is a **null on the bundle**, reportable as such.
+2. **The per-lever deltas are the strong ones.** A2–A6 share `in_proj`'s shape, so at a fixed seed they
+   start from *identical* embeddings, MLPs, norms and projections — only `trap_bias`/`B_bias` differ —
+   and they see the same data in the same order. A3−A2, A4−A2, A5−A2 and A6−A5 are therefore near-
+   perfectly paired and are the numbers that can actually attribute a mechanism. Report these, not a
+   league table of eight absolute PPLs.
+3. **The winner gets a second seed before the full pipeline** (~8 GPU-h) — cheap next to committing
+   133 GPU-h to a 0.3 PPL gap that a seed could have produced.
+4. **M7-E's mechanism diagnostics carry more weight than PPL here**, not less: MQAR and the
+   late-position slice probe the claim directly and are not bounded by this floor.
+
+Measured cost per arm: **~8.0 h wall** for 12,000 steps (2:37 in the training loop at 2.2 s/step,
+matching the 2.22 s/step estimate; the rest is validation with the teacher resident, packing and
+checkpoint writes).
+
 - [ ] **M7-C** **Gate: A2 ≤ A0 at 12K.** If the corrected operator is *worse*, **stop and report** — the buggy
       operator was acting as an unintended regularizer. That is a real finding; do not tune around it.
 - [ ] **M7-D** Per-lever deltas. **Pre-registered decision rule (written before the numbers exist):** advance

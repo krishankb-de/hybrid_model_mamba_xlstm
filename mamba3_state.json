@@ -1,6 +1,6 @@
 {
   "current_phase": "M6_decode_cache",
-  "last_updated": "2026-09-06T12:14:43+02:00",
+  "last_updated": "2026-09-06T13:00:32+02:00",
   "status": "M0-M5 complete. All 8 screen arms build the operator they claim at 150M and are submittable from one definition. M6 next: O(1) recurrent decode cache.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
@@ -487,11 +487,11 @@
       "status": "in_progress",
       "checkboxes": {
         "M7-A": {
-          "done": false,
+          "done": true,
           "desc": "⚠ Do this before anything else costs money. (i) Run A0 twice with different seeds at"
         },
         "M7-A2": {
-          "done": false,
+          "done": true,
           "desc": "Early-start the Mamba-1 arms. A0, A0-seed and A1 need only M1's flags, so they can"
         },
         "M7-B0": {
@@ -521,7 +521,12 @@
       },
       "evidence": {
         "script": "scripts/screen_arms_h100.sh",
-        "tests": "test_willi_parity.py::test_screen_arms_job_array_reads_the_shared_arm_ladder"
+        "tests": "test_willi_parity.py::test_screen_arms_job_array_reads_the_shared_arm_ladder",
+        "A0_s42": "jobs/2513005",
+        "A0_s1234": "jobs/2513006",
+        "ppl": "19.387 / 18.933",
+        "noise_floor": "0.454 PPL (2.37%)",
+        "bar": "0.642 PPL (3.35%)"
       },
       "verdict": null
     },
@@ -630,7 +635,10 @@
     "2026-09-06: Full ladder parameter counts, measured: A0/A0-seed 183,721,824 | A1 183,708,000 | A2 184,192,200 | A3 184,192,416 | A4 184,192,200 | A5 184,192,416 | A6 184,167,072. A2..A6 spread 0.014%; whole ladder 0.26% of the control.",
     "2026-09-06: current_phase -> M6_decode_cache",
     "M7-B0: scripts/screen_arms_h100.sh is a SLURM job array over the shared ladder (ARMS default A2..A6; A0/A0-seed/A1 excluded, early-started under M7-A2). Levers are read from mamba3_arms.py, never hand-written; recipe delegated to the 150M wrapper so FM7 recipe drift is impossible.",
-    "2026-09-06: M7-A(ii) teacher on/off probe is now informational only: A0/A0-seed/A1 are already training WITH the BioMedLM teacher, so screening A2-A6 without it would break the paired comparison. The early start (M7-A2) foreclosed that saving for this screen; it would only apply to a future 70M screen."
+    "2026-09-06: M7-A(ii) teacher on/off probe is now informational only: A0/A0-seed/A1 are already training WITH the BioMedLM teacher, so screening A2-A6 without it would break the paired comparison. The early start (M7-A2) foreclosed that saving for this screen; it would only apply to a future 70M screen.",
+    "M7-A(i) NOISE FLOOR MEASURED. A0 s42 val PPL 19.387 (loss 2.887); A0 s1234 val PPL 18.933 (loss 2.864). |dPPL| = 0.454 = 2.37%; d log-loss 0.023 nats. SD estimate 0.321 PPL (n=2), so the pre-registered '2x seed SD' bar is 0.642 PPL = 3.35%. The plan's expected architecture effect was 1-3% -- FM6 has materialised: the unpaired screen cannot rank arms that differ by less than ~3.4%.",
+    "2026-09-06: Per-arm wall clock measured: A0 ran 03:25 -> 11:24 = ~8.0 h for 12,000 steps, of which the progress bar attributes only 2:37 to the training loop (1.36 it/s over 36,000 micro-batches = 2.2 s/optimiser step, matching the 2.22 s/step estimate). The other ~5.4 h is validation (983 batches x 6 checks, teacher resident) plus packing and checkpoint writes. Budget 8 h/arm wall, not 7.4.",
+    "2026-09-06: INCIDENT job 2513581: the documented single-arm launch ran python on lx01, which the login node refuses. The refusal text word-split into 'command not found' lines, the eval exported nothing, and sbatch ran the wrapper defaults -- hybrid_150m_v2, 120,000 steps, save_top_k=3 -- under the experiment name m3_probe_A2. A silent second A0 at 10x length. Fixed by resolving ARM= on the compute node; the pre-submit eval no longer exists."
   ],
   "open_questions": []
 }

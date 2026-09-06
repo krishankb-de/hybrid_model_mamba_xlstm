@@ -29,6 +29,34 @@
 
 set -euo pipefail
 
+cd "${SLURM_SUBMIT_DIR:-.}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"
+
+# ---------------------------------------------------------------------------
+# ARM=<A0|A0-seed|A1|A2..A6> resolves the whole arm INSIDE the job.
+#
+# This exists because the aisc login node refuses to execute python, so
+# `eval "$(python scripts/mamba3_arms.py env A2)"` cannot be run before sbatch:
+# on 2026-09-06 it printed "This command is not allowed on the login node!",
+# the shell word-split that sentence into "This: command not found" and friends,
+# NOTHING was exported, and the job ran the wrapper's defaults instead --
+# hybrid_150m_v2 for 120,000 steps with save_top_k=3. A silent second A0 at ten
+# times the intended length. Resolving the arm on the compute node removes the
+# whole class: no arm, no eval, no way to half-apply one.
+# ---------------------------------------------------------------------------
+if [ -n "${ARM:-}" ]; then
+  source "${VENV_ACTIVATE:-.venv/bin/activate}"
+  ARM_ENV="$(python scripts/mamba3_arms.py env "${ARM}" \
+               --steps "${STEPS:-12000}" --warmup "${WARMUP_STEPS:-500}" \
+               --save-top-k "${SAVE_TOP_K:-1}")" || {
+    echo "FATAL: could not resolve arm '${ARM}'. Known arms:"
+    python scripts/mamba3_arms.py list || true
+    exit 1
+  }
+  eval "${ARM_ENV}"
+  echo "[arm] ${ARM} -> MODEL_CONFIG=${MODEL_CONFIG} SEED=${SEED} MAX_STEPS=${MAX_STEPS}"
+  echo "[arm] ${ARM} -> EXTRA_OVERRIDES=${EXTRA_OVERRIDES:-<none>}"
+fi
+
 # Overridable so the MAMBA3_PLAN.md screen arms can reuse this wrapper's 150M-tuned SBATCH
 # header and stability settings (LR 4e-4, warmup 2000, grad-clip 0.5 -- all load-bearing; see
 # the collapse notes above) while swapping only the architecture.
@@ -52,6 +80,5 @@ export EXPERIMENT="${EXPERIMENT:-h100_stage0_150m_v2}"
 # The screen arms flip their levers here (see scripts/mamba3_arms.py); empty for A0/A1.
 export EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"
 
-cd "${SLURM_SUBMIT_DIR:-.}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"
 echo "[wrapper] 150M Stage-0 → delegating to train_stage0_h100.sh (MODEL_CONFIG=${MODEL_CONFIG}, MAX_STEPS=${MAX_STEPS}, BATCH_SIZE=${BATCH_SIZE})"
 bash scripts/train_stage0_h100.sh
