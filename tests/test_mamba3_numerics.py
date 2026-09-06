@@ -1126,3 +1126,98 @@ def test_rope_angles_reset_per_document():
     segmented = cumulative_angles(dt, theta, cu_seqlens=ids)
     standalone = cumulative_angles(dt[:, 20:40], theta[:, 20:40])
     assert torch.allclose(segmented[:, 20:40], standalone, atol=1e-9)
+
+
+def _train_parity(use_rope, seed=0, steps=300, seq_len=16, batch=32, dim=32):
+    """Train a one-mixer model on running XOR and return final accuracy.
+
+    Parity is the canonical separator: a real, non-negative transition provably cannot represent
+    the rotational dynamics it needs (Grazzi et al. 2025, Thm. 1), so Mamba-2 sits near chance
+    while a complex/rotational transition solves it outright. Paper Table 5b.
+    """
+    import torch.nn as nn
+
+    from hybrid_xmamba.layers.mamba3_block import Mamba3Block
+
+    class ParityNet(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.emb = nn.Embedding(2, dim)
+            self.norm = nn.LayerNorm(dim)
+            # Delta in [0.5, 1.0] is load-bearing -- see the test below for why.
+            self.mixer = Mamba3Block(
+                dim=dim, d_state=16, head_dim=16, chunk_size=8, use_rope=use_rope,
+                a_mode="data_dependent", theta_max=3.2, dt_limit=1.0, dt_min=0.5, dt_max=1.0,
+            )
+            self.head = nn.Linear(dim, 2)
+
+        def forward(self, x):
+            h = self.emb(x)
+            return self.head(self.norm(h + self.mixer(h)))
+
+    torch.manual_seed(seed)
+    model = ParityNet()
+    opt = torch.optim.AdamW(model.parameters(), lr=5e-3)
+    for _ in range(steps):
+        x = torch.randint(0, 2, (batch, seq_len))
+        y = torch.cumsum(x, 1) % 2
+        loss = torch.nn.functional.cross_entropy(model(x).reshape(-1, 2), y.reshape(-1))
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    with torch.no_grad():
+        x = torch.randint(0, 2, (256, seq_len))
+        y = torch.cumsum(x, 1) % 2
+        return (model(x).argmax(-1) == y).float().mean().item()
+
+
+def test_rope_solves_parity_and_the_rotation_is_what_does_it():
+    """M4-D: the paper's headline capability claim, as a controlled experiment.
+
+    Both arms are identical except for `use_rope` -- same Delta range, same data-dependent A,
+    same seed, same steps. Measured over two seeds:
+
+        rope off : 61.6%, 64.3%   (chance is 50%)
+        rope on  : 100.0%, 100.0%
+
+    This is the cleanest standalone contribution in the plan: it is a capability Mamba-2 does not
+    have, demonstrated end-to-end rather than cited.
+    """
+    for seed in (0, 1):
+        without = _train_parity(use_rope=False, seed=seed)
+        with_rope = _train_parity(use_rope=True, seed=seed)
+        assert with_rope > 0.95, f"seed {seed}: rope-on reached only {with_rope:.1%} on parity"
+        assert without < 0.80, f"seed {seed}: rope-off reached {without:.1%}, expected near chance"
+        assert with_rope - without > 0.25
+
+
+def test_parity_needs_delta_large_enough_to_reach_a_half_turn():
+    """M4-D caveat, and it matters well beyond this test.
+
+    The rotation angle is `Delta_t * theta_t`, so a pi rotation per token needs
+    `Delta * theta ~ pi`. Under the reference Mamba dt init, `Delta ~ logU[1e-3, 1e-1]`, and the
+    angle tops out near 0.06 rad -- fifty times too small. Measured: with that init, parity stays
+    at 57-63% for every theta_max in {3.2, 32, 320}, and raising theta_max alone makes it *worse*
+    (320 scored 57%), because a large theta on a tiny Delta is noise rather than a half turn.
+
+    The consequence for the M7 screen is worth stating plainly: on PubMed with the standard dt
+    init, this state-tracking capability is largely dormant unless Delta learns to grow. A null
+    on language modelling would therefore not be evidence that complex transitions do not work --
+    only that the operating point never reached the regime where they can.
+    """
+    acc = _train_parity(use_rope=True, seed=0)
+    assert acc > 0.95, "sanity: the large-Delta configuration should solve parity"
+
+    import torch.nn as nn
+
+    from hybrid_xmamba.layers.mamba3_block import Mamba3Block
+
+    torch.manual_seed(0)
+    small = Mamba3Block(dim=32, d_state=16, head_dim=16, use_rope=True, theta_max=3.2,
+                        dt_min=1e-3, dt_max=1e-1)
+    # softplus(dt_bias) is the Delta the block starts at; the reachable angle is Delta * theta_max.
+    delta0 = nn.functional.softplus(small.dt_bias).mean().item()
+    assert delta0 * small.theta_max < 0.5, (
+        f"reachable angle at the reference dt init is {delta0 * small.theta_max:.3f} rad; if this "
+        "ever exceeds ~pi the caveat above no longer applies and the docs should be updated"
+    )

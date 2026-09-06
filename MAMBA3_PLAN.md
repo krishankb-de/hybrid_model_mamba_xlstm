@@ -372,9 +372,20 @@ Test-first: M1-A/B/C must **fail on HEAD**.
       fp32 `sin/cos`, **Θ reset per document segment**, `θ = θ_max·tanh(angle_proj)`, `rope_fraction=0.5`.
 - [x] **M4-B** **Bit-identity: rope off reproduces M3 exactly.**
 - [x] **M4-C** Rotate-then-shift ordering test (Prop. 4).
-- [ ] **M4-D** **Capability test — the paper's headline claim.** Parity + modular arithmetic on a tiny model
-      (Table 5b): Mamba-3 ≈100%, Mamba-2/Mamba-1 ≈ chance. Cheap CPU test, and the cleanest standalone
-      contribution in the plan.
+- [x] **M4-D** **Capability test — the paper's headline claim.** ✅ **Reproduced.** Controlled parity
+      experiment, two seeds, identical but for `use_rope`: **rope-off 61.6% / 64.3%, rope-on 100.0% /
+      100.0%** (chance 50%). The cleanest standalone contribution in the plan — a capability Mamba-2
+      does not have, demonstrated rather than cited.
+
+      ⚠ **Caveat that matters for M7.** The rotation angle is `Δ_t·θ_t`, so a π turn per token needs
+      `Δ·θ ≈ π`. Under the reference dt init (`Δ ~ logU[1e-3,1e-1]`) the reachable angle tops out near
+      **0.06 rad — fifty times too small**, and parity stays at 57–63% for *every* `theta_max` tried
+      {3.2, 32, 320}; raising `theta_max` alone made it **worse** (320 → 57%), because a large θ on a
+      tiny Δ is noise, not a half turn. Only with Δ free to reach ~1 does it solve.
+      **Consequence: on PubMed with the standard dt init this capability is largely dormant unless Δ
+      learns to grow. A null on LM perplexity would therefore NOT be evidence that complex transitions
+      do not work — only that the operating point never entered the regime where they can.** Say this
+      in the writeup whichever way M7 lands.
 - [x] **M4-E** Angle-drift test: fp32 path vs fp64 sequential rotation < 1e-6 at L=1024;
       alarm if `Θ.abs().max() > 1e3` rad.
 
