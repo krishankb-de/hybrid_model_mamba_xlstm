@@ -51,51 +51,14 @@ python -c "import torch; print('torch', torch.__version__, '| cuda available:', 
 
 echo
 echo "--- 1/3  architecture fingerprints (does each arm build what it claims?) ---"
-python - <<'PYEOF'
-import dataclasses
-import sys
-
-import torch
-import yaml
-
-from hybrid_xmamba.models.configuration_hybrid import HybridConfig
-from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
-
-# Build through HybridConfig.from_hydra -- the exact call the training entry points make. The
-# first version of this pre-flight filtered dataclass fields inline instead, which is a *different*
-# code path: it passed cleanly on 2026-09-06 while train_stage0_distill.py was still dropping
-# scan_impl/tfla_impl/dt_init_strategy, and job 2513007 trained the A1 arm with its defects intact.
-# A pre-flight that does not exercise the real path is not a pre-flight.
-# arm -> (config, substrings the fingerprint MUST contain)
-ARMS = {
-    "A0  control        ": ("hybrid_150m_v2", ["mambax9", "scan_impl=legacy", "dt_init=none"]),
-    "A1  defect fix     ": ("hybrid_150m_a1", ["mambax9", "scan_impl=exact", "tfla_impl=exact",
-                                               "dt_init=mamba", "norm_topology=hybrid_bc"]),
-    "A2  Mamba-2 SSD    ": ("hybrid_150m_m3", ["mamba3x9", "d_state=128", "trapezoid=False",
-                                               "rope=False"]),
-}
-failures = []
-for arm, (name, expected) in ARMS.items():
-    raw = yaml.safe_load(open(f"configs/model/{name}.yaml"))
-    torch.manual_seed(0)
-    model = HybridLanguageModel(HybridConfig.from_hydra(raw))
-    fp = model.architecture_fingerprint()
-    missing = [tok for tok in expected if tok not in fp]
-    print(f"{arm} {name}")
-    print(f"    {fp}")
-    if missing:
-        failures.append(f"{name}: fingerprint missing {missing}")
-    n = sum(p.numel() for p in model.parameters())
-    if not 181e6 < n < 186e6:
-        failures.append(f"{name}: {n:,} params outside the [181,186]M band")
-
-if failures:
-    print("\nFAIL:")
-    for f in failures:
-        print("  -", f)
-    sys.exit(1)
-print("\nOK: every arm builds the operator it claims, and all three are parameter-matched.")
-PYEOF
+# One definition of the ladder, in scripts/mamba3_arms.py, read by both this pre-flight and the
+# submission (`eval "$(python scripts/mamba3_arms.py env A5)"`). That shared definition is the
+# point: the first version of this file carried its own copy of three arms and filtered dataclass
+# fields inline -- a *different* code path from the trainer's. It passed cleanly on 2026-09-06
+# while train_stage0_distill.py was still dropping scan_impl/tfla_impl/dt_init_strategy, and job
+# 2513007 trained the A1 arm with its defects intact. A pre-flight that checks a path nothing
+# trains on is not a pre-flight.
+python scripts/mamba3_arms.py verify --full
 
 echo
 echo "--- 2/3  Delta at init (A1's whole point: ~0.02, not ~0.80) ---"

@@ -594,7 +594,14 @@ def _m3_block(**kw):
     return Mamba3Block(**defaults)
 
 
-def _load_yaml_config(name: str):
+def _load_yaml_config(name: str, **overrides):
+    """Build a HybridConfig from an arm yaml, optionally with the CLI overrides an arm applies.
+
+    Arms A3..A6 are not separate yaml files -- they are `hybrid_150m_m3.yaml` plus
+    `model.mamba3_*=...` on the command line, which is why every flag is declared in that file
+    (Hydra's strict struct mode rejects an override for a key the config never named). `overrides`
+    here stands in for those CLI arguments.
+    """
     import dataclasses
     import yaml
 
@@ -602,7 +609,11 @@ def _load_yaml_config(name: str):
 
     raw = yaml.safe_load(open(f"configs/model/{name}.yaml"))
     fields = {f.name for f in dataclasses.fields(HybridConfig)}
-    return HybridConfig(**{k: v for k, v in raw.items() if k in fields})
+    cfg = {k: v for k, v in raw.items() if k in fields}
+    unknown = set(overrides) - fields
+    assert not unknown, f"override names no HybridConfig field: {sorted(unknown)}"
+    cfg.update(overrides)
+    return HybridConfig(**cfg)
 
 
 def test_mamba3_reduces_to_mamba2_by_default():
@@ -1221,3 +1232,283 @@ def test_parity_needs_delta_large_enough_to_reach_a_half_turn():
         f"reachable angle at the reference dt init is {delta0 * small.theta_max:.3f} rad; if this "
         "ever exceeds ~pi the caveat above no longer applies and the docs should be updated"
     )
+
+
+# ---------------------------------------------------------------------------
+# M5: the Sec 3.4 refinements, folded into arm A6 rather than given their own milestone
+#
+# Three flags, and the point of this section is to establish exactly which of them is a real
+# architectural change and which is a no-op in its default state. Only the first kind may be
+# credited with a quality difference at M7.
+#   bc_bias    -- `none` and `zero_init` are the same operator; `one_init` is a genuine arm
+#   use_conv   -- dropping the short conv is a real change, and moves parameters by a known amount
+#   mimo_rank  -- plumbed at rank 1 (bit-identical), never run (MAMBA3_PLAN.md decision 3)
+# ---------------------------------------------------------------------------
+
+
+def _bc_bias_pair(**extra):
+    """A `none` block and a `zero_init` block carrying the same shared weights."""
+    torch.manual_seed(0)
+    none = _m3_block(bc_bias="none", **extra).eval()
+    torch.manual_seed(0)
+    zero = _m3_block(bc_bias="zero_init", **extra).eval()
+    # `B_bias`/`C_bias` exist only on the zero_init twin, so the projection is one-directional.
+    missing, unexpected = zero.load_state_dict(none.state_dict(), strict=False)
+    assert set(missing) == {"B_bias", "C_bias"} and not unexpected
+    assert torch.count_nonzero(zero.B_bias) == 0
+    return none, zero
+
+
+@pytest.mark.parametrize("with_documents", [False, True])
+@pytest.mark.parametrize("features", [{}, {"use_trapezoid": True, "use_rope": True}])
+def test_zero_init_bc_bias_is_bit_identical_to_no_bias(with_documents, features):
+    """M5-A: `bc_bias=zero_init` must reproduce `none` exactly, `a + 0.0 == a` in IEEE754.
+
+    This is not a formality. Turning the bias on also changes the *shape* of B and C: `none`
+    leaves them group-indexed `(b, l, ngroups, n)` and lets the scan broadcast one group over all
+    24 heads, while any bias setting materializes them per head. Two different tensor shapes reach
+    the same einsums, so "adding zero changes nothing" is a claim about the kernel's contraction
+    order as much as about arithmetic. Measured equal on both paths, with and without documents.
+    """
+    none, zero = _bc_bias_pair(**features)
+    x = torch.randn(2, 96, 128)
+    kw = {}
+    if with_documents:
+        ids = torch.zeros(2, 96, dtype=torch.long)
+        ids[:, 41:] = 1
+        kw["cu_seqlens"] = ids
+    with torch.no_grad():
+        assert torch.equal(none(x, **kw), zero(x, **kw))
+
+
+def test_one_init_bc_bias_is_a_real_arm_not_a_relabelling():
+    """M5-A: the other half. `one_init` is the paper's setting and must move the output.
+
+    Recorded here because the plan's bit-identity table lists this one as deliberately *not*
+    achievable -- a constant 1.0 added to every normalized B and C row is a genuine change of
+    operator, so arm A6 owns a capability difference and not just a different parameter count.
+    """
+    _, zero = _bc_bias_pair()
+    torch.manual_seed(0)
+    one = _m3_block(bc_bias="one_init").eval()
+    one.load_state_dict(zero.state_dict())
+    with torch.no_grad():
+        one.B_bias.fill_(1.0)
+        one.C_bias.fill_(1.0)
+        x = torch.randn(2, 96, 128)
+        assert not torch.allclose(one(x), zero(x), atol=1e-5)
+
+
+def test_dropping_the_conv_moves_parameters_by_exactly_the_conv():
+    """M5-B: the conv is depthwise over `x`, `B` and `C` together, so its size is predictable.
+
+    `inner_dim + 2 * bc_dim = 1536 + 256 = 1792` channels x (kernel 4 weights + 1 bias) = 8,960
+    per layer, nine mamba3 layers, 80,640 in total. Asserting the exact number rather than a band
+    is what catches the conv being dropped from the *parameter list* while still running (or the
+    reverse -- a `use_conv=False` arm that quietly keeps the module and its SiLU).
+    """
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    torch.manual_seed(0)
+    with_conv = HybridLanguageModel(_load_yaml_config("hybrid_150m_m3"))
+    torch.manual_seed(0)
+    without = HybridLanguageModel(_load_yaml_config("hybrid_150m_m3", mamba3_use_conv=False))
+
+    n = lambda m: sum(p.numel() for p in m.parameters())
+    assert n(with_conv) - n(without) == 9 * 8_960
+    assert without.layers[0].mixer.conv1d is None
+    assert not any("conv1d" in k for k in without.state_dict())
+
+
+def test_arm_a6_stays_inside_the_parameter_matched_band():
+    """M5: A6 = A5 + `bc_bias=one_init` + conv dropped, reached purely by CLI overrides.
+
+    The two refinements pull in opposite directions -- the biases add `2 * 24 * 128` per layer,
+    the conv removes 8,960 -- and the arm lands 25,128 parameters *below* A2. The whole A2..A6
+    ladder therefore spans 0.014% of the model, well inside the drift the screen can attribute to
+    the operator rather than to capacity.
+    """
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    n = lambda m: sum(p.numel() for p in m.parameters())
+    torch.manual_seed(0)
+    ctrl = n(HybridLanguageModel(_load_yaml_config("hybrid_150m_v2")))
+    torch.manual_seed(0)
+    a2 = n(HybridLanguageModel(_load_yaml_config("hybrid_150m_m3")))
+    torch.manual_seed(0)
+    a6_model = HybridLanguageModel(
+        _load_yaml_config(
+            "hybrid_150m_m3", mamba3_use_conv=False, mamba3_bc_bias="one_init",
+            mamba3_use_trapezoid=True, mamba3_use_rope=True,
+        )
+    )
+    a6 = n(a6_model)
+
+    assert abs(a6 - ctrl) / ctrl < 0.005, "A6 left the parameter-matched regime"
+    assert abs(a6 - a2) / a2 < 0.001, "the A2..A6 ladder is no longer capacity-matched"
+    fp = a6_model.architecture_fingerprint()
+    for token in ("conv=False", "trapezoid=True", "rope=True", "bc_bias=one_init"):
+        assert token in fp, f"A6's fingerprint is missing {token!r}: {fp}"
+
+
+@pytest.mark.parametrize("bc_bias", ["none", "zero_init", "one_init"])
+@pytest.mark.parametrize("use_conv", [True, False])
+def test_no_parameter_is_left_dangling_by_an_m5_flag(bc_bias, use_conv):
+    """M5-A/B: the harness's "every parameter receives a gradient" gate, over the M5 cross.
+
+    `B_bias`/`C_bias` and `conv1d` are each owned by one setting. A bias registered but never
+    added -- or a conv built and then bypassed -- shows up here and nowhere else until a training
+    run silently trains an architecture nobody chose.
+    """
+    block = _m3_block(bc_bias=bc_bias, use_conv=use_conv)
+    block(torch.randn(2, 32, 128)).sum().backward()
+    missing = [n for n, p in block.named_parameters() if p.grad is None]
+    assert not missing, f"parameters received no gradient: {missing}"
+
+
+def test_mimo_rank_one_is_bit_identical_to_leaving_it_alone():
+    """M5-C: rank 1 is the identity, so the plumbing cannot perturb any arm that ships.
+
+    MIMO is carried as an interface and never trained (decision 3): rank 4 costs +3.2%
+    parameters, which leaves the parameter-matched regime, and its payoff is decode arithmetic
+    intensity that nothing in this project can currently measure.
+    """
+    torch.manual_seed(0)
+    default = _m3_block().eval()
+    torch.manual_seed(0)
+    explicit = _m3_block(mimo_rank=1).eval()
+    explicit.load_state_dict(default.state_dict())
+    x = torch.randn(2, 96, 128)
+    with torch.no_grad():
+        assert torch.equal(default(x), explicit(x))
+
+
+def test_m5_flags_reach_the_block_from_the_config():
+    """M5-A/B/C vs FM5: the levers must survive yaml -> HybridConfig -> HybridBlock -> mixer.
+
+    The A6 arm is expressed as CLI overrides on `hybrid_150m_m3.yaml`, so every one of these keys
+    travels the same path that dropped `norm_topology` in Phase 9 and `scan_impl` on the first A1
+    submission. A flag that reaches the config and not the mixer is how you train A2 for three
+    days believing it is A6.
+    """
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    model = HybridLanguageModel(
+        HybridConfig(
+            vocab_size=256, dim=128, num_layers=2, layer_pattern=["mamba3", "mlstm"],
+            head_dim=32, num_heads=4, max_position_embeddings=64,
+            mamba3_d_state=32, mamba3_head_dim=16, mamba3_chunk_size=8,
+            mamba3_bc_bias="one_init", mamba3_use_conv=False, mamba3_mimo_rank=1,
+        )
+    )
+    mixer = model.layers[0].mixer
+    assert mixer.bc_bias == "one_init" and mixer.B_bias is not None
+    assert torch.equal(mixer.B_bias, torch.ones_like(mixer.B_bias))
+    assert mixer.use_conv is False and mixer.conv1d is None
+    assert mixer.mimo_rank == 1
+
+    with pytest.raises(NotImplementedError, match="MIMO"):
+        HybridLanguageModel(
+            HybridConfig(
+                vocab_size=256, dim=128, num_layers=1, layer_pattern=["mamba3"],
+                head_dim=32, num_heads=4, max_position_embeddings=64,
+                mamba3_d_state=32, mamba3_head_dim=16, mamba3_mimo_rank=4,
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# M5/M7-B: the arm ladder has exactly one definition, and it survives Hydra
+# ---------------------------------------------------------------------------
+
+
+def _arms_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("mamba3_arms", "scripts/mamba3_arms.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_arm_ladder_matches_the_plan_state():
+    """One ladder, two files, and they must agree.
+
+    `mamba3_state.json` records what each arm is *for* and whether it has run; `mamba3_arms.py`
+    records how to build and submit it. If the two drift, the screen either skips an arm or runs
+    one nothing will know how to interpret.
+    """
+    import json
+
+    arms = _arms_module().ARMS
+    state = json.load(open("mamba3_state.json"))["arms"]
+    assert set(arms) == set(state), (
+        "ladder mismatch -- arms.py has {}, state has {}".format(
+            sorted(set(arms) - set(state)), sorted(set(state) - set(arms))
+        )
+    )
+    assert len(arms) == 8, "the plan's ladder is A0, A0-seed, A1..A6"
+    # Every arm's levers must be real config fields; a typo here silently trains the base arm.
+    import dataclasses
+
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+
+    fields = {f.name for f in dataclasses.fields(HybridConfig)}
+    for name, arm in arms.items():
+        unknown = set(arm.overrides) - fields
+        assert not unknown, "{} overrides unknown fields {}".format(name, sorted(unknown))
+
+
+def test_the_screen_is_a_paired_comparison():
+    """M7-B: same seed, same data order, for every arm except the deliberate noise-floor twin.
+
+    The screen ranks arms on paired delta log-loss, which is only meaningful if the only thing
+    that differs is the operator. A0-seed exists precisely to measure what a *seed* is worth, so
+    it is the one arm allowed to differ.
+    """
+    arms = _arms_module().ARMS
+    seeds = {name: arm.seed for name, arm in arms.items()}
+    assert seeds.pop("A0-seed") != seeds["A0"], "the noise-floor arm must use a different seed"
+    assert len(set(seeds.values())) == 1, "arms differ in seed as well as operator: {}".format(seeds)
+
+
+@pytest.mark.parametrize("arm_name", ["A2", "A3", "A4", "A5", "A6"])
+def test_arm_overrides_survive_hydra_and_reach_the_mixer(arm_name):
+    """FM5, end to end, on the exact path a submission takes.
+
+    Arms A3..A6 exist only as `model.mamba3_*=...` command-line overrides, so three things must
+    hold at once: Hydra's strict struct mode must accept the key (it rejects any override for a
+    field the yaml never named), `HybridConfig.from_hydra` must carry it, and `HybridBlock` must
+    pass it to the mixer rather than filter it away. Each of those has broken separately in this
+    project; this asserts the composition, which is what a submission actually depends on.
+    """
+    import dataclasses
+    import os
+
+    from hydra import compose, initialize_config_dir
+
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+
+    arms = _arms_module()
+    arm = arms.ARMS[arm_name]
+    with initialize_config_dir(config_dir=os.path.abspath("configs"), version_base=None):
+        cfg = compose(
+            config_name="config",
+            overrides=["model={}".format(arm.config)] + arms.hydra_overrides(arm),
+        )
+    config = HybridConfig.from_hydra(cfg.model)
+    for key, want in arm.overrides.items():
+        assert getattr(config, key) == want, "Hydra dropped {} for {}".format(key, arm_name)
+
+    # ...and now the same levers, through the model, at a scale the CPU suite can afford.
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    shrunk = dataclasses.replace(config, dim=128, num_layers=2, num_heads=4, head_dim=32,
+                                 vocab_size=512, max_position_embeddings=64,
+                                 layer_pattern=["mamba3", "mlstm"])
+    fp = HybridLanguageModel(shrunk).architecture_fingerprint()
+    for token in arm.expect:
+        if token.endswith("x9") or token.endswith("x3"):
+            continue        # layer counts are a property of the 150M pattern, not of the arm
+        assert token in fp, "{}: fingerprint is missing {!r}: {}".format(arm_name, token, fp)

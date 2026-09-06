@@ -1,7 +1,7 @@
 {
-  "current_phase": "M5_flags_and_arms",
-  "last_updated": "2026-09-06T04:34:20+02:00",
-  "status": "M0-M4 complete. RoPE reproduces the parity capability under control; dormant at the standard dt init. M5 next: B/C biases, conv-drop, MIMO plumbing.",
+  "current_phase": "M6_decode_cache",
+  "last_updated": "2026-09-06T11:50:15+02:00",
+  "status": "M0-M5 complete. All 8 screen arms build the operator they claim at 150M and are submittable from one definition. M6 next: O(1) recurrent decode cache.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
     "name": "h100_scaling_mamba3",
@@ -152,42 +152,50 @@
     "A0": {
       "desc": "Mamba-1 as-shipped",
       "role": "control; must reproduce the Phase-5 curve",
-      "status": "not_run"
+      "status": "running",
+      "job_id": "2513005"
     },
     "A0-seed": {
       "desc": "A0, different seed",
       "role": "THE NOISE FLOOR - run before ranking anything",
-      "status": "not_run"
+      "status": "running",
+      "job_id": "2513006"
     },
     "A1": {
       "desc": "Mamba-1 + exact scan + dt init + no Delta-norm",
       "role": "isolates the defect/Delta fix; screen-only, never enters the full pipeline",
-      "status": "not_run"
+      "status": "running",
+      "job_id": "2513057"
     },
     "A2": {
       "desc": "Mamba3Block, exact Mamba-2 reduction, d_state=128",
       "role": "SSD + 8x state (report as a BUNDLE)",
-      "status": "not_run"
+      "status": "not_run",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A2)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
     },
     "A3": {
       "desc": "A2 + exponential-trapezoidal",
       "role": "Prop. 1",
-      "status": "not_run"
+      "status": "not_run",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A3)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
     },
     "A4": {
       "desc": "A2 + complex/RoPE",
       "role": "Sec 3.2",
-      "status": "not_run"
+      "status": "not_run",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A4)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
     },
     "A5": {
       "desc": "A2 + trapezoid + RoPE",
       "role": "Mamba-3 SISO",
-      "status": "not_run"
+      "status": "not_run",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A5)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
     },
     "A6": {
       "desc": "A5 + bc_bias=one_init, conv dropped",
       "role": "Sec 3.4 refinements",
-      "status": "not_run"
+      "status": "not_run",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A6)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
     }
   },
   "pre_registered": {
@@ -425,22 +433,25 @@
     },
     "M5": {
       "title": "Flags folded into arm definitions (no milestone of its own)",
-      "status": "pending",
+      "status": "complete",
       "checkboxes": {
         "M5-A": {
-          "done": false,
+          "done": true,
           "desc": "bc_bias ∈ {none, zero_init, one_init}; assert none ≡ zero_init bitwise."
         },
         "M5-B": {
-          "done": false,
+          "done": true,
           "desc": "use_conv=False path; n_params moves by exactly 9 × 8,960."
         },
         "M5-C": {
-          "done": false,
+          "done": true,
           "desc": "mimo_rank plumbing, default 1, asserted bit-identical. Never run."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "tests": "tests/test_mamba3_numerics.py::M5",
+        "harness": "9/9 gates, 327 passed, 21 xfailed"
+      },
       "verdict": null
     },
     "M6": {
@@ -610,7 +621,11 @@
     "2026-09-06: Storage: found save_top_k hard-coded at 3 in train_stage0_distill.py:484, so the SAVE_TOP_K env override never took effect -- 8.4 GB per 150M arm, 67 GB across an 8-arm screen against a 200 GB quota. Now read from config; screen arms should use SAVE_TOP_K=0 (last.ckpt only, preserving --requeue).",
     "2026-09-06: M4-A/B/C/E done (complex state via the RoPE trick). M4-D (parity capability) still running.",
     "2026-09-06: M4-D reproduced the paper's parity claim under control -- rope-off 61.6%/64.3% vs rope-on 100.0%/100.0% over two seeds, identical but for use_rope. Caveat found: the angle is Delta*theta, so under the reference dt init (Delta ~ logU[1e-3,1e-1]) the reachable angle is ~0.06 rad and parity is NOT solved at any theta_max; it needs Delta free to reach ~1. State tracking is therefore largely dormant at the standard operating point -- a null on LM would not disprove complex transitions.",
-    "2026-09-06: current_phase -> M5_flags_and_arms"
+    "2026-09-06: current_phase -> M5_flags_and_arms",
+    "M5: bc_bias none==zero_init bitwise (both paths, with and without documents); one_init verified a real arm; conv drop moves params by exactly 9x8,960 = 80,640; mimo rank 1 bit-identical and rank>1 refuses.",
+    "2026-09-06: M5 also closed the submission gap the ladder had: arms A3-A6 exist only as model.mamba3_* CLI overrides, and train_stage0_h100.sh had no way to pass them. scripts/mamba3_arms.py is now the single definition of all 8 arms (config + overrides + seed + expected ARCH tokens); the pre-flight verifies it at full 150M scale and submission reads it via 'eval $(python scripts/mamba3_arms.py env A5)'.",
+    "2026-09-06: Full ladder parameter counts, measured: A0/A0-seed 183,721,824 | A1 183,708,000 | A2 184,192,200 | A3 184,192,416 | A4 184,192,200 | A5 184,192,416 | A6 184,167,072. A2..A6 spread 0.014%; whole ladder 0.26% of the control.",
+    "2026-09-06: current_phase -> M6_decode_cache"
   ],
   "open_questions": []
 }

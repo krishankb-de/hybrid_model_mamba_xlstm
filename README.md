@@ -7,7 +7,7 @@ A research implementation of a hybrid architecture combining **Mamba** (Selectiv
 
 ## 🔬 This branch: `h100_scaling_mamba3` — Mamba-3 backbone upgrade
 
-**Status: M0–M4 complete, 33/62 checkboxes.** Plan of record: [`MAMBA3_PLAN.md`](MAMBA3_PLAN.md);
+**Status: M0–M5 complete, 36/62 checkboxes.** Plan of record: [`MAMBA3_PLAN.md`](MAMBA3_PLAN.md);
 live state: [`mamba3_state.json`](mamba3_state.json). Branched from `h100_scaling` @ `20a1d27`.
 **This branch is never merged without an explicit instruction** — `h100_scaling` keeps the approved
 results reproducible.
@@ -87,14 +87,29 @@ sbatch scripts/preflight_mamba3_h100.sh     # ~2 min, CPU only; verifies every a
                                             # the operator it claims and A1's Delta is ~0.02
 tail -f logs/mamba3_preflight_*.log
 
-# then the arms — A0 (control), A0-seed (noise floor), A1 (defect fix)
-MODEL_CONFIG=hybrid_150m_v2 MAX_STEPS=12000 WARMUP=500 SEED=42 SAVE_TOP_K=1 \
-  EXPERIMENT=m3_screen_A0_s42 sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh
-MODEL_CONFIG=hybrid_150m_a1 MAX_STEPS=12000 WARMUP=500 SEED=42 SAVE_TOP_K=1 \
-  EXPERIMENT=m3_screen_A1_s42 sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh
+# then the arms. A0..A6 have exactly one definition, in scripts/mamba3_arms.py --
+# config, overrides, seed and the ARCH tokens each arm must log. Never hand-write these:
+# four of the eight arms (A3-A6) are CLI overrides on hybrid_150m_m3.yaml, not yamls of
+# their own, and a lever typed by hand is a lever that silently trains the base arm.
+python scripts/mamba3_arms.py list                 # the ladder and what each rung isolates
+eval "$(python scripts/mamba3_arms.py env A5)"     # sets MODEL_CONFIG/SEED/EXTRA_OVERRIDES/...
+sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh
 
 grep ARCH logs/<job>.log   # confirm the operator that is actually training
 ```
+
+| Arm | Isolates | Params |
+|---|---|---|
+| A0 / A0-seed | control, and the seed-noise floor | 183,721,824 |
+| A1 | the defect fix alone (exact scan + Δ init + no Δ-norm); screen-only | 183,708,000 |
+| A2 | SSD + 8× state — report as a **bundle** | 184,192,200 |
+| A3 | + exponential-trapezoidal (Prop. 1) | 184,192,416 |
+| A4 | + complex state via RoPE (Sec 3.2) | 184,192,200 |
+| A5 | both — Mamba-3 SISO | 184,192,416 |
+| A6 | + B/C biases, conv dropped (Sec 3.4) | 184,167,072 |
+
+A2→A6 spans 0.014% of the model, so a quality difference is attributable to the operator rather
+than to capacity.
 
 Every model logs an architecture fingerprint at construction, so "is this really Mamba-3?" is
 answerable from the log rather than by inference:
@@ -130,7 +145,7 @@ not transfer, but neither is a win assumed. That is what the M7 screen measures.
 | M2 | Mamba3Block = exactly Mamba-2 SSD (+ the sequential oracle) | ✅ 10/10 |
 | M3 | Exponential-trapezoidal | ✅ 3/3 |
 | M4 | Complex-valued state (RoPE trick) | ✅ 5/5 |
-| M5 | Flags folded into arm definitions (no milestone of its own) | ⬜ 0/3 |
+| M5 | Flags folded into arm definitions (no milestone of its own) | ✅ 3/3 |
 | M6 | O(1) recurrent decode cache | ⬜ 0/5 |
 | M7 | Timing probe + short-run screen  — H100 | ⬜ 0/8 |
 | M8 | Full pipeline on the winner — H100 | ⬜ 0/5 |

@@ -177,6 +177,7 @@ already verified — the implementation phases are engineering, not research:**
 | `hybrid_xmamba/layers/rotary.py` | Data-dependent RoPE: fp64 cumulative angle, `remainder(·, 2π)`, `apply_rotary` |
 | `hybrid_xmamba/training/spike_guard.py` | Skip-step-on-spike callback (FM2) |
 | `configs/model/hybrid_150m_m3.yaml`, `hybrid_150m_m3_rrg.yaml` | Arch + report-gen configs |
+| `scripts/mamba3_arms.py` | **The one definition of the A0–A6 ladder** — config, overrides, seed, expected ARCH tokens; read by the pre-flight and by every submission (M5) |
 | `analysis/mamba3_results.md` | Ablation table + writeup |
 
 ### The three mechanisms
@@ -390,9 +391,41 @@ Test-first: M1-A/B/C must **fail on HEAD**.
       alarm if `Θ.abs().max() > 1e3` rad.
 
 ### M5 — Flags folded into arm definitions (no milestone of its own)
-- [ ] **M5-A** `bc_bias ∈ {none, zero_init, one_init}`; assert `none ≡ zero_init` bitwise.
-- [ ] **M5-B** `use_conv=False` path; `n_params` moves by exactly `9 × 8,960`.
-- [ ] **M5-C** `mimo_rank` plumbing, default 1, asserted bit-identical. **Never run.**
+- [x] **M5-A** `bc_bias ∈ {none, zero_init, one_init}`; assert `none ≡ zero_init` bitwise.
+- [x] **M5-B** `use_conv=False` path; `n_params` moves by exactly `9 × 8,960`.
+- [x] **M5-C** `mimo_rank` plumbing, default 1, asserted bit-identical. **Never run.**
+
+**Measured.** `none ≡ zero_init` is bit-identical on both paths and with documents — worth stating,
+because turning the bias on also changes B and C from group-indexed `(b,l,1,n)` to per-head, so two
+different tensor shapes reach the same einsums and "adding zero changes nothing" is a claim about the
+kernel's contraction order, not only about IEEE754. `one_init` moves the output, as the table
+predicted: A6 owns a real capability difference. Conv drop: exactly **80,640 = 9 × 8,960**.
+
+**The gap M5 actually closed.** A3–A6 exist only as `model.mamba3_*=...` overrides on
+`hybrid_150m_m3.yaml`, and `train_stage0_h100.sh` had **no way to pass an extra Hydra argument** —
+four of the eight arms were unsubmittable. Fixed by `EXTRA_OVERRIDES` plus **one definition of the
+ladder** in `scripts/mamba3_arms.py` (config, overrides, seed, and the ARCH tokens each arm must
+log). The pre-flight now verifies that module at full 150M scale instead of carrying its own copy of
+three arms, and submission reads the same module:
+
+```bash
+eval "$(python scripts/mamba3_arms.py env A5)" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh
+```
+
+That shared definition is the FM5 defence. The first pre-flight had its own arm list and filtered
+dataclass fields inline — a *different* code path from the trainer's — so it passed on 2026-09-06
+while `train_stage0_distill.py` was still dropping three fields, and job 2513007 trained A1 with its
+defects intact.
+
+**Ladder parameter counts, measured at 150M:**
+
+| A0 / A0-seed | A1 | A2 | A3 | A4 | A5 | A6 |
+|---|---|---|---|---|---|---|
+| 183,721,824 | 183,708,000 | 184,192,200 | 184,192,416 | 184,192,200 | 184,192,416 | 184,167,072 |
+
+A2→A6 spans **0.014%**; the whole ladder spans 0.26% of the control. A6's two refinements pull in
+opposite directions — the B/C biases add `2 × 24 × 128` per layer, the conv removes 8,960 — leaving it
+25,128 parameters *below* A2.
 
 ### M6 — O(1) recurrent decode cache
 Measured on a tiny CPU model, per-token cost rises monotonically (0.0135 → 0.0173 s/tok from 16 → 128 new
@@ -429,6 +462,9 @@ chunk boundaries (`tfla_interface.py:110-117`), so an exact mLSTM `step()` is de
       a 120K schedule never enters decay, and decay is where models separate. Warmup 500.
       **Hold `GRAD_CKPT=true` fixed across all arms** even though SSD makes it unnecessary (see FM3).
       If M7-A shows the teacher dominates, screen at 70M first (~3× cheaper) then confirm the top 2 at 150M.
+      Every arm is submitted from `scripts/mamba3_arms.py` (M5) so seed, step count and levers cannot
+      drift between arms: `eval "$(python scripts/mamba3_arms.py env A5)" && sbatch ...`. A0-seed is the
+      one arm allowed to differ in seed — that is what it measures.
 - [ ] **M7-C** **Gate: A2 ≤ A0 at 12K.** If the corrected operator is *worse*, **stop and report** — the buggy
       operator was acting as an unintended regularizer. That is a real finding; do not tune around it.
 - [ ] **M7-D** Per-lever deltas. **Pre-registered decision rule (written before the numbers exist):** advance

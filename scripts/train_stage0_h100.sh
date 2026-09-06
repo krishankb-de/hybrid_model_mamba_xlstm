@@ -44,6 +44,11 @@ MODEL_CONFIG="${MODEL_CONFIG:-hybrid_70m_v2}"
 # arms run at once, and a screen only ever reads the final val loss.
 SEED="${SEED:-42}"
 SAVE_TOP_K="${SAVE_TOP_K:-3}"
+# Extra Hydra overrides, space separated. This is how the MAMBA3_PLAN.md screen arms flip their
+# levers -- A3..A6 are hybrid_150m_m3.yaml plus `model.mamba3_*=...`, not five separate yamls.
+# Do not hand-write these: `eval "$(python scripts/mamba3_arms.py env A5)"` sets this variable
+# from the one definition of the ladder that the pre-flight also checks.
+EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"
 MAX_STEPS="${MAX_STEPS:-120000}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 ACCUM="${ACCUM:-1}"                 # grad-accum: eff batch = BATCH_SIZE*ACCUM
@@ -54,6 +59,7 @@ GRAD_CLIP="${GRAD_CLIP:-1.0}"       # 70M default; 150M wrapper overrides to 0.5
 EXPERIMENT="${EXPERIMENT:-h100_stage0_${MODEL_CONFIG}}"
 
 echo "=== H100 Stage-0 pre-train: ${MODEL_CONFIG} + BioMedLM KD (seed=${SEED}, save_top_k=${SAVE_TOP_K}) ==="
+echo "extra overrides: ${EXTRA_OVERRIDES:-<none>}"
 date; hostname
 mkdir -p logs
 
@@ -112,7 +118,9 @@ python scripts/train_stage0_distill.py \
   +model.scheduler_name=wsd \
   +model.beta2_schedule=true \
   +model.beta2_start=0.999 \
-  +model.beta2_end=0.974
+  +model.beta2_end=0.974 \
+  ${EXTRA_OVERRIDES}
+  # ^ deliberately unquoted: the arm's overrides are separate Hydra arguments, not one string.
 
 echo "=== END: checkpoints in ./outputs/${EXPERIMENT}/checkpoints/ ==="
 date
