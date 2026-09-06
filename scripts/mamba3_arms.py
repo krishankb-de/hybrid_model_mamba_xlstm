@@ -100,6 +100,22 @@ ARMS = {
     ),
 }
 
+# --- M7-G: re-test Prop. 3/4 at a rotation rate that is a position code, not a scrambler ----
+# The M7-B rope arms did not test complex-valued state; they tested theta_max=1.0, the block
+# default, which was the only value reachable because mamba3_theta_max was missing from
+# HybridConfig. At dt_limit=1.0 that is 1 rad/token and 81 turns over 512 tokens. These arms
+# sweep the rate instead. 0.002 keeps the whole sequence inside ~1/6 of a turn; 0.02 inside
+# ~1.6 turns; 0.2 inside ~16 and should start to degrade if the aliasing story is right.
+for _tag, _theta in (("lo", 0.002), ("mid", 0.02), ("hi", 0.2)):
+    ARMS["A4-{}".format(_tag)] = Arm(
+        config=_M3,
+        overrides={"mamba3_use_rope": True, "mamba3_theta_max": _theta},
+        seed=SCREEN_SEED,
+        isolates="RoPE at theta_max={} -- {:.2f} turns over 512 tokens".format(
+            _theta, 512 * _theta / (2 * 3.141592653589793)),
+        expect=_M3_BASE + ["trapezoid=False", "rope=True"],
+    )
+
 # Deliberately absent, so it is not silently re-proposed: `mamba3_mimo_rank > 1` (decision 3,
 # +3.2% params leaves the parameter-matched regime), `mamba3_ngroups > 1` and
 # `mamba3_d_state > 128` (pre-registered as *scaled* arms only, never the headline comparison).

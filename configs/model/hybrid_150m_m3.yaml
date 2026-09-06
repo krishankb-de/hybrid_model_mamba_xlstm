@@ -41,6 +41,10 @@ mamba3_conv_size: 4
 mamba3_use_trapezoid: false   # M3 arm
 mamba3_use_rope: false        # M4 arm
 mamba3_rope_fraction: 0.5
+mamba3_theta_max: 1.0      # per-token angular rate cap; see the M7-B rope collapse
+mamba3_dt_min: 1.0e-3      # Delta ~ logU[dt_min, dt_max] at init
+mamba3_dt_max: 1.0e-1
+mamba3_dt_init_floor: 1.0e-4
 mamba3_bc_bias: "none"        # M5 arm ("one_init" is the paper's setting)
 mamba3_mimo_rank: 1           # plumbed, never run (decision 3)
 mamba3_a_mode: "static"       # "data_dependent" is Mamba-3's own default

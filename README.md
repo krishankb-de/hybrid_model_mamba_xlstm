@@ -7,7 +7,7 @@ A research implementation of a hybrid architecture combining **Mamba** (Selectiv
 
 ## 🔬 This branch: `h100_scaling_mamba3` — Mamba-3 backbone upgrade
 
-**Status: M0–M5 complete, 39/62 checkboxes.** Plan of record: [`MAMBA3_PLAN.md`](MAMBA3_PLAN.md);
+**Status: M0–M5 complete, 42/63 checkboxes.** Plan of record: [`MAMBA3_PLAN.md`](MAMBA3_PLAN.md);
 live state: [`mamba3_state.json`](mamba3_state.json). Branched from `h100_scaling` @ `20a1d27`.
 **This branch is never merged without an explicit instruction** — `h100_scaling` keeps the approved
 results reproducible.
@@ -142,6 +142,27 @@ ARCH layers=[mamba3x9, mlstmx3] | norm_topology=hybrid | scan_impl=legacy | tfla
      rope=False, bc_bias=none, a_mode=static, mimo_rank=1) | params=184,192,200
 ```
 
+### M7-B screen result (12,000 steps, seed 42, paired)
+
+| Arm | levers | val PPL | fit |
+|---|---|---|---|
+| A0 s42 / s1234 | control, legacy scan | 19.387 / 18.933 | 2:36:50 |
+| **A2** | **SSD + 8× state** | **16.708** | **1:20:55** |
+| A3 | + trapezoid | 16.719 | 1:28:00 |
+| A4 / A5 / A6 | + RoPE (`theta_max=1.0`) | 1166.7 / 1166.2 / 1168.5 | — |
+
+Seed-noise floor 0.454 PPL; pre-registered bar 0.642 PPL.
+
+- **A2 beats A0 by 2.679 PPL paired (−13.8%), 4.2× the bar**, and trains **1.94× faster**. Report
+  as a *bundle*: SSD + `d_state` 16→128 + a recurrence without the divide-and-clamp.
+- **Trapezoid is a null**: A3 − A2 = +0.011 PPL, 1.7% of the bar, in the well-powered paired
+  comparison.
+- **Every rope arm collapsed to unigram, and the cause was a missing config field.**
+  `mamba3_theta_max` was not on `HybridConfig`, so the block default 1.0 was the only reachable
+  value — 1 rad/token, **81 turns over 512 tokens**. The rotation stopped being a position code and
+  became a scrambler. M7-B therefore has *not yet tested* Prop. 3/4; arms `A4-lo/mid/hi` re-test it
+  at {0.002, 0.02, 0.2}.
+
 ### Baselines any arm must beat
 
 Official MIMIC-CXR-JPG test split, n=2663, beam=3 (from `analysis/h100_scaling_results.md`):
@@ -169,7 +190,7 @@ not transfer, but neither is a win assumed. That is what the M7 screen measures.
 | M4 | Complex-valued state (RoPE trick) | ✅ 5/5 |
 | M5 | Flags folded into arm definitions (no milestone of its own) | ✅ 3/3 |
 | M6 | O(1) recurrent decode cache | ⬜ 0/5 |
-| M7 | Timing probe + short-run screen  — H100 | 🔄 3/8 |
+| M7 | Timing probe + short-run screen  — H100 | 🔄 6/9 |
 | M8 | Full pipeline on the winner — H100 | ⬜ 0/5 |
 | M9 | Cleanup, writeup, reintegration | ⬜ 0/5 |
 | M10 | Re-open the mamba/mLSTM ratio | ⬜ 0/3 |

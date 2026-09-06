@@ -1448,7 +1448,13 @@ def test_the_arm_ladder_matches_the_plan_state():
             sorted(set(arms) - set(state)), sorted(set(state) - set(arms))
         )
     )
-    assert len(arms) == 8, "the plan's ladder is A0, A0-seed, A1..A6"
+    assert {"A0", "A0-seed", "A1", "A2", "A3", "A4", "A5", "A6"} <= set(arms), (
+        "the M7-B ladder must stay intact -- those runs are on record"
+    )
+    assert {"A4-lo", "A4-mid", "A4-hi"} <= set(arms), (
+        "M7-G: the rope re-test. The M7-B rope arms measured theta_max=1.0, the only value "
+        "reachable at the time, not the mechanism"
+    )
     # Every arm's levers must be real config fields; a typo here silently trains the base arm.
     import dataclasses
 
@@ -1512,3 +1518,101 @@ def test_arm_overrides_survive_hydra_and_reach_the_mixer(arm_name):
         if token.endswith("x9") or token.endswith("x3"):
             continue        # layer counts are a property of the 150M pattern, not of the arm
         assert token in fp, "{}: fingerprint is missing {!r}: {}".format(arm_name, token, fp)
+
+
+# ---------------------------------------------------------------------------
+# FM5 again, and the most expensive instance of it so far: a lever the block
+# accepts, the dispatcher does not forward, and nobody notices until a screen
+# arm collapses. See the M7-B rope result in MAMBA3_PLAN.md.
+# ---------------------------------------------------------------------------
+
+
+def test_every_mamba3_block_parameter_is_reachable_from_the_config():
+    """Every lever `Mamba3Block` accepts must exist as a `mamba3_*` field on HybridConfig.
+
+    `theta_max` did not, so the whole M7-B screen ran the block default of 1.0 and no arm could
+    have been given a different value. With `dt_limit=1.0` that permits 1 rad per token and 512
+    rad over a 512-token sequence -- 81 full turns -- and every rope-on arm (A4, A5, A6)
+    collapsed to ~1166 val PPL while the rope-off arms trained to 16.7.
+
+    Two hand-maintained copies of the forwarding whitelist both omitted it. They are now derived
+    from the block's signature; this test closes the other half, so that adding a parameter to
+    the block without adding the config field fails here rather than in a 5-hour GPU run.
+    """
+    import dataclasses
+    import inspect
+
+    from hybrid_xmamba.layers.mamba3_block import Mamba3Block
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+
+    params = inspect.signature(Mamba3Block.__init__).parameters
+    levers = {
+        name for name, p in params.items()
+        if name not in ("self", "dim") and p.kind is not inspect.Parameter.VAR_KEYWORD
+    }
+    fields = {f.name for f in dataclasses.fields(HybridConfig)}
+    # `expand_factor` and `use_hybrid_norm` are shared, unprefixed config keys.
+    shared = {"expand_factor", "use_hybrid_norm"}
+    missing = sorted(
+        lever for lever in levers - shared if "mamba3_{}".format(lever) not in fields
+    )
+    assert not missing, (
+        "Mamba3Block accepts {} but HybridConfig has no mamba3_ field for them, so no arm can "
+        "ever set them: {}".format(len(missing), missing)
+    )
+
+
+def test_the_dispatcher_whitelist_is_derived_not_listed():
+    """The forwarding set must come from the block, so it cannot go stale again."""
+    import inspect
+
+    from hybrid_xmamba.layers import hybrid_block
+    from hybrid_xmamba.layers.mamba3_block import Mamba3Block
+
+    known = hybrid_block._mamba3_params()
+    params = inspect.signature(Mamba3Block.__init__).parameters
+    expected = {
+        name for name, p in params.items()
+        if name not in ("self", "dim") and p.kind is not inspect.Parameter.VAR_KEYWORD
+    }
+    assert set(known) == expected
+    assert "theta_max" in known, "the lever whose absence cost three screen arms"
+
+
+@pytest.mark.parametrize("lever,value", [("mamba3_theta_max", 0.02), ("mamba3_dt_max", 0.5)])
+def test_the_newly_reachable_levers_land_on_the_mixer(lever, value):
+    """End to end, on the path a submission takes: config field -> block attribute."""
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    model = HybridLanguageModel(
+        HybridConfig(
+            vocab_size=256, dim=128, num_layers=1, layer_pattern=["mamba3"],
+            head_dim=32, num_heads=4, max_position_embeddings=64,
+            mamba3_d_state=32, mamba3_head_dim=16, mamba3_use_rope=True, **{lever: value}
+        )
+    )
+    assert getattr(model.layers[0].mixer, lever[len("mamba3_"):]) == value
+
+
+def test_theta_max_bounds_the_total_rotation_over_a_sequence():
+    """Quantify the failure mode, so the number is on record rather than the argument.
+
+    The rotation angle is `Delta_t * theta_t` with `|theta| <= theta_max` and
+    `Delta <= dt_limit`, so the total turn over L tokens is bounded by
+    `L * dt_limit * theta_max / 2pi`. A relative rotation `R(Theta_s - Theta_t)` encodes
+    position only while it stays inside one turn; past that it aliases, and since theta is
+    data-dependent the aliasing follows the content between s and t rather than the distance.
+    At the screen's setting that bound is 81 turns.
+    """
+    import math
+
+    block = _m3_block(use_rope=True)
+    assert block.theta_max == 1.0, "the block default the M7-B screen was stuck with"
+    turns = 512 * block.dt_limit * block.theta_max / (2 * math.pi)
+    assert turns > 50, "the screen's operating point permitted {:.0f} turns".format(turns)
+
+    calm = _m3_block(use_rope=True, theta_max=0.02)
+    assert 512 * calm.dt_limit * calm.theta_max / (2 * math.pi) < 2, (
+        "a setting where the rotation stays a position code rather than a scrambler"
+    )

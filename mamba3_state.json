@@ -1,6 +1,6 @@
 {
   "current_phase": "M6_decode_cache",
-  "last_updated": "2026-09-06T15:53:35+02:00",
+  "last_updated": "2026-09-06T20:02:08+02:00",
   "status": "M0-M5 complete. All 8 screen arms build the operator they claim at 150M and are submittable from one definition. M6 next: O(1) recurrent decode cache.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
@@ -152,50 +152,80 @@
     "A0": {
       "desc": "Mamba-1 as-shipped",
       "role": "control; must reproduce the Phase-5 curve",
-      "status": "running",
-      "job_id": "2513005"
+      "status": "done",
+      "job_id": "job 2513005",
+      "val_ppl": 19.387
     },
     "A0-seed": {
       "desc": "A0, different seed",
       "role": "THE NOISE FLOOR - run before ranking anything",
-      "status": "running",
-      "job_id": "2513006"
+      "status": "done",
+      "job_id": "job 2513006",
+      "val_ppl": 18.933
     },
     "A1": {
       "desc": "Mamba-1 + exact scan + dt init + no Delta-norm",
       "role": "isolates the defect/Delta fix; screen-only, never enters the full pipeline",
-      "status": "running",
-      "job_id": "2513057"
+      "status": "rerunning",
+      "job_id": "2513750 (24h; 2513057 TIMED OUT at 12:00:03)"
     },
     "A2": {
       "desc": "Mamba3Block, exact Mamba-2 reduction, d_state=128",
       "role": "SSD + 8x state (report as a BUNDLE)",
-      "status": "not_run",
-      "submit": "eval \"$(python scripts/mamba3_arms.py env A2)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
+      "status": "done",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A2)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 16.708,
+      "job_id": "array 2513632_0"
     },
     "A3": {
       "desc": "A2 + exponential-trapezoidal",
       "role": "Prop. 1",
-      "status": "not_run",
-      "submit": "eval \"$(python scripts/mamba3_arms.py env A3)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
+      "status": "done",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A3)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 16.719,
+      "job_id": "array 2513632_1"
     },
     "A4": {
       "desc": "A2 + complex/RoPE",
       "role": "Sec 3.2",
-      "status": "not_run",
-      "submit": "eval \"$(python scripts/mamba3_arms.py env A4)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
+      "status": "done",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A4)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 1166.701,
+      "job_id": "array 2513632_2"
     },
     "A5": {
       "desc": "A2 + trapezoid + RoPE",
       "role": "Mamba-3 SISO",
-      "status": "not_run",
-      "submit": "eval \"$(python scripts/mamba3_arms.py env A5)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
+      "status": "done",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A5)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 1166.185,
+      "job_id": "array 2513632_3"
     },
     "A6": {
       "desc": "A5 + bc_bias=one_init, conv dropped",
       "role": "Sec 3.4 refinements",
+      "status": "done",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A6)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 1168.531,
+      "job_id": "array 2513632_4"
+    },
+    "A4-lo": {
+      "desc": "A4 with mamba3_theta_max=0.002",
+      "role": "M7-G: re-test Prop. 3/4 at 0.16 turns over 512 tokens. The M7-B rope arms measured theta_max=1.0 (81 turns), the only value reachable at the time.",
       "status": "not_run",
-      "submit": "eval \"$(python scripts/mamba3_arms.py env A6)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
+      "submit": "ARM=A4-lo sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
+    },
+    "A4-mid": {
+      "desc": "A4 with mamba3_theta_max=0.02",
+      "role": "M7-G: re-test Prop. 3/4 at 1.63 turns over 512 tokens. The M7-B rope arms measured theta_max=1.0 (81 turns), the only value reachable at the time.",
+      "status": "not_run",
+      "submit": "ARM=A4-mid sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
+    },
+    "A4-hi": {
+      "desc": "A4 with mamba3_theta_max=0.2",
+      "role": "M7-G: re-test Prop. 3/4 at 16.30 turns over 512 tokens. The M7-B rope arms measured theta_max=1.0 (81 turns), the only value reachable at the time.",
+      "status": "not_run",
+      "submit": "ARM=A4-hi sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
     }
   },
   "pre_registered": {
@@ -502,23 +532,27 @@
           "desc": "scripts/screen_arms_h100.sh as a SLURM job array (--array=0-7), arm selected by"
         },
         "M7-B": {
-          "done": false,
+          "done": true,
           "desc": "Screen A0, A0-seed, A1, A2, A3, A4, A5, A6 — 12,000 steps, 150M, aisc-batch,"
         },
         "M7-C": {
-          "done": false,
+          "done": true,
           "desc": "Gate: A2 ≤ A0 at 12K. If the corrected operator is *worse*, stop and report — the buggy"
         },
         "M7-D": {
           "done": false,
           "desc": "Per-lever deltas. Pre-registered decision rule (written before the numbers exist): advance"
         },
+        "M7-G": {
+          "done": false,
+          "desc": "⚠ Re-test Prop. 3/4 at a rotation rate that is a position code. The M7-B rope"
+        },
         "M7-E": {
           "done": false,
           "desc": "Mechanism-sensitive diagnostics (nearly free, and they test the actual claim): synthetic"
         },
         "M7-F": {
-          "done": false,
+          "done": true,
           "desc": "If A2 wins, note it as a bundle (SSD parameterization + 8× state), not \"SSD is better\","
         }
       },
@@ -529,7 +563,14 @@
         "A0_s1234": "jobs/2513006",
         "ppl": "19.387 / 18.933",
         "noise_floor": "0.454 PPL (2.37%)",
-        "bar": "0.642 PPL (3.35%)"
+        "bar": "0.642 PPL (3.35%)",
+        "array": "2513632",
+        "A2": "16.708",
+        "A3": "16.719",
+        "A4": "1166.701",
+        "A5": "1166.185",
+        "A6": "1168.531",
+        "gate": "A2 <= A0, passed by 4.2x the bar"
       },
       "verdict": null
     },
@@ -649,7 +690,12 @@
     "2026-09-06: Added scripts/mamba3_watch.sh (login-node safe, no python) for squeue + sacct preemption state + per-arm progress + disk, and --open-mode=append to the three H100 sbatch headers: aisc-batch is preemptible and nothing passes ckpt_path, so a requeued arm restarts from step 0 -- previously the requeue also truncated the log, erasing the only evidence.",
     "2026-09-06: Third login-node refusal: 'bash scripts/mamba3_watch.sh' was blocked before its first echo, so the guard intercepts running a SCRIPT, not just python. Rule corrected everywhere: anything scripted goes through sbatch/srun or is designed to be sourced; individual commands stay fine interactively. mamba3_watch.sh now carries SBATCH headers, works under source (BASH_SOURCE), and skips the du pass unless it is running as a job.",
     "2026-09-06: A1 (job 2513057) TIMED OUT at 12:00:03 without finishing 12,000 steps -- my --time=12:00:00 was too short. A0 needed 7:59 wall; A1's exact Mamba-1 scan cannot use the cheap log-segsum (that form costs 19.3 GB) and flips the parallel axis instead, which the plan accepted as 3-5x slower because A1 is screen-only. 3-5x of A0's 2:37 training loop is 8-13 h on top of ~5 h of validation. A1's walltime is now recorded as 24:00:00 in mamba3_arms.py. No PREEMPTED anywhere -- the array is clean.",
-    "2026-09-06: COST STRUCTURE, inferred from A0: wall 7:59 but Lightning's train progress bar reports 2:36:50, and Lightning times its validation on a separate bar. val_max_samples=2000 caps ARTICLES, not chunks -- 2000 full PubMed articles pack into 15,724 chunks = 8M tokens, x6 val passes, each running the 2.6B teacher as well as the student. Validation therefore looks like roughly TWICE the cost of training in this screen. Do not change it mid-screen (A0/A0-seed already ran); size it down for M8 and any future screen."
+    "2026-09-06: COST STRUCTURE, inferred from A0: wall 7:59 but Lightning's train progress bar reports 2:36:50, and Lightning times its validation on a separate bar. val_max_samples=2000 caps ARTICLES, not chunks -- 2000 full PubMed articles pack into 15,724 chunks = 8M tokens, x6 val passes, each running the 2.6B teacher as well as the student. Validation therefore looks like roughly TWICE the cost of training in this screen. Do not change it mid-screen (A0/A0-seed already ran); size it down for M8 and any future screen.",
+    "M7-B SCREEN COMPLETE (array 2513632). A0 s42 19.387 / s1234 18.933 | A2 16.708 | A3 16.719 | A4 1166.701 | A5 1166.185 | A6 1168.531. M7-C GATE PASSED: A2 beats A0 by 2.679 PPL paired (-13.8%), 4.2x the 0.642 bar. Trapezoid is a NULL: A3-A2 = +0.011 PPL, 1.7% of the bar, in the well-powered paired comparison. EVERY rope-on arm COLLAPSED to unigram (~7.05 nats vs ln(50257)=10.82 uniform).",
+    "2026-09-06: ROOT CAUSE FOUND for the rope collapse, and it is mine, not the paper's: mamba3_theta_max was NEVER a HybridConfig field. The block default 1.0 was the only value the campaign could run. With dt_limit=1.0 that permits 1 rad/token and 512 rad over a 512-token sequence -- 81 full turns. A relative rotation R(Theta_s - Theta_t) is a position code only inside one turn; past that it aliases, and theta is data-dependent so the aliasing follows content, not distance. Two hand-maintained copies of the forwarding whitelist in hybrid_block.py both omitted theta_max, so the config round-trip test and the ARCH fingerprint both looked clean.",
+    "2026-09-06: Fixed the CLASS: the mamba3 forwarding whitelist is now derived from inspect.signature(Mamba3Block.__init__) instead of hand-listed twice, and a test asserts every block lever has a matching mamba3_ config field. That test immediately found a second unreachable lever, dt_init_floor. mamba3_theta_max / dt_min / dt_max / dt_init_floor are now declared in HybridConfig and hybrid_150m_m3.yaml.",
+    "2026-09-06: Speed confirmed on equal footing (identical validation schedules): A0 fit 2:36:50 vs A2 1:20:55 = 1.94x. The earlier 1.76x probe estimate was conservative.",
+    "2026-09-06: All five array tasks show sacct State=FAILED ExitCode 2:0 despite completing 12,000 steps and saving checkpoints; the log ends with 'error reading input file: Stale file handle' from bash itself on the vast NFS home. Training results are valid -- Trainer.fit reported max_steps reached and the final metrics are present. The exit code is not trustworthy on this filesystem."
   ],
   "open_questions": []
 }

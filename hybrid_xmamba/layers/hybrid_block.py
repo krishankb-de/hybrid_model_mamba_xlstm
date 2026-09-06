@@ -6,6 +6,9 @@ allowing flexible interleaving and configuration.
 
 import torch
 import torch.nn as nn
+import functools
+import inspect
+
 from typing import List, Optional, Literal
 
 from hybrid_xmamba.layers.mamba3_block import Mamba3Block
@@ -16,6 +19,22 @@ from hybrid_xmamba.layers.normalization import RMSNorm
 
 
 LayerType = Literal["mamba", "mamba3", "mlstm", "slstm"]
+
+
+@functools.lru_cache(maxsize=1)
+def _mamba3_params() -> frozenset:
+    """The `mamba3_*` options this dispatcher will forward, read off the block's signature.
+
+    Deriving rather than listing. `dim`, `**unused` and `self` are not levers; everything else
+    Mamba3Block accepts is one, and adding a parameter to the block is now enough to make it
+    reachable from HybridConfig. The two hand-written copies this replaces both omitted
+    `theta_max`, so the M7-B screen ran the block default of 1.0 with no way to change it.
+    """
+    params = inspect.signature(Mamba3Block.__init__).parameters
+    return frozenset(
+        name for name, p in params.items()
+        if name not in ("self", "dim") and p.kind is not inspect.Parameter.VAR_KEYWORD
+    )
 
 
 class HybridBlock(nn.Module):
@@ -77,10 +96,13 @@ class HybridBlock(nn.Module):
         # still dropped quietly, because the flat bag deliberately carries every type's fields.
         _PREFIXES = ("mamba3_", "mlstm_", "slstm_")
         _KNOWN = {
-            "mamba3_": {"d_state", "head_dim", "expand_factor", "ngroups", "chunk_size",
-                        "use_conv", "conv_size", "use_trapezoid", "use_rope", "rope_fraction",
-                        "bc_bias", "mimo_rank", "a_mode", "a_floor", "dt_min", "dt_max",
-                        "dt_limit", "use_outproj_norm", "use_hybrid_norm"},
+            # Derived from Mamba3Block's own signature, never hand-listed. Two hand-maintained
+            # copies of this set both went stale on `theta_max`, which is why the M7-B screen
+            # could only ever run theta_max=1.0 -- 1 rad/token, 81 turns over 512 tokens -- and
+            # every rope-on arm collapsed to ~1166 val PPL. A lever the block accepts but the
+            # dispatcher does not know about is invisible: it reaches the config, passes the
+            # yaml round-trip, and is dropped here.
+            "mamba3_": _mamba3_params(),
             "mlstm_": {"gate_soft_cap", "input_gate_bias_init", "forget_gate_bias_init"},
             "slstm_": {"hidden_dim", "num_heads"},
         }
@@ -106,12 +128,7 @@ class HybridBlock(nn.Module):
         elif self.layer_type == "mamba3":
             # `mamba3_*`-prefixed config keys are stripped here so the block's own signature stays
             # readable and does not collide with the Mamba-1 names (`state_size` vs `d_state`).
-            mamba3_params = {
-                "d_state", "head_dim", "expand_factor", "ngroups", "chunk_size", "use_conv",
-                "conv_size", "use_trapezoid", "use_rope", "rope_fraction", "bc_bias",
-                "mimo_rank", "a_mode", "a_floor", "dt_min", "dt_max", "dt_limit",
-                "use_outproj_norm", "use_hybrid_norm",
-            }
+            mamba3_params = _mamba3_params()
             renamed = {}
             for key, value in layer_kwargs.items():
                 stripped = key[len("mamba3_"):] if key.startswith("mamba3_") else key

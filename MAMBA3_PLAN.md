@@ -460,7 +460,7 @@ chunk boundaries (`tfla_interface.py:110-117`), so an exact mLSTM `step()` is de
       `$SLURM_ARRAY_TASK_ID` from a table in the script. One submission instead of eight; each task takes a
       GPU as one frees. Assert the arm table in `tests/test_willi_parity.py` the way the other SLURM
       wrappers are asserted.
-- [ ] **M7-B** Screen A0, A0-seed, A1, A2, A3, A4, A5, A6 — **12,000 steps**, 150M, `aisc-batch`,
+- [x] **M7-B** Screen A0, A0-seed, A1, A2, A3, A4, A5, A6 — **12,000 steps**, 150M, `aisc-batch`,
       **identical seed and data order** (paired comparison on Δ log-loss, not independent PPL).
       Set `trainer.max_steps` to the screen length so **WSD reshapes its own decay** — a run stopped at 12K of
       a 120K schedule never enters decay, and decay is where models separate. Warmup 500.
@@ -524,13 +524,65 @@ flips the parallel axis instead — accepted as 3-5× slower because A1 never en
 and 3-5× of a 2:37 training loop plus ~5 h of validation does not fit in 12 h. Recorded as
 `walltime` in `scripts/mamba3_arms.py`, which `env` now prints.
 
-- [ ] **M7-C** **Gate: A2 ≤ A0 at 12K.** If the corrected operator is *worse*, **stop and report** — the buggy
+**M7-B RESULT (2026-09-06, array 2513632, all five arms 12,000 steps, seed 42, paired).**
+
+| Arm | levers | val PPL | val loss | fit time |
+|---|---|---|---|---|
+| A0 s42 | control, legacy scan | 19.387 | 2.887 | 2:36:50 |
+| A0 s1234 | noise-floor twin | 18.933 | 2.864 | 2:36:44 |
+| **A2** | **SSD + 8× state** | **16.708** | **2.746** | **1:20:55** |
+| A3 | + trapezoid | 16.719 | 2.746 | 1:28:00 |
+| A4 | + RoPE | **1166.701** | 7.046 | 1:30:40 |
+| A5 | + trapezoid + RoPE | **1166.185** | 7.045 | 1:44:09 |
+| A6 | + `bc_bias`, no conv, both | **1168.531** | 7.047 | 1:35:37 |
+
+**1. M7-C passes, decisively.** A2 beats A0 by **2.679 PPL paired (−13.8%)**, and by 2.225 even
+against the luckier A0 seed — **4.2× the pre-registered 0.642 PPL bar**. The corrected operator is
+not merely not-worse; it is a large win. Report it as a **bundle** (M7-F): SSD parameterization,
+`d_state` 16→128, and a recurrence without the divide-and-clamp, all at once. A1 separates the last
+of those and is re-running with a 24 h clock.
+
+**2. Speed confirmed on equal footing.** A0 2:36:50 → A2 **1:20:55 = 1.94×**, same validation
+schedule, same node class. The 300-step probe's 1.76× was conservative.
+
+**3. The trapezoid is a null.** A3 − A2 = **+0.011 PPL — 1.7% of the bar**, in the *well-powered*
+paired comparison (identical seed, data order, and `in_proj` shape, so the two runs start from the
+same weights but for `trap_bias`). This is a real, reportable negative result on Prop. 1 at this
+scale and context length.
+
+**4. Every rope-on arm collapsed to unigram — and the cause was mine, not the paper's.**
+7.05 nats against `ln(50257) = 10.82` for uniform: the models learned token frequencies and nothing
+else. `mamba3_theta_max` **was never a field on `HybridConfig`**. The block's default of 1.0 was the
+only value the campaign could run, and with `dt_limit=1.0` that permits **1 rad per token, 512 rad
+over a 512-token sequence — 81 full turns.** A relative rotation `R(Θ_s − Θ_t)` is a position code
+only while it stays inside one turn; past that it aliases, and because θ is *data-dependent* the
+aliasing follows the content between s and t rather than the distance. The rotation stopped being a
+positional encoding and became a scrambler of B and C in nine of twelve layers.
+
+Why nothing caught it: **two** hand-maintained copies of the `mamba3_` forwarding whitelist in
+`hybrid_block.py` both omitted `theta_max`, so the yaml round-trip test passed, the strict
+unknown-kwarg guard never fired, and the ARCH fingerprint — which does not print `theta_max` —
+looked correct. Fixed as a class, not an instance: the whitelist is now derived from
+`inspect.signature(Mamba3Block.__init__)`, and a test asserts every block lever has a matching
+`mamba3_*` config field. That test immediately found a second unreachable lever, `dt_init_floor`.
+
+⚠ **This means M7-B has not yet tested Prop. 3/4.** A collapse caused by an unreachable
+hyperparameter is evidence about the harness, not about complex-valued state. Reported as such.
+
+- [x] **M7-C** **Gate: A2 ≤ A0 at 12K.** If the corrected operator is *worse*, **stop and report** — the buggy
       operator was acting as an unintended regularizer. That is a real finding; do not tune around it.
 - [ ] **M7-D** Per-lever deltas. **Pre-registered decision rule (written before the numbers exist):** advance
       the arm with lowest val PPL **only if Δ > 2× seed SD**; otherwise advance the **simplest** arm.
+- [ ] **M7-G** ⚠ **Re-test Prop. 3/4 at a rotation rate that is a position code.** The M7-B rope
+      arms measured `theta_max=1.0` — the only value reachable at the time — not the mechanism.
+      Three arms, `A4-lo/mid/hi` at `theta_max` ∈ {0.002, 0.02, 0.2} = {0.16, 1.6, 16} turns over
+      512 tokens, everything else identical to A4. Pre-registered reading: if `lo`/`mid` recover to
+      A2's ~16.7 and `hi` degrades, the aliasing account is confirmed and complex state gets a fair
+      null-or-win; if **all three** still collapse, the fault is deeper than the rate and RoPE is
+      reported as broken in this implementation, not as a failed mechanism. ~15 GPU-h.
 - [ ] **M7-E** Mechanism-sensitive diagnostics (nearly free, and they test the actual claim): synthetic
       MQAR/induction probe + a positions-384-512-only PPL slice.
-- [ ] **M7-F** If A2 wins, note it as a **bundle** (SSD parameterization + 8× state), not "SSD is better",
+- [x] **M7-F** If A2 wins, note it as a **bundle** (SSD parameterization + 8× state), not "SSD is better",
       unless a `d_state=16` arm is run.
 
 ### M8 — Full pipeline on the winner — H100

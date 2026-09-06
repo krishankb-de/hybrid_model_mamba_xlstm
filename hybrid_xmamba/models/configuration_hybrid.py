@@ -77,6 +77,20 @@ class HybridConfig:
     mamba3_use_trapezoid: bool = False # Sec 3.1 (M3)
     mamba3_use_rope: bool = False      # Sec 3.2 (M4)
     mamba3_rope_fraction: float = 0.5
+    # theta_max bounds the per-token angular rate: theta = theta_max * tanh(proj(x)), and the
+    # rotation angle is Delta_t * theta_t. It was MISSING from this dataclass until 2026-09-06,
+    # so the block's default of 1.0 was the only value the campaign could ever run -- and 1.0
+    # with dt_limit=1.0 permits 1 rad/token, 512 rad over a 512-token sequence, EIGHTY-ONE full
+    # turns. A relative rotation R(Theta_s - Theta_t) is a positional signal only while it stays
+    # inside one turn; past that it aliases, and because theta is data-dependent the aliasing
+    # tracks the content between s and t rather than the distance. Arms A4, A5 and A6 -- every
+    # rope-on arm in the M7-B screen -- collapsed to ~1166 val PPL against A2's 16.708.
+    mamba3_theta_max: float = 1.0
+    # Delta's init range. Also previously unreachable; the pair sets where the rotation can
+    # operate at all (M4-D: at logU[1e-3, 1e-1] the reachable angle tops out near 0.06 rad).
+    mamba3_dt_min: float = 1e-3
+    mamba3_dt_max: float = 1e-1
+    mamba3_dt_init_floor: float = 1e-4
     mamba3_bc_bias: str = "none"       # "none" | "zero_init" | "one_init"  (Sec 3.4, M5)
     mamba3_mimo_rank: int = 1          # plumbed, never run (decision 3)
     mamba3_a_mode: str = "static"      # "static" (Mamba-2) | "data_dependent" (Mamba-3)
