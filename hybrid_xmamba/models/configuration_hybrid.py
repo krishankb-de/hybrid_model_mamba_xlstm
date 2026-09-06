@@ -4,6 +4,7 @@ Defines the configuration schema for hybrid Mamba-xLSTM architectures,
 compatible with Hugging Face transformers library conventions.
 """
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import List, Optional, Literal
 
@@ -250,6 +251,35 @@ class HybridConfig:
         
         return base_config
     
+    @classmethod
+    def from_hydra(cls, model_cfg, **overrides) -> "HybridConfig":
+        """Build a config from a Hydra `cfg.model` node, keeping every field the dataclass has.
+
+        MAMBA3_PLAN.md M2-F / FM5. Every training entry point used to spell out ~25
+        `field=cfg.model.field` lines by hand, so a new config field silently fell back to its
+        default unless someone remembered to edit all twelve of them. That is not hypothetical:
+        Phase 9 lost a run because `norm_topology` was dropped this way, and it happened again on
+        2026-09-06 when `scan_impl`, `tfla_impl` and `dt_init_strategy` reached the yaml but not
+        the model -- job 2513007 trained the A1 arm with the defects still in place, and only the
+        architecture fingerprint caught it.
+
+        Filtering against `dataclasses.fields` removes the class of bug rather than an instance:
+        a field added to the dataclass and set in a yaml arrives here with no further wiring.
+
+        Args:
+            model_cfg: Hydra `cfg.model` node (or any mapping).
+            **overrides: applied after the config, for values a caller computes itself.
+        """
+        valid = {f.name for f in dataclasses.fields(cls)}
+        # `model_type` exists on both sides and means different things: the yaml says
+        # "hybrid_lm" (the Hydra target), the dataclass "hybrid_xmamba". Keep the dataclass's.
+        raw = {k: v for k, v in dict(model_cfg).items() if k in valid and k != "model_type"}
+        raw.update({k: v for k, v in overrides.items() if k in valid})
+        # Hydra hands back ListConfig for sequences; HybridConfig validates against plain str.
+        if "layer_pattern" in raw and raw["layer_pattern"] is not None:
+            raw["layer_pattern"] = [str(x) for x in raw["layer_pattern"]]
+        return cls(**raw)
+
     def to_dict(self) -> dict:
         """Convert config to dictionary."""
         return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}

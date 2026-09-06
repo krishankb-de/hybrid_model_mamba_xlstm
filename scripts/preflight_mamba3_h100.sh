@@ -61,7 +61,11 @@ import yaml
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
 
-FIELDS = {f.name for f in dataclasses.fields(HybridConfig)}
+# Build through HybridConfig.from_hydra -- the exact call the training entry points make. The
+# first version of this pre-flight filtered dataclass fields inline instead, which is a *different*
+# code path: it passed cleanly on 2026-09-06 while train_stage0_distill.py was still dropping
+# scan_impl/tfla_impl/dt_init_strategy, and job 2513007 trained the A1 arm with its defects intact.
+# A pre-flight that does not exercise the real path is not a pre-flight.
 # arm -> (config, substrings the fingerprint MUST contain)
 ARMS = {
     "A0  control        ": ("hybrid_150m_v2", ["mambax9", "scan_impl=legacy", "dt_init=none"]),
@@ -74,7 +78,7 @@ failures = []
 for arm, (name, expected) in ARMS.items():
     raw = yaml.safe_load(open(f"configs/model/{name}.yaml"))
     torch.manual_seed(0)
-    model = HybridLanguageModel(HybridConfig(**{k: v for k, v in raw.items() if k in FIELDS}))
+    model = HybridLanguageModel(HybridConfig.from_hydra(raw))
     fp = model.architecture_fingerprint()
     missing = [tok for tok in expected if tok not in fp]
     print(f"{arm} {name}")
@@ -96,7 +100,6 @@ PYEOF
 echo
 echo "--- 2/3  Delta at init (A1's whole point: ~0.02, not ~0.80) ---"
 python - <<'PYEOF'
-import dataclasses
 import sys
 
 import torch
@@ -106,14 +109,11 @@ import yaml
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
 
-FIELDS = {f.name for f in dataclasses.fields(HybridConfig)}
-
-
 def delta_mean(name):
     """Mirror mamba_block.forward:117-141 on realistic input."""
     raw = yaml.safe_load(open(f"configs/model/{name}.yaml"))
     torch.manual_seed(0)
-    model = HybridLanguageModel(HybridConfig(**{k: v for k, v in raw.items() if k in FIELDS}))
+    model = HybridLanguageModel(HybridConfig.from_hydra(raw))
     block = next(l for l in model.layers if l.layer_type == "mamba")
     mixer, seq = block.mixer, 128
     ids = torch.randint(0, model.config.vocab_size, (4, seq))

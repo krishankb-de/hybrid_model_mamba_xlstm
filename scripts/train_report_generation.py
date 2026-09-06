@@ -130,32 +130,10 @@ def main(cfg: DictConfig):
     tokenizer.padding_side = "right"
     tokenizer.model_max_length = cfg.model.max_position_embeddings
 
-    decoder_config = HybridConfig(
-        vocab_size=cfg.model.vocab_size,
-        dim=cfg.model.dim,
-        num_layers=cfg.model.num_layers,
-        layer_pattern=cfg.model.layer_pattern,
-        state_size=cfg.model.state_size,
-        conv_size=cfg.model.conv_size,
-        expand_factor=cfg.model.expand_factor,
-        dt_rank=cfg.model.dt_rank,
-        use_fast_path=cfg.model.use_fast_path,
-        head_dim=cfg.model.head_dim,
-        num_heads=cfg.model.num_heads,
-        use_tfla=cfg.model.use_tfla,
-        proj_factor=cfg.model.proj_factor,
-        slstm_hidden_dim=cfg.model.slstm_hidden_dim,
-        slstm_num_heads=cfg.model.slstm_num_heads,
-        use_exponential_gate=cfg.model.use_exponential_gate,
-        norm_type=cfg.model.norm_type,
-        norm_topology=cfg.model.get("norm_topology", "pre_rms"),
-        use_mlp=cfg.model.use_mlp,
-        mlp_ratio=cfg.model.mlp_ratio,
-        max_position_embeddings=cfg.model.max_position_embeddings,
-        dropout=cfg.model.dropout,
-        initializer_range=cfg.model.initializer_range,
-        use_cache=cfg.model.use_cache,
-        tie_word_embeddings=cfg.model.tie_word_embeddings,
+    # MAMBA3_PLAN.md M2-F: every dataclass field present in the yaml is carried
+    # through automatically. Do not go back to listing fields by hand -- that is
+    # how norm_topology (Phase 9) and scan_impl (job 2513007) were silently lost.
+    decoder_config = HybridConfig.from_hydra(cfg.model,
         use_gradient_checkpointing=cfg.model.get("use_gradient_checkpointing", False),
     )
 

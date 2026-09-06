@@ -1481,36 +1481,70 @@ def test_wsd_scheduler_absolute_warmup_override():
 
 
 def test_norm_topology_threaded_to_hybridconfig():
-    """Phase 9F: training entry scripts must thread ``norm_topology`` from yaml
-    into ``HybridConfig``. Regression-guards against the Phase 9 silent-drop bug
-    (HybridConfig was built from an explicit cfg.model.* list that omitted
-    ``norm_topology`` → v2 yaml ``norm_topology: hybrid`` was ignored).
+    """Training entry points must carry every yaml config field into ``HybridConfig``.
 
-    Strategy: read the two training entry-point source files and assert the
-    explicit ``norm_topology=`` kwarg is present in the HybridConfig(...) call.
-    Direct source-text assert is more robust than a full Hydra eval here, and
-    cheaper.
+    History, because this has now happened twice and the guard should reflect both:
+
+    * Phase 9F -- ``HybridConfig`` was built from an explicit ``cfg.model.*`` list that omitted
+      ``norm_topology``, so a v2 yaml's ``norm_topology: hybrid`` was ignored and HybridNorm
+      weights loaded into a pre_rms model. This test was written then, asserting the literal
+      ``norm_topology=`` kwarg was present.
+    * 2026-09-06 (MAMBA3_PLAN.md FM5) -- the same hand-written list dropped ``scan_impl``,
+      ``tfla_impl`` and ``dt_init_strategy``. Job 2513007 trained the A1 arm with every defect
+      still in place; only the ARCH fingerprint caught it. Guarding one field name could never
+      have caught that, because the bug is the mechanism, not the field.
+
+    So the assertion moved up a level: entry points must build through
+    ``HybridConfig.from_hydra``, which filters against ``dataclasses.fields`` and therefore
+    carries fields that do not exist yet. Source text plus a runtime round-trip, because the
+    failure is invisible at runtime otherwise -- the model builds and trains perfectly well, it
+    is simply not the architecture that was asked for.
     """
+    import dataclasses
     import pathlib
+
+    import yaml
+
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 
     repo_root = pathlib.Path(__file__).resolve().parent.parent
     for rel in (
         "scripts/train.py",
         "scripts/train_stage0_distill.py",
-        "scripts/train_contrastive.py",  # Phase 10: same bug would corrupt the backbone
+        "scripts/train_stage0_distill_resume.py",
+        "scripts/train_contrastive.py",
+        "scripts/train_report_generation.py",
     ):
         src = (repo_root / rel).read_text()
-        assert "HybridConfig(" in src, f"{rel}: no HybridConfig call found"
-        # Look for the threading line within the HybridConfig argument block.
-        # Tolerant of either explicit `cfg.model.norm_topology` or
-        # `cfg.model.get('norm_topology', ...)`.
-        has_explicit = "norm_topology=cfg.model.norm_topology" in src
-        has_getter = "norm_topology=cfg.model.get(" in src and 'norm_topology' in src
-        assert has_explicit or has_getter, (
-            f"{rel}: HybridConfig(...) call does not pass norm_topology — "
-            f"Phase 9 regression hazard. Add "
-            f"norm_topology=cfg.model.get('norm_topology', 'pre_rms')."
+        assert "HybridConfig.from_hydra(" in src, (
+            f"{rel}: must build HybridConfig via from_hydra(); a hand-written kwarg list "
+            "silently drops any field nobody remembered to add"
         )
+        assert "HybridConfig(\n" not in src, (
+            f"{rel}: still constructs HybridConfig from an explicit kwarg list"
+        )
+
+    # Runtime half: whatever a yaml sets must arrive on the dataclass.
+    fields = {f.name for f in dataclasses.fields(HybridConfig)}
+    for name in ("hybrid_70m_v2", "hybrid_150m_v2", "hybrid_150m_a1", "hybrid_150m_m3"):
+        path = repo_root / "configs" / "model" / f"{name}.yaml"
+        if not path.exists():
+            continue
+        raw = yaml.safe_load(path.read_text())
+        cfg = HybridConfig.from_hydra(raw)
+        for key, value in raw.items():
+            # `null` in a yaml means "derive it" -- __post_init__ fills dt_rank, num_heads and
+            # slstm_hidden_dim -- so a None never round-trips unchanged and is not a drop.
+            if (
+                key in fields
+                and key != "model_type"
+                and value is not None
+                and not isinstance(value, (dict, list))
+            ):
+                assert getattr(cfg, key) == value, (
+                    f"{name}.yaml sets {key}={value!r} but the config has "
+                    f"{getattr(cfg, key)!r} -- the field was dropped in transit"
+                )
 
 
 def test_resume_from_checkpoint_wired_to_trainer_fit():

@@ -361,11 +361,11 @@ Test-first: M1-A/B/C must **fail on HEAD**.
 - [x] **M2-J** 20-sample beam-decode timing probe. **Tripwire:** if > 1.5× the mamba1 time, promote M6 to M3.
 
 ### M3 — Exponential-trapezoidal
-- [ ] **M3-A** `trap` head, `λ = sigmoid(trap)`, two SSD passes sharing one mask, 1-step `(B,x)` chunk carry,
+- [x] **M3-A** `trap` head, `λ = sigmoid(trap)`, two SSD passes sharing one mask, 1-step `(B,x)` chunk carry,
       **`β = 0` at document starts**.
-- [ ] **M3-B** **Bit-identity: `λ ≡ 1` reproduces M2 exactly (`torch.equal`)** via the zeroed-slice /
+- [x] **M3-B** **Bit-identity: `λ ≡ 1` reproduces M2 exactly (`torch.equal`)** via the zeroed-slice /
       `trap_bias=+20` recipe. Without this the arm is uninterpretable.
-- [ ] **M3-C** vs the fp64 3-term oracle, rel-err ≤ 1e-6.
+- [x] **M3-C** vs the fp64 3-term oracle, rel-err ≤ 1e-6.
 
 ### M4 — Complex-valued state (RoPE trick)
 - [ ] **M4-A** `rotary.py`: `Θ = cumsum(Δ·θ)` **in float64** (~2 MB, negligible), `remainder(·, 2π)` before

@@ -1,7 +1,7 @@
 {
-  "current_phase": "M3_exponential_trapezoidal",
-  "last_updated": "2026-09-06T03:19:47+02:00",
-  "status": "M0-M2 complete. Mamba3Block registered and parameter-matched; flags all-off == Mamba-2 SSD. M3 next: exponential-trapezoidal via the extra_terms hook.",
+  "current_phase": "M4_complex_state",
+  "last_updated": "2026-09-06T03:43:48+02:00",
+  "status": "M0-M3 complete. Trapezoid landed with an exact lambda=1 bit-identity control. M4 next: complex state via the RoPE trick.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
     "name": "h100_scaling_mamba3",
@@ -363,22 +363,28 @@
     },
     "M3": {
       "title": "Exponential-trapezoidal",
-      "status": "pending",
+      "status": "complete",
       "checkboxes": {
         "M3-A": {
-          "done": false,
+          "done": true,
           "desc": "trap head, λ = sigmoid(trap), two SSD passes sharing one mask, 1-step (B,x) chunk carry,"
         },
         "M3-B": {
-          "done": false,
+          "done": true,
           "desc": "Bit-identity: λ ≡ 1 reproduces M2 exactly (torch.equal) via the zeroed-slice /"
         },
         "M3-C": {
-          "done": false,
+          "done": true,
           "desc": "vs the fp64 3-term oracle, rel-err ≤ 1e-6."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "m3a": "trapezoid via the extra_terms hook: coeff=gamma=lambda*dt, extra=(beta=(1-lambda)*dt*alpha, shift(B), shift(x)); beta zeroed at document starts",
+        "m3b_bit_identity": "lambda==1 vs trapezoid-off: torch.equal=True, max|diff|=0.000e+00, with and without cu_seqlens. lambda=0.5 differs by 1.1e-1, so the flag is not a no-op.",
+        "m3c_accuracy": "rel-max-err ~3e-16 vs the fp64 3-term oracle across lambda in {0, 0.5, 1, random} x chunk {16,32,64}, plus multi-document",
+        "fm5_bug": "job 2513007 logged 'scan_impl=legacy | tfla_impl=legacy | dt_init=none' for the A1 arm. Fixed by HybridConfig.from_hydra + upgraded parity guard + preflight now uses the trainer's own builder.",
+        "arm_param_match": "A2 184,192,200 | A3 184,192,416 | A5 184,192,416 | A6 184,167,072 -- spread 0.014%"
+      },
       "verdict": null
     },
     "M4": {
@@ -590,7 +596,9 @@
     "2026-09-06: unticked M7-A2",
     "2026-09-06: M7-A2 prep landed: configs/model/hybrid_150m_a1.yaml (Delta 0.0224 vs control 0.8070, params 183,708,000 = -13,824 for the 9 dropped dt_norms); SEED + SAVE_TOP_K env overrides in train_stage0_h100.sh; MODEL_CONFIG overridable in the 150M wrapper. Arms A0/A0-seed/A1 are now submittable.",
     "2026-09-06: README.md updated with a branch section (defect table, SSD memory argument, parameter matching, landed work, run commands, baselines, auto-generated progress table). scripts/mamba3_state.py gained a 'readme' subcommand so the status cannot go stale; contract updated in MAMBA3_PLAN.md + CLAUDE.md to require it at the end of every phase.",
-    "2026-09-06: Added scripts/preflight_mamba3_h100.sh: the aisc login node refuses to execute python, so the M7-A2 pre-flight is an sbatch job (CPU, ~2 min) that checks all three arm fingerprints, the [181,186]M param band, Delta at init, and the CPU suite. README run instructions corrected -- they had wrongly told the user to run python on lx01."
+    "2026-09-06: Added scripts/preflight_mamba3_h100.sh: the aisc login node refuses to execute python, so the M7-A2 pre-flight is an sbatch job (CPU, ~2 min) that checks all three arm fingerprints, the [181,186]M param band, Delta at init, and the CPU suite. README run instructions corrected -- they had wrongly told the user to run python on lx01.",
+    "2026-09-06: M3 complete (exponential-trapezoidal). ALSO fixed a live FM5 bug found by the ARCH fingerprint on aisc job 2513007: every training entry point built HybridConfig from a hand-written kwarg list, so scan_impl/tfla_impl/dt_init_strategy reached the yaml but not the model and the A1 arm trained with its defects intact. Replaced with HybridConfig.from_hydra() everywhere.",
+    "2026-09-06: current_phase -> M4_complex_state"
   ],
   "open_questions": []
 }

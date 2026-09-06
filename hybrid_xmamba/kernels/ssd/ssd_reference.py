@@ -23,7 +23,7 @@ Shape conventions, shared with `ssd_interface` and matching Mamba-2/3:
 heads each, which is what keeps an 8x larger state nearly free in parameters.
 """
 
-from typing import Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import torch
 
@@ -83,22 +83,36 @@ def ssd_sequential_reference(
     C: torch.Tensor,
     D: Optional[torch.Tensor] = None,
     cu_seqlens: Optional[torch.Tensor] = None,
+    coeff: Optional[torch.Tensor] = None,
+    extra_terms: Optional[Sequence[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = None,
     dtype: torch.dtype = torch.float64,
 ) -> torch.Tensor:
-    """Ground-truth SSD scan: a plain loop over `ssd_step`, in float64 by default.
+    """Ground-truth SSD scan: a plain loop, in float64 by default.
+
+        h_t = exp(dt_t A) h_{t-1} + sum_terms coeff_t (B_t x_t^T)
+        y_t = C_t^T h_t + D x_t
 
     Args:
         cu_seqlens: optional (batch, seqlen) int tensor of segment ids. The state is reset
             wherever the id changes, matching the repo-wide packed-document convention
             (`mamba_block.py::_forward_segmented`).
+        coeff: state-input coefficient, defaulting to `dt`. Separate from `dt` because `dt` also
+            sets the decay, and the exponential-trapezoidal rule scales the input by
+            `gamma = lambda * dt` while the decay stays `exp(dt A)`.
+        extra_terms: additional `(coefficient, B, x)` triples summed into the state -- the
+            trapezoidal rule's `beta * B_{t-1} x_{t-1}` term (MAMBA3_PLAN.md M3).
 
     Returns:
         (batch, seqlen, nheads, headdim)
     """
     x, dt, A, B, C = (t.to(dtype) for t in (x, dt, A, B, C))
     D = None if D is None else D.to(dtype)
+    terms: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = [
+        ((dt if coeff is None else coeff.to(dtype)), B, x)
+    ] + [(co.to(dtype), bb.to(dtype), xx.to(dtype)) for co, bb, xx in (extra_terms or [])]
     batch, seqlen, nheads, headdim = x.shape
-    dstate = B.shape[-1]
+    ngroups, dstate = B.shape[-2], B.shape[-1]
+    rep = _heads_per_group(nheads, ngroups)
 
     state = torch.zeros(batch, nheads, headdim, dstate, dtype=dtype, device=x.device)
     ys = []
@@ -107,6 +121,16 @@ def ssd_sequential_reference(
             # Zero the carried state for any row whose document changed at this position.
             new_doc = (cu_seqlens[:, t] != cu_seqlens[:, t - 1]).view(batch, 1, 1, 1)
             state = torch.where(new_doc, torch.zeros_like(state), state)
-        y_t, state = ssd_step(x[:, t], dt[:, t], A, B[:, t], C[:, t], state, D)
+        state = torch.exp(dt[:, t] * A).view(batch, nheads, 1, 1) * state
+        for co, bb, xx in terms:
+            B_h = bb[:, t].repeat_interleave(rep, dim=1)          # (batch, nheads, dstate)
+            state = state + (
+                co[:, t].unsqueeze(-1).unsqueeze(-1)
+                * xx[:, t].unsqueeze(-1) * B_h.unsqueeze(-2)
+            )
+        C_h = C[:, t].repeat_interleave(rep, dim=1)
+        y_t = torch.einsum("bhpn,bhn->bhp", state, C_h)
+        if D is not None:
+            y_t = y_t + D.view(1, -1, 1) * x[:, t]
         ys.append(y_t)
     return torch.stack(ys, dim=1)

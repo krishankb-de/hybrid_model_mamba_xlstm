@@ -14,6 +14,7 @@ Where `A_cum[s]` falls under 1e-8 the clamp pins the denominator, so the ratio
 `t`. The token's own contribution to the state is annihilated, not merely perturbed.
 """
 
+import pathlib
 from typing import List
 
 import pytest
@@ -794,3 +795,201 @@ def test_architecture_fingerprint_names_the_operator_and_its_flags():
 
     ctrl = HybridLanguageModel(_load_yaml_config("hybrid_150m_v2")).architecture_fingerprint()
     assert "mamba3" not in ctrl and "mambax9" in ctrl
+
+
+# ---------------------------------------------------------------------------
+# M3: exponential-trapezoidal discretization (paper Sec 3.1, Prop. 1)
+# ---------------------------------------------------------------------------
+#     h_t = alpha_t h_{t-1} + beta_t B_{t-1} x_{t-1} + gamma_t B_t x_t
+#     alpha_t = exp(dt_t A),  beta_t = (1-lambda_t) dt_t alpha_t,  gamma_t = lambda_t dt_t
+# lambda = 1 is Euler (Mamba-2), lambda = 1/2 the classical trapezoidal rule.
+
+
+def _trapezoid_terms(x, dt, A, B, lam, cu_seqlens=None):
+    """Reference construction of (gamma, [(beta, shift(B), shift(x))]), mirroring the block."""
+    alpha = torch.exp(dt * A)
+    gamma = lam * dt
+    beta = (1.0 - lam) * dt * alpha
+    if cu_seqlens is not None:
+        starts = torch.zeros_like(cu_seqlens, dtype=torch.bool)
+        starts[:, 1:] = cu_seqlens[:, 1:] != cu_seqlens[:, :-1]
+        starts[:, 0] = True
+        beta = beta.masked_fill(starts.unsqueeze(-1), 0.0)
+    else:
+        beta = beta.clone()
+        beta[:, 0] = 0.0
+
+    def shift(v):
+        return torch.cat([torch.zeros_like(v[:, :1]), v[:, :-1]], dim=1)
+
+    return gamma, [(beta, shift(B), shift(x))]
+
+
+@pytest.mark.parametrize("chunk_size", [16, 32, 64])
+@pytest.mark.parametrize(
+    "lam_mode", ["half", "one", "zero", "random"],
+    ids=["lambda=0.5 classical", "lambda=1 Euler", "lambda=0 all-left", "lambda data-dependent"],
+)
+def test_trapezoid_matches_three_term_reference(lam_mode, chunk_size):
+    """M3-C: the two-pass form must equal the literal 3-term recurrence.
+
+    Because the recurrence is linear in its state-input, the beta term is one more pass over the
+    *same* decay mask rather than a second scan. This is the test that says so.
+    """
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan, ssd_sequential_reference
+
+    kw = _ssd_fixture((2, 96, 4, 16, 2, 32))
+    shape = kw["dt"].shape
+    lam = {
+        "half": torch.full(shape, 0.5, dtype=torch.float64),
+        "one": torch.ones(shape, dtype=torch.float64),
+        "zero": torch.zeros(shape, dtype=torch.float64),
+        "random": torch.rand(shape, dtype=torch.float64),
+    }[lam_mode]
+    gamma, extra = _trapezoid_terms(kw["x"], kw["dt"], kw["A"], kw["B"], lam)
+    want = ssd_sequential_reference(coeff=gamma, extra_terms=extra, **kw)
+    got = ssd_chunked_scan(chunk_size=chunk_size, coeff=gamma, extra_terms=extra, **kw)
+    assert rel_max_err(got, want) <= 1e-12
+
+
+def test_trapezoid_respects_document_boundaries():
+    """M3-A: beta reaches one token back, so at a document start it would pull in the previous
+    document's last token -- a leak the decay mask alone does not prevent."""
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan, ssd_sequential_reference
+
+    kw = _ssd_fixture((2, 96, 4, 16, 2, 32))
+    ids = torch.zeros(2, 96, dtype=torch.long)
+    ids[:, 20:], ids[:, 55:] = 1, 2
+    lam = torch.rand(kw["dt"].shape, dtype=torch.float64)
+    gamma, extra = _trapezoid_terms(kw["x"], kw["dt"], kw["A"], kw["B"], lam, cu_seqlens=ids)
+    want = ssd_sequential_reference(cu_seqlens=ids, coeff=gamma, extra_terms=extra, **kw)
+    got = ssd_chunked_scan(chunk_size=32, cu_seqlens=ids, coeff=gamma, extra_terms=extra, **kw)
+    assert rel_max_err(got, want) <= 1e-12
+
+
+def _drive_lambda_to_one(block):
+    """Zero the trap slice of in_proj and raise trap_bias so lambda is exactly 1.0 in fp32."""
+    s = block._split
+    offset = sum(s[:6])
+    with torch.no_grad():
+        block.in_proj.weight[offset:offset + s[6]].zero_()
+        if block.trap_bias is not None:
+            block.trap_bias.fill_(20.0)
+
+
+@pytest.mark.parametrize("with_documents", [False, True])
+def test_lambda_one_is_bit_identical_to_trapezoid_off(with_documents):
+    """M3-B: the control that makes the M3 arm interpretable.
+
+    `lambda = 1` gives `beta = 0` and `gamma = dt`, which is exactly Mamba-2's Euler rule -- so
+    the trapezoid path must reproduce the trapezoid-off path *bitwise*, not approximately. If it
+    only matched to 1e-6, a measured PPL difference could be the discretization or could be
+    accumulated arithmetic noise, and the arm would say nothing.
+
+    `sigmoid(20) == 1.0` exactly in fp32 (the true value differs by 2e-9, far below the 1.2e-7
+    spacing at 1.0), and `a + 0.0 == a` in IEEE754, so the equality is exact rather than lucky.
+    """
+    torch.manual_seed(0)
+    on = _m3_block(use_trapezoid=True).eval()
+    torch.manual_seed(0)
+    off = _m3_block(use_trapezoid=False).eval()
+    off.load_state_dict({k: v for k, v in on.state_dict().items() if k != "trap_bias"})
+    _drive_lambda_to_one(on)
+    _drive_lambda_to_one(off)
+
+    x = torch.randn(2, 96, 128)
+    kw = {}
+    if with_documents:
+        ids = torch.zeros(2, 96, dtype=torch.long)
+        ids[:, 41:] = 1
+        kw["cu_seqlens"] = ids
+    with torch.no_grad():
+        assert torch.equal(on(x, **kw), off(x, **kw)), "lambda=1 is not bit-identical to Euler"
+
+
+def test_trapezoid_actually_changes_the_output_at_its_default():
+    """M3-B: the other half of the control -- the flag must not be a no-op at lambda=0.5."""
+    torch.manual_seed(0)
+    trap = _m3_block(use_trapezoid=True).eval()
+    torch.manual_seed(0)
+    euler = _m3_block(use_trapezoid=False).eval()
+    euler.load_state_dict({k: v for k, v in trap.state_dict().items() if k != "trap_bias"})
+    x = torch.randn(2, 96, 128)
+    with torch.no_grad():
+        assert (trap(x) - euler(x)).abs().max() > 1e-3, (
+            "lambda=0.5 produced the same output as Euler -- the trapezoid term is not wired in"
+        )
+
+
+@pytest.mark.parametrize("use_trapezoid", [False, True])
+@pytest.mark.parametrize("a_mode", ["static", "data_dependent"])
+def test_no_parameter_is_left_dangling_by_a_disabled_flag(use_trapezoid, a_mode):
+    """M2-H/M3-A: the pre-push harness requires every parameter to receive a gradient.
+
+    `trap_bias` and `A_log` are each owned by one setting, so registering them unconditionally
+    would leave a dangling Parameter whenever that setting is off. They are conditional instead;
+    the in_proj slices stay allocated either way, so arms remain parameter-matched.
+    """
+    block = _m3_block(use_trapezoid=use_trapezoid, a_mode=a_mode)
+    block(torch.randn(2, 32, 128)).sum().backward()
+    missing = [n for n, p in block.named_parameters() if p.grad is None]
+    assert not missing, f"parameters received no gradient: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# FM5: config fields must survive the trip from yaml to model
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "script",
+    ["train_stage0_distill.py", "train_stage0_distill_resume.py", "train.py",
+     "train_contrastive.py", "train_report_generation.py"],
+)
+def test_training_entry_points_use_the_shared_config_builder(script):
+    """Every trainer must build HybridConfig via `from_hydra`, not by listing fields by hand.
+
+    A source-text assertion, mirroring `test_norm_topology_threaded_to_hybridconfig`, because the
+    failure is invisible at runtime: the model builds fine, trains fine, and is simply not the
+    architecture you asked for. It has now happened twice -- `norm_topology` in Phase 9, and
+    `scan_impl`/`tfla_impl`/`dt_init_strategy` on 2026-09-06, where job 2513007 ran the A1 arm
+    with every defect still in place and only the ARCH fingerprint revealed it.
+    """
+    src = (pathlib.Path(__file__).resolve().parent.parent / "scripts" / script).read_text()
+    assert "HybridConfig.from_hydra(" in src, (
+        f"{script} does not use HybridConfig.from_hydra; a new config field will be silently "
+        "dropped there"
+    )
+    assert "HybridConfig(\n" not in src, (
+        f"{script} still constructs HybridConfig with a hand-written kwarg list"
+    )
+
+
+@pytest.mark.parametrize(
+    "config_name,expected",
+    [
+        ("hybrid_150m_v2", {"scan_impl": "legacy", "tfla_impl": "legacy",
+                            "dt_init_strategy": "none", "norm_topology": "hybrid"}),
+        ("hybrid_150m_a1", {"scan_impl": "exact", "tfla_impl": "exact",
+                            "dt_init_strategy": "mamba", "norm_topology": "hybrid_bc"}),
+    ],
+)
+def test_arm_configs_survive_the_hydra_round_trip(config_name, expected):
+    """The runtime half of the guard above: what the yaml says is what the model gets."""
+    import yaml
+
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+
+    raw = yaml.safe_load(open(f"configs/model/{config_name}.yaml"))
+    cfg = HybridConfig.from_hydra(raw)
+    for key, want in expected.items():
+        assert getattr(cfg, key) == want, (
+            f"{config_name}: {key} is {getattr(cfg, key)!r}, expected {want!r}"
+        )
+    mixer = next(
+        l.mixer for l in __import__(
+            "hybrid_xmamba.models.hybrid_lm", fromlist=["HybridLanguageModel"]
+        ).HybridLanguageModel(cfg).layers if l.layer_type == "mamba"
+    )
+    assert mixer.scan_impl == expected["scan_impl"], "scan_impl reached the config but not the mixer"
+    assert mixer.dt_init_strategy == expected["dt_init_strategy"]

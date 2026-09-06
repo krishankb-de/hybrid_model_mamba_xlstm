@@ -183,7 +183,21 @@ class Mamba3Block(nn.Module):
             self.B_bias = nn.Parameter(torch.full((self.nheads, d_state), init))
             self.C_bias = nn.Parameter(torch.full((self.nheads, d_state), init))
 
-        self.A_log = nn.Parameter(torch.empty(self.nheads))
+        # Parameters that only a *disabled* feature would own are registered conditionally. The
+        # in_proj slices stay allocated either way (so arms remain parameter-matched to within a
+        # few hundred out of 184M), but a standalone Parameter that receives no gradient fails
+        # the pre-push harness's "every parameter is connected" gate -- and that gate is worth
+        # keeping strict, because a genuinely dangling parameter usually means a feature was
+        # wired up only halfway.
+        #
+        # lambda = sigmoid(proj(x) + trap_bias), per head. Init 0 gives lambda = 0.5, the
+        # classical trapezoidal rule (paper Remark 2); lambda = 1 recovers Mamba-2's Euler rule
+        # exactly. The bias exists mainly so the bit-identity control is expressible: zeroing the
+        # projection slice and raising the bias drives lambda to exactly 1.0 in fp32, which is
+        # what makes the M3 arm interpretable.
+        self.trap_bias = nn.Parameter(torch.zeros(self.nheads)) if use_trapezoid else None
+        # A is learned per head only in "static" mode; "data_dependent" projects it per token.
+        self.A_log = nn.Parameter(torch.empty(self.nheads)) if a_mode == "static" else None
         self.dt_bias = nn.Parameter(torch.empty(self.nheads))
         self.D = nn.Parameter(torch.ones(self.nheads))
         self.out_norm = RMSNorm(self.inner_dim) if use_outproj_norm else None
@@ -208,7 +222,8 @@ class Mamba3Block(nn.Module):
             ).clamp(min=self.dt_init_floor)
             self.dt_bias.copy_(dt + torch.log(-torch.expm1(-dt)))
             # A ~ U[1, 16] per head, stored in log space; A = -exp(A_log) is strictly negative.
-            self.A_log.copy_(torch.log(torch.rand(self.nheads) * 15.0 + 1.0))
+            if self.A_log is not None:
+                self.A_log.copy_(torch.log(torch.rand(self.nheads) * 15.0 + 1.0))
 
     def _compute_a(self, a_raw: torch.Tensor) -> torch.Tensor:
         """Per-head state transition, strictly negative. Shape (nheads,) or (batch, len, nheads)."""
@@ -261,17 +276,57 @@ class Mamba3Block(nn.Module):
         return self.out_proj(y * self.activation(z))
 
     def _scan(self, xs, dt, A, B, C, trap_raw, angles, cu_seqlens):
-        """SSD scan. M3 adds the trapezoidal term and M4 the rotation; both are no-ops here."""
-        del trap_raw, angles  # consumed by M3 / M4
+        """SSD scan, plus the exponential-trapezoidal term when enabled. M4 adds the rotation."""
+        del angles  # consumed by M4
         if self.B_bias is not None:
             B = B.repeat_interleave(self.nheads // self.ngroups, dim=2) + self.B_bias
             C = C.repeat_interleave(self.nheads // self.ngroups, dim=2) + self.C_bias
-        if A.dim() == 1:
-            return ssd_chunked_scan(
-                xs, dt, A, B, C, self.D.float(),
-                chunk_size=self.chunk_size, cu_seqlens=cu_seqlens,
-            )
-        raise NotImplementedError("data-dependent A requires the M3 scan signature")
+
+        coeff, extra = dt, None
+        if self.use_trapezoid:
+            coeff, extra = self._trapezoid_terms(xs, dt, A, B, trap_raw, cu_seqlens)
+
+        return ssd_chunked_scan(
+            xs, dt, A, B, C, self.D.float(),
+            chunk_size=self.chunk_size, cu_seqlens=cu_seqlens,
+            coeff=coeff, extra_terms=extra,
+        )
+
+    def _trapezoid_terms(self, xs, dt, A, B, trap_raw, cu_seqlens):
+        """Exponential-trapezoidal discretization (paper Prop. 1).
+
+            h_t = alpha_t h_{t-1} + beta_t B_{t-1} x_{t-1} + gamma_t B_t x_t
+            alpha_t = exp(dt_t A),  beta_t = (1 - lambda_t) dt_t alpha_t,  gamma_t = lambda_t dt_t
+
+        Euler (Mamba-2) keeps only the interval's right endpoint; the trapezoidal rule takes a
+        data-dependent convex combination of both, which is second-order accurate rather than
+        first. Equivalently it is a width-2 convolution on the state-input *inside* the
+        recurrence -- distinct from the short convolution applied outside it (paper Remark 4).
+
+        The recurrence is linear in its state-input, so this needs no new scan: the beta term is
+        one more `(coefficient, B, x)` triple over the *same* decay mask. Shifting at full-
+        sequence level means the chunk-boundary carry falls out for free.
+
+        Returns `(gamma, [(beta, shift(B), shift(x))])`.
+        """
+        lam = torch.sigmoid(trap_raw.float() + self.trap_bias)      # (batch, seqlen, nheads)
+        alpha = torch.exp(dt * A)
+        gamma = lam * dt
+        beta = (1.0 - lam) * dt * alpha
+
+        # beta reaches one token back, so at a document's first position it would pull in the
+        # previous document's last token -- the same leak the decay mask prevents for the state.
+        if cu_seqlens is not None:
+            starts = torch.zeros_like(cu_seqlens, dtype=torch.bool)
+            starts[:, 1:] = cu_seqlens[:, 1:] != cu_seqlens[:, :-1]
+            starts[:, 0] = True
+            beta = beta.masked_fill(starts.unsqueeze(-1), 0.0)
+        else:
+            beta = beta.clone()
+            beta[:, 0] = 0.0
+
+        shift = lambda v: torch.cat([torch.zeros_like(v[:, :1]), v[:, :-1]], dim=1)
+        return gamma, [(beta, shift(B), shift(xs))]
 
     def _mask_conv_across_documents(self, raw, conved, cu_seqlens):
         """Recompute the first `conv_size - 1` positions of each document with a zeroed history.
