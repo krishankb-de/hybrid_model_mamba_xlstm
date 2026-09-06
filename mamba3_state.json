@@ -1,6 +1,6 @@
 {
   "current_phase": "M6_decode_cache",
-  "last_updated": "2026-09-06T15:32:15+02:00",
+  "last_updated": "2026-09-06T15:53:35+02:00",
   "status": "M0-M5 complete. All 8 screen arms build the operator they claim at 150M and are submittable from one definition. M6 next: O(1) recurrent decode cache.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
@@ -647,7 +647,9 @@
     "2026-09-06: Probe collision fixed: ARM= took EXPERIMENT from mamba3_arms.py and ignored the caller, so the 300-step probe wrote into outputs/m3_screen_A2_s42 and left a last.ckpt for the real A2 run. A caller-supplied EXPERIMENT now wins.",
     "2026-09-06: M7-B SCREEN LAUNCHED: array 2513632 (tasks 0-4 = A2,A3,A4,A5,A6), all five started immediately on gx07/gx08x2/gx14x2, no queue wait; A1 (2513057) still running alongside at 11h. Every task's [arm] line confirms the right levers, and each writes to its own outputs/m3_screen_<arm>_s42 -- the unset EXPERIMENT guard held.",
     "2026-09-06: Added scripts/mamba3_watch.sh (login-node safe, no python) for squeue + sacct preemption state + per-arm progress + disk, and --open-mode=append to the three H100 sbatch headers: aisc-batch is preemptible and nothing passes ckpt_path, so a requeued arm restarts from step 0 -- previously the requeue also truncated the log, erasing the only evidence.",
-    "2026-09-06: Third login-node refusal: 'bash scripts/mamba3_watch.sh' was blocked before its first echo, so the guard intercepts running a SCRIPT, not just python. Rule corrected everywhere: anything scripted goes through sbatch/srun or is designed to be sourced; individual commands stay fine interactively. mamba3_watch.sh now carries SBATCH headers, works under source (BASH_SOURCE), and skips the du pass unless it is running as a job."
+    "2026-09-06: Third login-node refusal: 'bash scripts/mamba3_watch.sh' was blocked before its first echo, so the guard intercepts running a SCRIPT, not just python. Rule corrected everywhere: anything scripted goes through sbatch/srun or is designed to be sourced; individual commands stay fine interactively. mamba3_watch.sh now carries SBATCH headers, works under source (BASH_SOURCE), and skips the du pass unless it is running as a job.",
+    "2026-09-06: A1 (job 2513057) TIMED OUT at 12:00:03 without finishing 12,000 steps -- my --time=12:00:00 was too short. A0 needed 7:59 wall; A1's exact Mamba-1 scan cannot use the cheap log-segsum (that form costs 19.3 GB) and flips the parallel axis instead, which the plan accepted as 3-5x slower because A1 is screen-only. 3-5x of A0's 2:37 training loop is 8-13 h on top of ~5 h of validation. A1's walltime is now recorded as 24:00:00 in mamba3_arms.py. No PREEMPTED anywhere -- the array is clean.",
+    "2026-09-06: COST STRUCTURE, inferred from A0: wall 7:59 but Lightning's train progress bar reports 2:36:50, and Lightning times its validation on a separate bar. val_max_samples=2000 caps ARTICLES, not chunks -- 2000 full PubMed articles pack into 15,724 chunks = 8M tokens, x6 val passes, each running the 2.6B teacher as well as the student. Validation therefore looks like roughly TWICE the cost of training in this screen. Do not change it mid-screen (A0/A0-seed already ran); size it down for M8 and any future screen."
   ],
   "open_questions": []
 }

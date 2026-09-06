@@ -41,6 +41,7 @@ class Arm(NamedTuple):
     seed: int
     isolates: str
     expect: List[str]        # substrings the ARCH fingerprint must contain
+    walltime: str = "12:00:00"
 
 
 _M3 = "hybrid_150m_m3"
@@ -62,6 +63,12 @@ ARMS = {
         isolates="the defect fix alone: exact scan + dt init + no Delta-norm. Screen-only.",
         expect=["mambax9", "scan_impl=exact", "tfla_impl=exact", "dt_init=mamba",
                 "norm_topology=hybrid_bc"],
+        # MEASURED: job 2513057 hit a 12 h TIMEOUT unfinished. The exact scan for Mamba-1's
+        # (d_inner, dstate) A cannot use the cheap log-segsum -- it flips the parallel axis
+        # instead, depth cs + L/cs -- and the plan accepted 3-5x slower because A1 never
+        # enters the pipeline. 3-5x of A0's 2:37 training loop is 8-13 h on top of ~5 h of
+        # validation, so 12 h was never enough. This is the one arm that needs a long clock.
+        walltime="24:00:00",
     ),
     "A2": Arm(
         config=_M3, overrides={}, seed=SCREEN_SEED,
@@ -117,7 +124,8 @@ def cmd_list(_args) -> int:
     width = max(len(n) for n in ARMS)
     for name, arm in ARMS.items():
         extra = " ".join(hydra_overrides(arm)) or "-"
-        print("{:<{w}}  {:<18} seed={:<5} {}".format(name, arm.config, arm.seed, extra, w=width))
+        print("{:<{w}}  {:<18} seed={:<5} time={} {}".format(
+            name, arm.config, arm.seed, arm.walltime, extra, w=width))
         print("{:<{w}}  {}".format("", arm.isolates, w=width))
     return 0
 
@@ -136,6 +144,7 @@ def cmd_env(args) -> int:
     }
     for key, value in exports.items():
         print("export {}={}".format(key, shlex.quote(value)))
+    print("# suggested walltime for this arm: sbatch --time={}".format(arm.walltime))
     return 0
 
 

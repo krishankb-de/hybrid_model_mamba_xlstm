@@ -510,9 +510,19 @@ Confirm on equal footing from the screen, where every arm shares one validation 
 also that the 2.6B teacher is a fixed cost in **both**, so the student-side speedup is larger than
 this end-to-end figure — 8× the SSM state, at 0.24% more parameters, for less wall-clock.
 
-Measured cost per arm: **~8.0 h wall** for 12,000 steps (2:37 in the training loop at 2.2 s/step,
-matching the 2.22 s/step estimate; the rest is validation with the teacher resident, packing and
-checkpoint writes).
+Measured cost per arm: **~8.0 h wall** for 12,000 steps, of which Lightning's train progress bar
+reports only **2:36:50**. Lightning times validation on a separate bar, and the arithmetic says that
+is where the other ~5 h goes: `val_max_samples: 2000` caps **articles, not chunks**, so 2000 full
+PubMed articles pack into **15,724 chunks = 8M tokens**, evaluated six times, each pass running the
+2.6B teacher alongside the student. **Validation looks like roughly twice the cost of training in
+this screen.** Do not touch it mid-screen — A0 and A0-seed already ran with it — but size it down
+for M8 and any future screen; 1M tokens is ample for a stable val PPL.
+
+⚠ **A1 needs a 24 h clock, not 12.** Job 2513057 hit `TIMEOUT` at 12:00:03 with the run unfinished.
+Mamba-1's `(d_inner, dstate)` `A` cannot use the cheap log-segsum (19.3 GB), so `scan_impl=exact`
+flips the parallel axis instead — accepted as 3-5× slower because A1 never enters the pipeline —
+and 3-5× of a 2:37 training loop plus ~5 h of validation does not fit in 12 h. Recorded as
+`walltime` in `scripts/mamba3_arms.py`, which `env` now prints.
 
 - [ ] **M7-C** **Gate: A2 ≤ A0 at 12K.** If the corrected operator is *worse*, **stop and report** — the buggy
       operator was acting as an unintended regularizer. That is a real finding; do not tune around it.

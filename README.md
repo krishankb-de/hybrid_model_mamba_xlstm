@@ -97,6 +97,10 @@ tail -f logs/mamba3_preflight_*.log
 # wrapper's defaults (that is how job 2513581 became a second A0 at 120,000 steps).
 ARM=A5 sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh
 
+# ...but check the arm's own walltime first: `mamba3_arms.py list` prints it, and A1 needs
+# 24 h, not 12 (its exact Mamba-1 scan is 3-5x slower and job 2513057 died on the limit).
+ARM=A1 sbatch --time=24:00:00 scripts/train_stage0_150m_h100.sh
+
 # or the whole remaining screen as one job array — each task takes an H100 as one frees,
 # so the queue wait is paid once in parallel instead of five times in series
 sbatch --array=0-4 scripts/screen_arms_h100.sh     # A2..A6; A0/A0-seed/A1 already ran

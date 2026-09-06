@@ -52,6 +52,11 @@ echo "=== 1. running now ==="
 command -v squeue >/dev/null \
   && { squeue --me --format="%.10i %.12P %.9N %.2t %.10M %.20j" 2>/dev/null || squeue --me; } \
   || echo "  (squeue unavailable — not on the cluster?)"
+echo
+echo "  time left (a TIMEOUT killed A1 at 12:00:03 with the run unfinished):"
+command -v squeue >/dev/null \
+  && squeue --me --format="  %.10i %.20j %.10M elapsed %.10L left" 2>/dev/null \
+  || true
 hr
 
 echo "=== 2. state incl. preemption (sacct, last 3 days) ==="
@@ -65,21 +70,35 @@ sacct --starttime=now-3days --user="$USER" \
 hr
 
 echo "=== 3. per-arm progress ==="
-# Lightning writes its metrics into a carriage-return progress bar, so the log has
-# to be unfolded before it can be grepped.
+# Lightning's progress bar is written with carriage returns and only lands in the log
+# when the run ENDS, so a live job shows nothing there. The checkpoints are the honest
+# mid-run signal: one every 2,000 steps, and `auto_insert_metric_name: false` puts the
+# val loss straight into the filename (checkpoint-<epoch>-<val_loss>.ckpt).
+for d in outputs/m3_screen_*; do
+  [ -d "$d" ] || continue
+  arm=$(basename "$d")
+  ck="$d/checkpoints"
+  n=$(ls -1 "$ck"/checkpoint-*.ckpt 2>/dev/null | wc -l | tr -d ' ')
+  best=$(ls -1 "$ck"/checkpoint-*.ckpt 2>/dev/null | sed -E 's/.*-([0-9]+\.[0-9]+)\.ckpt/\1/' \
+           | sort -g | head -1)
+  last_mtime=$(ls -1t "$ck"/*.ckpt 2>/dev/null | head -1 | xargs -r stat -c %y 2>/dev/null \
+                 | cut -d. -f1)
+  # exp() without python: awk is not blocked and is everywhere.
+  ppl=$( [ -n "$best" ] && awk -v l="$best" 'BEGIN{printf "%.3f", exp(l)}' )
+  printf "  %-22s ckpts=%-3s best val/loss=%-8s ppl=%-9s last write: %s\n" \
+         "$arm" "${n:-0}" "${best:-–}" "${ppl:-–}" "${last_mtime:-–}"
+done
+echo
+echo "  a finished 12,000-step arm has 6 checkpoints; each is one val pass (every 2,000 steps)"
+echo
+# Real failures only. Matching bare "inf" hits config.json, dataset_infos.json and [INFO];
+# matching "Error" hits nothing useful either. Anchor on things that are actually fatal.
 for f in "${LOGDIR}"/m3_screen_*.log "${LOGDIR}"/m3_A*.log; do
   [ -e "$f" ] || continue
-  arm=$(grep -m1 '^\[arm\]' "$f" 2>/dev/null | awk '{print $2}')
-  [ -n "$arm" ] || arm=$(grep -m1 -o 'm3_[A-Za-z0-9_]*' "$f" 2>/dev/null | head -1)
-  fp=$(grep -m1 -o 'mamba3\?(\?[^|]*' "$f" 2>/dev/null | head -c 90)
-  step=$(tr '\r' '\n' < "$f" | grep -oE '[0-9]+/[0-9]+ +[0-9]+:[0-9]+:[0-9]+' | tail -1)
-  ppl=$(tr '\r' '\n' < "$f" | grep -oE 'val/perplexity:? *[0-9.]+' | tail -1)
-  vloss=$(tr '\r' '\n' < "$f" | grep -oE 'val/loss:? *[0-9.]+' | tail -1)
-  bad=$(tr '\r' '\n' < "$f" | grep -cE 'nan|inf|Traceback|CUDA out of memory|Error' )
-  printf "  %-10s %-28s %s\n" "${arm:-?}" "${step:-<no step yet>}" "${vloss:-} ${ppl:-}"
-  [ "${bad:-0}" -gt 0 ] && echo "      ⚠ $bad line(s) matching nan/inf/Traceback/OOM/Error in $f"
+  bad=$(grep -cE 'Traceback|CUDA out of memory|RuntimeError|DUE TO TIME LIMIT|\bnan\b|Segmentation fault' "$f" 2>/dev/null)
+  [ "${bad:-0}" -gt 0 ] && { echo "  ⚠ $f"; grep -E 'Traceback|CUDA out of memory|RuntimeError|DUE TO TIME LIMIT|\bnan\b|Segmentation fault' "$f" | tail -2 | sed 's/^/      /'; }
   restarts=$(grep -c '=== M7-B screen: arm' "$f" 2>/dev/null)
-  [ "${restarts:-0}" -gt 1 ] && echo "      ⚠ this log contains $restarts run headers — the job was REQUEUED and restarted"
+  [ "${restarts:-0}" -gt 1 ] && echo "  ⚠ $f has $restarts run headers — REQUEUED, restarted from step 0"
 done
 hr
 
