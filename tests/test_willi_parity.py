@@ -4276,6 +4276,11 @@ def test_screen_arms_job_array_reads_the_shared_arm_ladder():
 
     assert 'ARMS="${ARMS:-A2 A3 A4 A5 A6}"' in sh, "default set must skip the early-started arms"
     assert "export ARM" in sh, "the arm is handed to the wrapper, which resolves it on the node"
+    assert "unset EXPERIMENT" in sh, (
+        "SLURM propagates the submitting environment and the wrapper lets a caller-supplied "
+        "EXPERIMENT win, so a stray one would funnel all five arms into one output directory"
+    )
+    assert sh.index("unset EXPERIMENT") < sh.index("bash scripts/train_stage0_150m_h100.sh")
     code = "\n".join(ln for ln in sh.splitlines() if not ln.lstrip().startswith("#"))
     assert "model.mamba3_" not in code, (
         "levers must come from mamba3_arms.py, not be hand-written here"

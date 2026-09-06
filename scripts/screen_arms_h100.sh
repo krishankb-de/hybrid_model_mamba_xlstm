@@ -63,6 +63,12 @@ echo "branch: $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)
 # `eval "$(python scripts/mamba3_arms.py env A2)"` silently exports nothing and the job
 # runs the wrapper's defaults; that is how job 2513581 became a second A0 at 120,000
 # steps on 2026-09-06.
+# Every array task must use the arm's canonical experiment name. SLURM propagates the
+# submitting environment, and the wrapper now lets a caller-supplied EXPERIMENT win (so a
+# probe does not write into a screen run's directory) -- which means a stray EXPERIMENT
+# exported in the login shell would silently funnel ALL FIVE arms into one output
+# directory, each overwriting the last one's checkpoints. Clear it.
+unset EXPERIMENT
 export ARM STEPS WARMUP_STEPS
 export SAVE_TOP_K="${SAVE_TOP_K_SCREEN}"
 bash scripts/train_stage0_150m_h100.sh
