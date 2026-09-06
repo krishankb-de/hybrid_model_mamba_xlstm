@@ -304,13 +304,19 @@ import torch
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
 
-# Tiny model — matches hybrid_70m architecture, CPU-safe dimensions
+# Tiny model, CPU-safe dimensions. MAMBA3_PLAN.md M2-H: this used to be ["mamba","mamba","mlstm"],
+# which meant the "every parameter receives a gradient" assertion below never saw a mamba3 or an
+# sLSTM block. All four layer types are exercised now, so a mixer with a dangling parameter fails
+# here rather than three days into a Stage-0 run. use_fast_path=False is deliberate: it is the
+# path that carried an undetected copy of the selective-scan defect for the whole prior campaign.
 cfg = HybridConfig(
-    vocab_size=50257, dim=64, num_layers=3,
-    layer_pattern=["mamba", "mamba", "mlstm"],
+    vocab_size=50257, dim=64, num_layers=4,
+    layer_pattern=["mamba", "mamba3", "mlstm", "slstm"],
     max_position_embeddings=64,
     use_fast_path=False,
     use_tfla=False,
+    mamba3_d_state=16,
+    mamba3_head_dim=32,
 )
 model = HybridLanguageModel(cfg)
 model.train()

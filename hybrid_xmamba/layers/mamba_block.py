@@ -31,6 +31,9 @@ class MambaBlock(nn.Module):
         dt_rank: Rank of dt projection (typically 'auto' = ceil(dim / 16))
         use_fast_path: Whether to use optimized kernel path
     """
+
+    # MAMBA3_PLAN.md M2-E: declared capability, read by `HybridBlock`. `_forward_segmented` re-runs the block per document segment.
+    supports_cu_seqlens = True
     
     def __init__(
         self,

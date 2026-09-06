@@ -126,7 +126,7 @@ class TestsLSTMBlock:
 class TestHybridBlock:
     """Tests for hybrid block wrapper."""
     
-    @pytest.mark.parametrize("layer_type", ["mamba", "mlstm", "slstm"])
+    @pytest.mark.parametrize("layer_type", ["mamba", "mamba3", "mlstm", "slstm"])
     def test_all_layer_types(self, layer_type):
         """Test hybrid block with all layer types."""
         batch_size, seq_len, dim = 2, 64, 256
@@ -135,6 +135,8 @@ class TestHybridBlock:
             dim=dim,
             layer_type=layer_type,
             state_size=16,
+            mamba3_d_state=32,
+            mamba3_head_dim=16,
             head_dim=64,
             num_heads=4,
             hidden_dim=256,

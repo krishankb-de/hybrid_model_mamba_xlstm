@@ -4,6 +4,9 @@ Main model class that assembles the hybrid architecture into a
 causal language modeling backbone.
 """
 
+import dataclasses
+import logging
+
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
@@ -13,6 +16,8 @@ from dataclasses import dataclass
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 from hybrid_xmamba.layers.hybrid_block import create_hybrid_blocks
 from hybrid_xmamba.layers.normalization import RMSNorm
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -93,7 +98,20 @@ class HybridLanguageModel(nn.Module):
         # Embedding layer
         self.embeddings = HybridEmbedding(config)
         
-        # Create hybrid blocks based on layer pattern
+        # Create hybrid blocks based on layer pattern.
+        #
+        # MAMBA3_PLAN.md M2-F: this used to be ~20 hand-written `name=config.name` lines. Every
+        # new config field then had to be added here *and* to the per-type kwarg whitelist in
+        # `hybrid_block.py`, and forgetting either silently fell back to the default -- the exact
+        # failure that cost this project a run in Phase 9 (`norm_topology` was dropped when
+        # building HybridConfig, so HybridNorm weights loaded into a pre_rms model). Passing every
+        # dataclass field removes the class of bug rather than one instance of it: the whitelist
+        # downstream still decides what each mixer receives, but nothing can go missing on the way.
+        layer_kwargs = {f.name: getattr(config, f.name) for f in dataclasses.fields(config)}
+        layer_kwargs["hidden_dim"] = config.slstm_hidden_dim  # sLSTM's own name for it
+        for reserved in ("dim", "num_layers", "layer_pattern", "norm_type", "norm_topology",
+                         "use_mlp", "mlp_ratio"):
+            layer_kwargs.pop(reserved, None)
         self.layers = create_hybrid_blocks(
             dim=config.dim,
             num_layers=config.num_layers,
@@ -102,26 +120,7 @@ class HybridLanguageModel(nn.Module):
             norm_topology=config.norm_topology,
             use_mlp=config.use_mlp,
             mlp_ratio=config.mlp_ratio,
-            # Mamba params
-            state_size=config.state_size,
-            conv_size=config.conv_size,
-            expand_factor=config.expand_factor,
-            dt_rank=config.dt_rank,
-            use_fast_path=config.use_fast_path,
-            scan_impl=config.scan_impl,
-            dt_init_strategy=config.dt_init_strategy,
-            dt_min=config.dt_min,
-            dt_max=config.dt_max,
-            # mLSTM params
-            head_dim=config.head_dim,
-            num_heads=config.num_heads,
-            use_tfla=config.use_tfla,
-            tfla_impl=config.tfla_impl,
-            proj_factor=config.proj_factor,
-            # sLSTM params
-            hidden_dim=config.slstm_hidden_dim,
-            slstm_num_heads=config.slstm_num_heads,
-            use_exponential_gate=config.use_exponential_gate,
+            **layer_kwargs,
         )
         
         # Final normalization
@@ -148,7 +147,42 @@ class HybridLanguageModel(nn.Module):
             mixer = getattr(layer, "mixer", None)
             if hasattr(mixer, "post_model_init"):
                 mixer.post_model_init()
+
+        logger.info(self.architecture_fingerprint())
     
+    def architecture_fingerprint(self) -> str:
+        """One-line summary of what was actually built (MAMBA3_PLAN.md M2-I).
+
+        The expensive failure mode in this project is not a crash, it is training the wrong thing
+        for three days: `hybrid_block` filters mixer kwargs against a per-type whitelist and drops
+        the rest silently, Hydra rejects overrides for keys a yaml never declared, and
+        `HybridConfig` is constructed by hand in a dozen entry points. Phase 9 lost a run to
+        exactly that (`norm_topology` silently dropped). This prints at step 0 of every job, so
+        "is this really Mamba-3?" is answerable by looking at the log rather than by inference.
+        """
+        types = self.get_layer_types()
+        counts = ", ".join(f"{k}x{types.count(k)}" for k in sorted(set(types)))
+        parts = [
+            f"layers=[{counts}]",
+            f"norm_topology={self.config.norm_topology}",
+            f"scan_impl={self.config.scan_impl}",
+            f"tfla_impl={self.config.tfla_impl}",
+            f"dt_init={self.config.dt_init_strategy}",
+        ]
+        if "mamba3" in types:
+            parts.append(
+                "mamba3(d_state={0}, head_dim={1}, ngroups={2}, conv={3}, trapezoid={4}, "
+                "rope={5}, bc_bias={6}, a_mode={7}, mimo_rank={8})".format(
+                    self.config.mamba3_d_state, self.config.mamba3_head_dim,
+                    self.config.mamba3_ngroups, self.config.mamba3_use_conv,
+                    self.config.mamba3_use_trapezoid, self.config.mamba3_use_rope,
+                    self.config.mamba3_bc_bias, self.config.mamba3_a_mode,
+                    self.config.mamba3_mimo_rank,
+                )
+            )
+        parts.append(f"params={sum(p.numel() for p in self.parameters()):,}")
+        return "ARCH " + " | ".join(parts)
+
     def _init_weights(self, module):
         """Initialize model weights."""
         if isinstance(module, nn.Linear):

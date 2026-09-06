@@ -37,6 +37,8 @@ class mLSTMBlock(nn.Module):
         forget_gate_bias_init: Initial bias for f_gate_proj
     """
 
+    # MAMBA3_PLAN.md M2-E: declared capability, read by `HybridBlock`. `_forward_segmented` re-runs the block per document segment.
+    supports_cu_seqlens = True
     def __init__(
         self,
         dim: int,

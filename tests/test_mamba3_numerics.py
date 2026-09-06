@@ -577,3 +577,220 @@ def test_ssd_step_matches_the_chunked_scan():
         )
         ys.append(y_t)
     assert rel_max_err(torch.stack(ys, dim=1), ssd_chunked_scan(chunk_size=16, **kw)) <= 1e-12
+
+
+# ---------------------------------------------------------------------------
+# M2-C..H: Mamba3Block as a registered layer type
+# ---------------------------------------------------------------------------
+
+
+def _m3_block(**kw):
+    from hybrid_xmamba.layers.mamba3_block import Mamba3Block
+
+    torch.manual_seed(0)
+    defaults = dict(dim=128, d_state=64, head_dim=32)
+    defaults.update(kw)
+    return Mamba3Block(**defaults)
+
+
+def _load_yaml_config(name: str):
+    import dataclasses
+    import yaml
+
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+
+    raw = yaml.safe_load(open(f"configs/model/{name}.yaml"))
+    fields = {f.name for f in dataclasses.fields(HybridConfig)}
+    return HybridConfig(**{k: v for k, v in raw.items() if k in fields})
+
+
+def test_mamba3_reduces_to_mamba2_by_default():
+    """M2-C: every Mamba-3 feature is off unless asked for, so A2 is a clean Mamba-2 arm."""
+    block = _m3_block()
+    assert block.use_trapezoid is False
+    assert block.use_rope is False
+    assert block.bc_bias == "none"
+    assert block.a_mode == "static"
+    assert block.mimo_rank == 1
+    assert block.use_conv is True, "Mamba-2 has the short conv; M5 drops it as an arm"
+    assert block.out_norm is None
+
+
+def test_mamba3_forward_backward_is_finite_and_fully_connected():
+    """M2-C/M2-H: the harness's Gate 6 requires every parameter to receive a gradient.
+
+    Worth asserting here too rather than only in the shell harness: `in_proj` is sized for flags
+    that are off, so a plausible refactor that split it into per-feature projections would leave
+    dangling parameters and fail the pre-push gate at the least convenient moment.
+    """
+    block = _m3_block()
+    out = block(torch.randn(2, 48, 128))
+    out.sum().backward()
+    assert out.shape == (2, 48, 128)
+    assert torch.isfinite(out).all()
+    missing = [n for n, p in block.named_parameters() if p.grad is None]
+    assert not missing, f"parameters received no gradient: {missing}"
+
+
+@pytest.mark.parametrize("use_conv", [True, False])
+def test_mamba3_document_reset_matches_running_the_document_alone(use_conv):
+    """M2-E: the strong form of the boundary property.
+
+    Isolation (document B unchanged when A is perturbed) is necessary but not sufficient -- a
+    block that simply zeroed everything would pass it. This also asserts document B's output
+    equals what you get by running document B on its own, which is the property that actually
+    says the reset is correct. With the convolution on, the two paths differ only by fp32
+    rounding because the boundary positions are recomputed with a masked window.
+    """
+    block = _m3_block(use_conv=use_conv).eval()
+    batch, seqlen, boundary = 2, 64, 29
+    ids = torch.zeros(batch, seqlen, dtype=torch.long)
+    ids[:, boundary:] = 1
+    x = torch.randn(batch, seqlen, 128)
+    with torch.no_grad():
+        ref = block(x, cu_seqlens=ids)
+        perturbed = x.clone()
+        perturbed[:, :boundary] += torch.randn(batch, boundary, 128) * 5.0
+        out = block(perturbed, cu_seqlens=ids)
+        standalone = block(x[:, boundary:])
+    assert torch.equal(ref[:, boundary:], out[:, boundary:]), "doc B leaked from doc A"
+    assert torch.allclose(ref[:, boundary:], standalone, atol=1e-5), (
+        "doc B differs from running it standalone -- the reset is isolating but not correct"
+    )
+
+
+def test_supports_cu_seqlens_matches_the_forward_signature():
+    """M2-E: the capability attribute and the real signature must not drift apart.
+
+    `HybridBlock` used to dispatch cu_seqlens on a hard-coded `("mamba", "mlstm")` tuple, which
+    is how sLSTM silently leaked recurrent state across packed documents. The fix is a declared
+    capability; this is the guard that stops the declaration from lying.
+    """
+    import inspect
+
+    from hybrid_xmamba.layers.mamba3_block import Mamba3Block
+    from hybrid_xmamba.layers.mamba_block import MambaBlock
+    from hybrid_xmamba.layers.mlstm_block import mLSTMBlock
+    from hybrid_xmamba.layers.slstm_block import sLSTMBlock
+
+    for cls in (MambaBlock, Mamba3Block, mLSTMBlock, sLSTMBlock):
+        declared = getattr(cls, "supports_cu_seqlens", None)
+        assert declared is not None, f"{cls.__name__} must declare supports_cu_seqlens"
+        accepts = "cu_seqlens" in inspect.signature(cls.forward).parameters
+        assert declared == accepts, (
+            f"{cls.__name__}.supports_cu_seqlens={declared} but forward() "
+            f"{'accepts' if accepts else 'does not accept'} cu_seqlens"
+        )
+
+
+def test_every_layer_type_declares_the_capability():
+    """M2-E: a fifth layer type must fail here rather than silently lose document resets."""
+    import typing
+
+    from hybrid_xmamba.layers.hybrid_block import HybridBlock, LayerType
+
+    for layer_type in typing.get_args(LayerType):
+        block = HybridBlock(
+            dim=64, layer_type=layer_type, state_size=8, head_dim=32, num_heads=2,
+            hidden_dim=64, slstm_num_heads=2, mamba3_d_state=16, mamba3_head_dim=32,
+        )
+        assert hasattr(block.mixer, "supports_cu_seqlens"), (
+            f"{layer_type} mixer does not declare supports_cu_seqlens"
+        )
+        assert block._mixer_takes_cu_seqlens == block.mixer.supports_cu_seqlens
+
+
+def test_hybrid_150m_m3_is_parameter_matched_to_the_control():
+    """M2-G: structural equality, which is a far stronger claim than a parameter band.
+
+    A band says "close enough". This says *only the nine mamba mixers changed*: embeddings, the
+    LM head, every MLP, every mLSTM mixer and every norm are identical in size, and the whole
+    model's delta is exactly nine times the per-mixer delta. That is what makes a quality
+    difference attributable to the operator rather than to capacity.
+    """
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    torch.manual_seed(0)
+    ctrl = HybridLanguageModel(_load_yaml_config("hybrid_150m_v2"))
+    torch.manual_seed(0)
+    m3 = HybridLanguageModel(_load_yaml_config("hybrid_150m_m3"))
+
+    assert ctrl.get_layer_types().count("mlstm") == m3.get_layer_types().count("mlstm") == 3
+    assert m3.get_layer_types().count("mamba3") == ctrl.get_layer_types().count("mamba") == 9
+
+    def n(module):
+        return sum(p.numel() for p in module.parameters())
+
+    assert n(ctrl.embeddings) == n(m3.embeddings)
+    assert n(ctrl.lm_head) == n(m3.lm_head)
+    for a, b in zip(ctrl.layers, m3.layers):
+        assert n(a.mlp) == n(b.mlp), "MLP width moved -- arms are no longer capacity-matched"
+        if a.layer_type == "mlstm":
+            assert n(a.mixer) == n(b.mixer)
+
+    per_mixer = n(m3.layers[0].mixer) - n(ctrl.layers[0].mixer)
+    assert n(m3) - n(ctrl) == 9 * per_mixer, "something outside the mamba mixers changed"
+    assert 181e6 < n(m3) < 186e6, f"{n(m3)/1e6:.2f}M leaves the control's drift band"
+    assert abs(n(m3) - n(ctrl)) / n(ctrl) < 0.02, "parameter matching worse than 2%"
+
+
+def test_mamba3_config_flags_reach_the_block():
+    """M2-F: `hybrid_block` filters kwargs per type and silently drops the rest.
+
+    A `mamba3_*` field can therefore reach HybridConfig and never reach the mixer -- the same
+    silent-drop that cost this project a run in Phase 9. Assert the levers actually land.
+    """
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    model = HybridLanguageModel(
+        HybridConfig(
+            vocab_size=256, dim=128, num_layers=2, layer_pattern=["mamba3", "mlstm"],
+            head_dim=32, num_heads=4, max_position_embeddings=64,
+            mamba3_d_state=32, mamba3_head_dim=16, mamba3_chunk_size=8,
+            mamba3_use_conv=False, mamba3_a_mode="data_dependent", mamba3_dt_limit=0.5,
+        )
+    )
+    mixer = model.layers[0].mixer
+    assert (mixer.d_state, mixer.head_dim, mixer.chunk_size) == (32, 16, 8)
+    assert mixer.use_conv is False and mixer.conv1d is None
+    assert mixer.a_mode == "data_dependent" and mixer.dt_limit == 0.5
+
+
+def test_mimo_is_plumbed_but_refuses_to_run():
+    """Decision 3: MIMO ships as an interface and is never trained. Make that explicit."""
+    with pytest.raises(NotImplementedError, match="MIMO"):
+        _m3_block(mimo_rank=4)
+
+
+@pytest.mark.parametrize(
+    "bad_kwarg", ["mamba3_use_ropee", "mamba3_dstate", "mlstm_gate_softcap", "slstm_hidden_size"]
+)
+def test_typo_in_a_prefixed_mixer_option_raises(bad_kwarg):
+    """M2-F: a lever that names a mixer family but matches nothing must not be dropped silently.
+
+    `HybridBlock` filters kwargs against a per-type whitelist, so `mamba3_use_ropee=True` used to
+    vanish without a word and the arm would quietly run without RoPE. Unprefixed kwargs are still
+    dropped quietly on purpose -- the flat bag carries every type's fields to every block.
+    """
+    from hybrid_xmamba.layers.hybrid_block import HybridBlock
+
+    with pytest.raises(ValueError, match="unknown mixer option"):
+        HybridBlock(
+            dim=64, layer_type="mamba3", mamba3_d_state=16, mamba3_head_dim=32,
+            **{bad_kwarg: True},
+        )
+
+
+def test_architecture_fingerprint_names_the_operator_and_its_flags():
+    """M2-I: the line that answers "is this really Mamba-3?" from a log, at step 0."""
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    fp = HybridLanguageModel(_load_yaml_config("hybrid_150m_m3")).architecture_fingerprint()
+    assert fp.startswith("ARCH ")
+    for token in ("mamba3x9", "mlstmx3", "d_state=128", "trapezoid=False", "rope=False",
+                  "scan_impl=legacy", "params="):
+        assert token in fp, f"fingerprint is missing {token!r}: {fp}"
+
+    ctrl = HybridLanguageModel(_load_yaml_config("hybrid_150m_v2")).architecture_fingerprint()
+    assert "mamba3" not in ctrl and "mambax9" in ctrl

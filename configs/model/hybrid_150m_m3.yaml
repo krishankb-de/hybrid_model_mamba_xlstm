@@ -1,0 +1,93 @@
+# 150M Mamba-3 — the A2 arm of MAMBA3_PLAN.md.
+#
+# Identical to hybrid_150m_v2 in every respect except that its 9 `mamba` layers are `mamba3`.
+# The mLSTM count and placement, dims, LR schedule and norm topology are all held fixed, so the
+# screen compares one variable. With every mamba3_* flag at its default this block is exactly
+# Mamba-2 SSD; M3/M4/M5 turn on the trapezoidal rule, the rotation and the B/C biases in turn.
+#
+# Parameter matching (measured, not estimated): the mamba3 mixer is 3,824,712 params against the
+# Mamba-1 mixer's 3,772,448, so the model lands at 184.19M vs the control's 183.72M -- +0.24%,
+# and inside the [181, 186]M band the control's own drift alarm uses. Dropping x_proj, dt_proj
+# and the (d_inner, state) A_log nearly pays for an 8x wider B/C, which is why d_state can go
+# 16 -> 128 for almost nothing.
+#
+# Do not raise mamba3_ngroups above 1 or mamba3_d_state above 128 in a headline arm: both leave
+# the parameter-matched regime (186.16M and 186.21M respectively) and must be reported as scaled
+# arms instead.
+
+model_type: "hybrid_lm"
+
+# Architecture
+vocab_size: 50257
+dim: 768
+num_layers: 12
+layer_pattern: ["mamba3", "mamba3", "mamba3", "mamba3", "mlstm", "mlstm", "mlstm", "mamba3", "mamba3", "mamba3", "mamba3", "mamba3"]
+
+# Mamba-1 parameters — retained so this config still resolves against HybridConfig, but unused:
+# no `mamba` layers remain in the pattern above.
+state_size: 16
+conv_size: 4
+expand_factor: 2
+dt_rank: null
+use_fast_path: true
+
+# Mamba-3 parameters. Every flag here is the Mamba-2 reduction; the ablation arms override them.
+mamba3_d_state: 128        # 8x the Mamba-1 setting, +1.4% params (B/C shared across heads)
+mamba3_head_dim: 64        # -> nheads = 1536 / 64 = 24
+mamba3_ngroups: 1          # multi-value attention: one B/C for all heads
+mamba3_chunk_size: 64
+mamba3_use_conv: true      # dropped as an arm at M5, not by default
+mamba3_conv_size: 4
+mamba3_use_trapezoid: false   # M3 arm
+mamba3_use_rope: false        # M4 arm
+mamba3_rope_fraction: 0.5
+mamba3_bc_bias: "none"        # M5 arm ("one_init" is the paper's setting)
+mamba3_mimo_rank: 1           # plumbed, never run (decision 3)
+mamba3_a_mode: "static"       # "data_dependent" is Mamba-3's own default
+mamba3_a_floor: 1.0e-4
+mamba3_dt_limit: 1.0          # replaces the RMSNorm that used to bound Delta by accident
+mamba3_use_outproj_norm: false
+
+# mLSTM parameters
+head_dim: 64           # keep 64 (matrix state ∝ head_dim²); num_heads scales instead
+num_heads: 12          # 768 / 64 = 12
+use_tfla: true
+proj_factor: 2
+
+# sLSTM parameters (unused by this pattern; kept for config completeness)
+slstm_hidden_dim: 768
+slstm_num_heads: 4
+use_exponential_gate: true
+
+# Shared parameters
+norm_type: "rms"
+use_mlp: true
+mlp_ratio: 4.0
+
+# Training parameters
+max_position_embeddings: 1024
+dropout: 0.1
+initializer_range: 0.02
+
+# Generation parameters
+use_cache: true
+tie_word_embeddings: false
+
+use_gradient_checkpointing: false
+proj_head_dropout: 0.1
+norm_topology: hybrid
+pooling_strategy: attention
+
+# Optimization
+# LR √-width-scaled from the 70M's 6e-4 (sqrt(512/768)≈0.82 → ~4.9e-4). Start
+# conservative at 4.0e-4 (fresh 150M pretrain + mLSTM gate sensitivity); bump to
+# 5e-4 if the Stage-0 loss curve descends slowly. warmup_steps 1000→2000 for the
+# larger model. max_steps here is a fallback; the Phase-5 SLURM script sets the
+# real 150M Chinchilla target via trainer.max_steps (~90-120K, ~3B tokens).
+learning_rate: 4.0e-4
+weight_decay: 0.1
+warmup_steps: 2000
+max_steps: 90000
+gradient_clip_val: 1.0
+
+distill: null

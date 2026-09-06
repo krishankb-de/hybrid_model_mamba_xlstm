@@ -48,7 +48,7 @@ class HybridConfig:
     vocab_size: int = 50257
     dim: int = 768
     num_layers: int = 12
-    layer_pattern: List[Literal["mamba", "mlstm", "slstm"]] = field(
+    layer_pattern: List[Literal["mamba", "mamba3", "mlstm", "slstm"]] = field(
         default_factory=lambda: ["mamba", "mamba", "mlstm"]
     )
     
@@ -64,6 +64,24 @@ class HybridConfig:
     dt_min: float = 1e-3
     dt_max: float = 1e-1
     tfla_impl: str = "legacy"          # "legacy" | "exact"  (the mLSTM counterpart, M1-H)
+
+    # --- Mamba-3 (MAMBA3_PLAN.md M2). Every flag defaults to the Mamba-2 reduction, so a
+    # `mamba3` layer built from defaults is exactly Mamba-2 SSD and each arm moves one variable.
+    mamba3_d_state: int = 128          # 8x the Mamba-1 setting for +1.4% params (B/C are shared)
+    mamba3_head_dim: int = 64
+    mamba3_ngroups: int = 1            # >1 leaves the parameter-matched regime -- see the plan
+    mamba3_chunk_size: int = 64
+    mamba3_use_conv: bool = True       # dropped as an arm at M5, not by default
+    mamba3_conv_size: int = 4
+    mamba3_use_trapezoid: bool = False # Sec 3.1 (M3)
+    mamba3_use_rope: bool = False      # Sec 3.2 (M4)
+    mamba3_rope_fraction: float = 0.5
+    mamba3_bc_bias: str = "none"       # "none" | "zero_init" | "one_init"  (Sec 3.4, M5)
+    mamba3_mimo_rank: int = 1          # plumbed, never run (decision 3)
+    mamba3_a_mode: str = "static"      # "static" (Mamba-2) | "data_dependent" (Mamba-3)
+    mamba3_a_floor: float = 1e-4
+    mamba3_dt_limit: float = 1.0
+    mamba3_use_outproj_norm: bool = False
     
     # mLSTM parameters
     head_dim: int = 64
@@ -148,7 +166,7 @@ class HybridConfig:
             self.slstm_hidden_dim = self.dim
         
         # Validate layer pattern
-        valid_types = {"mamba", "mlstm", "slstm"}
+        valid_types = {"mamba", "mamba3", "mlstm", "slstm"}
         for layer_type in self.layer_pattern:
             if layer_type not in valid_types:
                 raise ValueError(
@@ -168,6 +186,15 @@ class HybridConfig:
             raise ValueError(f"scan_impl must be 'legacy' or 'exact', got {self.scan_impl!r}")
         if self.tfla_impl not in ("legacy", "exact"):
             raise ValueError(f"tfla_impl must be 'legacy' or 'exact', got {self.tfla_impl!r}")
+        if self.mamba3_bc_bias not in ("none", "zero_init", "one_init"):
+            raise ValueError(
+                "mamba3_bc_bias must be 'none', 'zero_init' or 'one_init', got "
+                f"{self.mamba3_bc_bias!r}"
+            )
+        if self.mamba3_a_mode not in ("static", "data_dependent"):
+            raise ValueError(
+                f"mamba3_a_mode must be 'static' or 'data_dependent', got {self.mamba3_a_mode!r}"
+            )
         if self.dt_init_strategy not in ("none", "mamba"):
             raise ValueError(
                 f"dt_init_strategy must be 'none' or 'mamba', got {self.dt_init_strategy!r}"

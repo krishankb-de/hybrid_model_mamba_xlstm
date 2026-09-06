@@ -1,7 +1,7 @@
 {
-  "current_phase": "M2_mamba3_block",
-  "last_updated": "2026-09-06T02:26:23+02:00",
-  "status": "M0+M1 complete: both recurrences correct behind flags, defaults unchanged. M2 next: Mamba3Block = exactly Mamba-2 SSD.",
+  "current_phase": "M3_exponential_trapezoidal",
+  "last_updated": "2026-09-06T02:39:02+02:00",
+  "status": "M0-M2 complete. Mamba3Block registered and parameter-matched; flags all-off == Mamba-2 SSD. M3 next: exponential-trapezoidal via the extra_terms hook.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
     "name": "h100_scaling_mamba3",
@@ -303,7 +303,7 @@
     },
     "M2": {
       "title": "Mamba3Block = exactly Mamba-2 SSD (+ the sequential oracle)",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "M2-A": {
           "done": true,
@@ -314,35 +314,35 @@
           "desc": "ssd_interface.ssd_chunked_scan() — chunked, scalar-A/head, log-space mask, matmul-shaped,"
         },
         "M2-C": {
-          "done": false,
+          "done": true,
           "desc": "Mamba3Block: in_proj → [z, x, B, C, dt, A, trap, angles], BCNorm, optional conv, SSD scan,"
         },
         "M2-D": {
-          "done": false,
+          "done": true,
           "desc": "Register the type: configuration_hybrid.py:51-53 Literal + :145-151 valid_types;"
         },
         "M2-E": {
-          "done": false,
+          "done": true,
           "desc": "supports_cu_seqlens contract + signature drift guard + sLSTM leak warning."
         },
         "M2-F": {
-          "done": false,
+          "done": true,
           "desc": "New HybridConfig fields, all defaulting to Mamba-2 behaviour. Replace the 18-named-kwargs"
         },
         "M2-G": {
-          "done": false,
+          "done": true,
           "desc": "Tests: \"mamba3\" in test_layers.py:129; update test_models.py:114; structural equality"
         },
         "M2-H": {
-          "done": false,
+          "done": true,
           "desc": "Extend Gate 6 to the 4-type pattern [\"mamba\",\"mamba3\",\"mlstm\",\"slstm\"] at dim=64"
         },
         "M2-I": {
-          "done": false,
+          "done": true,
           "desc": "Arch fingerprint logged at HybridLanguageModel.__init__ (layer_pattern, mixer classes,"
         },
         "M2-J": {
-          "done": false,
+          "done": true,
           "desc": "20-sample beam-decode timing probe. Tripwire: if > 1.5× the mamba1 time, promote M6 to M3."
         }
       },
@@ -351,7 +351,13 @@
         "accuracy": "rel-max-err <=1e-12 (measured ~4e-16) vs the fp64 sequential oracle, all shapes/chunks/boundary layouts",
         "boundary_handling": "three boolean masks over segment ids (same / carry_ok / end_ok); no Python loop over segments",
         "bug_found_1": "the -1e30 log-decay sentinel destroys the finite part of a cumsum (fp64 loses <1e14 next to 1e30), so A_cum[end]-A_cum[t] came back exactly 0 and killed within-document decay too. Replaced with boolean masks.",
-        "bug_found_2": "repeat_interleave gives head-indexed B but the einsum labelled it 'g', silently summing over heads"
+        "bug_found_2": "repeat_interleave gives head-indexed B but the einsum labelled it 'g', silently summing over heads",
+        "m2c_block": "hybrid_xmamba/layers/mamba3_block.py; in_proj sized for every flag so params are constant across arms A2..A6",
+        "m2g_param_match": "hybrid_150m_m3 = 184,192,200 vs control 183,721,824 (+0.256%); structural-equality test asserts only the 9 mamba mixers changed",
+        "m2e_slstm_leak": "fixed: cu_seqlens dispatched on a declared capability, not a hard-coded ('mamba','mlstm') tuple. sLSTM had been silently leaking state across packed documents.",
+        "m2h_gate6": "widened to ['mamba','mamba3','mlstm','slstm'] with use_fast_path=False",
+        "m2i_fingerprint": "ARCH layers=[mamba3x9, mlstmx3] | ... | mamba3(d_state=128, ..., trapezoid=False, rope=False) | params=184,192,200",
+        "m2j_decode_probe": "mamba3 vs mamba1: decode 1.04x, prefill 0.79x. Tripwire (>1.5x) NOT tripped -- M6 stays after M3-M5."
       },
       "verdict": null
     },
@@ -578,7 +584,9 @@
     "2026-09-06: M1 complete. scan_impl and tfla_impl flags added (both default 'legacy'); exact paths verified against fp64 oracles; dt_init_strategy='mamba' + norm_topology='hybrid_bc' put Delta in range. Suite 227 passed / 1 skipped / 5 deselected / 21 xfailed. py3.9 static gates green.",
     "2026-09-06: current_phase -> M2_mamba3_block",
     "2026-09-06: Batching decided: M7-B uses a SLURM job array (--array=0-7, one submission for 8 arms); M8 uses --dependency=afterok chaining for Stage-0 -> tower -> decoder -> eval -> CheXbert; eval+CheXbert share one allocation. A0/A0-seed/A1 can start on the cluster before M2-M6 land (M7-A2).",
-    "2026-09-06: M2-A/B done. hybrid_xmamba/kernels/ssd/ -- fp64 sequential oracle + ssd_step (the M6 decode path) and the chunked SSD scan. Exact (~4e-16) across 4 shapes x 3 chunk sizes, with document boundaries mid-chunk / on chunk edge / multi-doc, and the extra_terms hook M3 needs. 88 passed, 21 xfailed."
+    "2026-09-06: M2-A/B done. hybrid_xmamba/kernels/ssd/ -- fp64 sequential oracle + ssd_step (the M6 decode path) and the chunked SSD scan. Exact (~4e-16) across 4 shapes x 3 chunk sizes, with document boundaries mid-chunk / on chunk edge / multi-doc, and the extra_terms hook M3 needs. 88 passed, 21 xfailed.",
+    "2026-09-06: M2 complete. Mamba3Block registered as a fourth layer type; flags all-off is exactly Mamba-2 SSD. 150M m3 config lands at 184,192,200 params (+0.256%), delta exactly 9x the per-mixer delta. All 9 willi gates green under py3.9.23.",
+    "2026-09-06: current_phase -> M3_exponential_trapezoidal"
   ],
   "open_questions": []
 }

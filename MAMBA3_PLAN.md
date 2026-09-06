@@ -338,27 +338,27 @@ Test-first: M1-A/B/C must **fail on HEAD**.
       Writing the oracle is mandatory for testing anyway, and it *is* the decode step — free de-risking.
 - [x] **M2-B** `ssd_interface.ssd_chunked_scan()` — chunked, scalar-`A`/head, log-space mask, matmul-shaped,
       native `cu_seqlens` decay masking. Carry the fp32 policy explicitly (see FM3).
-- [ ] **M2-C** `Mamba3Block`: `in_proj → [z, x, B, C, dt, A, trap, angles]`, BCNorm, optional conv, SSD scan,
+- [x] **M2-C** `Mamba3Block`: `in_proj → [z, x, B, C, dt, A, trap, angles]`, BCNorm, optional conv, SSD scan,
       gate `* silu(z)`, `out_proj`, `D` per head. Contract `forward(x, cache=None, cu_seqlens=None) -> Tensor`,
       **positional order load-bearing** (`hybrid_lm.py:196-199` checkpoints positionally).
-- [ ] **M2-D** Register the type: `configuration_hybrid.py:51-53` Literal + `:145-151` `valid_types`;
+- [x] **M2-D** Register the type: `configuration_hybrid.py:51-53` Literal + `:145-151` `valid_types`;
       `hybrid_block.py:17` `LayerType`, `:71-100` dispatch.
-- [ ] **M2-E** `supports_cu_seqlens` contract + signature drift guard + sLSTM leak warning.
+- [x] **M2-E** `supports_cu_seqlens` contract + signature drift guard + sLSTM leak warning.
       Extend `TestDocBoundaryReset` to `mamba3`.
-- [ ] **M2-F** New `HybridConfig` fields, **all defaulting to Mamba-2 behaviour**. Replace the 18-named-kwargs
+- [x] **M2-F** New `HybridConfig` fields, **all defaulting to Mamba-2 behaviour**. Replace the 18-named-kwargs
       call at `hybrid_lm.py:97-120` with a `dataclasses.fields`-filtered pass-through — this kills the
       silent-drop bug *class*, not an instance. Make `hybrid_block.py`'s whitelist **raise** on unknown kwargs
       carrying a recognized prefix (`mamba3_`, `mlstm_`, `slstm_`) instead of silently dropping them.
-- [ ] **M2-G** Tests: `"mamba3"` in `test_layers.py:129`; update `test_models.py:114`; **structural equality**
+- [x] **M2-G** Tests: `"mamba3"` in `test_layers.py:129`; update `test_models.py:114`; **structural equality**
       test (embeddings/lm_head/MLPs/mLSTM mixers/norms exactly equal to the control, and
       `total_m3 − total_ctrl == 9 × (mixer_m3 − mixer_m1)`) — far stronger than a band; plus a ±2% band for
       m3 yamls, predicted **184,166,640**. **Leave `test_150m_v2_param_count` byte-identical** — it guards the control.
-- [ ] **M2-H** Extend Gate 6 to the 4-type pattern `["mamba","mamba3","mlstm","slstm"]` at `dim=64`
+- [x] **M2-H** Extend Gate 6 to the 4-type pattern `["mamba","mamba3","mlstm","slstm"]` at `dim=64`
       (`d_inner=128`, `nheads=2`, `use_fast_path=False`) — it currently only exercises `["mamba","mamba","mlstm"]`,
       so a dangling mamba3 parameter would slip past "every parameter receives a gradient".
-- [ ] **M2-I** **Arch fingerprint** logged at `HybridLanguageModel.__init__` (layer_pattern, mixer classes,
+- [x] **M2-I** **Arch fingerprint** logged at `HybridLanguageModel.__init__` (layer_pattern, mixer classes,
       mamba3 flag tuple, total params) into `utils/run_metadata.py` output — eyeballable at step 0 of a 3-day job.
-- [ ] **M2-J** 20-sample beam-decode timing probe. **Tripwire:** if > 1.5× the mamba1 time, promote M6 to M3.
+- [x] **M2-J** 20-sample beam-decode timing probe. **Tripwire:** if > 1.5× the mamba1 time, promote M6 to M3.
 
 ### M3 — Exponential-trapezoidal
 - [ ] **M3-A** `trap` head, `λ = sigmoid(trap)`, two SSD passes sharing one mask, 1-step `(B,x)` chunk carry,
