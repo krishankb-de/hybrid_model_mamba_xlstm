@@ -481,7 +481,12 @@ def main(cfg: DictConfig):
             dirpath=cfg.checkpoint_dir,
             monitor="val/loss",
             mode="min",
-            save_top_k=3,
+            # Read from the config instead of hard-coding 3. A 150M checkpoint is ~2.1 GB, so
+            # top-3 plus `last` is 8.4 GB per run -- 67 GB across an 8-arm screen, which does not
+            # fit the 200 GB home quota. A screen only ever reads the final val loss, so
+            # SAVE_TOP_K=0 is the right setting there; `save_last` stays on regardless because
+            # aisc-batch is preemptible and `--requeue` needs `last.ckpt` to resume.
+            save_top_k=cfg.callbacks.checkpoint.get("save_top_k", 3),
             save_last=True,
             every_n_train_steps=cfg.callbacks.checkpoint.get("every_n_train_steps", 2000),
             filename="stage0_kd-{step:06d}-{val/loss:.4f}",

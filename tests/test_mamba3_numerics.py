@@ -993,3 +993,19 @@ def test_arm_configs_survive_the_hydra_round_trip(config_name, expected):
     )
     assert mixer.scan_impl == expected["scan_impl"], "scan_impl reached the config but not the mixer"
     assert mixer.dt_init_strategy == expected["dt_init_strategy"]
+
+
+def test_stage0_checkpoint_retention_is_configurable():
+    """A hard-coded save_top_k is a quota bug, not a style issue.
+
+    At ~2.1 GB per 150M checkpoint, top-3 plus `last` is 8.4 GB per run and 67 GB across an
+    8-arm screen -- more than the 200 GB home quota can absorb alongside the existing outputs.
+    The SLURM wrapper exposes SAVE_TOP_K for exactly this reason, so the trainer has to read it.
+    """
+    src = (pathlib.Path(__file__).resolve().parent.parent
+           / "scripts" / "train_stage0_distill.py").read_text()
+    assert "save_top_k=3," not in src, "save_top_k is hard-coded; SAVE_TOP_K cannot take effect"
+    assert 'save_top_k=cfg.callbacks.checkpoint.get("save_top_k"' in src
+    assert "save_last=True" in src, (
+        "save_last must stay on: aisc-batch is preemptible and --requeue resumes from last.ckpt"
+    )
