@@ -1,6 +1,6 @@
 {
   "current_phase": "M1_pin_the_defect",
-  "last_updated": "2026-09-06T02:02:14+02:00",
+  "last_updated": "2026-09-06T02:14:50+02:00",
   "status": "M0 complete. M1 next: pin the scan defect with failing tests before any fix.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
@@ -247,7 +247,7 @@
     },
     "M1": {
       "title": "Pin the defect, then fix it on the legacy path (produces arm A1)",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "M1-A": {
           "done": true,
@@ -266,23 +266,23 @@
           "desc": "Mark all three xfail(strict=True) citing this plan, so CI is green on HEAD and flips loudly."
         },
         "M1-E": {
-          "done": false,
+          "done": true,
           "desc": "scan_impl: {\"legacy\",\"exact\"}, default legacy. For the Mamba-1 form do not use the 4-D"
         },
         "M1-F": {
-          "done": false,
+          "done": true,
           "desc": "dt_init_strategy: {none, mamba} (default none) + norm_topology: hybrid_bc (B/C norm"
         },
         "M1-G": {
-          "done": false,
+          "done": true,
           "desc": "Fix _slow_forward too, or collapse both into one function."
         },
         "M1-H": {
-          "done": false,
+          "done": true,
           "desc": "TFLA intra-chunk log-space fix (tfla_interface.py:93-95 only; do not touch :149)."
         },
         "M1-I": {
-          "done": false,
+          "done": true,
           "desc": "Flip all three xfails. Gate: rel-err ≤ 1e-6 at every Δ, and legacy bit-identical to today."
         }
       },
@@ -291,7 +291,13 @@
         "m1a_scan_xfails": "15 (selective_scan_parallel 7, public API 4, _slow_forward 4)",
         "m1b_delta_150m_v2": "pre_rms mean 0.6932/max 0.7587; hybrid mean 0.8070/max 4.8130/max|dtA| 77.01",
         "m1c_tfla_rel_max_err_shipped": "0.882 (forget_bias=0.0, chunk=64)",
-        "m1d_marker_gap": "pytest.mark.cuda now applied to 3 classes in test_kernels.py; 5 tests deselect instead of silently skipping"
+        "m1d_marker_gap": "pytest.mark.cuda now applied to 3 classes in test_kernels.py; 5 tests deselect instead of silently skipping",
+        "m1e_exact_scan": "rel-max-err ~1e-7 (fp32 floor) at delta in {1e-3..5.0}, all chunk sizes; legacy unchanged at 0.92 @ delta=0.705",
+        "m1e_algorithm": "flip the parallel axis: sequential within chunk (all chunks in parallel) + carry across chunks. depth cs+L/cs, no mask, no division. Avoids the 19.3GB (cs,cs,d_inner,N) segsum mask.",
+        "m1f_delta_grid": "pre_rms/none 0.6932 | pre_rms/mamba 0.0211 OK | hybrid/none 0.7987 | hybrid/mamba 0.3320 (dt_norm erases the fix) | hybrid_bc/none 0.6932 | hybrid_bc/mamba 0.0211 OK",
+        "m1g_slow_forward": "collapsed into the shared interface; ulp-level change only (rel 9.8e-08) from Bx multiplication order",
+        "m1h_tfla_exact": "re-centre on half the chunk log-decay + guarded sequential fallback when the half-range exceeds 40 (fp32 exp limit). worst error 8.5e-07 across forget_bias -4..3 x chunk 8/64/128; legacy is 1.00 at bias -4",
+        "m1i_perf_cpu": "exact scan is 2-3x FASTER than legacy on CPU (0.35x/0.47x wall at L=128/512) -- legacy's 5-D cumsum+divide dominates. exact TFLA 1.03x. GPU unmeasured."
       },
       "verdict": null
     },
@@ -554,7 +560,8 @@
     "2026-09-06: Full M2+M3+M4 math prototyped in fp64 and verified exact before any code was written (F7). Implementation phases are engineering, not research.",
     "2026-09-06: M0 complete. Branch h100_scaling_mamba3 @ 20a1d27; MAMBA3_PLAN.md + mamba3_state.json shipped; .gitignore allowlisted; CLAUDE.md repointed (incl. corrections to the false Triton claim and the stale 'forward takes only input_ids' claim); MAMBA3_INTEGRATION_PLAN.md + mamba3_integration_state.json retired. Baseline test suite green: 164 passed, 6 skipped.",
     "2026-09-06: current_phase -> M1_pin_the_defect",
-    "2026-09-06: M1-A/B/C/D done. tests/test_mamba3_numerics.py pins all three defects with strict xfails: 20 passed, 19 xfailed, 0 failed. Suite 184 passed / 1 skipped / 5 deselected / 19 xfailed. mLSTM error QUANTIFIED (0.882 at shipped config), closing the last open measurement."
+    "2026-09-06: M1-A/B/C/D done. tests/test_mamba3_numerics.py pins all three defects with strict xfails: 20 passed, 19 xfailed, 0 failed. Suite 184 passed / 1 skipped / 5 deselected / 19 xfailed. mLSTM error QUANTIFIED (0.882 at shipped config), closing the last open measurement.",
+    "2026-09-06: M1 complete. scan_impl and tfla_impl flags added (both default 'legacy'); exact paths verified against fp64 oracles; dt_init_strategy='mamba' + norm_topology='hybrid_bc' put Delta in range. Suite 227 passed / 1 skipped / 5 deselected / 21 xfailed. py3.9 static gates green."
   ],
   "open_questions": []
 }

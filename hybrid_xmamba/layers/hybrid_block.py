@@ -54,10 +54,15 @@ class HybridBlock(nn.Module):
         # for blocks >= 1. First block stays pure pre-norm to avoid early-training instability.
         self.norm_topology = norm_topology
         self.is_first_block = is_first_block
-        self._use_hybrid_norm = (norm_topology == "hybrid")
+        # MAMBA3_PLAN.md M1-F: "hybrid_bc" is "hybrid" minus the Delta norm -- B/C norms only,
+        # matching Mamba-3 Sec 3.4. Everything else (FFN post-norm placement, mLSTM projection
+        # norms) is identical, so the two topologies differ in exactly one variable. "hybrid"
+        # itself is untouched, so every existing checkpoint keeps loading.
+        self._use_hybrid_norm = norm_topology in ("hybrid", "hybrid_bc")
         self._ffn_post_norm = self._use_hybrid_norm and not is_first_block
         layer_kwargs = dict(layer_kwargs)
         layer_kwargs["use_hybrid_norm"] = self._use_hybrid_norm
+        layer_kwargs.setdefault("use_dt_norm", norm_topology != "hybrid_bc")
         
         # Pre-normalization for mixer
         if norm_type.lower() == "rms":
@@ -70,12 +75,14 @@ class HybridBlock(nn.Module):
         
         if self.layer_type == "mamba":
             # MambaBlock parameters
-            mamba_params = {"state_size", "conv_size", "expand_factor", "dt_rank", "use_fast_path", "use_hybrid_norm"}
+            mamba_params = {"state_size", "conv_size", "expand_factor", "dt_rank", "use_fast_path",
+                            "use_hybrid_norm", "use_dt_norm", "scan_impl", "dt_init_strategy",
+                            "dt_min", "dt_max"}
             filtered_kwargs = {k: v for k, v in layer_kwargs.items() if k in mamba_params}
             self.mixer = MambaBlock(dim, **filtered_kwargs)
         elif self.layer_type == "mlstm":
             # mLSTMBlock parameters
-            mlstm_params = {"head_dim", "num_heads", "use_tfla", "proj_factor",
+            mlstm_params = {"head_dim", "num_heads", "use_tfla", "tfla_impl", "proj_factor",
                             "gate_soft_cap", "input_gate_bias_init", "forget_gate_bias_init",
                             "use_hybrid_norm"}
             filtered_kwargs = {k: v for k, v in layer_kwargs.items() if k in mlstm_params}

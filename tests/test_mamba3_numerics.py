@@ -21,6 +21,7 @@ import torch
 
 from hybrid_xmamba.kernels.selective_scan.scan_interface import (
     selective_scan,
+    selective_scan_exact,
     selective_scan_parallel,
 )
 from hybrid_xmamba.layers.mamba_block import MambaBlock
@@ -42,17 +43,25 @@ def _xfail_if(condition: bool, reason: str = _DEFECT_SCAN):
     return [pytest.mark.xfail(strict=True, reason=reason)] if condition else []
 
 
+# "legacy" reproduces the pre-2026-09 numerics on purpose (MAMBA3_PLAN.md decision 7), so its
+# failures are permanent xfails, not a TODO. "exact" must pass everywhere -- those are the cases
+# that make M1 a fix rather than a description.
+SCAN_IMPLS = ("legacy", "exact")
+
+
 def _scan_cases():
     """Measured on HEAD: chunk=8 rescues delta=0.1 but nothing rescues delta>=0.3."""
-    for delta in DELTAS:
-        for chunk in CHUNKS:
-            broken = delta >= 0.3 or (delta >= 0.1 and chunk >= 64)
-            yield pytest.param(delta, chunk, marks=_xfail_if(broken))
+    for impl in SCAN_IMPLS:
+        for delta in DELTAS:
+            for chunk in CHUNKS:
+                broken = impl == "legacy" and (delta >= 0.3 or (delta >= 0.1 and chunk >= 64))
+                yield pytest.param(impl, delta, chunk, marks=_xfail_if(broken))
 
 
 def _delta_cases():
-    for delta in DELTAS:
-        yield pytest.param(delta, marks=_xfail_if(delta >= 0.1))
+    for impl in SCAN_IMPLS:
+        for delta in DELTAS:
+            yield pytest.param(impl, delta, marks=_xfail_if(impl == "legacy" and delta >= 0.1))
 
 
 def sequential_selective_scan_fp64(
@@ -104,27 +113,30 @@ def _fixture(delta: float, seq_len: int = 128, dim: int = 8, state: int = 16):
     )
 
 
-@pytest.mark.parametrize("delta,chunk_size", list(_scan_cases()))
-def test_selective_scan_parallel_matches_sequential_reference(delta, chunk_size):
-    """M1-A: the chunked scan must equal the sequential recurrence it claims to compute."""
+@pytest.mark.parametrize("scan_impl,delta,chunk_size", list(_scan_cases()))
+def test_selective_scan_parallel_matches_sequential_reference(scan_impl, delta, chunk_size):
+    """M1-A/M1-E: the chunked scan must equal the sequential recurrence it claims to compute."""
     x, dt, A, B, C, D = _fixture(delta)
     want = sequential_selective_scan_fp64(x, dt, A, B, C, D)
-    got = selective_scan_parallel(x, dt, A, B, C, D, chunk_size=chunk_size)
-    err = rel_max_err(got, want)
-    assert err <= TOL, f"delta={delta} chunk={chunk_size}: rel-max-err {err:.3e} > {TOL:.0e}"
+    impl = selective_scan_parallel if scan_impl == "legacy" else selective_scan_exact
+    err = rel_max_err(impl(x, dt, A, B, C, D, chunk_size=chunk_size), want)
+    assert err <= TOL, (
+        f"scan_impl={scan_impl} delta={delta} chunk={chunk_size}: "
+        f"rel-max-err {err:.3e} > {TOL:.0e}"
+    )
 
 
-@pytest.mark.parametrize("delta", list(_delta_cases()))
-def test_selective_scan_public_api_matches_sequential_reference(delta):
-    """M1-A: same claim for the public entry point, at whatever chunk size it picks."""
+@pytest.mark.parametrize("scan_impl,delta", list(_delta_cases()))
+def test_selective_scan_public_api_matches_sequential_reference(scan_impl, delta):
+    """M1-A/M1-E: same claim for the public entry point, at whatever chunk size it picks."""
     x, dt, A, B, C, D = _fixture(delta)
     want = sequential_selective_scan_fp64(x, dt, A, B, C, D)
-    err = rel_max_err(selective_scan(x, dt, A, B, C, D), want)
-    assert err <= TOL, f"delta={delta}: rel-max-err {err:.3e} > {TOL:.0e}"
+    err = rel_max_err(selective_scan(x, dt, A, B, C, D, scan_impl=scan_impl), want)
+    assert err <= TOL, f"scan_impl={scan_impl} delta={delta}: rel-max-err {err:.3e} > {TOL:.0e}"
 
 
-@pytest.mark.parametrize("delta", list(_delta_cases()))
-def test_mamba_block_slow_forward_matches_sequential_reference(delta):
+@pytest.mark.parametrize("scan_impl,delta", list(_delta_cases()))
+def test_mamba_block_slow_forward_matches_sequential_reference(scan_impl, delta):
     """M1-A: `use_fast_path=False` carries an identical copy of the defect.
 
     This path is not a curiosity -- `scripts/validate_for_willi.sh` builds its Gate 6 model with
@@ -132,12 +144,12 @@ def test_mamba_block_slow_forward_matches_sequential_reference(delta):
     """
     dim, state = 8, 16
     x, dt, A, B, C, D = _fixture(delta, dim=dim, state=state)
-    block = MambaBlock(dim=dim, state_size=state, expand_factor=1).eval()
+    block = MambaBlock(dim=dim, state_size=state, expand_factor=1, scan_impl=scan_impl).eval()
     with torch.no_grad():
         block.D.copy_(D)
         got = block._slow_forward(x, dt, A, B, C)
     err = rel_max_err(got, sequential_selective_scan_fp64(x, dt, A, B, C, D))
-    assert err <= TOL, f"delta={delta}: rel-max-err {err:.3e} > {TOL:.0e}"
+    assert err <= TOL, f"scan_impl={scan_impl} delta={delta}: rel-max-err {err:.3e} > {TOL:.0e}"
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +184,10 @@ def _delta_at_init(model, seq_len: int = 128, batch: int = 4) -> torch.Tensor:
         return torch.nn.functional.softplus(dt)
 
 
-def _tiny_model(norm_topology: str):
+seq_cap = 128
+
+
+def _tiny_model(norm_topology: str, dt_init_strategy: str = "none"):
     from hybrid_xmamba.models.configuration_hybrid import HybridConfig
     from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
 
@@ -181,30 +196,65 @@ def _tiny_model(norm_topology: str):
         HybridConfig(
             vocab_size=512, dim=128, num_layers=2, layer_pattern=["mamba", "mlstm"],
             state_size=16, head_dim=32, num_heads=4, max_position_embeddings=seq_cap,
-            norm_topology=norm_topology,
+            norm_topology=norm_topology, dt_init_strategy=dt_init_strategy,
         )
     )
 
 
-seq_cap = 128
+# The full 3x2 grid. Only two cells land in range, and *which* two is the whole finding: the
+# init alone is not enough, because dt_norm rescales Delta to unit RMS and throws the bias away.
+#
+#   norm_topology  dt_init  Delta mean   in range
+#   pre_rms        none     0.6932       no
+#   pre_rms        mamba    0.0211       YES
+#   hybrid         none     0.7987       no
+#   hybrid         mamba    0.3320       no    <-- dt_norm erases the fix
+#   hybrid_bc      none     0.6932       no
+#   hybrid_bc      mamba    0.0211       YES
+_DELTA_GRID = [
+    ("pre_rms", "none", True),
+    ("pre_rms", "mamba", False),
+    ("hybrid", "none", True),
+    ("hybrid", "mamba", True),      # Finding 2: pinned as still-broken, deliberately
+    ("hybrid_bc", "none", True),
+    ("hybrid_bc", "mamba", False),
+]
 
 
 @pytest.mark.parametrize(
-    "norm_topology",
+    "norm_topology,dt_init_strategy",
     [
-        pytest.param("pre_rms", marks=_xfail_if(True, _DEFECT_DELTA)),
-        pytest.param("hybrid", marks=_xfail_if(True, _DEFECT_DELTA)),
+        pytest.param(tp, di, marks=_xfail_if(broken, _DEFECT_DELTA))
+        for tp, di, broken in _DELTA_GRID
     ],
 )
-def test_delta_at_init_is_in_mamba_range(norm_topology):
-    """M1-B: Delta at init must sit in the reference range. Fails on HEAD at ~0.70 / ~0.82."""
+def test_delta_at_init_is_in_mamba_range(norm_topology, dt_init_strategy):
+    """M1-B/M1-F: Delta at init must sit in the reference range logU[1e-3, 1e-1].
+
+    The `hybrid` + `mamba` cell is xfailed *on purpose* and must stay that way. It is the pin on
+    Finding 2: applying the reference dt init while dt_norm is still active is a no-op (Delta
+    lands at 0.33, not 0.02), so a future refactor that "helpfully" enables the init under
+    `hybrid` would be silently ineffective. If that cell ever starts passing, strict=True turns
+    it into a failure and someone has to explain why.
+    """
     lo, hi = DELTA_INIT_RANGE
-    delta = _delta_at_init(_tiny_model(norm_topology))
+    delta = _delta_at_init(_tiny_model(norm_topology, dt_init_strategy))
     mean = delta.mean().item()
     assert lo <= mean <= hi, (
-        f"norm_topology={norm_topology}: Delta mean {mean:.4f} outside [{lo}, {hi}]; "
-        f"max {delta.max().item():.4f}. Reference Mamba init is logU[1e-3, 1e-1]."
+        f"norm_topology={norm_topology} dt_init={dt_init_strategy}: Delta mean {mean:.4f} "
+        f"outside [{lo}, {hi}]; max {delta.max().item():.4f}."
     )
+
+
+def test_dt_norm_erases_the_dt_init():
+    """M1-F: state Finding 2 as a direct, positive claim rather than only as an xfail."""
+    with_norm = _delta_at_init(_tiny_model("hybrid", "mamba")).mean().item()
+    without_norm = _delta_at_init(_tiny_model("hybrid_bc", "mamba")).mean().item()
+    assert without_norm < 0.05 < with_norm, (
+        f"expected dt_norm to inflate Delta (got {with_norm:.4f} with, {without_norm:.4f} "
+        "without). If this flips, the hybrid_bc topology is no longer doing its job."
+    )
+    assert with_norm / without_norm > 5.0, "dt_norm's effect on Delta has shrunk unexpectedly"
 
 
 def test_dt_proj_bias_is_zeroed_by_model_init():
@@ -273,14 +323,18 @@ def _tfla_fixture(forget_bias: float, seq_len: int = 128, heads: int = 2, dim: i
 
 
 @pytest.mark.parametrize(
-    "forget_bias,chunk_size",
+    "tfla_impl,forget_bias,chunk_size",
     [
-        pytest.param(fb, cs, marks=_xfail_if(fb <= 1.0 and cs >= 64, _DEFECT_TFLA))
+        pytest.param(
+            impl, fb, cs,
+            marks=_xfail_if(impl == "legacy" and fb <= 1.0 and cs >= 64, _DEFECT_TFLA),
+        )
+        for impl in ("legacy", "exact")
         for fb in FORGET_BIASES
         for cs in CHUNKS
     ],
 )
-def test_tfla_intra_chunk_matches_sequential_reference(forget_bias, chunk_size):
+def test_tfla_intra_chunk_matches_sequential_reference(tfla_impl, forget_bias, chunk_size):
     """M1-C: the error is governed entirely by whether f_cum underflows the 1e-6 clamp.
 
     Measured rel-max-err against the fp64 oracle (chunk_size=64 is the shipped default):
@@ -300,10 +354,13 @@ def test_tfla_intra_chunk_matches_sequential_reference(forget_bias, chunk_size):
 
     q, k, v, i_gate, f_gate = _tfla_fixture(forget_bias)
     want = sequential_mlstm_fp64(q, k, v, i_gate, f_gate)
-    got = tfla_forward_parallel(q, k, v, i_gate, f_gate, chunk_size=chunk_size)
+    got = tfla_forward_parallel(
+        q, k, v, i_gate, f_gate, chunk_size=chunk_size, tfla_impl=tfla_impl
+    )
     err = rel_max_err(got, want)
     assert err <= TOL, (
-        f"forget_bias={forget_bias} chunk={chunk_size}: rel-max-err {err:.3e} > {TOL:.0e}"
+        f"tfla_impl={tfla_impl} forget_bias={forget_bias} chunk={chunk_size}: "
+        f"rel-max-err {err:.3e} > {TOL:.0e}"
     )
 
 
@@ -317,4 +374,79 @@ def test_tfla_clamp_hit_rate_is_documented(forget_bias):
     expected = {0.0: 0.70, 1.0: 0.36, 2.0: 0.0, 3.0: 0.0}[forget_bias]
     assert abs(hit_rate - expected) < 0.05, (
         f"forget_bias={forget_bias}: clamp hit-rate {hit_rate:.3f}, expected ~{expected}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M1-E / M1-H: guards on the fixed paths themselves
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("forget_bias", [-4.0, -2.0])
+@pytest.mark.parametrize("chunk_size", [64, 128])
+def test_tfla_exact_survives_extreme_decay(forget_bias, chunk_size):
+    """M1-H: the overflow guard. Re-centring alone produced NaN here.
+
+    Re-centring halves the dynamic range but cannot remove it: a chunk whose total log-decay
+    exceeds 2 * _EXP_SAFE still overflows fp32 on one side, and because the causal mask is
+    applied after the product, an inf meets a 0 and yields NaN. `chunk_size=128` with a
+    forget-gate bias near -2 reaches that regime. The guarded fallback scans within the chunk
+    instead of factorizing across it, which forms no large exponential at all.
+    """
+    from hybrid_xmamba.kernels.tfla.tfla_interface import tfla_forward_parallel
+
+    q, k, v, i_gate, f_gate = _tfla_fixture(forget_bias)
+    got = tfla_forward_parallel(q, k, v, i_gate, f_gate, chunk_size=chunk_size, tfla_impl="exact")
+    assert torch.isfinite(got).all(), "exact TFLA produced NaN/Inf under extreme decay"
+    err = rel_max_err(got, sequential_mlstm_fp64(q, k, v, i_gate, f_gate))
+    assert err <= TOL, f"forget_bias={forget_bias} chunk={chunk_size}: rel-max-err {err:.3e}"
+
+
+def test_legacy_scan_path_is_unchanged():
+    """M1-I: `scan_impl="legacy"` must still be the original operator, bit for bit.
+
+    Decision 7 in MAMBA3_PLAN.md keeps `legacy` as the default through the screen precisely so
+    the A0 control arm and every number published before 2026-09 stay reproducible. If this ever
+    drifts, that comparison is void -- so it is asserted, not assumed.
+    """
+    x, dt, A, B, C, D = _fixture(0.705, seq_len=256)
+    # selective_scan picks chunk 64 for 128 < L <= 512; mirror that exactly.
+    direct = selective_scan_parallel(
+        x.float(), dt.float(), A.float(), B.float(), C.float(), D.float(), chunk_size=64
+    )
+    assert torch.equal(selective_scan(x, dt, A, B, C, D, scan_impl="legacy"), direct)
+
+
+@pytest.mark.parametrize("scan_impl", ["legacy", "exact"])
+def test_scan_impl_is_threaded_from_config_to_block(scan_impl):
+    """M1-E: a lever that silently fails to arrive is the failure mode this project already hit.
+
+    `hybrid_block.py` filters mixer kwargs against a per-type whitelist and silently drops
+    anything unrecognized, so a new config field can reach `HybridConfig` and never reach the
+    mixer. Assert it actually lands.
+    """
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    model = HybridLanguageModel(
+        HybridConfig(
+            vocab_size=256, dim=64, num_layers=2, layer_pattern=["mamba", "mlstm"],
+            state_size=16, head_dim=32, num_heads=2, max_position_embeddings=64,
+            scan_impl=scan_impl, tfla_impl=scan_impl,
+        )
+    )
+    mamba = next(l.mixer for l in model.layers if l.layer_type == "mamba")
+    mlstm = next(l.mixer for l in model.layers if l.layer_type == "mlstm")
+    assert mamba.scan_impl == scan_impl, "scan_impl did not reach MambaBlock"
+    assert mlstm.tfla_impl == scan_impl, "tfla_impl did not reach mLSTMBlock"
+
+
+def test_hybrid_bc_keeps_bc_norms_but_drops_dt_norm():
+    """M1-F: `hybrid_bc` differs from `hybrid` in exactly one thing -- the Delta norm."""
+    hybrid = next(l.mixer for l in _tiny_model("hybrid").layers if l.layer_type == "mamba")
+    hybrid_bc = next(l.mixer for l in _tiny_model("hybrid_bc").layers if l.layer_type == "mamba")
+    assert hybrid.dt_norm is not None and hybrid.B_norm is not None
+    assert hybrid_bc.dt_norm is None, "hybrid_bc must not build a Delta norm"
+    assert hybrid_bc.B_norm is not None and hybrid_bc.C_norm is not None, (
+        "hybrid_bc must keep the B/C norms -- that is the half of HybridNorm Mamba-3 Sec 3.4 keeps"
     )

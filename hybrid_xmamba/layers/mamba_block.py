@@ -4,6 +4,8 @@ This module implements the Mamba architecture with selective SSM (State Space Mo
 Based on "Mamba: Linear-Time Sequence Modeling with Selective State Spaces"
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,6 +13,10 @@ from typing import Optional
 from einops import rearrange
 
 from hybrid_xmamba.kernels.selective_scan import selective_scan
+from hybrid_xmamba.kernels.selective_scan.scan_interface import (
+    selective_scan_exact,
+    selective_scan_parallel,
+)
 from hybrid_xmamba.layers.normalization import RMSNorm
 
 
@@ -35,12 +41,37 @@ class MambaBlock(nn.Module):
         dt_rank: Optional[int] = None,
         use_fast_path: bool = True,
         use_hybrid_norm: bool = False,
+        scan_impl: str = "legacy",
+        dt_init_strategy: str = "none",
+        dt_min: float = 1e-3,
+        dt_max: float = 1e-1,
+        use_dt_norm: Optional[bool] = None,
     ):
         super().__init__()
         self.dim = dim
         self.state_size = state_size
         self.conv_size = conv_size
         self.expand_factor = expand_factor
+        # MAMBA3_PLAN.md M1-E: "legacy" keeps the pre-2026-09 numerics bit-reproducible;
+        # "exact" selects the division-free scan. Default flips at M9-A.
+        if scan_impl not in ("legacy", "exact"):
+            raise ValueError(f"scan_impl must be 'legacy' or 'exact', got {scan_impl!r}")
+        self.scan_impl = scan_impl
+        # MAMBA3_PLAN.md M1-F. Reference Mamba draws Delta ~ logU[dt_min, dt_max] via an
+        # inverse-softplus bias on dt_proj. This repo has never had that init, and Delta sits at
+        # ~0.70 (pre_rms) / ~0.81 (hybrid) instead of ~0.02. Two things must both be true for a
+        # fix to take effect, which is why they are one phase:
+        #   1. the init has to be re-applied AFTER HybridLanguageModel._init_weights zeroes every
+        #      bias -- see post_model_init(), called from hybrid_lm.py;
+        #   2. dt_norm has to be off, because RMSNorm rescales Delta to unit RMS and discards the
+        #      bias offset entirely. Mamba-3 (paper Sec 3.4) normalizes B and C only.
+        if dt_init_strategy not in ("none", "mamba"):
+            raise ValueError(
+                f"dt_init_strategy must be 'none' or 'mamba', got {dt_init_strategy!r}"
+            )
+        self.dt_init_strategy = dt_init_strategy
+        self.dt_min = dt_min
+        self.dt_max = dt_max
         self.inner_dim = dim * expand_factor
         self.use_fast_path = use_fast_path
         self.use_hybrid_norm = use_hybrid_norm
@@ -69,8 +100,15 @@ class MambaBlock(nn.Module):
         self.dt_proj = nn.Linear(self.dt_rank, self.inner_dim, bias=True)
 
         # Phase 4B (HybridNorm): per-projection pre-norm on Δ/B/C before selective scan
+        # use_dt_norm defaults to use_hybrid_norm (the shipped `hybrid` topology). The
+        # `hybrid_bc` topology sets it False: B/C norms without the Delta norm, matching
+        # Mamba-3 Sec 3.4 and unblocking the dt init above.
+        self._use_dt_norm = use_hybrid_norm if use_dt_norm is None else bool(use_dt_norm)
         if use_hybrid_norm:
-            self.dt_norm = RMSNorm(self.inner_dim)
+            # B/C norms are the half Mamba-3 Sec 3.4 keeps (its "BCNorm"/"QKNorm") and are on for
+            # both `hybrid` and `hybrid_bc`. The Delta norm is this repo's own addition and is
+            # what erases the dt init, so `hybrid_bc` drops it and nothing else.
+            self.dt_norm = RMSNorm(self.inner_dim) if self._use_dt_norm else None
             self.B_norm = RMSNorm(state_size)
             self.C_norm = RMSNorm(state_size)
         else:
@@ -89,6 +127,25 @@ class MambaBlock(nn.Module):
         # Activation
         self.activation = nn.SiLU()
     
+    def post_model_init(self) -> None:
+        """Re-apply the Mamba dt init after the parent model's global weight init.
+
+        `HybridLanguageModel.__init__` ends with `self.apply(self._init_weights)`, which zeroes
+        every `nn.Linear` bias -- including `dt_proj.bias`. Any init done in `__init__` is
+        therefore erased. This hook runs after that pass; it is a no-op unless
+        `dt_init_strategy="mamba"`, so the default keeps today's behaviour exactly.
+        """
+        if self.dt_init_strategy != "mamba":
+            return
+        with torch.no_grad():
+            # Delta ~ logU[dt_min, dt_max]; invert softplus so softplus(bias) reproduces it.
+            dt = torch.exp(
+                torch.rand(self.inner_dim)
+                * (math.log(self.dt_max) - math.log(self.dt_min))
+                + math.log(self.dt_min)
+            ).clamp(min=1e-4)
+            self.dt_proj.bias.copy_(dt + torch.log(-torch.expm1(-dt)))
+
     def forward(
         self,
         x: torch.Tensor,
@@ -134,8 +191,11 @@ class MambaBlock(nn.Module):
         # dt projection and transformation
         dt = self.dt_proj(dt)  # (B, L, inner_dim)
         # Phase 4B: pre-norm Δ/B/C before selective scan (HybridNorm)
+        # Gate B/C on their own module, not on dt_norm: under `hybrid_bc` the Delta norm is
+        # absent while the B/C norms are still required (Mamba-3 Sec 3.4).
         if self.dt_norm is not None:
             dt = self.dt_norm(dt)
+        if self.B_norm is not None:
             B = self.B_norm(B)
             C = self.C_norm(C)
         dt = F.softplus(dt)
@@ -146,7 +206,7 @@ class MambaBlock(nn.Module):
         # Selective scan
         if self.use_fast_path:
             y = selective_scan(
-                x_conv, dt, A, B, C, self.D.float(), z=None
+                x_conv, dt, A, B, C, self.D.float(), z=None, scan_impl=self.scan_impl
             )
         else:
             y = self._slow_forward(x_conv, dt, A, B, C)
@@ -165,85 +225,21 @@ class MambaBlock(nn.Module):
         B: torch.Tensor,
         C: torch.Tensor,
     ) -> torch.Tensor:
-        """Parallel reference implementation using chunk-wise scan.
-        
-        Replaces the sequential for-loop with a chunk-parallel approach.
-        Divides sequence into chunks and uses cumulative sums within chunks,
-        only iterating across chunks (~L/chunk_size steps).
-        
-        Args:
-            x: Input (B, L, D)
-            dt: Delta values (B, L, D)
-            A: State transition (D, N)
-            B: Input projection (B, L, N)
-            C: Output projection (B, L, N)
-            
-        Returns:
-            Output tensor (B, L, D)
+        """Non-fast-path selective scan.
+
+        This used to carry its own copy of the chunk-parallel scan, including an identical copy
+        of the divide-and-clamp defect (MAMBA3_PLAN.md M1). That mattered more than it looks:
+        `scripts/validate_for_willi.sh` builds its Gate 6 model with `use_fast_path=False`, so
+        the pre-push harness only ever exercised the buggy duplicate. Both paths now share one
+        implementation, so a fix cannot land on one and miss the other.
+
+        Note the two paths still differ in chunk size — this one uses `min(64, seq_len)` where
+        `selective_scan` picks adaptively — so `use_fast_path` remains a real switch, just not a
+        second implementation.
         """
-        batch, seq_len, dim = x.shape
-        _, _, state_size = B.shape
-        chunk_size = min(64, seq_len)
-        
-        # Pad to multiple of chunk_size
-        pad_len = (chunk_size - seq_len % chunk_size) % chunk_size
-        if pad_len > 0:
-            x = F.pad(x, (0, 0, 0, pad_len))
-            dt = F.pad(dt, (0, 0, 0, pad_len))
-            B = F.pad(B, (0, 0, 0, pad_len))
-            C = F.pad(C, (0, 0, 0, pad_len))
-        
-        L = x.shape[1]
-        num_chunks = L // chunk_size
-        
-        # Reshape into chunks
-        x_c = x.reshape(batch, num_chunks, chunk_size, dim)
-        dt_c = dt.reshape(batch, num_chunks, chunk_size, dim)
-        B_c = B.reshape(batch, num_chunks, chunk_size, state_size)
-        C_c = C.reshape(batch, num_chunks, chunk_size, state_size)
-        
-        # Discretize: dA = dt * A -> A_disc = exp(dA)
-        dA = dt_c.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0).unsqueeze(0)
-        A_disc = torch.exp(dA)  # (B, nc, cs, D, N)
-        
-        # Input contribution: Bx = dt * x * B
-        Bx = dt_c.unsqueeze(-1) * x_c.unsqueeze(-1) * B_c.unsqueeze(-2)
-        
-        # Cumulative A within chunk (log-space)
-        log_A_cum = torch.cumsum(dA, dim=2)
-        A_cum = torch.exp(log_A_cum)
-        
-        h = torch.zeros(batch, dim, state_size, device=x.device, dtype=x.dtype)
-        all_outputs = []
-        
-        for ci in range(num_chunks):
-            A_cum_ci = A_cum[:, ci]  # (B, cs, D, N)
-            Bx_ci = Bx[:, ci]       # (B, cs, D, N)
-            C_ci = C_c[:, ci]       # (B, cs, N)
-            x_ci = x_c[:, ci]      # (B, cs, D)
-            
-            # Previous state contribution
-            h_prev = A_cum_ci * h.unsqueeze(1)  # (B, cs, D, N)
-            
-            # Intra-chunk via cumulative sum
-            A_cum_safe = A_cum_ci.clamp(min=1e-8)
-            Bx_weighted = Bx_ci / A_cum_safe
-            Bx_cum = torch.cumsum(Bx_weighted, dim=1)
-            h_intra = A_cum_ci * Bx_cum
-            
-            h_chunk = h_prev + h_intra  # (B, cs, D, N)
-            
-            # Output: y = C @ h + D * x
-            y_ci = torch.einsum('btdn, btn -> btd', h_chunk, C_ci)
-            y_ci = y_ci + self.D.unsqueeze(0).unsqueeze(0) * x_ci
-            all_outputs.append(y_ci)
-            
-            h = h_chunk[:, -1, :, :]
-        
-        output = torch.cat(all_outputs, dim=1)
-        if pad_len > 0:
-            output = output[:, :seq_len, :]
-        return output
+        chunk_size = min(64, x.shape[1])
+        impl = selective_scan_parallel if self.scan_impl == "legacy" else selective_scan_exact
+        return impl(x, dt, A, B, C, self.D.float(), chunk_size=chunk_size)
 
     def _forward_segmented(
         self,

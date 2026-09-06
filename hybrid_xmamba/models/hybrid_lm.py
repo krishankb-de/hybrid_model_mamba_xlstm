@@ -108,10 +108,15 @@ class HybridLanguageModel(nn.Module):
             expand_factor=config.expand_factor,
             dt_rank=config.dt_rank,
             use_fast_path=config.use_fast_path,
+            scan_impl=config.scan_impl,
+            dt_init_strategy=config.dt_init_strategy,
+            dt_min=config.dt_min,
+            dt_max=config.dt_max,
             # mLSTM params
             head_dim=config.head_dim,
             num_heads=config.num_heads,
             use_tfla=config.use_tfla,
+            tfla_impl=config.tfla_impl,
             proj_factor=config.proj_factor,
             # sLSTM params
             hidden_dim=config.slstm_hidden_dim,
@@ -134,6 +139,15 @@ class HybridLanguageModel(nn.Module):
         
         # Initialize weights
         self.apply(self._init_weights)
+
+        # MAMBA3_PLAN.md M1-F: `_init_weights` zeroes every nn.Linear bias, which erases any
+        # per-mixer init done in the block's own __init__ -- the Mamba dt bias is exactly that.
+        # Mixers needing to re-assert an init expose `post_model_init`; it is a no-op unless the
+        # corresponding strategy flag is on, so the default path is unchanged.
+        for layer in self.layers:
+            mixer = getattr(layer, "mixer", None)
+            if hasattr(mixer, "post_model_init"):
+                mixer.post_model_init()
     
     def _init_weights(self, module):
         """Initialize model weights."""

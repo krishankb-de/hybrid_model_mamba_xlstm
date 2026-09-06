@@ -148,6 +148,101 @@ def selective_scan_parallel(
     return output
 
 
+def selective_scan_exact(
+    x: torch.Tensor,
+    dt: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    D: torch.Tensor,
+    chunk_size: Optional[int] = None,
+) -> torch.Tensor:
+    """Exact chunked selective scan — no division, no clamp (MAMBA3_PLAN.md M1-E).
+
+    `selective_scan_parallel` computes the intra-chunk term as
+    ``A_cum * cumsum(Bx / A_cum.clamp(min=1e-8))``. Wherever ``A_cum[s]`` falls below the clamp
+    the ratio ``A_cum[t] / max(A_cum[s], 1e-8)`` collapses to ~0 even though the true ratio is
+    O(1) for ``s`` near ``t``, so a token's own contribution to the state is annihilated. Measured
+    rel-max-err against a float64 sequential reference: 3.9e-01 at Δ=0.1, 9.2e-01 at Δ=0.705 (the
+    Δ this repo actually initializes to). See tests/test_mamba3_numerics.py.
+
+    This routine removes the reciprocal entirely by flipping which axis is parallel:
+
+      1. scan *within* each chunk sequentially from a zero state, with all chunks in parallel
+         (``chunk_size`` steps over ``(batch, num_chunks, dim, state)``);
+      2. carry the per-chunk end states across chunks (``L / chunk_size`` steps over
+         ``(batch, dim, state)``);
+      3. add ``A_cum * carry`` back into every position, fully parallel.
+
+    Depth is ``chunk_size + L/chunk_size`` rather than ``L/chunk_size``, minimized near
+    ``chunk_size = sqrt(L)``, which is what the default picks. Peak memory is unchanged — no
+    ``(cs, cs, dim, state)`` mask is ever materialized, which for this Mamba-1 parameterization
+    (``A`` is ``(dim, state)``, not scalar-per-head) would be 19.3 GB at chunk 64 / bs 48.
+
+    ``A_cum`` may still underflow to zero. That is correct here and harmless: it multiplies the
+    carried state, driving a genuinely-decayed contribution to zero, and is never a denominator.
+
+    Args/Returns: identical to `selective_scan_parallel`.
+    """
+    batch, seq_len, dim = x.shape
+    state_size = B.shape[-1]
+    device, dtype = x.device, x.dtype
+
+    if chunk_size is None:
+        # Depth is chunk_size + L/chunk_size, minimized at sqrt(L); snap to a power of two in
+        # [8, 64] so the reshape stays cheap and the loop count stays predictable.
+        target = max(1.0, float(seq_len)) ** 0.5
+        chunk_size = min(64, max(8, 1 << int(target).bit_length() - 1))
+    chunk_size = min(chunk_size, seq_len) if seq_len > 0 else chunk_size
+
+    pad_len = (chunk_size - seq_len % chunk_size) % chunk_size
+    if pad_len > 0:
+        x = F.pad(x, (0, 0, 0, pad_len))
+        dt = F.pad(dt, (0, 0, 0, pad_len))
+        B = F.pad(B, (0, 0, 0, pad_len))
+        C = F.pad(C, (0, 0, 0, pad_len))
+
+    padded_len = x.shape[1]
+    num_chunks = padded_len // chunk_size
+
+    x_c = x.reshape(batch, num_chunks, chunk_size, dim)
+    dt_c = dt.reshape(batch, num_chunks, chunk_size, dim)
+    B_c = B.reshape(batch, num_chunks, chunk_size, state_size)
+    C_c = C.reshape(batch, num_chunks, chunk_size, state_size)
+
+    # dA[t] = dt[t] * A is the per-step log-decay; A_disc = exp(dA); A_cum = decay from chunk start.
+    dA = dt_c.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0).unsqueeze(0)  # (B, nc, cs, D, N)
+    A_disc = torch.exp(dA)
+    A_cum = torch.exp(torch.cumsum(dA, dim=2))
+    dB = dt_c.unsqueeze(-1) * B_c.unsqueeze(-2)
+    Bx = dB * x_c.unsqueeze(-1)  # (B, nc, cs, D, N)
+
+    # (1) intra-chunk scan from a zero state, every chunk in parallel.
+    h = torch.zeros(batch, num_chunks, dim, state_size, device=device, dtype=dtype)
+    h_local_steps = []
+    for t in range(chunk_size):
+        h = A_disc[:, :, t] * h + Bx[:, :, t]
+        h_local_steps.append(h)
+    h_local = torch.stack(h_local_steps, dim=2)  # (B, nc, cs, D, N)
+
+    # (2) carry chunk-end states forward. `carry_prev[c]` is the state entering chunk c.
+    chunk_decay = A_cum[:, :, -1]     # (B, nc, D, N) — total decay across the chunk
+    chunk_end = h_local[:, :, -1]     # (B, nc, D, N) — chunk-local end state
+    carry = torch.zeros(batch, dim, state_size, device=device, dtype=dtype)
+    carries = []
+    for ci in range(num_chunks):
+        carries.append(carry)
+        carry = chunk_decay[:, ci] * carry + chunk_end[:, ci]
+    carry_prev = torch.stack(carries, dim=1)  # (B, nc, D, N)
+
+    # (3) h[t] = A_cum[t] * (state entering the chunk) + (chunk-local scan). Fully parallel.
+    h_full = h_local + A_cum * carry_prev.unsqueeze(2)
+    y = torch.einsum("bctdn,bctn->bctd", h_full, C_c)
+    y = y + D.view(1, 1, 1, -1) * x_c
+    y = y.reshape(batch, padded_len, dim)
+    return y[:, :seq_len] if pad_len > 0 else y
+
+
 def selective_scan(
     x: torch.Tensor,
     dt: torch.Tensor,
@@ -156,6 +251,7 @@ def selective_scan(
     C: torch.Tensor,
     D: torch.Tensor,
     z: Optional[torch.Tensor] = None,
+    scan_impl: str = "legacy",
 ) -> torch.Tensor:
     """Apply selective scan operation.
     
@@ -174,10 +270,16 @@ def selective_scan(
         C: Output matrix (B, L, N)
         D: Skip connection (D,)
         z: Optional gating tensor (B, L, D)
-        
+        scan_impl: "legacy" (default) reproduces every number published before 2026-09 —
+            including its divide-and-clamp defect, so existing checkpoints and the A0 control
+            arm stay bit-reproducible. "exact" selects the division-free scan.
+            MAMBA3_PLAN.md M1-E; the default flips to "exact" at M9-A.
+
     Returns:
         Output tensor (B, L, D)
     """
+    if scan_impl not in ("legacy", "exact"):
+        raise ValueError(f"scan_impl must be 'legacy' or 'exact', got {scan_impl!r}")
     # Use chunk-parallel implementation (differentiable, no custom backward)
     # Choose chunk size based on sequence length
     seq_len = x.shape[1]
@@ -197,10 +299,13 @@ def selective_scan(
     # collapse the 150M model (grad_norm 0.23 -> 1.6 -> representation collapse).
     # Reference Mamba keeps this SSM scan in fp32 for exactly this reason. Run it in
     # fp32 and cast the result back to the mixer dtype (interface unchanged).
+    # "exact" keeps the fp32 guard: it removes the reciprocal, but the scan still exponentiates
+    # a cumsum that spans exp(0) down to underflow inside one chunk, and bf16 has 8 mantissa bits.
     in_dtype = x.dtype
-    y = selective_scan_parallel(
+    impl = selective_scan_parallel if scan_impl == "legacy" else selective_scan_exact
+    y = impl(
         x.float(), dt.float(), A.float(), B.float(), C.float(), D.float(),
-        chunk_size=chunk_size,
+        chunk_size=chunk_size if scan_impl == "legacy" else None,
     ).to(in_dtype)
 
     # Apply gating if provided

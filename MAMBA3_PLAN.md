@@ -323,15 +323,15 @@ Test-first: M1-A/B/C must **fail on HEAD**.
 - [x] **M1-B** `test_delta_at_init_is_in_mamba_range` — Δ mean ∈ [1e-3, 1.5e-1] for `pre_rms` and `hybrid`.
 - [x] **M1-C** TFLA intra-chunk test; **quantify the mLSTM output error** (open from Context §1).
 - [x] **M1-D** Mark all three `xfail(strict=True)` citing this plan, so CI is green on HEAD and **flips loudly**.
-- [ ] **M1-E** `scan_impl: {"legacy","exact"}`, default `legacy`. For the Mamba-1 form do **not** use the 4-D
+- [x] **M1-E** `scan_impl: {"legacy","exact"}`, default `legacy`. For the Mamba-1 form do **not** use the 4-D
       log-segsum (19.3 GB). Instead **flip the parallel axis**: per-chunk states from zero-init in parallel,
       then an `L/cs` sequential combine. Depth `cs + L/cs`, memory unchanged, no mask, no division, exact.
       A1 is screen-only, so a 3-5× slower scan is acceptable — do not optimize it.
-- [ ] **M1-F** `dt_init_strategy: {none, mamba}` (default `none`) + `norm_topology: hybrid_bc` (B/C norm
+- [x] **M1-F** `dt_init_strategy: {none, mamba}` (default `none`) + `norm_topology: hybrid_bc` (B/C norm
       **without** Δ-norm). `hybrid` untouched — every existing checkpoint must load unchanged.
-- [ ] **M1-G** Fix `_slow_forward` too, or collapse both into one function.
-- [ ] **M1-H** TFLA intra-chunk log-space fix (`tfla_interface.py:93-95` only; do **not** touch `:149`).
-- [ ] **M1-I** Flip all three `xfail`s. **Gate: rel-err ≤ 1e-6 at every Δ**, and `legacy` bit-identical to today.
+- [x] **M1-G** Fix `_slow_forward` too, or collapse both into one function.
+- [x] **M1-H** TFLA intra-chunk log-space fix (`tfla_interface.py:93-95` only; do **not** touch `:149`).
+- [x] **M1-I** Flip all three `xfail`s. **Gate: rel-err ≤ 1e-6 at every Δ**, and `legacy` bit-identical to today.
 
 ### M2 — `Mamba3Block` = exactly Mamba-2 SSD (+ the sequential oracle)
 - [ ] **M2-A** `ssd_reference.py`: float64 sequential oracle **and** `step(x_t, state) → y_t, state`.

@@ -58,6 +58,12 @@ class HybridConfig:
     expand_factor: int = 2
     dt_rank: Optional[int] = None  # Auto if None
     use_fast_path: bool = True
+    # MAMBA3_PLAN.md M1: all four default to today's behaviour, so adding them changes nothing.
+    scan_impl: str = "legacy"          # "legacy" | "exact"  (default flips to "exact" at M9-A)
+    dt_init_strategy: str = "none"     # "none" | "mamba"    (reference logU[dt_min, dt_max] init)
+    dt_min: float = 1e-3
+    dt_max: float = 1e-1
+    tfla_impl: str = "legacy"          # "legacy" | "exact"  (the mLSTM counterpart, M1-H)
     
     # mLSTM parameters
     head_dim: int = 64
@@ -149,6 +155,23 @@ class HybridConfig:
                     f"Invalid layer type '{layer_type}'. "
                     f"Must be one of {valid_types}"
                 )
+
+        # MAMBA3_PLAN.md M1-F. norm_topology was previously unvalidated, so a typo silently
+        # behaved as "pre_rms" -- the same silent-drop class that cost this project a run in
+        # Phase 9 (see tests/test_willi_parity.py::test_norm_topology_threaded_to_hybridconfig).
+        if self.norm_topology not in ("pre_rms", "hybrid", "hybrid_bc"):
+            raise ValueError(
+                "norm_topology must be 'pre_rms', 'hybrid' or 'hybrid_bc', got "
+                f"{self.norm_topology!r}"
+            )
+        if self.scan_impl not in ("legacy", "exact"):
+            raise ValueError(f"scan_impl must be 'legacy' or 'exact', got {self.scan_impl!r}")
+        if self.tfla_impl not in ("legacy", "exact"):
+            raise ValueError(f"tfla_impl must be 'legacy' or 'exact', got {self.tfla_impl!r}")
+        if self.dt_init_strategy not in ("none", "mamba"):
+            raise ValueError(
+                f"dt_init_strategy must be 'none' or 'mamba', got {self.dt_init_strategy!r}"
+            )
     
     def get_layer_config(self, layer_idx: int) -> dict:
         """Get configuration for a specific layer.
@@ -175,6 +198,11 @@ class HybridConfig:
                 "expand_factor": self.expand_factor,
                 "dt_rank": self.dt_rank,
                 "use_fast_path": self.use_fast_path,
+                "scan_impl": self.scan_impl,
+                "tfla_impl": self.tfla_impl,
+                "dt_init_strategy": self.dt_init_strategy,
+                "dt_min": self.dt_min,
+                "dt_max": self.dt_max,
             })
         elif layer_type == "mlstm":
             base_config.update({

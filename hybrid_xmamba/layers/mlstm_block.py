@@ -43,6 +43,7 @@ class mLSTMBlock(nn.Module):
         head_dim: int = 64,
         num_heads: Optional[int] = None,
         use_tfla: bool = True,
+        tfla_impl: str = "legacy",
         proj_factor: int = 2,
         gate_soft_cap: float = 15.0,
         input_gate_bias_init: float = -10.0,
@@ -62,6 +63,11 @@ class mLSTMBlock(nn.Module):
 
         self.inner_dim = self.num_heads * head_dim
         self.use_tfla = use_tfla
+        # MAMBA3_PLAN.md M1-H: "legacy" keeps the pre-2026-09 numerics (defect included)
+        # so existing checkpoints stay bit-reproducible; "exact" removes the reciprocal.
+        if tfla_impl not in ("legacy", "exact"):
+            raise ValueError(f"tfla_impl must be 'legacy' or 'exact', got {tfla_impl!r}")
+        self.tfla_impl = tfla_impl
         self.proj_factor = proj_factor
 
         # Input projections
@@ -162,7 +168,7 @@ class mLSTMBlock(nn.Module):
         o_gate = rearrange(o_gate, 'b l (h d) -> b h l d', h=self.num_heads)
 
         if self.use_tfla:
-            h = apply_tfla(q, k, v, i_gate, f_gate)
+            h = apply_tfla(q, k, v, i_gate, f_gate, tfla_impl=self.tfla_impl)
         else:
             h = self._slow_forward(q, k, v, i_gate, f_gate)
 
