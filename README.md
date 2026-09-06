@@ -70,12 +70,24 @@ is **parameter-matched to +0.26%** while carrying **8× the SSM state** (B/C are
 
 ### Running the screen arms
 
+**Locally:**
+
 ```bash
 git checkout h100_scaling_mamba3
 python -m pytest tests/ -m "not cuda and not slow" -q     # 267 passed, 21 xfailed
 bash scripts/validate_for_willi.sh                        # 9/9 gates
+```
 
-# On the aisc H100 cluster — arms A0 (control), A0-seed (noise floor), A1 (defect fix)
+**On the aisc H100 cluster.** The login node refuses to execute anything, `python` included, so the
+pre-flight is an sbatch job rather than a one-liner:
+
+```bash
+git fetch origin && git checkout h100_scaling_mamba3
+sbatch scripts/preflight_mamba3_h100.sh     # ~2 min, CPU only; verifies every arm builds
+                                            # the operator it claims and A1's Delta is ~0.02
+tail -f logs/mamba3_preflight_*.log
+
+# then the arms — A0 (control), A0-seed (noise floor), A1 (defect fix)
 MODEL_CONFIG=hybrid_150m_v2 MAX_STEPS=12000 WARMUP=500 SEED=42 SAVE_TOP_K=1 \
   EXPERIMENT=m3_screen_A0_s42 sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh
 MODEL_CONFIG=hybrid_150m_a1 MAX_STEPS=12000 WARMUP=500 SEED=42 SAVE_TOP_K=1 \
