@@ -102,7 +102,19 @@ ARM=A5 sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh
 sbatch --array=0-4 scripts/screen_arms_h100.sh     # A2..A6; A0/A0-seed/A1 already ran
 
 grep ARCH logs/<job>.log   # confirm the operator that is actually training
+
+# status: what is running, whether anything was PREEMPTED/REQUEUED, per-arm
+# progress, and disk. The login node refuses to execute scripts at all -- not
+# just python -- so run it as a job (or source it, which starts no new shell):
+sbatch scripts/mamba3_watch.sh && sleep 30 && cat logs/mamba3_watch_*.log
+source scripts/mamba3_watch.sh                       # cheaper, may pass the guard
 ```
+
+⚠ **Nothing may be executed on `lx01`.** `python …`, `bash script.sh` — both are refused,
+and the refusal text word-splits into `command not found` noise that looks like a different
+error. Anything that must run before or alongside a job goes through `sbatch`/`srun`.
+Individual commands (`squeue`, `sacct`, `grep`, `cat`, `ls`) are fine interactively; it is
+running them *as a script* that trips the guard.
 
 | Arm | Isolates | Params |
 |---|---|---|

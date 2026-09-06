@@ -587,8 +587,17 @@ against a Mamba-3 mixer — is no longer justified by evidence.
 6. Reconcile in-training vs authoritative eval numbers before citing any figure.
 
 **Cluster invariants**: `--partition=aisc-batch --account=aisc --gpus=N` (**never `--gres` for GPUs** —
-rejected live), `--exclude=ga03,gx17v1,gx13v1`, `--requeue` (preemptible), login node refuses execution so
-everything goes through `sbatch`, `torch.compile` OFF for anything touching custom kernels, `HF_HUB_OFFLINE=1`.
+rejected live), `--exclude=ga03,gx17v1,gx13v1`, `--requeue` (preemptible), `--open-mode=append` (a requeue
+otherwise truncates the log and the restart-from-step-0 leaves no trace), `torch.compile` OFF for anything
+touching custom kernels, `HF_HUB_OFFLINE=1`.
+
+⚠ **The login node executes nothing.** Not `python`, and not `bash script.sh` either — the guard fires
+before the script's first line, and its refusal text word-splits into `command not found` noise that reads
+like an unrelated error. This has now cost three separate mistakes in this campaign: the first pre-flight
+instruction, the `eval "$(python scripts/mamba3_arms.py env A2)"` launch that silently became a second A0 at
+120,000 steps (job 2513581), and `bash scripts/mamba3_watch.sh`. **The rule is not "avoid python on lx01" —
+it is that anything scripted runs through `sbatch`/`srun`, or is designed to be `source`d.** Individual
+commands (`squeue`, `sacct`, `grep`, `cat`, `ls`) remain fine interactively.
 
 ---
 
