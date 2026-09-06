@@ -538,7 +538,19 @@ screening at 70M with the teacher off drops the 8-arm screen from 59 GPU-h to un
 2. Resume at `current_phase`; the checkboxes in `MAMBA3_PLAN.md` are ground truth.
 3. After **every** meaningful change (test written, phase gated, job submitted, job finished, eval scored):
    tick the checkbox, update `last_updated` (ISO 8601), append a one-line `notes` entry, and record the
-   evidence (job id, log path, metric) under `phases[<id>].evidence`.
+   evidence (job id, log path, metric) under `phases[<id>].evidence`. Use the helper rather than editing
+   two files by hand — that is how a plan and its state drift apart:
+
+   ```bash
+   python scripts/mamba3_state.py tick M3-A M3-B --note "..." --evidence key=value
+   python scripts/mamba3_state.py phase M4_complex_state --status "..."
+   python scripts/mamba3_state.py readme      # refresh README's status line + progress table
+   python scripts/mamba3_state.py show [M3]   # progress at a glance
+   ```
+
+   Run `readme` at the end of every phase. The repo already carries one README that went stale enough to
+   assert the Mamba path used a Triton kernel it has never called; regenerating the table is what stops
+   this one going the same way.
 4. Never re-run a checkpoint-producing phase (M7-B, M8-A/B/C) without first reading its log and logging a verdict.
 5. If `mamba3_state.json` is lost, regenerate it from the checkboxes.
 

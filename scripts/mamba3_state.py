@@ -129,6 +129,7 @@ def main() -> int:
     s.add_argument("phase", nargs="?", default=None)
 
     sub.add_parser("sync", help="regenerate state phases from plan checkboxes")
+    sub.add_parser("readme", help="refresh the branch status + progress table in README.md")
 
     args = ap.parse_args()
     state = load_state()
@@ -174,6 +175,36 @@ def main() -> int:
         state = refresh_phases(state)
         save_state(state)
         print("state phases regenerated from MAMBA3_PLAN.md checkboxes")
+
+    elif args.cmd == "readme":
+        state = refresh_phases(state)
+        save_state(state)
+        readme = ROOT / "README.md"
+        text = readme.read_text()
+        done = sum(1 for p in state["phases"].values()
+                   for c in p["checkboxes"].values() if c["done"])
+        total = sum(len(p["checkboxes"]) for p in state["phases"].values())
+        complete = [pid for pid in state["phase_order"]
+                    if state["phases"][pid]["status"] == "complete"]
+        span = f"{complete[0]}\u2013{complete[-1]}" if len(complete) > 1 else (complete[0] if complete else "none")
+
+        old_status = re.search(r"\*\*Status: .*?\*\*", text)
+        if old_status:
+            text = text.replace(
+                old_status.group(0),
+                f"**Status: {span} complete, {done}/{total} checkboxes.**", 1)
+
+        rows = ["| Phase | | Status |", "|---|---|---|"]
+        for pid in state["phase_order"]:
+            ph = state["phases"][pid]
+            n = sum(1 for c in ph["checkboxes"].values() if c["done"])
+            mark = {"complete": "\u2705", "in_progress": "\U0001f504", "pending": "\u2b1c"}[ph["status"]]
+            rows.append(f"| {pid} | {ph['title']} | {mark} {n}/{len(ph['checkboxes'])} |")
+        table = "\n".join(rows)
+        start = text.index("| Phase | | Status |")
+        end = text.index("\n\n", start)
+        readme.write_text(text[:start] + table + text[end:])
+        print(f"README refreshed: {span} complete, {done}/{total} checkboxes")
 
     elif args.cmd == "show":
         state = refresh_phases(state)

@@ -1,6 +1,6 @@
 {
   "current_phase": "M3_exponential_trapezoidal",
-  "last_updated": "2026-09-06T03:10:02+02:00",
+  "last_updated": "2026-09-06T03:14:16+02:00",
   "status": "M0-M2 complete. Mamba3Block registered and parameter-matched; flags all-off == Mamba-2 SSD. M3 next: exponential-trapezoidal via the extra_terms hook.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
@@ -588,7 +588,8 @@
     "2026-09-06: M2 complete. Mamba3Block registered as a fourth layer type; flags all-off is exactly Mamba-2 SSD. 150M m3 config lands at 184,192,200 params (+0.256%), delta exactly 9x the per-mixer delta. All 9 willi gates green under py3.9.23.",
     "2026-09-06: current_phase -> M3_exponential_trapezoidal",
     "2026-09-06: unticked M7-A2",
-    "2026-09-06: M7-A2 prep landed: configs/model/hybrid_150m_a1.yaml (Delta 0.0224 vs control 0.8070, params 183,708,000 = -13,824 for the 9 dropped dt_norms); SEED + SAVE_TOP_K env overrides in train_stage0_h100.sh; MODEL_CONFIG overridable in the 150M wrapper. Arms A0/A0-seed/A1 are now submittable."
+    "2026-09-06: M7-A2 prep landed: configs/model/hybrid_150m_a1.yaml (Delta 0.0224 vs control 0.8070, params 183,708,000 = -13,824 for the 9 dropped dt_norms); SEED + SAVE_TOP_K env overrides in train_stage0_h100.sh; MODEL_CONFIG overridable in the 150M wrapper. Arms A0/A0-seed/A1 are now submittable.",
+    "2026-09-06: README.md updated with a branch section (defect table, SSD memory argument, parameter matching, landed work, run commands, baselines, auto-generated progress table). scripts/mamba3_state.py gained a 'readme' subcommand so the status cannot go stale; contract updated in MAMBA3_PLAN.md + CLAUDE.md to require it at the end of every phase."
   ],
   "open_questions": []
 }
