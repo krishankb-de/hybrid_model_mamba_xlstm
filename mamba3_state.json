@@ -1,6 +1,6 @@
 {
   "current_phase": "M6_decode_cache",
-  "last_updated": "2026-09-06T13:43:40+02:00",
+  "last_updated": "2026-09-06T15:23:39+02:00",
   "status": "M0-M5 complete. All 8 screen arms build the operator they claim at 150M and are submittable from one definition. M6 next: O(1) recurrent decode cache.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
@@ -644,7 +644,9 @@
     "2026-09-06: INCIDENT job 2513581: the documented single-arm launch ran python on lx01, which the login node refuses. The refusal text word-split into 'command not found' lines, the eval exported nothing, and sbatch ran the wrapper defaults -- hybrid_150m_v2, 120,000 steps, save_top_k=3 -- under the experiment name m3_probe_A2. A silent second A0 at 10x length. Fixed by resolving ARM= on the compute node; the pre-submit eval no longer exists.",
     "A2 GPU PROBE PASSED (job 2513598, 300 steps, 7m14s wall). Fingerprint exactly A2: mamba3x9 d_state=128 conv=True trapezoid=False rope=False bc_bias=none, params=184,192,200. Loss finite and descending (ce 4.517, ppl 91.6 at step 300); no NaN, no spike; bf16 autocast + gradient checkpointing + SSD all fine on H100. Mamba3Block had never run on a GPU before this.",
     "2026-09-06: SPEED, measured: A2 2.18 optimiser-steps/s vs A0 1.36 -- 1.60x on the reported rate, ~1.76x once A0's six interleaved validation passes are subtracted. Direction is unambiguous (SSD is matmul-shaped and drops the 4-D pairwise-decay tensor), magnitude is provisional: A2 ran 300 steps with no validation and pays start-up over fewer steps. Confirm on equal footing from the screen, where all arms share one validation schedule. Note the 2.6B teacher is a fixed cost in both, so the student-side speedup is larger than the end-to-end figure.",
-    "2026-09-06: Probe collision fixed: ARM= took EXPERIMENT from mamba3_arms.py and ignored the caller, so the 300-step probe wrote into outputs/m3_screen_A2_s42 and left a last.ckpt for the real A2 run. A caller-supplied EXPERIMENT now wins."
+    "2026-09-06: Probe collision fixed: ARM= took EXPERIMENT from mamba3_arms.py and ignored the caller, so the 300-step probe wrote into outputs/m3_screen_A2_s42 and left a last.ckpt for the real A2 run. A caller-supplied EXPERIMENT now wins.",
+    "2026-09-06: M7-B SCREEN LAUNCHED: array 2513632 (tasks 0-4 = A2,A3,A4,A5,A6), all five started immediately on gx07/gx08x2/gx14x2, no queue wait; A1 (2513057) still running alongside at 11h. Every task's [arm] line confirms the right levers, and each writes to its own outputs/m3_screen_<arm>_s42 -- the unset EXPERIMENT guard held.",
+    "2026-09-06: Added scripts/mamba3_watch.sh (login-node safe, no python) for squeue + sacct preemption state + per-arm progress + disk, and --open-mode=append to the three H100 sbatch headers: aisc-batch is preemptible and nothing passes ckpt_path, so a requeued arm restarts from step 0 -- previously the requeue also truncated the log, erasing the only evidence."
   ],
   "open_questions": []
 }

@@ -31,6 +31,8 @@
 #SBATCH --job-name=h100_stage0_v2
 #SBATCH --output=logs/%x_%j.log
 #SBATCH --error=logs/%x_%j.log
+#SBATCH --open-mode=append   # aisc-batch is preemptible: without this a requeue
+                             # TRUNCATES the log and the restart leaves no trace
 #SBATCH --requeue
 
 set -euo pipefail

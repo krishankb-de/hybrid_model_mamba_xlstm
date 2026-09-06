@@ -4272,6 +4272,10 @@ def test_screen_arms_job_array_reads_the_shared_arm_ladder():
     assert "--gres" not in sh, "aisc rejects --gres for GPUs -- use --gpus=N"
     assert "#SBATCH --partition=aisc-batch" in sh and "#SBATCH --account=aisc" in sh
     assert "#SBATCH --requeue" in sh, "aisc-batch is preemptible"
+    assert "#SBATCH --open-mode=append" in sh, (
+        "without append, a requeue TRUNCATES the log -- an arm silently restarts from step 0 "
+        "(nothing passes ckpt_path) and the evidence that it did is overwritten"
+    )
     assert "%A_%a" in sh, "array tasks must not all write to the same log file"
 
     assert 'ARMS="${ARMS:-A2 A3 A4 A5 A6}"' in sh, "default set must skip the early-started arms"

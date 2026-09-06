@@ -33,6 +33,8 @@
 #SBATCH --job-name=m3_screen
 #SBATCH --output=logs/%x_%A_%a.log
 #SBATCH --error=logs/%x_%A_%a.log
+#SBATCH --open-mode=append   # aisc-batch is preemptible: without this a requeue
+                             # TRUNCATES the log and the restart leaves no trace
 #SBATCH --requeue
 
 set -euo pipefail
