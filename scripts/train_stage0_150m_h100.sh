@@ -29,7 +29,10 @@
 
 set -euo pipefail
 
-export MODEL_CONFIG="hybrid_150m_v2"
+# Overridable so the MAMBA3_PLAN.md screen arms can reuse this wrapper's 150M-tuned SBATCH
+# header and stability settings (LR 4e-4, warmup 2000, grad-clip 0.5 -- all load-bearing; see
+# the collapse notes above) while swapping only the architecture.
+export MODEL_CONFIG="${MODEL_CONFIG:-hybrid_150m_v2}"
 export MAX_STEPS="${MAX_STEPS:-120000}"     # ~3B tokens Chinchilla for 150M (eff batch 48)
 export BATCH_SIZE="${BATCH_SIZE:-16}"       # 80GB-safe microbatch
 export ACCUM="${ACCUM:-3}"                  # 16*3 = eff batch 48

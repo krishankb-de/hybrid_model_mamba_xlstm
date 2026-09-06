@@ -1,0 +1,86 @@
+# 150M arm A1 of MAMBA3_PLAN.md — Mamba-1 with the operator defects repaired, nothing else.
+#
+# This is the control that makes a Mamba-3 result interpretable. Arm A2 differs from A0 in three
+# things at once: the Delta regime, the operator, and the scan's correctness. Without A1 a win
+# cannot be attributed to any of them. If A1 captures most of the gain, the honest headline is
+# "the Delta init was broken", which is still a real finding.
+#
+# Three changes from hybrid_150m_v2, all landed in M1:
+#   scan_impl: exact          the division-free scan. The default "legacy" reproduces the
+#                             pre-2026-09 numerics -- including a rel-max-err of 0.92 against a
+#                             float64 reference at the Delta this repo actually initializes to.
+#   dt_init_strategy: mamba   Delta ~ logU[1e-3, 1e-1] via the reference inverse-softplus bias.
+#   norm_topology: hybrid_bc  "hybrid" minus the Delta norm. Required, not cosmetic: RMSNorm
+#                             rescales Delta to unit RMS and throws the bias away, so the init
+#                             above is a no-op under "hybrid" (Delta lands at 0.33, not 0.02).
+#   tfla_impl: exact          the same repair on the mLSTM side, where the shipped
+#                             forget_gate_bias_init=0.0 at chunk 64 gives rel-max-err 0.882.
+#
+# Architecture, dims, layer pattern, LR schedule and parameter count are identical to
+# hybrid_150m_v2. Screen-only: A1 never enters the full pipeline (MAMBA3_PLAN.md M8 cut list).
+
+model_type: "hybrid_lm"
+
+# Architecture
+vocab_size: 50257
+dim: 768
+num_layers: 12
+layer_pattern: ["mamba", "mamba", "mamba", "mamba", "mlstm", "mlstm", "mlstm", "mamba", "mamba", "mamba", "mamba", "mamba"]
+
+# Mamba parameters
+state_size: 16
+conv_size: 4
+expand_factor: 2
+dt_rank: null          # Auto: 768 / 16 = 48
+use_fast_path: true
+
+# --- the A1 repairs (MAMBA3_PLAN.md M1) ---
+scan_impl: "exact"
+tfla_impl: "exact"
+dt_init_strategy: "mamba"
+dt_min: 1.0e-3
+dt_max: 1.0e-1
+
+# mLSTM parameters
+head_dim: 64           # keep 64 (matrix state ∝ head_dim²); num_heads scales instead
+num_heads: 12          # 768 / 64 = 12
+use_tfla: true
+proj_factor: 2
+
+# sLSTM parameters (unused by this pattern; kept for config completeness)
+slstm_hidden_dim: 768
+slstm_num_heads: 4
+use_exponential_gate: true
+
+# Shared parameters
+norm_type: "rms"
+use_mlp: true
+mlp_ratio: 4.0
+
+# Training parameters
+max_position_embeddings: 1024
+dropout: 0.1
+initializer_range: 0.02
+
+# Generation parameters
+use_cache: true
+tie_word_embeddings: false
+
+use_gradient_checkpointing: false
+proj_head_dropout: 0.1
+norm_topology: hybrid_bc
+pooling_strategy: attention
+
+# Optimization
+# LR √-width-scaled from the 70M's 6e-4 (sqrt(512/768)≈0.82 → ~4.9e-4). Start
+# conservative at 4.0e-4 (fresh 150M pretrain + mLSTM gate sensitivity); bump to
+# 5e-4 if the Stage-0 loss curve descends slowly. warmup_steps 1000→2000 for the
+# larger model. max_steps here is a fallback; the Phase-5 SLURM script sets the
+# real 150M Chinchilla target via trainer.max_steps (~90-120K, ~3B tokens).
+learning_rate: 4.0e-4
+weight_decay: 0.1
+warmup_steps: 2000
+max_steps: 90000
+gradient_clip_val: 1.0
+
+distill: null

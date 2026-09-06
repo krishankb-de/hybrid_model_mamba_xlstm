@@ -38,6 +38,12 @@ set -euo pipefail
 SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 MODEL_CONFIG="${MODEL_CONFIG:-hybrid_70m_v2}"
+# MAMBA3_PLAN.md M7: the screen needs a seed override (the A0/A0-seed pair measures the noise
+# floor, and every arm must otherwise share a seed for a paired comparison) and a checkpoint
+# budget override -- save_top_k=3 at 2.4 GB per 150M checkpoint fills the quota fast when eight
+# arms run at once, and a screen only ever reads the final val loss.
+SEED="${SEED:-42}"
+SAVE_TOP_K="${SAVE_TOP_K:-3}"
 MAX_STEPS="${MAX_STEPS:-120000}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 ACCUM="${ACCUM:-1}"                 # grad-accum: eff batch = BATCH_SIZE*ACCUM
@@ -47,7 +53,7 @@ WARMUP="${WARMUP:-1000}"            # 70M default; 150M wrapper overrides to 200
 GRAD_CLIP="${GRAD_CLIP:-1.0}"       # 70M default; 150M wrapper overrides to 0.5 (spike guard)
 EXPERIMENT="${EXPERIMENT:-h100_stage0_${MODEL_CONFIG}}"
 
-echo "=== H100 Stage-0 pre-train: ${MODEL_CONFIG} + BioMedLM KD ==="
+echo "=== H100 Stage-0 pre-train: ${MODEL_CONFIG} + BioMedLM KD (seed=${SEED}, save_top_k=${SAVE_TOP_K}) ==="
 date; hostname
 mkdir -p logs
 
@@ -75,6 +81,7 @@ print('BioMedLM cached.')
 echo "Starting Stage-0 distillation (${MAX_STEPS} steps, bs=${BATCH_SIZE}, accum=1)..."
 python scripts/train_stage0_distill.py \
   model=${MODEL_CONFIG} \
+  seed=${SEED} \
   dataset=pubmed \
   trainer=h100_single_gpu \
   distill=stage0_biomedlm \
@@ -94,7 +101,7 @@ python scripts/train_stage0_distill.py \
   dataset.pin_memory=true \
   dataset.cache_dir="${SCRATCH_ROOT}/pubmed_cache" \
   callbacks.checkpoint.every_n_train_steps=2000 \
-  callbacks.checkpoint.save_top_k=3 \
+  callbacks.checkpoint.save_top_k=${SAVE_TOP_K} \
   experiment_name=${EXPERIMENT} \
   output_dir=./outputs/${EXPERIMENT} \
   wandb.enabled=false \
