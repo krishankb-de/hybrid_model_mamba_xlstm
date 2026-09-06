@@ -4248,3 +4248,56 @@ def test_evaluate_sts_uses_script_free_dataset_mirrors():
     stsb_body = src.split("def _load_stsb(")[1].split("\ndef ")[0]
     assert "for dataset_id, kwargs in" in stsb_body
     assert "except Exception as exc:" in stsb_body
+
+
+@pytest.mark.willi_parity
+def test_screen_arms_job_array_reads_the_shared_arm_ladder():
+    """MAMBA3_PLAN.md M7-B0: the screen is one job array, and it hand-writes no lever.
+
+    Two invariants, both load-bearing:
+
+    1. The arm table is *not* in this script. It is read from `scripts/mamba3_arms.py`,
+       which is also what the pre-flight verifies -- so no arm can be screened with a
+       configuration the pre-flight never checked. A pre-flight carrying its own private
+       copy of the arm list is exactly how job 2513007 came to train A1 as plain A0.
+    2. aisc rejects `--gres` for GPUs; the request must be `--gpus=N`. Every other H100
+       wrapper in this repo is pinned the same way because that mistake was made live.
+
+    A0/A0-seed/A1 are deliberately absent from the default set -- they were early-started
+    under M7-A2, and re-running them would burn ~22 GPU-h to produce a second control.
+    """
+    sh = (REPO_ROOT / "scripts" / "screen_arms_h100.sh").read_text()
+
+    assert "#SBATCH --gpus=1" in sh
+    assert "--gres" not in sh, "aisc rejects --gres for GPUs -- use --gpus=N"
+    assert "#SBATCH --partition=aisc-batch" in sh and "#SBATCH --account=aisc" in sh
+    assert "#SBATCH --requeue" in sh, "aisc-batch is preemptible"
+    assert "%A_%a" in sh, "array tasks must not all write to the same log file"
+
+    assert 'ARMS="${ARMS:-A2 A3 A4 A5 A6}"' in sh, "default set must skip the early-started arms"
+    assert 'python scripts/mamba3_arms.py env "${ARM}"' in sh, "the ladder has one definition"
+    code = "\n".join(ln for ln in sh.splitlines() if not ln.lstrip().startswith("#"))
+    assert "model.mamba3_" not in code, (
+        "levers must come from mamba3_arms.py, not be hand-written here"
+    )
+    assert "SLURM_ARRAY_TASK_ID" in sh
+    assert "bash scripts/train_stage0_150m_h100.sh" in sh, (
+        "the 150M stability recipe (LR 4e-4, grad-clip 0.5, 80GB-safe bs/accum) is inherited, "
+        "not restated -- it took five attempts to find"
+    )
+
+
+@pytest.mark.willi_parity
+def test_stage0_h100_passes_extra_hydra_overrides_through():
+    """M5: arms A3..A6 are `model.mamba3_*=...` overrides, not yamls of their own.
+
+    Before this existed the wrapper had no way to pass an extra Hydra argument, so half the
+    screen ladder was unsubmittable. The expansion must stay unquoted -- the overrides are
+    separate arguments, not one string -- and defaulted, because the script runs under
+    `set -u`.
+    """
+    sh = (REPO_ROOT / "scripts" / "train_stage0_h100.sh").read_text()
+    assert 'EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"' in sh
+    assert "\n  ${EXTRA_OVERRIDES}\n" in sh, "must be word-split into separate Hydra arguments"
+    wrapper = (REPO_ROOT / "scripts" / "train_stage0_150m_h100.sh").read_text()
+    assert 'export EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"' in wrapper

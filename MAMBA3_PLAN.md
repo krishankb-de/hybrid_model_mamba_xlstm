@@ -449,10 +449,14 @@ chunk boundaries (`tfla_interface.py:110-117`), so an exact mLSTM `step()` is de
       BioMedLM teacher** (2 × 15 min) — the 2.7B teacher is ~10:1 of per-step FLOPs and contributes nothing
       to ranking. If seed noise ≥ the expected 1-3% effect, **the screen cannot rank arms** — change the
       metric before spending 50 GPU-h.
+      ⚠ **(ii) is now informational only.** A0, A0-seed and A1 were early-started under M7-A2 *with* the
+      teacher, so dropping it for A2–A6 would break the paired comparison the screen depends on. The early
+      start bought ~22 GPU-h of overlapped queue time and spent the teacher-off saving; that trade is
+      already made. The probe still has value for a future 70M screen, not for this one.
 - [ ] **M7-A2** **Early-start the Mamba-1 arms.** A0, A0-seed and A1 need only M1's flags, so they can
       queue while M2–M6 are still being built locally — ~22 GPU-h of queue time overlapped with
       development, and it validates the screen harness before the expensive arms exist.
-- [ ] **M7-B0** `scripts/screen_arms_h100.sh` as a **SLURM job array** (`--array=0-7`), arm selected by
+- [x] **M7-B0** `scripts/screen_arms_h100.sh` as a **SLURM job array** (`--array=0-7`), arm selected by
       `$SLURM_ARRAY_TASK_ID` from a table in the script. One submission instead of eight; each task takes a
       GPU as one frees. Assert the arm table in `tests/test_willi_parity.py` the way the other SLURM
       wrappers are asserted.

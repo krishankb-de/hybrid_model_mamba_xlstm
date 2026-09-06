@@ -1,6 +1,6 @@
 {
   "current_phase": "M6_decode_cache",
-  "last_updated": "2026-09-06T11:50:15+02:00",
+  "last_updated": "2026-09-06T12:14:43+02:00",
   "status": "M0-M5 complete. All 8 screen arms build the operator they claim at 150M and are submittable from one definition. M6 next: O(1) recurrent decode cache.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
@@ -484,7 +484,7 @@
     },
     "M7": {
       "title": "Timing probe + short-run screen  — H100",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "M7-A": {
           "done": false,
@@ -495,7 +495,7 @@
           "desc": "Early-start the Mamba-1 arms. A0, A0-seed and A1 need only M1's flags, so they can"
         },
         "M7-B0": {
-          "done": false,
+          "done": true,
           "desc": "scripts/screen_arms_h100.sh as a SLURM job array (--array=0-7), arm selected by"
         },
         "M7-B": {
@@ -519,7 +519,10 @@
           "desc": "If A2 wins, note it as a bundle (SSD parameterization + 8× state), not \"SSD is better\","
         }
       },
-      "evidence": {},
+      "evidence": {
+        "script": "scripts/screen_arms_h100.sh",
+        "tests": "test_willi_parity.py::test_screen_arms_job_array_reads_the_shared_arm_ladder"
+      },
       "verdict": null
     },
     "M8": {
@@ -625,7 +628,9 @@
     "M5: bc_bias none==zero_init bitwise (both paths, with and without documents); one_init verified a real arm; conv drop moves params by exactly 9x8,960 = 80,640; mimo rank 1 bit-identical and rank>1 refuses.",
     "2026-09-06: M5 also closed the submission gap the ladder had: arms A3-A6 exist only as model.mamba3_* CLI overrides, and train_stage0_h100.sh had no way to pass them. scripts/mamba3_arms.py is now the single definition of all 8 arms (config + overrides + seed + expected ARCH tokens); the pre-flight verifies it at full 150M scale and submission reads it via 'eval $(python scripts/mamba3_arms.py env A5)'.",
     "2026-09-06: Full ladder parameter counts, measured: A0/A0-seed 183,721,824 | A1 183,708,000 | A2 184,192,200 | A3 184,192,416 | A4 184,192,200 | A5 184,192,416 | A6 184,167,072. A2..A6 spread 0.014%; whole ladder 0.26% of the control.",
-    "2026-09-06: current_phase -> M6_decode_cache"
+    "2026-09-06: current_phase -> M6_decode_cache",
+    "M7-B0: scripts/screen_arms_h100.sh is a SLURM job array over the shared ladder (ARMS default A2..A6; A0/A0-seed/A1 excluded, early-started under M7-A2). Levers are read from mamba3_arms.py, never hand-written; recipe delegated to the 150M wrapper so FM7 recipe drift is impossible.",
+    "2026-09-06: M7-A(ii) teacher on/off probe is now informational only: A0/A0-seed/A1 are already training WITH the BioMedLM teacher, so screening A2-A6 without it would break the paired comparison. The early start (M7-A2) foreclosed that saving for this screen; it would only apply to a future 70M screen."
   ],
   "open_questions": []
 }

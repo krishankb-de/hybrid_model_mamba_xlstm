@@ -7,7 +7,7 @@ A research implementation of a hybrid architecture combining **Mamba** (Selectiv
 
 ## 🔬 This branch: `h100_scaling_mamba3` — Mamba-3 backbone upgrade
 
-**Status: M0–M5 complete, 36/62 checkboxes.** Plan of record: [`MAMBA3_PLAN.md`](MAMBA3_PLAN.md);
+**Status: M0–M5 complete, 37/62 checkboxes.** Plan of record: [`MAMBA3_PLAN.md`](MAMBA3_PLAN.md);
 live state: [`mamba3_state.json`](mamba3_state.json). Branched from `h100_scaling` @ `20a1d27`.
 **This branch is never merged without an explicit instruction** — `h100_scaling` keeps the approved
 results reproducible.
@@ -92,8 +92,14 @@ tail -f logs/mamba3_preflight_*.log
 # four of the eight arms (A3-A6) are CLI overrides on hybrid_150m_m3.yaml, not yamls of
 # their own, and a lever typed by hand is a lever that silently trains the base arm.
 python scripts/mamba3_arms.py list                 # the ladder and what each rung isolates
+
+# one arm
 eval "$(python scripts/mamba3_arms.py env A5)"     # sets MODEL_CONFIG/SEED/EXTRA_OVERRIDES/...
 sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh
+
+# or the whole remaining screen as one job array — each task takes an H100 as one frees,
+# so the queue wait is paid once in parallel instead of five times in series
+sbatch --array=0-4 scripts/screen_arms_h100.sh     # A2..A6; A0/A0-seed/A1 already ran
 
 grep ARCH logs/<job>.log   # confirm the operator that is actually training
 ```
@@ -147,7 +153,7 @@ not transfer, but neither is a win assumed. That is what the M7 screen measures.
 | M4 | Complex-valued state (RoPE trick) | ✅ 5/5 |
 | M5 | Flags folded into arm definitions (no milestone of its own) | ✅ 3/3 |
 | M6 | O(1) recurrent decode cache | ⬜ 0/5 |
-| M7 | Timing probe + short-run screen  — H100 | ⬜ 0/8 |
+| M7 | Timing probe + short-run screen  — H100 | 🔄 1/8 |
 | M8 | Full pipeline on the winner — H100 | ⬜ 0/5 |
 | M9 | Cleanup, writeup, reintegration | ⬜ 0/5 |
 | M10 | Re-open the mamba/mLSTM ratio | ⬜ 0/3 |
