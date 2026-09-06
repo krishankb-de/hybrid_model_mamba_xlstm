@@ -40,8 +40,17 @@ unit RMS, discarding any bias offset, so a `dt_proj` init would be a **no-op** o
 - `tfla_interface.py:93-95` divides by `f_cum.clamp(min=1e-6)` for the mLSTM intra-chunk term (`:149`, the
   inter-chunk half, is already log-space). Measured: at the shipped `forget_gate_bias_init=0.0`, **70.9% of
   `(t,d)` entries inside a 64-chunk hit the clamp** (36.8% at bias 1.0, 0% at bias ≥ 2.0). The clamp is the
-  dominant regime, not an edge case. Output-error magnitude is *not yet quantified* — that needs the block's
-  exact per-dim gating/normalizer convention, and is M1's job.
+  dominant regime, not an edge case. **Quantified in M1-C** against an fp64 oracle built from the block's
+  exact per-dim gating/normalizer convention: at the shipped `forget_gate_bias_init=0.0` and the shipped
+  `chunk_size=64`, **rel-max-err = 0.882**. The error tracks the clamp exactly — ~1e-7 wherever
+  `min(f_cum)` stays above `1e-6`, 0.48–0.96 wherever it falls below:
+
+  | forget bias | chunk 8 | chunk 32 | chunk 64 | chunk 128 |
+  |---|---|---|---|---|
+  | **0.0 (shipped)** | 1.1e-07 | 5.0e-01 | **8.8e-01** | 8.8e-01 |
+  | 1.0 | 1.2e-07 | 1.7e-07 | 5.7e-01 | 9.6e-01 |
+  | 2.0 | 6.5e-08 | 1.4e-07 | 1.8e-07 | 4.8e-01 |
+  | 3.0 | 9.1e-08 | 9.1e-08 | 1.3e-07 | 1.4e-07 |
 
 ⇒ **All 12 layers of the canonical 150M model run a recurrence that is not the one specified.**
 
@@ -307,13 +316,13 @@ Every phase ends with the validation harness exiting 0 and a commit on `h100_sca
 
 ### M1 — Pin the defect, then fix it on the legacy path (produces arm A1)
 Test-first: M1-A/B/C must **fail on HEAD**.
-- [ ] **M1-A** `test_selective_scan_matches_sequential_reference` — float64 oracle, Δ ∈ {1e-3, 1e-2, 1e-1,
+- [x] **M1-A** `test_selective_scan_matches_sequential_reference` — float64 oracle, Δ ∈ {1e-3, 1e-2, 1e-1,
       0.3, 0.705, 1.0} × chunk ∈ {8, 64} × **both `use_fast_path` values** (the slow path has the same bug).
       **CPU-collected.** Fix the marker gap first: `@pytest.mark.cuda` is never applied
       (`test_kernels.py:9-15` uses a local `skipif`), so `-m "not cuda"` deselects nothing.
-- [ ] **M1-B** `test_delta_at_init_is_in_mamba_range` — Δ mean ∈ [1e-3, 1.5e-1] for `pre_rms` and `hybrid`.
-- [ ] **M1-C** TFLA intra-chunk test; **quantify the mLSTM output error** (open from Context §1).
-- [ ] **M1-D** Mark all three `xfail(strict=True)` citing this plan, so CI is green on HEAD and **flips loudly**.
+- [x] **M1-B** `test_delta_at_init_is_in_mamba_range` — Δ mean ∈ [1e-3, 1.5e-1] for `pre_rms` and `hybrid`.
+- [x] **M1-C** TFLA intra-chunk test; **quantify the mLSTM output error** (open from Context §1).
+- [x] **M1-D** Mark all three `xfail(strict=True)` citing this plan, so CI is green on HEAD and **flips loudly**.
 - [ ] **M1-E** `scan_impl: {"legacy","exact"}`, default `legacy`. For the Mamba-1 form do **not** use the 4-D
       log-segsum (19.3 GB). Instead **flip the parallel axis**: per-chunk states from zero-init in parallel,
       then an `L/cs` sequential combine. Depth `cs + L/cs`, memory unchanged, no mask, no division, exact.

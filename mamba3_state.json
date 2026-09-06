@@ -1,6 +1,6 @@
 {
   "current_phase": "M1_pin_the_defect",
-  "last_updated": "2026-09-06T01:55:49+02:00",
+  "last_updated": "2026-09-06T02:02:14+02:00",
   "status": "M0 complete. M1 next: pin the scan defect with failing tests before any fix.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
@@ -87,7 +87,19 @@
       "hybrid_canonical": 0.8229,
       "max_dtA_per_step_hybrid": 74.46,
       "reference": "logU[1e-3, 1e-1]",
-      "blocker": "dt_norm (RMSNorm on Delta before softplus) rescales to unit RMS, so a dt_proj bias init is a NO-OP on every v2 config"
+      "blocker": "dt_norm (RMSNorm on Delta before softplus) rescales to unit RMS, so a dt_proj bias init is a NO-OP on every v2 config",
+      "reproduced_in_M1B": {
+        "hybrid_150m_v2_pre_rms": {
+          "mean": 0.6932,
+          "max": 0.7587,
+          "max_dtA": 12.14
+        },
+        "hybrid_150m_v2_hybrid": {
+          "mean": 0.807,
+          "max": 4.813,
+          "max_dtA": 77.01
+        }
+      }
     },
     "F3_defect_appears_3x": [
       "scan_interface.py:118-119 (fast path)",
@@ -98,7 +110,7 @@
       "forget_bias_0.0_shipped": 0.709,
       "forget_bias_1.0": 0.368,
       "forget_bias_2.0": 0.0,
-      "output_error_magnitude": "NOT YET QUANTIFIED - needs the block's exact per-dim gating/normalizer convention; that is M1-C"
+      "output_error_magnitude": "QUANTIFIED in M1-C: rel-max-err 0.882 at the shipped forget_gate_bias_init=0.0 + chunk_size=64. Tracks the clamp exactly: ~1e-7 wherever min(f_cum) > 1e-6, 0.48-0.96 wherever below. Table in MAMBA3_PLAN.md Context 1; oracle in tests/test_mamba3_numerics.py::sequential_mlstm_fp64."
     },
     "F5_log_space_segsum_is_exact": {
       "mamba1_form_all_deltas": "~1.7e-16",
@@ -235,22 +247,22 @@
     },
     "M1": {
       "title": "Pin the defect, then fix it on the legacy path (produces arm A1)",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "M1-A": {
-          "done": false,
+          "done": true,
           "desc": "test_selective_scan_matches_sequential_reference — float64 oracle, Δ ∈ {1e-3, 1e-2, 1e-1,"
         },
         "M1-B": {
-          "done": false,
+          "done": true,
           "desc": "test_delta_at_init_is_in_mamba_range — Δ mean ∈ [1e-3, 1.5e-1] for pre_rms and hybrid."
         },
         "M1-C": {
-          "done": false,
+          "done": true,
           "desc": "TFLA intra-chunk test; quantify the mLSTM output error (open from Context §1)."
         },
         "M1-D": {
-          "done": false,
+          "done": true,
           "desc": "Mark all three xfail(strict=True) citing this plan, so CI is green on HEAD and flips loudly."
         },
         "M1-E": {
@@ -274,7 +286,13 @@
           "desc": "Flip all three xfails. Gate: rel-err ≤ 1e-6 at every Δ, and legacy bit-identical to today."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "test_file": "tests/test_mamba3_numerics.py",
+        "m1a_scan_xfails": "15 (selective_scan_parallel 7, public API 4, _slow_forward 4)",
+        "m1b_delta_150m_v2": "pre_rms mean 0.6932/max 0.7587; hybrid mean 0.8070/max 4.8130/max|dtA| 77.01",
+        "m1c_tfla_rel_max_err_shipped": "0.882 (forget_bias=0.0, chunk=64)",
+        "m1d_marker_gap": "pytest.mark.cuda now applied to 3 classes in test_kernels.py; 5 tests deselect instead of silently skipping"
+      },
       "verdict": null
     },
     "M2": {
@@ -535,7 +553,8 @@
     "2026-09-06: Audit reproduced independently in the project venv; every number under audit_verified_2026_09_06 was measured this session, not inherited from the retired MAMBA3_INTEGRATION_PLAN.md.",
     "2026-09-06: Full M2+M3+M4 math prototyped in fp64 and verified exact before any code was written (F7). Implementation phases are engineering, not research.",
     "2026-09-06: M0 complete. Branch h100_scaling_mamba3 @ 20a1d27; MAMBA3_PLAN.md + mamba3_state.json shipped; .gitignore allowlisted; CLAUDE.md repointed (incl. corrections to the false Triton claim and the stale 'forward takes only input_ids' claim); MAMBA3_INTEGRATION_PLAN.md + mamba3_integration_state.json retired. Baseline test suite green: 164 passed, 6 skipped.",
-    "2026-09-06: current_phase -> M1_pin_the_defect"
+    "2026-09-06: current_phase -> M1_pin_the_defect",
+    "2026-09-06: M1-A/B/C/D done. tests/test_mamba3_numerics.py pins all three defects with strict xfails: 20 passed, 19 xfailed, 0 failed. Suite 184 passed / 1 skipped / 5 deselected / 19 xfailed. mLSTM error QUANTIFIED (0.882 at shipped config), closing the last open measurement."
   ],
   "open_questions": []
 }
