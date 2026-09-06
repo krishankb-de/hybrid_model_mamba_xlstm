@@ -491,6 +491,25 @@ clear is **0.642 PPL (3.35%)**. Consequences, decided before any arm's number ex
 4. **M7-E's mechanism diagnostics carry more weight than PPL here**, not less: MQAR and the
    late-position slice probe the claim directly and are not bounded by this floor.
 
+**A2 GPU probe (2026-09-06, job 2513598) — the operator runs, and it is faster.**
+
+`Mamba3Block` had never executed on a GPU before this; every prior check was CPU and fp32. 300
+steps, 7m14s wall. Fingerprint exactly A2 (`mamba3x9, d_state=128, conv=True, trapezoid=False,
+rope=False, bc_bias=none, params=184,192,200`); loss finite and descending (ce 4.517, ppl 91.6 at
+step 300); no NaN, no spike. bf16 autocast, gradient checkpointing and the SSD scan compose fine.
+
+| | optimiser steps/s | s/step |
+|---|---|---|
+| A0 (Mamba-1, legacy scan) | 1.36 | 0.78 elapsed / **0.66** train-only |
+| **A2 (Mamba-2 SSD, `d_state=128`)** | **2.18** | **0.38** |
+
+**~1.76× faster**, and the direction is not in doubt — SSD replaces the 4-D pairwise-decay tensor
+with a `(chunk, chunk)` matmul per head. The magnitude is provisional: A2 ran 300 steps with no
+validation pass while A0's elapsed includes six, and A2 amortizes start-up over fewer steps.
+Confirm on equal footing from the screen, where every arm shares one validation schedule. Note
+also that the 2.6B teacher is a fixed cost in **both**, so the student-side speedup is larger than
+this end-to-end figure — 8× the SSM state, at 0.24% more parameters, for less wall-clock.
+
 Measured cost per arm: **~8.0 h wall** for 12,000 steps (2:37 in the training loop at 2.2 s/step,
 matching the 2.22 s/step estimate; the rest is validation with the teacher resident, packing and
 checkpoint writes).

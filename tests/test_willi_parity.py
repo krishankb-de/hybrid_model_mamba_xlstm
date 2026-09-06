@@ -4329,3 +4329,9 @@ def test_150m_wrapper_resolves_the_arm_on_the_compute_node():
     # Resolution must precede the ${VAR:-default} exports, or the defaults win and the arm is
     # silently ignored -- the same failure in a new costume.
     assert sh.index('if [ -n "${ARM:-}" ]; then') < sh.index('export MODEL_CONFIG=')
+    # A caller-supplied EXPERIMENT must survive the arm's own naming, or a short probe writes
+    # into the screen run's output directory. Job 2513598 (a 300-step A2 probe) did exactly
+    # that: it landed in outputs/m3_screen_A2_s42 and left a last.ckpt behind.
+    assert 'ARM_EXPERIMENT="${EXPERIMENT:-}"' in sh
+    assert sh.index('ARM_EXPERIMENT="${EXPERIMENT:-}"') < sh.index('eval "${ARM_ENV}"')
+    assert 'export EXPERIMENT="${ARM_EXPERIMENT}"' in sh

@@ -52,7 +52,16 @@ if [ -n "${ARM:-}" ]; then
     python scripts/mamba3_arms.py list || true
     exit 1
   }
+  # A caller-supplied EXPERIMENT wins over the arm's canonical name. Without this a short
+  # probe writes into the screen run's own output directory: the 300-step A2 probe
+  # (job 2513598) landed in outputs/m3_screen_A2_s42 and left a last.ckpt there for the
+  # real 12,000-step A2 to trip over.
+  ARM_EXPERIMENT="${EXPERIMENT:-}"
   eval "${ARM_ENV}"
+  if [ -n "${ARM_EXPERIMENT}" ]; then
+    export EXPERIMENT="${ARM_EXPERIMENT}"
+    echo "[arm] ${ARM} -> EXPERIMENT overridden by caller: ${EXPERIMENT}"
+  fi
   echo "[arm] ${ARM} -> MODEL_CONFIG=${MODEL_CONFIG} SEED=${SEED} MAX_STEPS=${MAX_STEPS}"
   echo "[arm] ${ARM} -> EXTRA_OVERRIDES=${EXTRA_OVERRIDES:-<none>}"
 fi
