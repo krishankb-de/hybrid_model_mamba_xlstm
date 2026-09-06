@@ -450,3 +450,130 @@ def test_hybrid_bc_keeps_bc_norms_but_drops_dt_norm():
     assert hybrid_bc.B_norm is not None and hybrid_bc.C_norm is not None, (
         "hybrid_bc must keep the B/C norms -- that is the half of HybridNorm Mamba-3 Sec 3.4 keeps"
     )
+
+
+# ---------------------------------------------------------------------------
+# M2-A/M2-B: the SSD scan
+# ---------------------------------------------------------------------------
+# The point of SSD here is not the paper's quality numbers, it is that correctness becomes
+# affordable. Mamba-1's A is (d_inner, dstate), so an exact pairwise decay mask is
+# (chunk, chunk, d_inner, dstate) = 19.3 GB at chunk 64 / batch 48. Mamba-2/3's scalar-per-head A
+# makes the same mask (chunk, chunk) per head: 19 MB, and shaped as a matmul.
+
+SSD_SHAPES = [
+    # (batch, seqlen, nheads, headdim, ngroups, dstate)
+    (2, 128, 4, 16, 1, 32),    # ngroups=1: B/C fully shared (Mamba's MVA default)
+    (2, 128, 8, 16, 2, 64),
+    (1, 100, 4, 8, 4, 16),     # seqlen not a multiple of any chunk size
+    (3, 64, 6, 32, 6, 16),     # ngroups == nheads: no sharing at all
+]
+
+
+def _ssd_fixture(shape, seed: int = 0):
+    batch, seqlen, nheads, headdim, ngroups, dstate = shape
+    torch.manual_seed(seed)
+    f64 = torch.float64
+    return dict(
+        x=torch.randn(batch, seqlen, nheads, headdim, dtype=f64),
+        dt=torch.rand(batch, seqlen, nheads, dtype=f64) * 0.1 + 1e-3,
+        A=-torch.rand(nheads, dtype=f64) * 8 - 0.1,
+        B=torch.randn(batch, seqlen, ngroups, dstate, dtype=f64),
+        C=torch.randn(batch, seqlen, ngroups, dstate, dtype=f64),
+        D=torch.ones(nheads, dtype=f64),
+    )
+
+
+@pytest.mark.parametrize("chunk_size", [16, 32, 64])
+@pytest.mark.parametrize("shape", SSD_SHAPES, ids=lambda s: "x".join(str(v) for v in s))
+def test_ssd_chunked_matches_sequential_reference(shape, chunk_size):
+    """M2-B: the chunked scan must equal the sequential SSD recurrence exactly."""
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan, ssd_sequential_reference
+
+    kw = _ssd_fixture(shape)
+    want = ssd_sequential_reference(**kw)
+    err = rel_max_err(ssd_chunked_scan(chunk_size=chunk_size, **kw), want)
+    assert err <= 1e-12, f"shape={shape} chunk={chunk_size}: rel-max-err {err:.3e}"
+
+
+@pytest.mark.parametrize("boundaries", [(37,), (32,), (20, 55, 80)],
+                         ids=["mid-chunk", "on-chunk-edge", "multi-doc"])
+@pytest.mark.parametrize("chunk_size", [16, 32, 64])
+def test_ssd_document_boundaries_match_reference(boundaries, chunk_size):
+    """M2-B/M2-E: state resets at document boundaries, handled inside the mask.
+
+    `mamba_block._forward_segmented` implements this as a Python loop over (row, segment) that
+    re-runs the whole block per piece -- dozens of tiny kernel launches per layer per step, and
+    the reason `torch.compile` is disabled on that path. SSD needs no loop: three boolean masks
+    over the segment ids express every reset, batched.
+
+    The `on-chunk-edge` case matters on its own: a boundary that lands exactly on a chunk start
+    is the one an off-by-one in the carry logic would silently pass everything else.
+    """
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan, ssd_sequential_reference
+
+    kw = _ssd_fixture((2, 96, 4, 16, 2, 32))
+    ids = torch.zeros(2, 96, dtype=torch.long)
+    for k, start in enumerate(boundaries):
+        ids[:, start:] = k + 1
+    want = ssd_sequential_reference(cu_seqlens=ids, **kw)
+    got = ssd_chunked_scan(chunk_size=chunk_size, cu_seqlens=ids, **kw)
+    assert rel_max_err(got, want) <= 1e-12
+
+
+@pytest.mark.parametrize("chunk_size", [16, 64])
+def test_ssd_document_isolation_is_bit_exact(chunk_size):
+    """M2-E: perturbing document A must leave document B bit-identical, not merely close."""
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan
+
+    kw = _ssd_fixture((2, 96, 4, 16, 2, 32))
+    boundary = 37
+    ids = torch.zeros(2, 96, dtype=torch.long)
+    ids[:, boundary:] = 1
+    ref = ssd_chunked_scan(chunk_size=chunk_size, cu_seqlens=ids, **kw)
+
+    perturbed = dict(kw)
+    perturbed["x"] = kw["x"].clone()
+    perturbed["x"][:, :boundary] += torch.randn_like(perturbed["x"][:, :boundary]) * 5.0
+    out = ssd_chunked_scan(chunk_size=chunk_size, cu_seqlens=ids, **perturbed)
+
+    assert torch.equal(ref[:, boundary:], out[:, boundary:]), "doc B leaked from doc A"
+    assert not torch.allclose(ref[:, :boundary], out[:, :boundary]), "doc A should have changed"
+
+
+def test_ssd_extra_terms_are_linear():
+    """M2-B: the `extra_terms` hook the trapezoidal rule (M3) will use.
+
+    The recurrence is linear in its state-input, so splitting one term into two halves must
+    reproduce the original bit-for-bit-ish. Verifying that now means M3 adds a coefficient, not
+    a new scan.
+    """
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan, ssd_sequential_reference
+
+    kw = _ssd_fixture((2, 96, 4, 16, 2, 32))
+    want = ssd_sequential_reference(**kw)
+    half = kw["dt"] * 0.5
+    got = ssd_chunked_scan(
+        chunk_size=32, coeff=half, extra_terms=[(half, kw["B"], kw["x"])],
+        **{k: v for k, v in kw.items() if k != "coeff"},
+    )
+    assert rel_max_err(got, want) <= 1e-12
+
+
+def test_ssd_step_matches_the_chunked_scan():
+    """M2-A: the decode step and the training scan are the same recurrence.
+
+    `ssd_step` is what M6's O(1) decode cache will call. Pinning it against the chunked scan now
+    means a divergence shows up as a test failure rather than as a silent inference-only bug.
+    """
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan, ssd_step
+
+    kw = _ssd_fixture((2, 48, 4, 16, 2, 32))
+    batch, seqlen, nheads, headdim = kw["x"].shape
+    state = torch.zeros(batch, nheads, headdim, kw["B"].shape[-1], dtype=torch.float64)
+    ys = []
+    for t in range(seqlen):
+        y_t, state = ssd_step(
+            kw["x"][:, t], kw["dt"][:, t], kw["A"], kw["B"][:, t], kw["C"][:, t], state, kw["D"]
+        )
+        ys.append(y_t)
+    assert rel_max_err(torch.stack(ys, dim=1), ssd_chunked_scan(chunk_size=16, **kw)) <= 1e-12

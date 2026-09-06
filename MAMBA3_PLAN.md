@@ -334,9 +334,9 @@ Test-first: M1-A/B/C must **fail on HEAD**.
 - [x] **M1-I** Flip all three `xfail`s. **Gate: rel-err ≤ 1e-6 at every Δ**, and `legacy` bit-identical to today.
 
 ### M2 — `Mamba3Block` = exactly Mamba-2 SSD (+ the sequential oracle)
-- [ ] **M2-A** `ssd_reference.py`: float64 sequential oracle **and** `step(x_t, state) → y_t, state`.
+- [x] **M2-A** `ssd_reference.py`: float64 sequential oracle **and** `step(x_t, state) → y_t, state`.
       Writing the oracle is mandatory for testing anyway, and it *is* the decode step — free de-risking.
-- [ ] **M2-B** `ssd_interface.ssd_chunked_scan()` — chunked, scalar-`A`/head, log-space mask, matmul-shaped,
+- [x] **M2-B** `ssd_interface.ssd_chunked_scan()` — chunked, scalar-`A`/head, log-space mask, matmul-shaped,
       native `cu_seqlens` decay masking. Carry the fp32 policy explicitly (see FM3).
 - [ ] **M2-C** `Mamba3Block`: `in_proj → [z, x, B, C, dt, A, trap, angles]`, BCNorm, optional conv, SSD scan,
       gate `* silu(z)`, `out_proj`, `D` per head. Contract `forward(x, cache=None, cu_seqlens=None) -> Tensor`,
@@ -405,6 +405,13 @@ chunk boundaries (`tfla_interface.py:110-117`), so an exact mLSTM `step()` is de
       BioMedLM teacher** (2 × 15 min) — the 2.7B teacher is ~10:1 of per-step FLOPs and contributes nothing
       to ranking. If seed noise ≥ the expected 1-3% effect, **the screen cannot rank arms** — change the
       metric before spending 50 GPU-h.
+- [ ] **M7-A2** **Early-start the Mamba-1 arms.** A0, A0-seed and A1 need only M1's flags, so they can
+      queue while M2–M6 are still being built locally — ~22 GPU-h of queue time overlapped with
+      development, and it validates the screen harness before the expensive arms exist.
+- [ ] **M7-B0** `scripts/screen_arms_h100.sh` as a **SLURM job array** (`--array=0-7`), arm selected by
+      `$SLURM_ARRAY_TASK_ID` from a table in the script. One submission instead of eight; each task takes a
+      GPU as one frees. Assert the arm table in `tests/test_willi_parity.py` the way the other SLURM
+      wrappers are asserted.
 - [ ] **M7-B** Screen A0, A0-seed, A1, A2, A3, A4, A5, A6 — **12,000 steps**, 150M, `aisc-batch`,
       **identical seed and data order** (paired comparison on Δ log-loss, not independent PPL).
       Set `trainer.max_steps` to the screen length so **WSD reshapes its own decay** — a run stopped at 12K of
@@ -422,6 +429,10 @@ chunk boundaries (`tfla_interface.py:110-117`), so an exact mLSTM `step()` is de
 
 ### M8 — Full pipeline on the winner — H100
 Control is the **existing** 13D result — do not rebuild it.
+**Submit the whole chain at once** with `--dependency=afterok:<jobid>`: Stage-0 → tower → decoder → eval →
+CheXbert, each firing automatically when its predecessor succeeds. One submission, no babysitting between
+stages, and no idle days waiting for a human to notice a job finished. The eval and CheXbert steps (~8.5 h
+combined) share a single allocation so their queue time is paid once. `scripts/submit_m8_chain.sh` owns this.
 - [ ] **M8-A** Stage-0 150M, 120K steps. Measured **2.22 s/step → 74 h**; budget **1.5× for retries** (the
       150M Stage-0 needed five attempts historically). **Gate: PPL ≤ 13.18.**
       Harvest `GRAD_CKPT=false` here only (1.3-1.5×, numerically equivalent with `use_reentrant=False`) —

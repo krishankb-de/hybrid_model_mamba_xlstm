@@ -1,7 +1,7 @@
 {
-  "current_phase": "M1_pin_the_defect",
-  "last_updated": "2026-09-06T02:14:50+02:00",
-  "status": "M0 complete. M1 next: pin the scan defect with failing tests before any fix.",
+  "current_phase": "M2_mamba3_block",
+  "last_updated": "2026-09-06T02:26:23+02:00",
+  "status": "M0+M1 complete: both recurrences correct behind flags, defaults unchanged. M2 next: Mamba3Block = exactly Mamba-2 SSD.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
     "name": "h100_scaling_mamba3",
@@ -303,14 +303,14 @@
     },
     "M2": {
       "title": "Mamba3Block = exactly Mamba-2 SSD (+ the sequential oracle)",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "M2-A": {
-          "done": false,
+          "done": true,
           "desc": "ssd_reference.py: float64 sequential oracle and step(x_t, state) → y_t, state."
         },
         "M2-B": {
-          "done": false,
+          "done": true,
           "desc": "ssd_interface.ssd_chunked_scan() — chunked, scalar-A/head, log-space mask, matmul-shaped,"
         },
         "M2-C": {
@@ -346,7 +346,13 @@
           "desc": "20-sample beam-decode timing probe. Tripwire: if > 1.5× the mamba1 time, promote M6 to M3."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "files": "hybrid_xmamba/kernels/ssd/{__init__,ssd_reference,ssd_interface}.py",
+        "accuracy": "rel-max-err <=1e-12 (measured ~4e-16) vs the fp64 sequential oracle, all shapes/chunks/boundary layouts",
+        "boundary_handling": "three boolean masks over segment ids (same / carry_ok / end_ok); no Python loop over segments",
+        "bug_found_1": "the -1e30 log-decay sentinel destroys the finite part of a cumsum (fp64 loses <1e14 next to 1e30), so A_cum[end]-A_cum[t] came back exactly 0 and killed within-document decay too. Replaced with boolean masks.",
+        "bug_found_2": "repeat_interleave gives head-indexed B but the einsum labelled it 'g', silently summing over heads"
+      },
       "verdict": null
     },
     "M3": {
@@ -452,6 +458,14 @@
         "M7-A": {
           "done": false,
           "desc": "⚠ Do this before anything else costs money. (i) Run A0 twice with different seeds at"
+        },
+        "M7-A2": {
+          "done": false,
+          "desc": "Early-start the Mamba-1 arms. A0, A0-seed and A1 need only M1's flags, so they can"
+        },
+        "M7-B0": {
+          "done": false,
+          "desc": "scripts/screen_arms_h100.sh as a SLURM job array (--array=0-7), arm selected by"
         },
         "M7-B": {
           "done": false,
@@ -561,7 +575,10 @@
     "2026-09-06: M0 complete. Branch h100_scaling_mamba3 @ 20a1d27; MAMBA3_PLAN.md + mamba3_state.json shipped; .gitignore allowlisted; CLAUDE.md repointed (incl. corrections to the false Triton claim and the stale 'forward takes only input_ids' claim); MAMBA3_INTEGRATION_PLAN.md + mamba3_integration_state.json retired. Baseline test suite green: 164 passed, 6 skipped.",
     "2026-09-06: current_phase -> M1_pin_the_defect",
     "2026-09-06: M1-A/B/C/D done. tests/test_mamba3_numerics.py pins all three defects with strict xfails: 20 passed, 19 xfailed, 0 failed. Suite 184 passed / 1 skipped / 5 deselected / 19 xfailed. mLSTM error QUANTIFIED (0.882 at shipped config), closing the last open measurement.",
-    "2026-09-06: M1 complete. scan_impl and tfla_impl flags added (both default 'legacy'); exact paths verified against fp64 oracles; dt_init_strategy='mamba' + norm_topology='hybrid_bc' put Delta in range. Suite 227 passed / 1 skipped / 5 deselected / 21 xfailed. py3.9 static gates green."
+    "2026-09-06: M1 complete. scan_impl and tfla_impl flags added (both default 'legacy'); exact paths verified against fp64 oracles; dt_init_strategy='mamba' + norm_topology='hybrid_bc' put Delta in range. Suite 227 passed / 1 skipped / 5 deselected / 21 xfailed. py3.9 static gates green.",
+    "2026-09-06: current_phase -> M2_mamba3_block",
+    "2026-09-06: Batching decided: M7-B uses a SLURM job array (--array=0-7, one submission for 8 arms); M8 uses --dependency=afterok chaining for Stage-0 -> tower -> decoder -> eval -> CheXbert; eval+CheXbert share one allocation. A0/A0-seed/A1 can start on the cluster before M2-M6 land (M7-A2).",
+    "2026-09-06: M2-A/B done. hybrid_xmamba/kernels/ssd/ -- fp64 sequential oracle + ssd_step (the M6 decode path) and the chunked SSD scan. Exact (~4e-16) across 4 shapes x 3 chunk sizes, with document boundaries mid-chunk / on chunk edge / multi-doc, and the extra_terms hook M3 needs. 88 passed, 21 xfailed."
   ],
   "open_questions": []
 }

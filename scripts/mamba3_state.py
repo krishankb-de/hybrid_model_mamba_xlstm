@@ -26,7 +26,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 PLAN = ROOT / "MAMBA3_PLAN.md"
 STATE = ROOT / "mamba3_state.json"
 
-CHECKBOX_RE = re.compile(r"^(- \[)( |x)(\] \*\*)(M\d+-[A-Z])(\*\*\s+)(.*)$")
+CHECKBOX_RE = re.compile(r"^(- \[)( |x)(\] \*\*)(M\d+-[A-Z]\d*)(\*\*\s+)(.*)$")
 PHASE_RE = re.compile(r"^### (M\d+)\s+—\s+(.*)$")
 
 
