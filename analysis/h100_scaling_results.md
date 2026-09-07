@@ -5,10 +5,11 @@
 > change how results below must be described once measured:
 > **(14A)** there is no trained, parameter-matched Transformer baseline anywhere in this
 > document — §3's caveat to that effect is being replaced by the actual experiment;
-> **(14B)** ✅ **DONE 2026-09-07** — re-measured on 13D with controls: 73.6% → **29.2%**
-> exact-duplicate clustering, vs 0.2% (references) and 7.3% (retrieval-NN). Much improved,
-> but still ~7× less lexically diverse and 2.3× more self-similar than either control.
-> Folded into §1.6 and §4.4;
+> **(14B)** ✅ **DONE 2026-09-07** — re-measured on 13D with controls, on both splits.
+> Like-for-like (`validate`, n=1433, the split the historical figure came from):
+> 73.6% → **36.1%** exact-duplicate clustering, vs 1.7% (references) and 6.4%
+> (retrieval-NN). Much improved, but still ~6× less lexically diverse and ~2.1× more
+> self-similar than either control. Folded into §1.6 and §4.4;
 > **(14C)** the selective-scan defect noted below is being bounded with a committed
 > regression test and an end-to-end measurement.
 > Every number in this document remains a valid measurement of the system as built — none is
@@ -177,19 +178,33 @@ relative.
   reported without — show the generator is still markedly more formulaic than the text
   it is scored against:
 
-  | corpus (n=2663) | % in a duplicate cluster | distinct-2 | distinct-4 | self-BLEU-4 | mean tokens |
-  |---|---|---|---|---|---|
-  | **generated (13D)** | **29.2%** | 0.0299 | 0.0841 | 0.6854 | 58.2 |
-  | references (human) | 0.2% | 0.2162 | 0.6439 | 0.2974 | 72.3 |
-  | retrieval-NN (real reports) | 7.3% | 0.2116 | 0.6164 | 0.3046 | 64.0 |
+  Measured on **both** splits — the like-for-like `validate` row is the one directly
+  comparable to the historical 73.6%, since that is the split it was measured on. Both
+  splits are subject-disjoint by construction (official `mimic-cxr-2.0.0-split.csv.gz`).
 
-  Two things this changes. First, **the "beats the retrieval floor" result is not
-  hollow** — the generator is no longer mostly emitting a handful of templates, which
-  was the live worry. Second, **the exact-duplicate metric flatters it**: on lexical
-  diversity the generator is ~7× less varied than either control (distinct-2 0.030 vs
-  0.216/0.212) and **2.3× more self-similar** (self-BLEU-4 0.685 vs 0.297/0.305), and it
-  writes shorter reports. Near-duplicates that differ by a token do not register as
-  exact duplicates but are still boilerplate, and that is where the remaining gap lives.
+  | corpus | split | % in a dup. cluster | distinct-2 | distinct-4 | self-BLEU-4 | mean tokens |
+  |---|---|---|---|---|---|---|
+  | **generated (13D)** | validate, n=1433 | **36.1%** | 0.0446 | 0.1121 | 0.7073 | 58.4 |
+  | references (human) | validate, n=1433 | 1.7% | 0.2624 | 0.6681 | 0.3343 | 60.0 |
+  | retrieval-NN | validate, n=1433 | 6.4% | 0.2608 | 0.6420 | 0.3549 | 58.1 |
+  | **generated (13D)** | test, n=2663 | **29.2%** | 0.0299 | 0.0841 | 0.6854 | 58.2 |
+  | references (human) | test, n=2663 | 0.2% | 0.2162 | 0.6439 | 0.2974 | 72.3 |
+  | retrieval-NN | test, n=2663 | 7.3% | 0.2116 | 0.6164 | 0.3046 | 64.0 |
+
+  **Like-for-like: 73.6% → 36.1% on `validate`, a −37.5pp drop.** Two things this
+  changes. First, **the "beats the retrieval floor" result is not hollow** — the
+  generator is no longer mostly emitting a handful of templates, which was the live
+  worry. Second, **the exact-duplicate metric flatters it**: on lexical diversity the
+  generator is ~6–7× less varied than either control (distinct-2 0.045 vs 0.262/0.261 on
+  validate) and **~2.1–2.3× more self-similar** (self-BLEU-4 0.707 vs 0.334/0.355).
+  Near-duplicates that differ by a token do not register as exact duplicates but are
+  still boilerplate, and that is where the remaining gap lives.
+
+  One incidental observation worth recording: **the generator's output length is
+  essentially constant across splits** (58.4 / 58.2 tokens) while the references' is
+  not (60.0 / 72.3). It matches reference length on `validate` and is ~19% short on
+  `test` — the model writes the same amount regardless of what the case calls for,
+  which is a mild independent signal of the same formulaic behaviour.
 - **The `3e-5` `vit_lr` arm was never run.** Skipping it was a judgment call based on
   the visible trend (1e-5 already regressed, and 3e-5 was the worst arm on the small
   dataset too), not an empirically confirmed null.
@@ -300,11 +315,12 @@ checkpoint, and do not explain any retrieval or generation number above.
    the abstract" trigger (≥70% *and* materially above every control) nor the
    clean-positive trigger (at or below the controls) fired — so it is reported plainly
    here rather than rounded in either direction.
-   ⚠️ **Comparability caveat:** the 73.6% figure was measured on `validate.parquet`
-   (n=1433) and this one on the official test split (n=2663), so the −44.4pp change is
-   split-confounded. The direction is safe — duplicate-cluster rate *rises* with n, all
-   else equal, so measuring 29.2% on the larger set understates the improvement — but a
-   like-for-like re-run on n=1433 is still outstanding.
+   **Like-for-like confirmed:** re-run on `validate` (n=1433), the split the 73.6% came
+   from, gives **36.1%** — a −37.5pp drop under identical conditions. Both splits are
+   subject-disjoint by construction, so neither figure is a leakage artifact.
+   ⚠️ Note that duplication is **lower on the larger split**, for the generator (36.1% →
+   29.2%) *and* for the references (1.7% → 0.2%). Sample size does not drive this;
+   split composition does. Quote the split alongside any duplication rate.
 5. **Retrieval R@10 is not a perfect proxy for downstream conditioning quality** — the
    `vit_lr` sweep's `1e-5` arm had the best tower-side retrieval metric of all three arms
    tested, but the worst downstream CheXbert F1. Any future image-tower tuning should

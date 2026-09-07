@@ -8,7 +8,7 @@
 > ### ⚡ PLAN REOPENED 2026-09-07 — PHASE 14 (supervisor review). `current_phase: phase14_supervisor_review`.
 > Results were reviewed by the supervisor. Three findings, all about **validity of the central claim**, none about chasing a better number. In the supervisor's own priority order:
 > **(1) HIGHEST — there is no trained, parameter-matched Transformer baseline anywhere in the report.** The thesis is *"attention-free hybrid matches/beats attention-based transformers at better efficiency"*, but every comparison in the writeup is against this project's own architecture variants, an off-the-shelf non-fine-tuned model (BiomedCLIP zero-shot), or a naive nearest-neighbour control — none of which is the baseline the claim is about. **Nothing else matters if this isn't in place.**
-> **(2) ✅ CLOSED 2026-09-07 (14B): 73.6% → 29.2%** exact-duplicate clustering on 13D (n=2663), against controls at **0.2%** (references) and **7.3%** (retrieval-NN). Pre-registered outcome **INTERMEDIATE**: the "beats the retrieval floor" result is **not** hollow, but the generator is still ~7× less lexically diverse and 2.3× more self-similar than either control, so the exact-duplicate headline flatters it. Original finding: **the boilerplate/duplicate-template rate was never re-measured on the final (13D) checkpoint** — 73.6% of generations fell into 184 duplicate clusters on a *pre-Phase-13* checkpoint. Biggest validity threat to the primary result: if the generator is still mostly copying templates, "beats retrieval baseline" is hollow, since that is exactly what the retrieval baseline does too.
+> **(2) ✅ CLOSED 2026-09-07 (14B): 73.6% → 36.1%** exact-duplicate clustering on 13D, like-for-like on `validate` (n=1433, the split the historical figure came from), against controls at **1.7%** (references) and **6.4%** (retrieval-NN). On the official test split (n=2663) the same measurement gives 29.2% vs 0.2% / 7.3% — duplication is split-dependent, so always quote the split. Pre-registered outcome **INTERMEDIATE**: the "beats the retrieval floor" result is **not** hollow, but the generator is still ~7× less lexically diverse and 2.3× more self-similar than either control, so the exact-duplicate headline flatters it. Original finding: **the boilerplate/duplicate-template rate was never re-measured on the final (13D) checkpoint** — 73.6% of generations fell into 184 duplicate clusters on a *pre-Phase-13* checkpoint. Biggest validity threat to the primary result: if the generator is still mostly copying templates, "beats retrieval baseline" is hollow, since that is exactly what the retrieval baseline does too.
 > **(3) The disclosed selective-scan correctness defect is stated but neither fixed nor bounded** — the fp32 guard is in, but the `clamp(min=1e-8)` divide-by-decay approximation is still there and there is still no test against an exact reference recurrence. Fix it, or bound it and report the max deviation.
 > Full work breakdown, pre-registered success bars, and exact commands: **Phase 14** below. **Phases 1–13 are unchanged and still valid** — Phase 14 adds the missing baseline and the missing validity checks; it does not re-litigate any closed arm. Retrieval stays closed. **⚠ Operator freeze in force: do not change the selective scan while 14A is running (see 14C).**
 >
@@ -983,7 +983,23 @@ Absolute numbers on both arms are a bit lower than validate.parquet's (harder/la
   OUTPUT=analysis/generation_diversity_13d.md \
     sbatch scripts/analyze_diversity_h100.sh
   ```
-- [ ] **14B-3** — **NOW A LIKE-FOR-LIKE RE-RUN, and it is cheap (one job, seconds of compute).** 14B-2 answered the question on the test split; the historical 73.6% is from `validate.parquet` (n=1433), so re-run there to remove the split confound:
+- [x] **14B-3** — **DONE 2026-09-07 (job 2516815, 3 s wall). Like-for-like on `validate.parquet` (n=1433), the split the historical 73.6% came from.**
+
+  | corpus (n=1433, validate) | unique | dup. clusters | % in a dup. cluster | largest | distinct-2 | distinct-4 | self-BLEU-4 | mean tokens |
+  |---|---|---|---|---|---|---|---|---|
+  | **generated (13D)** | 1053 | 137 | **36.1%** | 47,29,29,13,13 | 0.0446 | 0.1121 | 0.7073 | 58.4 |
+  | references (human) | 1418 | 10 | **1.7%** | 5,3,3,2,2 | 0.2624 | 0.6681 | 0.3343 | 60.0 |
+  | retrieval-NN (real reports) | 1380 | 39 | **6.4%** | 10,6,3,3,2 | 0.2608 | 0.6420 | 0.3549 | 58.1 |
+
+  **CLEAN HEADLINE: 73.6% → 36.1%, −37.5pp, same split, same protocol.** This supersedes the split-confounded −44.4pp from 14B-2 as the number to quote. Both splits are subject-disjoint by construction (official `mimic-cxr-2.0.0-split.csv.gz`), so neither figure is a leakage artifact.
+
+  ⚠️ **A prediction made in 14B-2 was WRONG, and this run falsified it.** 14B-2 argued the direction was safe because "duplicate-cluster rate rises with n, all else equal, so 29.2% on the larger set understates the improvement". Measured, duplication is **lower on the larger split**, for the generator (36.1% → 29.2%) *and* for the references (1.7% → 0.2%). The birthday-collision intuition does not dominate here — **split composition does**. Practical consequence: **always quote the split alongside a duplication rate**; these numbers are not portable between splits.
+
+  **Second correction, to 14B-2's own writeup text:** 14B-2 concluded the generator "writes shorter reports" (58.2 vs 72.3 tokens on test). That is test-split-specific. The generator's length is essentially **constant** across splits (58.4 / 58.2) while the references' is not (60.0 / 72.3) — it matches reference length on validate and is ~19% short on test. The correct statement is that the model writes the same amount regardless of what the case calls for, which is a mild independent signal of the same formulaic behaviour — not that it is uniformly terse.
+
+  The diversity story is unchanged and consistent across both splits: ~6× less varied (distinct-2 0.045 vs 0.262/0.261) and ~2.1× more self-similar (self-BLEU-4 0.707 vs 0.334/0.355). Pre-registered outcome fired **INTERMEDIATE** on this split too.
+
+  ~~Original spec:~~ **A like-for-like re-run, cheap (one job, seconds of compute).** 14B-2 answered the question on the test split; the historical 73.6% is from `validate.parquet` (n=1433), so re-run there to remove the split confound:
   ```bash
   HYPS=results/report_gen_tower13d_n1433/hyps.txt \
   REFS=results/report_gen_tower13d_n1433/refs.txt \
