@@ -230,6 +230,37 @@ class HybridBlock(nn.Module):
 
         return x
     
+    def allocate_inference_cache(self, batch_size, device=None, dtype=torch.float32):
+        """Per-layer decode state, or None if this mixer has no O(1) step (M6-C)."""
+        allocate = getattr(self.mixer, "allocate_inference_cache", None)
+        if allocate is None:
+            return None
+        return allocate(batch_size, device=device, dtype=dtype)
+
+    def step(self, x_t: torch.Tensor, cache) -> torch.Tensor:
+        """One token through mixer + MLP with residuals, carrying `cache`.
+
+        Mirrors `forward`'s topology exactly, including the HybridNorm post-norm FFN variant --
+        a decode path that quietly used pre-norm where training used post-norm would be a silent
+        quality regression that no shape check would catch.
+        """
+        if not getattr(self.mixer, "supports_step", False):
+            raise NotImplementedError(
+                "{} has no step(); cached decode is unavailable for a model containing "
+                "'{}' layers".format(type(self.mixer).__name__, self.layer_type)
+            )
+        squeeze = x_t.dim() == 3
+        if squeeze:
+            x_t = x_t[:, 0]
+
+        x_t = x_t + self.mixer.step(self.norm1(x_t), cache)
+        if self.use_mlp:
+            if self._ffn_post_norm:
+                x_t = self.norm2(x_t + self.mlp(x_t))
+            else:
+                x_t = x_t + self.mlp(self.norm2(x_t))
+        return x_t.unsqueeze(1) if squeeze else x_t
+
     def get_layer_info(self) -> dict:
         """Get information about this layer.
         

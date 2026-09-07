@@ -432,16 +432,49 @@ Measured on a tiny CPU model, per-token cost rises monotonically (0.0135 → 0.0
 tokens; doubling ratios 1.9× → 2.4×): **confirmed super-linear, trending quadratic**, paid 3× under beam=3.
 Only pays off if **every** layer is cacheable — TFLA already carries the `m_state` LSE stabilizer across
 chunk boundaries (`tfla_interface.py:110-117`), so an exact mLSTM `step()` is derivable.
-- [ ] **M6-A** `Mamba3Block.step()` + `allocate_inference_cache()` (reuse M2-A's oracle). State:
+- [x] **M6-A** `Mamba3Block.step()` + `allocate_inference_cache()` (reuse M2-A's oracle). State:
       `h (nheads, headdim, d_state)` + `angle_state` + `B_prev`/`x_prev` ≈ **7.1 MB fp32** for the whole model at bs=1.
-- [ ] **M6-B** `mLSTMBlock.step()` + cache (`C`, `n`, `m`).
-- [ ] **M6-C** Cache plumbing through `HybridBlock.forward`, `generate()`, `beam_search_decode` — including
+- [x] **M6-B** `mLSTMBlock.step()` + cache (`C`, `n`, `m`).
+- [x] **M6-C** Cache plumbing through `HybridBlock.forward`, `generate()`, `beam_search_decode` — including
       the `prefix_embeds` branch.
-- [ ] **M6-D** **Equivalence: cached decode == full recompute, `atol ≤ 1e-5`**, greedy and beam=3, with and
+- [x] **M6-D** **Equivalence: cached decode == full recompute, `atol ≤ 1e-5`**, greedy and beam=3, with and
       without an image prefix.
-- [ ] **M6-E** Add prefill / per-token decode / TTFT to `performance_profile.py` — the repo has **no**
+- [x] **M6-E** Add prefill / per-token decode / TTFT to `performance_profile.py` — the repo has **no**
       decode-latency benchmark (`evaluate_lm.py:170-194` and `performance_profile.py` time full-sequence
       forwards only). Report O(L²) → O(L).
+
+**M6 RESULT (2026-09-07).** The cache is an *equivalence*, and every test says so:
+
+| Check | Result |
+|---|---|
+| `Mamba3Block.step` vs the chunked forward, 7 flag combinations | ≤ **5e-7** |
+| `mLSTMBlock.step` vs `apply_tfla` (`tfla_impl=exact`) | **1.2e-10** |
+| Cached beam=3 vs the existing `beam_search_decode`, ± image prefix | **token-identical** |
+| Per-token decode (tiny CPU model, prompt 32, 224 new) | **21.5× faster** |
+| Growth, first half → second | recompute **1.19×**, cached **0.99×** |
+
+That last row *is* the O(L²) → O(L) claim: the recomputing path gets slower as context grows and
+the cached one does not.
+
+⚠ **Finding 1 — the cache cannot serve a legacy-TFLA checkpoint, and A2 is one.** `tfla_impl=
+"legacy"` divides by a clamped forget-gate cumulative product and so computes *no* recurrence;
+measured, `step` vs legacy `apply_tfla` is **rel 1.01** — the legacy output is noise relative to a
+correct one. No O(1) step can reproduce that, by construction. This is a second, *functional*
+argument for the M9-A flip: cacheable decode, not merely correctness.
+
+⚠ **Finding 2 — `mLSTMBlock._slow_forward` and `apply_tfla` are different functions.**
+`_slow_forward` carries the LSE stabilizer `m` into `C`/`n` and divides by `max(|n·q|, 1)`;
+`apply_tfla` computes an `m_state` and never applies it, and clamps the **signed** denominator.
+Gap **0.42 max abs** at L=24, identical for `legacy` and `exact`, so structural rather than the M1
+clamp defect. `sequential_mlstm_fp64` (the M1 oracle) already documents TFLA's convention as the
+reference one, and `use_tfla=True` is what every checkpoint trained on — so the cache matches TFLA
+and `_slow_forward` is the outlier. Same class as the Mamba-1 `_slow_forward` divergence M1 found.
+
+⚠ **Limitation, deliberate.** `prefill` steps token by token, so **TTFT is 1.7–8.6× slower** than
+the uncached path (prompt-length dependent) while every token after it is ~21× faster.
+`ssd_chunked_scan` already computes the carried state in its inter-chunk loop but does not return
+it, and padding is masked out of that state, so exposing it correctly is its own change — recorded
+as follow-up rather than bolted on under time pressure.
 
 ### M7 — Timing probe + short-run screen (**the cheap decision gate**) — H100
 - [x] **M7-A** ⚠ **Do this before anything else costs money.** (i) Run **A0 twice with different seeds** at

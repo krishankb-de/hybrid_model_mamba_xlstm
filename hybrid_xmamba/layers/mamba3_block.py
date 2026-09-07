@@ -37,6 +37,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from hybrid_xmamba.kernels.ssd import ssd_chunked_scan
+from hybrid_xmamba.kernels.ssd.ssd_reference import ssd_step
 from hybrid_xmamba.layers.normalization import RMSNorm
 from hybrid_xmamba.layers.rotary import apply_rotary, cumulative_angles
 
@@ -372,6 +373,124 @@ class Mamba3Block(nn.Module):
         for shift in range(k - 1):
             near_start[:, shift:] |= starts[:, : seqlen - shift] if shift else starts
         return torch.where(near_start.unsqueeze(-1), masked, conved)
+
+    # -- M6-A: O(1) recurrent decode -------------------------------------------------------
+    supports_step = True
+
+    def allocate_inference_cache(self, batch_size, device=None, dtype=torch.float32):
+        """Everything the recurrence needs to continue from token t to t+1, and nothing that
+        grows with context.
+
+        For the 150M model at batch 1 this is ~7.1 MB in fp32 across all nine mamba3 layers:
+        `nheads * headdim * d_state = 24 * 64 * 128` state elements per layer, plus a conv
+        window of `conv_size - 1` and, when RoPE is on, one accumulated angle per rotated pair.
+        The full-recompute path it replaces is O(L) per token and O(L^2) per sequence.
+        """
+        device = device or self.in_proj.weight.device
+        cache = {
+            "ssm_state": torch.zeros(batch_size, self.nheads, self.head_dim, self.d_state,
+                                     device=device, dtype=dtype),
+            "seen": 0,
+        }
+        if self.conv1d is not None:
+            cache["conv_state"] = torch.zeros(
+                batch_size, self.conv1d.weight.shape[0], max(self.conv_size - 1, 0),
+                device=device, dtype=dtype,
+            )
+        if self.use_rope:
+            # fp64, for the same reason the chunked path accumulates in fp64: Theta is a running
+            # sum over the whole sequence and fp32 drifts by ~1e-2 rad by L=512 (FM4).
+            cache["angle_state"] = torch.zeros(batch_size, 1, self.n_rope_angles,
+                                               device=device, dtype=torch.float64)
+        if self.use_trapezoid:
+            # The beta term reaches one token back. Allocated as zeros rather than left as None
+            # so the cache has a fixed structure from step zero -- `seen == 0` is what suppresses
+            # the term, and a cache whose keys change shape mid-decode cannot be reordered for
+            # beam search. B carries head-indexed state once a B/C bias is on, group-indexed
+            # otherwise, matching what `step` stores.
+            b_groups = self.nheads if self.B_bias is not None else self.ngroups
+            cache["B_prev"] = torch.zeros(batch_size, b_groups, self.d_state,
+                                          device=device, dtype=dtype)
+            cache["x_prev"] = torch.zeros(batch_size, self.nheads, self.head_dim,
+                                          device=device, dtype=dtype)
+        return cache
+
+    def step(self, x_t: torch.Tensor, cache: dict) -> torch.Tensor:
+        """Advance one token. `(batch, dim)` or `(batch, 1, dim)` in, `(batch, dim)` out.
+
+        Mirrors `forward` exactly -- same projection split, same conv, same rotate-then-bias-then-
+        shift ordering -- but carries state in `cache` instead of materializing the sequence. The
+        recurrence itself is `ssd_step`, which is also the oracle's inner loop, so this path
+        cannot drift from the reference the chunked scan is tested against.
+
+        The state stays fp32 regardless of autocast (FM3): it is a running sum over the whole
+        sequence, and bf16's 8 mantissa bits would accumulate error the chunked path never sees.
+        """
+        if x_t.dim() == 3:
+            if x_t.shape[1] != 1:
+                raise ValueError(f"step() takes one token, got seqlen {x_t.shape[1]}")
+            x_t = x_t[:, 0]
+        batch = x_t.shape[0]
+        out_dtype = x_t.dtype
+
+        proj = self.in_proj(x_t)
+        z, xs, B, C, dt_raw, a_raw, trap_raw, angles = torch.split(proj, self._split, dim=-1)
+
+        if self.conv1d is not None:
+            xbc = torch.cat([xs, B, C], dim=-1)                        # (batch, channels)
+            window = torch.cat(
+                [cache["conv_state"].to(xbc.dtype), xbc.unsqueeze(-1)], dim=-1
+            )                                                          # (batch, channels, k)
+            # Depthwise, so the convolution is an elementwise product summed over the window.
+            # Ordering matches Conv1d's left-padded cross-correlation: w[0] hits the oldest.
+            conv = (window * self.conv1d.weight.squeeze(1).unsqueeze(0)).sum(-1)
+            conv = conv + self.conv1d.bias
+            cache["conv_state"] = window[..., 1:].detach()
+            xbc = self.activation(conv)
+            xs, B, C = torch.split(xbc, [self.inner_dim, self.bc_dim, self.bc_dim], dim=-1)
+
+        dt = F.softplus(dt_raw.float() + self.dt_bias)                 # (batch, nheads)
+        if self.dt_limit is not None:
+            dt = dt.clamp(max=self.dt_limit)
+        A = self._compute_a(a_raw)
+
+        B = self.B_norm(B.view(batch, self.ngroups, self.d_state)).float()
+        C = self.C_norm(C.view(batch, self.ngroups, self.d_state)).float()
+        xs = xs.view(batch, self.nheads, self.head_dim).float()
+
+        if self.use_rope:
+            theta = self.theta_max * torch.tanh(angles.float())        # (batch, n_angles)
+            increment = (dt[..., :1].double() * theta.double()).unsqueeze(1)
+            cache["angle_state"] = torch.remainder(
+                cache["angle_state"] + increment, 2.0 * math.pi
+            )
+            ang = cache["angle_state"].to(B.dtype)                     # (batch, 1, n_angles)
+            B = apply_rotary(B.unsqueeze(1), ang, self.rope_fraction).squeeze(1)
+            C = apply_rotary(C.unsqueeze(1), ang, self.rope_fraction).squeeze(1)
+        if self.B_bias is not None:
+            B = B.repeat_interleave(self.nheads // self.ngroups, dim=1) + self.B_bias
+            C = C.repeat_interleave(self.nheads // self.ngroups, dim=1) + self.C_bias
+
+        coeff, extra = dt, None
+        if self.use_trapezoid:
+            lam = torch.sigmoid(trap_raw.float() + self.trap_bias)     # (batch, nheads)
+            coeff = lam * dt                                           # gamma
+            if cache["seen"] > 0:
+                beta = (1.0 - lam) * dt * torch.exp(dt * A)
+                extra = [(beta, cache["B_prev"], cache["x_prev"])]
+            # At the first token beta is zero, exactly as the chunked path masks `beta[:, 0]`.
+            cache["B_prev"], cache["x_prev"] = B, xs
+
+        y, cache["ssm_state"] = ssd_step(
+            xs, dt, A, B, C, cache["ssm_state"].to(xs.dtype), self.D.float(),
+            coeff=coeff, extra_terms=extra,
+        )
+        cache["seen"] += 1
+
+        y = y.reshape(batch, self.inner_dim).to(out_dtype)
+        if self.out_norm is not None:
+            y = self.out_norm(y)
+        return self.out_proj(y * self.activation(z))
 
     def extra_repr(self) -> str:
         return (

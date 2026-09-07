@@ -258,6 +258,92 @@ class mLSTMBlock(nn.Module):
 
         return torch.stack(outputs, dim=2)  # (B, H, L, D)
 
+    # -- M6-B: O(1) recurrent decode -------------------------------------------------------
+    supports_step = True
+
+    def allocate_inference_cache(self, batch_size, device=None, dtype=torch.float32):
+        """mLSTM decode state: the matrix cell `C` and the normalizer `n`, both zero-initialized.
+
+        No `m`: `apply_tfla` maintains an `m_state` but never applies it to its output, so the
+        recurrence this cache continues does not have a stabilizer to carry. See `step`.
+        """
+        device = device or self.out_proj.weight.device
+        H, D = self.num_heads, self.head_dim
+        return {
+            "C": torch.zeros(batch_size, H, D, D, device=device, dtype=dtype),
+            "n": torch.zeros(batch_size, H, D, device=device, dtype=dtype),
+            "seen": 0,
+        }
+
+    def step(self, x_t: torch.Tensor, cache: dict) -> torch.Tensor:
+        """Advance one token. `(batch, dim)` or `(batch, 1, dim)` in, `(batch, dim)` out.
+
+        This reproduces the recurrence **`apply_tfla` computes**, which is the one every trained
+        checkpoint in this repo actually used (`use_tfla=True` is the default and what the M7
+        arms ran):
+
+            C_t[d,e] = f_t[d] C_{t-1}[d,e] + i_t[d] k_t[d] v_t[e]
+            n_t[d]   = f_t[d] n_{t-1}[d]   + i_t[d] k_t[d]
+            y_t[e]   = (sum_d q_t[d] C_t[d,e]) / max(sum_d q_t[d] n_t[d], 1)
+
+        ⚠ It is deliberately **not** `_slow_forward`'s recurrence. Those two compute different
+        functions, and this cache is an equivalence for the shipping one, not an improvement on
+        it. `_slow_forward` carries the LSE stabilizer `m` into `C` and `n` and divides by
+        `max(|n·q|, 1)`; `apply_tfla` computes `m_state` and then never applies it, and clamps
+        the **signed** denominator. Measured gap on random input at L=24, dim 64: **0.42 max
+        abs**, identical for `tfla_impl` "legacy" and "exact", so it is structural rather than
+        the M1 clamp defect. The M1 fp64 oracle (`tests/test_mamba3_numerics.py::
+        sequential_mlstm_fp64`) already documents TFLA's convention as the reference one.
+
+        This is the same class of defect M1 found in `mamba_block._slow_forward`: a "reference"
+        path that quietly disagrees with the path that trains. Recorded for M9; not silently
+        reconciled here, because changing either one would move a trained operator.
+        """
+        if x_t.dim() == 3:
+            if x_t.shape[1] != 1:
+                raise ValueError(f"step() takes one token, got seqlen {x_t.shape[1]}")
+            x_t = x_t[:, 0]
+        H = self.num_heads
+
+        x_proj = self.in_proj(x_t)
+        if self.proj_factor == 2:
+            x_inner, x_gate = x_proj.chunk(2, dim=-1)
+        else:
+            x_inner = x_proj
+            x_gate = x_inner
+
+        heads = lambda v: rearrange(v, "b (h d) -> b h d", h=H)
+        q = self.q_norm(heads(self.q_proj(x_inner)))
+        k = self.k_norm(heads(self.k_proj(x_inner)))
+        v = heads(self.v_proj(x_inner))
+        if self.v_norm is not None:
+            v = self.v_norm(v)
+
+        i_logit = _tanh_soft_cap(self.i_gate_proj(x_inner), self.gate_soft_cap)
+        f_logit = _tanh_soft_cap(self.f_gate_proj(x_inner), self.gate_soft_cap)
+        _gdt = i_logit.dtype
+        i_gate = heads(exponential_activation(i_logit.float()).to(_gdt))
+        f_gate = heads(torch.sigmoid(f_logit))
+        o_gate = heads(torch.sigmoid(self.o_gate_proj(x_inner)))
+
+        # f is clamped at 1e-6 exactly as tfla_interface does when it takes log_f, so the two
+        # paths pin the same floor rather than differing on tiny forget gates.
+        f_eff = f_gate.clamp(min=1e-6)
+        ki = i_gate * k
+
+        C = f_eff.unsqueeze(-1) * cache["C"].to(v.dtype) + torch.einsum("bhd,bhe->bhde", ki, v)
+        n = f_eff * cache["n"].to(v.dtype) + ki
+        h = torch.einsum("bhde,bhd->bhe", C, q)
+        # Signed clamp, matching TFLA's joint denominator. NOT abs-clamped -- see the docstring.
+        denom = (n * q).sum(dim=-1, keepdim=True).clamp(min=1.0)
+        h = h / denom
+
+        cache["C"], cache["n"] = C, n
+        cache["seen"] += 1
+
+        h = rearrange(h * o_gate, "b h d -> b (h d)")
+        return self.out_proj(h * torch.sigmoid(x_gate))
+
     def _forward_segmented(
         self,
         x: torch.Tensor,

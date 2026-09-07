@@ -1,7 +1,7 @@
 {
   "current_phase": "M8_full_pipeline",
-  "last_updated": "2026-09-07T13:28:19+02:00",
-  "status": "M7 COMPLETE. Winner A2 (SSD + 8x state), two-seed mean 16.542 vs A0 19.160 = -13.7%. A1 showed the correctness fix is the whole quality gain; SSD makes it 3.10x cheaper. Trapezoid null, RoPE rejected as high-variance. M8-A next: Stage-0 120K steps on A2.",
+  "last_updated": "2026-09-07T13:54:35+02:00",
+  "status": "M6 complete (O(1) decode cache: 21.5x per token, cached growth flat at 0.99x, beam=3 token-identical). M7 complete, winner A2. M8-A next: Stage-0 120K steps on A2.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
     "name": "h100_scaling_mamba3",
@@ -514,30 +514,34 @@
     },
     "M6": {
       "title": "O(1) recurrent decode cache",
-      "status": "pending",
+      "status": "complete",
       "checkboxes": {
         "M6-A": {
-          "done": false,
+          "done": true,
           "desc": "Mamba3Block.step() + allocate_inference_cache() (reuse M2-A's oracle). State:"
         },
         "M6-B": {
-          "done": false,
+          "done": true,
           "desc": "mLSTMBlock.step() + cache (C, n, m)."
         },
         "M6-C": {
-          "done": false,
+          "done": true,
           "desc": "Cache plumbing through HybridBlock.forward, generate(), beam_search_decode — including"
         },
         "M6-D": {
-          "done": false,
+          "done": true,
           "desc": "Equivalence: cached decode == full recompute, atol ≤ 1e-5, greedy and beam=3, with and"
         },
         "M6-E": {
-          "done": false,
+          "done": true,
           "desc": "Add prefill / per-token decode / TTFT to performance_profile.py — the repo has no"
         }
       },
-      "evidence": {},
+      "evidence": {
+        "tests": "tests/test_mamba3_numerics.py::M6 (16 tests)",
+        "speedup": "21.5x per token",
+        "growth": "cached 0.99x vs recompute 1.19x"
+      },
       "verdict": null
     },
     "M7": {
@@ -734,6 +738,11 @@
     "M7-D TIEBREAK COMPLETE, ORDERING FLIPPED. Seed 1234: A2 16.376, A4-hi 18.912 -- A2 wins by 2.536 PPL, having LOST to A4-hi by 0.509 at seed 42. Two-seed means: A2 16.542, A4-hi 17.556. Cross-seed spread: A2 0.332, A0 0.454, A4-hi 2.713 = 8.2x A2's. The rope arm is not merely equal, it is HIGH-VARIANCE. Its seed-42 lead was a lucky draw. WINNER = A2.",
     "2026-09-07: The pre-registered decision rule earned its keep. M7-D said advance the lowest arm only if the gap exceeds 2x seed SD, else advance the simplest. A4-hi led by 0.509 < 0.642, so the rule said A2 -- and the replication then showed A4-hi losing by 2.536 at another seed. Taking the lowest number would have put a high-variance arm into a 133 GPU-h pipeline.",
     "2026-09-07: Two M8 blockers found in the tiebreak logs and fixed. (1) ModelCheckpoint filename was 'stage0_kd-{step:06d}-{val/loss:.4f}'; the slash in val/loss is a PATH SEPARATOR, so every save made a directory stage0_kd-step=NNNNNN-val/ with loss=N.NNNN.ckpt inside. Only last.ckpt was ever visible to a *.ckpt glob -- that is why every arm reported zero checkpoints while holding 2.1 GB. Now filename='stage0_kd-step{step:06d}', monitor unchanged. (2) val_check_interval was hard-coded at 2000; at M8-A's 120,000 steps that is 60 validation passes, ~54 h against ~13.5 h of training. Now VAL_EVERY, default 2000 for screens, 10000 for M8-A. The val SET stays 15,724 chunks so the number remains comparable to the 13.18 baseline.",
+    "2026-09-07: current_phase -> M8_full_pipeline",
+    "M6 COMPLETE. Mamba3Block.step/allocate_inference_cache reproduce the chunked forward to <=5e-7 under every flag cross (trapezoid, rope, bc_bias, conv-drop, data-dependent A). mLSTMBlock.step matches apply_tfla at tfla_impl=exact to 1.2e-10. Cached beam=3 is TOKEN-IDENTICAL to the existing uncached beam_search_decode, with and without an image prefix. Measured on a tiny CPU model: 21.5x per-token speedup, and the growth signature is the claim -- full recompute 1.19x from first to second half, cached 0.99x (flat).",
+    "2026-09-07: M6 FINDING 1: the cache cannot be exact against tfla_impl=legacy, because legacy TFLA computes no recurrence at all -- it divides by a clamped forget-gate cumulative product (M1's 0.882 rel-max-err). Measured: step vs legacy apply_tfla is rel 1.01, i.e. the legacy output is noise relative to the correct one. A2 trained with legacy TFLA, so an A2 checkpoint CANNOT be decoded with a state cache. This is a second, functional argument for the M9-A flip -- cacheable decode, not just correctness.",
+    "2026-09-07: M6 FINDING 2: mLSTMBlock._slow_forward and apply_tfla compute DIFFERENT FUNCTIONS. _slow_forward carries the LSE stabilizer m into C/n and divides by max(|n.q|,1); apply_tfla computes an m_state and never applies it, and clamps the SIGNED denominator. Gap 0.42 max abs at L=24, identical for legacy and exact, so structural not the clamp defect. The M1 fp64 oracle already documents TFLA's convention as the reference one, and use_tfla=True is what every checkpoint trained on -- so the cache matches TFLA and _slow_forward is the outlier. Same class as the Mamba-1 _slow_forward divergence M1 found. For M9.",
+    "2026-09-07: M6 LIMITATION, deliberate and documented: prefill steps token by token, so TTFT is 1.7-8.6x SLOWER than the uncached path depending on prompt length, while every token after it is ~21x faster. ssd_chunked_scan already computes the carried state in its inter-chunk loop but does not return it, and padding is masked out of that state, so exposing it correctly is its own change. Recorded as M6 follow-up rather than bolted on.",
     "2026-09-07: current_phase -> M8_full_pipeline"
   ],
   "open_questions": []

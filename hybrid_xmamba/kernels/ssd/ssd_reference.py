@@ -42,19 +42,29 @@ def ssd_step(
     C_t: torch.Tensor,
     state: torch.Tensor,
     D: Optional[torch.Tensor] = None,
+    coeff: Optional[torch.Tensor] = None,
+    extra_terms: Optional[Sequence[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Advance the SSD recurrence by one token.
 
-        h_t = exp(dt_t * A) h_{t-1} + dt_t (B_t x_t^T)
+        h_t = exp(dt_t * A) h_{t-1} + sum_terms coeff_t (B_t x_t^T)
         y_t = C_t^T h_t + D * x_t
+
+    This is both the float64 oracle's inner loop and the O(1) decode step
+    (MAMBA3_PLAN.md M2-A, M6-A): one function, so a decode path cannot drift from the reference
+    it is checked against. `coeff` and `extra_terms` mirror `ssd_chunked_scan` exactly, which is
+    what lets the trapezoidal rule decode without a second code path -- its `beta B_{t-1} x_{t-1}`
+    term is just another triple over the same decay.
 
     Args:
         x_t: (batch, nheads, headdim)
-        dt_t: (batch, nheads)
-        A: (nheads,)
+        dt_t: (batch, nheads) -- sets the decay exp(dt_t A)
+        A: (nheads,) or (batch, nheads)
         B_t, C_t: (batch, ngroups, dstate)
         state: (batch, nheads, headdim, dstate) -- the state after token t-1
         D: (nheads,) or None
+        coeff: (batch, nheads) state-input coefficient; defaults to `dt_t` (Euler).
+        extra_terms: additional (coefficient, B, x) triples summed into the state.
 
     Returns:
         (y_t, new_state) with y_t (batch, nheads, headdim).
@@ -64,11 +74,15 @@ def ssd_step(
     rep = _heads_per_group(nheads, ngroups)
 
     decay = torch.exp(dt_t * A).unsqueeze(-1).unsqueeze(-1)          # (batch, nheads, 1, 1)
-    B_h = B_t.repeat_interleave(rep, dim=1)                          # (batch, nheads, dstate)
     C_h = C_t.repeat_interleave(rep, dim=1)
-    new_state = decay * state + (
-        dt_t.unsqueeze(-1).unsqueeze(-1) * x_t.unsqueeze(-1) * B_h.unsqueeze(-2)
-    )
+
+    terms = [(dt_t if coeff is None else coeff, B_t, x_t)] + list(extra_terms or [])
+    new_state = decay * state
+    for co, bb, xx in terms:
+        b_h = bb.repeat_interleave(_heads_per_group(nheads, bb.shape[1]), dim=1)
+        new_state = new_state + (
+            co.unsqueeze(-1).unsqueeze(-1) * xx.unsqueeze(-1) * b_h.unsqueeze(-2)
+        )
     y_t = torch.einsum("bhpn,bhn->bhp", new_state, C_h)
     if D is not None:
         y_t = y_t + D.view(1, -1, 1) * x_t

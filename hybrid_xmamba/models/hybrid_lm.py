@@ -383,6 +383,194 @@ class HybridLanguageModel(nn.Module):
 
         return generated_ids
     
+    # -- M6-C: model-level O(1) decode ------------------------------------------------------
+
+    def supports_cached_decode(self) -> bool:
+        """True when every mixer in the stack has an O(1) `step`.
+
+        A partially cacheable stack is worthless -- one recomputing layer keeps the whole model
+        O(L) per token -- so this is all-or-nothing by design. sLSTM has no step yet, so a
+        pattern containing it decodes the old way.
+        """
+        return all(getattr(layer.mixer, "supports_step", False) for layer in self.layers)
+
+    def allocate_inference_cache(self, batch_size, device=None, dtype=torch.float32):
+        """One cache per layer. ~7.1 MB fp32 for the 150M model at batch 1, independent of L."""
+        device = device or self.lm_head.weight.device
+        return [
+            layer.allocate_inference_cache(batch_size, device=device, dtype=dtype)
+            for layer in self.layers
+        ]
+
+    def step_logits(self, hidden_t: torch.Tensor, caches) -> torch.Tensor:
+        """One token of hidden state -> next-token logits, advancing every layer's cache."""
+        for layer, cache in zip(self.layers, caches):
+            hidden_t = layer.step(hidden_t, cache)
+        return self.lm_head(self.final_norm(hidden_t))
+
+    def prefill(self, hidden: torch.Tensor, caches) -> torch.Tensor:
+        """Consume a prompt, leaving the caches positioned after its last token.
+
+        Token by token. That is O(L) work for the prompt -- the same order the chunked forward
+        does -- but as L separate kernel launches rather than one batched pass, so time-to-first-
+        token is *worse* than the uncached path even though every token after it is far better.
+
+        The fix is known and deliberately not attempted here: `ssd_chunked_scan` already computes
+        the carried state in its inter-chunk loop but does not return it, and padding is masked
+        out of that state, so exposing it correctly is its own change. Recorded as M6 follow-up
+        rather than bolted on -- M6-E measures and reports the TTFT cost as it stands.
+
+        Returns:
+            Logits for the final prompt position, (batch, vocab).
+        """
+        logits = None
+        for t in range(hidden.shape[1]):
+            logits = self.step_logits(hidden[:, t], caches)
+        return logits
+
+    def _filter_logits(self, logits, temperature, top_k, top_p):
+        """Shared sampling filter, so the cached and uncached paths cannot diverge on it."""
+        logits = logits / temperature
+        if top_k is not None:
+            logits[logits < torch.topk(logits, top_k)[0][..., -1, None]] = float("-inf")
+        if top_p is not None:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+            remove = cumulative > top_p
+            remove[..., 1:] = remove[..., :-1].clone()
+            remove[..., 0] = 0
+            logits[remove.scatter(1, sorted_indices, remove)] = float("-inf")
+        return logits
+
+    def generate_cached(
+        self,
+        input_ids: torch.Tensor,
+        prefix_embeds: Optional[torch.Tensor] = None,
+        max_new_tokens: int = 100,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+    ) -> torch.Tensor:
+        """`generate` with an O(1)-per-token recurrent cache instead of full recomputation.
+
+        The uncached path re-runs the whole prefix for every new token: O(L) per token, O(L^2)
+        per sequence, paid `beam_size` times over under beam search. Here the prompt is consumed
+        once and each new token costs a fixed amount of work.
+
+        Same contract as `generate`, including the `prefix_embeds` branch: the prefix consumes
+        context and contributes no ids of its own.
+        """
+        if not self.supports_cached_decode():
+            raise NotImplementedError(
+                "cached decode needs every mixer to implement step(); layer types are "
+                "{}".format(self.get_layer_types())
+            )
+        self.eval()
+        batch = input_ids.shape[0]
+        param = self.lm_head.weight
+        caches = self.allocate_inference_cache(batch, device=param.device, dtype=param.dtype)
+
+        generated_ids = input_ids
+        with torch.no_grad():
+            hidden = self.embeddings(input_ids)
+            if prefix_embeds is not None:
+                hidden = torch.cat([prefix_embeds, hidden], dim=1)
+            logits = self.prefill(hidden, caches)
+
+            for _ in range(max_new_tokens):
+                filtered = self._filter_logits(logits.clone(), temperature, top_k, top_p)
+                next_token = torch.multinomial(torch.softmax(filtered, dim=-1), num_samples=1)
+                generated_ids = torch.cat([generated_ids, next_token], dim=1)
+                logits = self.step_logits(self.embeddings(next_token)[:, 0], caches)
+        return generated_ids
+
+    @staticmethod
+    def reorder_cache(caches, index: torch.Tensor):
+        """Reindex every cached tensor along the batch axis (M6-C, beam search).
+
+        Beam search reorders and duplicates hypotheses at each step, so their recurrent state has
+        to follow. Everything batch-major is gathered; scalars like `seen` are shared across
+        beams by construction (all beams have consumed the same number of tokens) and are copied
+        through unchanged.
+        """
+        out = []
+        for cache in caches:
+            if cache is None:
+                out.append(None)
+                continue
+            moved = {}
+            for key, value in cache.items():
+                if torch.is_tensor(value):
+                    moved[key] = value.index_select(0, index)
+                else:
+                    moved[key] = value
+            out.append(moved)
+        return out
+
+    def beam_search_cached(
+        self,
+        input_ids: torch.Tensor,
+        prefix_embeds: Optional[torch.Tensor] = None,
+        beam_size: int = 3,
+        max_new_tokens: int = 100,
+        length_penalty: float = 1.0,
+    ) -> torch.Tensor:
+        """Beam search over the recurrent cache, one sample at a time.
+
+        The uncached beam search in `evaluate_report_generation.py` re-runs the full prefix for
+        every beam at every step: O(beam * L) work per token and O(beam * L^2) per sequence. Here
+        the beams live in the batch axis of one cache, so a step costs O(beam) and the prompt is
+        consumed once.
+
+        Same tie-breaking and length-penalty convention as the uncached version, so the two
+        return identical token sequences (asserted in tests/test_mamba3_numerics.py).
+        """
+        if input_ids.shape[0] != 1:
+            raise ValueError(
+                "beam_search_cached operates on one sample at a time (got batch "
+                "{})".format(input_ids.shape[0])
+            )
+        if not self.supports_cached_decode():
+            raise NotImplementedError("cached decode needs every mixer to implement step()")
+        self.eval()
+        device = input_ids.device
+        param = self.lm_head.weight
+
+        with torch.no_grad():
+            hidden = self.embeddings(input_ids)
+            if prefix_embeds is not None:
+                hidden = torch.cat([prefix_embeds, hidden], dim=1)
+            # All beams start from the same prompt, so prefill once, replicated.
+            hidden = hidden.expand(beam_size, -1, -1).contiguous()
+            caches = self.allocate_inference_cache(
+                beam_size, device=param.device, dtype=param.dtype
+            )
+            logits = self.prefill(hidden, caches)                    # (beam, vocab)
+
+            tokens = input_ids.expand(beam_size, -1).contiguous()
+            # Only beam 0 is live at the start; the rest are -inf so the first expansion picks
+            # the true top-k of a single hypothesis rather than k copies of it.
+            scores = torch.full((beam_size,), float("-inf"), device=device)
+            scores[0] = 0.0
+
+            for _ in range(max_new_tokens):
+                log_probs = torch.log_softmax(logits.float(), dim=-1)     # (beam, vocab)
+                total = scores.unsqueeze(-1) + log_probs
+                length = tokens.shape[1] + 1
+                ranked = total / (length ** length_penalty)
+                flat_rank, flat_idx = ranked.view(-1).topk(beam_size)
+                beam_idx = torch.div(flat_idx, log_probs.shape[-1], rounding_mode="floor")
+                token_idx = flat_idx % log_probs.shape[-1]
+
+                scores = total.view(-1)[flat_idx]
+                tokens = torch.cat([tokens.index_select(0, beam_idx),
+                                    token_idx.unsqueeze(-1)], dim=1)
+                caches = self.reorder_cache(caches, beam_idx)
+                logits = self.step_logits(self.embeddings(token_idx.unsqueeze(-1))[:, 0], caches)
+
+            best = int(torch.argmax(scores / (tokens.shape[1] ** length_penalty)))
+        return tokens[best : best + 1]
+
     def get_num_params(self, non_embedding: bool = True) -> int:
         """Get number of parameters.
         

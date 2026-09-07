@@ -1635,3 +1635,198 @@ def test_theta_max_bounds_the_total_rotation_over_a_sequence():
     assert 512 * calm.dt_limit * calm.theta_max / (2 * math.pi) < 2, (
         "a setting where the rotation stays a position code rather than a scrambler"
     )
+
+
+# ---------------------------------------------------------------------------
+# M6: O(1) recurrent decode cache
+#
+# The point of the cache is that it is an EQUIVALENCE, not an approximation and
+# not an improvement: whatever the chunked forward computes, stepping must
+# reproduce. Every test here is that claim in a different setting.
+# ---------------------------------------------------------------------------
+
+
+def _step_through(block, x, **cache_kw):
+    """Run `block` one token at a time through its cache and stack the outputs."""
+    cache = block.allocate_inference_cache(x.shape[0], **cache_kw)
+    with torch.no_grad():
+        return torch.stack([block.step(x[:, t], cache) for t in range(x.shape[1])], dim=1)
+
+
+@pytest.mark.parametrize("flags", [
+    {},
+    {"use_trapezoid": True},
+    {"use_rope": True, "theta_max": 0.2},
+    {"use_conv": False},
+    {"bc_bias": "one_init"},
+    {"a_mode": "data_dependent"},
+    {"use_trapezoid": True, "use_rope": True, "bc_bias": "one_init", "theta_max": 0.2},
+])
+def test_mamba3_step_reproduces_the_chunked_forward(flags):
+    """M6-A: the decode step must equal the training-time operator, under every flag.
+
+    This is the test that makes the cache trustworthy. `step` re-derives the whole block --
+    projection split, short conv over a rolling window, rotate-then-bias-then-shift ordering,
+    the trapezoid's one-token carry -- and any divergence from `forward` is a silent inference
+    bug that no shape check would catch. The recurrence itself is `ssd_step`, which is also the
+    fp64 oracle's inner loop, so the decode path and the reference cannot drift apart.
+    """
+    torch.manual_seed(0)
+    block = _m3_block(**flags).eval()
+    x = torch.randn(2, 40, 128)
+    with torch.no_grad():
+        full = block(x)
+    assert torch.allclose(full, _step_through(block, x), atol=1e-5), (
+        "max abs {:.3e}".format((full - _step_through(block, x)).abs().max())
+    )
+
+
+def test_mamba3_cache_size_is_independent_of_context():
+    """The whole point: state, not history. Nothing in the cache may scale with L."""
+    block = _m3_block(use_rope=True, use_trapezoid=True)
+    cache_short = block.allocate_inference_cache(1)
+    x = torch.randn(1, 64, 128)
+    cache_long = block.allocate_inference_cache(1)
+    with torch.no_grad():
+        for t in range(64):
+            block.step(x[:, t], cache_long)
+    size = lambda c: sum(v.numel() for v in c.values() if torch.is_tensor(v))
+    assert size(cache_long) == size(cache_short), "cache grew while decoding"
+
+
+def test_mlstm_step_reproduces_the_shipping_tfla_operator():
+    """M6-B: the mLSTM step must match `apply_tfla`, which is what every checkpoint trained on.
+
+    Only against `tfla_impl="exact"`. The legacy kernel divides by a clamped forget-gate
+    cumulative product and does not compute this -- or any -- recurrence, so no O(1) step can
+    reproduce it. That is a property of the M1 defect, not of this cache, and it is a second,
+    functional argument for flipping the default at M9: a model trained on the legacy kernel
+    cannot be decoded with a state cache at all.
+    """
+    from hybrid_xmamba.layers.mlstm_block import mLSTMBlock
+
+    torch.manual_seed(0)
+    block = mLSTMBlock(dim=64, head_dim=16, tfla_impl="exact").eval()
+    x = torch.randn(2, 96, 64)
+    with torch.no_grad():
+        full = block(x)
+    assert torch.allclose(full, _step_through(block, x), atol=1e-5)
+
+    torch.manual_seed(0)
+    legacy = mLSTMBlock(dim=64, head_dim=16, tfla_impl="legacy").eval()
+    legacy.load_state_dict(block.state_dict())
+    with torch.no_grad():
+        gap = (legacy(x) - _step_through(legacy, x)).abs().max().item()
+    assert gap > 1e-5, (
+        "legacy TFLA suddenly agrees with an exact recurrence -- if the M1 defect was fixed, "
+        "this test and the M9 flip both need revisiting"
+    )
+
+
+def test_mlstm_slow_forward_is_a_different_operator_than_tfla():
+    """A finding, pinned so it cannot be forgotten: the two mLSTM paths disagree structurally.
+
+    `_slow_forward` carries the LSE stabilizer `m` into `C`/`n` and divides by `max(|n·q|, 1)`.
+    `apply_tfla` computes an `m_state` and never applies it, and clamps the **signed**
+    denominator. They are different functions, identically so for `tfla_impl` "legacy" and
+    "exact", so this is structural rather than the M1 clamp defect. `sequential_mlstm_fp64`
+    above already documents TFLA's convention as the reference one, and `use_tfla=True` is what
+    every trained checkpoint used -- so the cache matches TFLA and `_slow_forward` is the
+    outlier. Same class as the Mamba-1 `_slow_forward` divergence M1 found. Recorded for M9.
+    """
+    from hybrid_xmamba.layers.mlstm_block import mLSTMBlock
+
+    torch.manual_seed(0)
+    block = mLSTMBlock(dim=64, head_dim=16, tfla_impl="exact").eval()
+    x = torch.randn(2, 24, 64)
+    with torch.no_grad():
+        via_tfla = block(x)
+        block.use_tfla = False
+        via_slow = block(x)
+    assert not torch.allclose(via_tfla, via_slow, atol=1e-3), (
+        "the two mLSTM paths now agree -- if that was deliberate, delete this test and update "
+        "the M9 writeup, which records them as different operators"
+    )
+
+
+def _cached_lm(vocab=97, **cfg_kw):
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    torch.manual_seed(0)
+    kw = dict(vocab_size=vocab, dim=64, num_layers=4, layer_pattern=["mamba3", "mlstm"],
+              head_dim=16, num_heads=4, max_position_embeddings=64, tfla_impl="exact",
+              mamba3_d_state=32, mamba3_head_dim=16, mamba3_chunk_size=8)
+    kw.update(cfg_kw)
+    return HybridLanguageModel(HybridConfig(**kw)).eval()
+
+
+@pytest.mark.parametrize("with_prefix", [False, True])
+def test_cached_decode_matches_full_recompute(with_prefix):
+    """M6-D: the logit stream must be the same whether or not a cache produced it.
+
+    Compared on logits rather than sampled tokens, so the assertion is deterministic and
+    strictly stronger -- two paths can sample identically for a while and still disagree.
+    """
+    model = _cached_lm()
+    assert model.supports_cached_decode()
+    ids = torch.randint(0, 97, (2, 7))
+    prefix = torch.randn(2, 3, 64) if with_prefix else None
+
+    with torch.no_grad():
+        hidden = model.embeddings(ids)
+        if prefix is not None:
+            hidden = torch.cat([prefix, hidden], dim=1)
+        caches = model.allocate_inference_cache(2)
+        cached = model.prefill(hidden, caches)
+        full = model(inputs_embeds=hidden).logits[:, -1]
+        assert torch.allclose(full, cached, atol=1e-5)
+
+        # ...and it stays true as tokens are appended.
+        for _ in range(6):
+            nxt = full.argmax(-1, keepdim=True)
+            hidden = torch.cat([hidden, model.embeddings(nxt)], dim=1)
+            cached = model.step_logits(model.embeddings(nxt)[:, 0], caches)
+            full = model(inputs_embeds=hidden).logits[:, -1]
+            assert torch.allclose(full, cached, atol=1e-5), (
+                "cached decode drifted from full recompute: max abs {:.3e}".format(
+                    (full - cached).abs().max()
+                )
+            )
+
+
+@pytest.mark.parametrize("with_prefix", [False, True])
+def test_cached_beam_search_is_token_identical_to_the_uncached_one(with_prefix):
+    """M6-D: beam=3, the decode setting the report-gen eval actually uses.
+
+    Beams reorder and duplicate every step, so their recurrent state has to be gathered with
+    them -- the failure mode is a beam inheriting another's state, which produces fluent,
+    plausible, wrong text. Token equality against the existing uncached implementation is the
+    only check that catches it.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "erg", "scripts/evaluate_report_generation.py"
+    )
+    erg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(erg)
+
+    model = _cached_lm()
+    ids = torch.randint(0, 97, (1, 6))
+    prefix = torch.randn(1, 3, 64) if with_prefix else None
+    uncached = erg.beam_search_decode(model, ids, prefix_embeds=prefix,
+                                      beam_size=3, max_new_tokens=8)
+    cached = model.beam_search_cached(ids, prefix_embeds=prefix,
+                                      beam_size=3, max_new_tokens=8)
+    assert torch.equal(uncached, cached), (
+        "uncached {} vs cached {}".format(uncached.tolist(), cached.tolist())
+    )
+
+
+def test_cached_decode_refuses_a_stack_it_cannot_serve():
+    """All-or-nothing: one recomputing layer keeps the whole model O(L) per token."""
+    model = _cached_lm(layer_pattern=["mamba3", "slstm"], slstm_hidden_dim=64)
+    assert not model.supports_cached_decode()
+    with pytest.raises(NotImplementedError, match="step"):
+        model.generate_cached(torch.randint(0, 97, (1, 4)), max_new_tokens=2)

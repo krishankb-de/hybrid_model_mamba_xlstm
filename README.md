@@ -7,7 +7,7 @@ A research implementation of a hybrid architecture combining **Mamba** (Selectiv
 
 ## 🔬 This branch: `h100_scaling_mamba3` — Mamba-3 backbone upgrade
 
-**Status: M0–M5 complete, 44/63 checkboxes.** Plan of record: [`MAMBA3_PLAN.md`](MAMBA3_PLAN.md);
+**Status: M0–M6 complete, 49/63 checkboxes.** Plan of record: [`MAMBA3_PLAN.md`](MAMBA3_PLAN.md);
 live state: [`mamba3_state.json`](mamba3_state.json). Branched from `h100_scaling` @ `20a1d27`.
 **This branch is never merged without an explicit instruction** — `h100_scaling` keeps the approved
 results reproducible.
@@ -199,7 +199,7 @@ not transfer, but neither is a win assumed. That is what the M7 screen measures.
 | M3 | Exponential-trapezoidal | ✅ 3/3 |
 | M4 | Complex-valued state (RoPE trick) | ✅ 5/5 |
 | M5 | Flags folded into arm definitions (no milestone of its own) | ✅ 3/3 |
-| M6 | O(1) recurrent decode cache | ⬜ 0/5 |
+| M6 | O(1) recurrent decode cache | ✅ 5/5 |
 | M7 | Timing probe + short-run screen  — H100 | 🔄 8/9 |
 | M8 | Full pipeline on the winner — H100 | ⬜ 0/5 |
 | M9 | Cleanup, writeup, reintegration | ⬜ 0/5 |
