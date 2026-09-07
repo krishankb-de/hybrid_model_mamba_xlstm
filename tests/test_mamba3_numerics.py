@@ -1474,9 +1474,28 @@ def test_the_screen_is_a_paired_comparison():
     it is the one arm allowed to differ.
     """
     arms = _arms_module().ARMS
-    seeds = {name: arm.seed for name, arm in arms.items()}
-    assert seeds.pop("A0-seed") != seeds["A0"], "the noise-floor arm must use a different seed"
-    assert len(set(seeds.values())) == 1, "arms differ in seed as well as operator: {}".format(seeds)
+
+    # Replication arms are the deliberate exception: they hold the operator fixed and vary only
+    # the seed, which is the one thing the screen cannot otherwise measure. A0-seed gave the
+    # noise floor; A2-s2 / A4-hi-s2 are the M7-D tiebreak (A4-hi leads A2 by 0.509 PPL, 79% of
+    # the bar, against 0.335 PPL of measured paired trajectory sensitivity).
+    replicas = {"A0-seed": "A0", "A2-s2": "A2", "A4-hi-s2": "A4-hi"}
+    for replica, base in replicas.items():
+        assert replica in arms and base in arms, "{} has no base arm".format(replica)
+        assert arms[replica].seed != arms[base].seed, (
+            "{} must differ in seed from {} -- that is the whole point".format(replica, base)
+        )
+        assert arms[replica].overrides == arms[base].overrides, (
+            "{} must hold {}'s operator fixed and vary ONLY the seed".format(replica, base)
+        )
+        assert arms[replica].config == arms[base].config
+
+    # Everything else is a paired comparison and must share one seed.
+    seeds = {n: a.seed for n, a in arms.items() if n not in replicas}
+    assert len(set(seeds.values())) == 1, (
+        "arms differ in seed as well as operator, so their deltas are not attributable: "
+        "{}".format(seeds)
+    )
 
 
 @pytest.mark.parametrize("arm_name", ["A2", "A3", "A4", "A5", "A6"])

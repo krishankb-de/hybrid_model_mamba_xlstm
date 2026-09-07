@@ -1,7 +1,7 @@
 {
-  "current_phase": "M6_decode_cache",
-  "last_updated": "2026-09-06T20:02:08+02:00",
-  "status": "M0-M5 complete. All 8 screen arms build the operator they claim at 150M and are submittable from one definition. M6 next: O(1) recurrent decode cache.",
+  "current_phase": "M7_screen_tiebreak",
+  "last_updated": "2026-09-07T08:32:19+02:00",
+  "status": "M7-B/G complete. The correctness fix is the whole gain (-3.09 PPL); SSD makes it 3.1x cheaper. Trapezoid null, rope collapse was my missing theta_max field. A4-hi leads A2 by 0.509 PPL (79% of bar) -- replicating both at seed 1234 before M8.",
   "plan_of_record": "MAMBA3_PLAN.md",
   "branch": {
     "name": "h100_scaling_mamba3",
@@ -166,8 +166,9 @@
     "A1": {
       "desc": "Mamba-1 + exact scan + dt init + no Delta-norm",
       "role": "isolates the defect/Delta fix; screen-only, never enters the full pipeline",
-      "status": "rerunning",
-      "job_id": "2513750 (24h; 2513057 TIMED OUT at 12:00:03)"
+      "status": "done",
+      "job_id": "2513750 (2513057 TIMED OUT at 12h)",
+      "val_ppl": 16.294
     },
     "A2": {
       "desc": "Mamba3Block, exact Mamba-2 reduction, d_state=128",
@@ -212,20 +213,38 @@
     "A4-lo": {
       "desc": "A4 with mamba3_theta_max=0.002",
       "role": "M7-G: re-test Prop. 3/4 at 0.16 turns over 512 tokens. The M7-B rope arms measured theta_max=1.0 (81 turns), the only value reachable at the time.",
-      "status": "not_run",
-      "submit": "ARM=A4-lo sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
+      "status": "done",
+      "submit": "ARM=A4-lo sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 16.431,
+      "job_id": "2514913"
     },
     "A4-mid": {
       "desc": "A4 with mamba3_theta_max=0.02",
       "role": "M7-G: re-test Prop. 3/4 at 1.63 turns over 512 tokens. The M7-B rope arms measured theta_max=1.0 (81 turns), the only value reachable at the time.",
-      "status": "not_run",
-      "submit": "ARM=A4-mid sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
+      "status": "done",
+      "submit": "ARM=A4-mid sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 16.534,
+      "job_id": "2514914"
     },
     "A4-hi": {
       "desc": "A4 with mamba3_theta_max=0.2",
       "role": "M7-G: re-test Prop. 3/4 at 16.30 turns over 512 tokens. The M7-B rope arms measured theta_max=1.0 (81 turns), the only value reachable at the time.",
+      "status": "done",
+      "submit": "ARM=A4-hi sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 16.199,
+      "job_id": "2514915"
+    },
+    "A2-s2": {
+      "desc": "A2 replicated at seed 1234",
+      "role": "M7-D tiebreak: A4-hi leads A2 by 0.509 PPL = 79% of the bar, and the theta_max sweep showed 0.335 PPL of paired trajectory sensitivity. Replicate before committing 133 GPU-h to M8.",
       "status": "not_run",
-      "submit": "ARM=A4-hi sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
+      "submit": "ARM=A2-s2 sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
+    },
+    "A4-hi-s2": {
+      "desc": "A4-hi replicated at seed 1234",
+      "role": "M7-D tiebreak: A4-hi leads A2 by 0.509 PPL = 79% of the bar, and the theta_max sweep showed 0.335 PPL of paired trajectory sensitivity. Replicate before committing 133 GPU-h to M8.",
+      "status": "not_run",
+      "submit": "ARM=A4-hi-s2 sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh"
     }
   },
   "pre_registered": {
@@ -540,11 +559,11 @@
           "desc": "Gate: A2 ≤ A0 at 12K. If the corrected operator is *worse*, stop and report — the buggy"
         },
         "M7-D": {
-          "done": false,
+          "done": true,
           "desc": "Per-lever deltas. Pre-registered decision rule (written before the numbers exist): advance"
         },
         "M7-G": {
-          "done": false,
+          "done": true,
           "desc": "⚠ Re-test Prop. 3/4 at a rotation rate that is a position code. The M7-B rope"
         },
         "M7-E": {
@@ -570,7 +589,10 @@
         "A4": "1166.701",
         "A5": "1166.185",
         "A6": "1168.531",
-        "gate": "A2 <= A0, passed by 4.2x the bar"
+        "gate": "A2 <= A0, passed by 4.2x the bar",
+        "A4_lo": "16.431 (job 2514913)",
+        "A4_mid": "16.534 (job 2514914)",
+        "A4_hi": "16.199 (job 2514915)"
       },
       "verdict": null
     },
@@ -695,7 +717,12 @@
     "2026-09-06: ROOT CAUSE FOUND for the rope collapse, and it is mine, not the paper's: mamba3_theta_max was NEVER a HybridConfig field. The block default 1.0 was the only value the campaign could run. With dt_limit=1.0 that permits 1 rad/token and 512 rad over a 512-token sequence -- 81 full turns. A relative rotation R(Theta_s - Theta_t) is a position code only inside one turn; past that it aliases, and theta is data-dependent so the aliasing follows content, not distance. Two hand-maintained copies of the forwarding whitelist in hybrid_block.py both omitted theta_max, so the config round-trip test and the ARCH fingerprint both looked clean.",
     "2026-09-06: Fixed the CLASS: the mamba3 forwarding whitelist is now derived from inspect.signature(Mamba3Block.__init__) instead of hand-listed twice, and a test asserts every block lever has a matching mamba3_ config field. That test immediately found a second unreachable lever, dt_init_floor. mamba3_theta_max / dt_min / dt_max / dt_init_floor are now declared in HybridConfig and hybrid_150m_m3.yaml.",
     "2026-09-06: Speed confirmed on equal footing (identical validation schedules): A0 fit 2:36:50 vs A2 1:20:55 = 1.94x. The earlier 1.76x probe estimate was conservative.",
-    "2026-09-06: All five array tasks show sacct State=FAILED ExitCode 2:0 despite completing 12,000 steps and saving checkpoints; the log ends with 'error reading input file: Stale file handle' from bash itself on the vast NFS home. Training results are valid -- Trainer.fit reported max_steps reached and the final metrics are present. The exit code is not trustworthy on this filesystem."
+    "2026-09-06: All five array tasks show sacct State=FAILED ExitCode 2:0 despite completing 12,000 steps and saving checkpoints; the log ends with 'error reading input file: Stale file handle' from bash itself on the vast NFS home. Training results are valid -- Trainer.fit reported max_steps reached and the final metrics are present. The exit code is not trustworthy on this filesystem.",
+    "M7-G RESULT: the rope collapse WAS theta_max. theta_max=1.0 (81 turns) -> 1166 PPL; 0.2 -> 16.199; 0.02 -> 16.534; 0.002 -> 16.431. My pre-registered SHAPE was wrong though: I predicted lo/mid recover and hi degrades. All three recovered and hi was the BEST arm in the whole screen. Harm therefore sets in somewhere between 16 and 81 turns, not gradually from one turn.",
+    "2026-09-07: A1 IS THE HEADLINE. A1 = 16.294 (job 2513750, 4:11:13). A0 -> A1 = -3.093 PPL (-16.0%) from fixing the defect on the EXISTING Mamba-1 architecture. A0 -> A2 = -2.679 (-13.8%). A1 - A2 = +0.414 = 64% of the bar, NOT significant: both routes to a correct operator land in the same place. The entire measurable gain is the correctness fix, not the architecture. What SSD buys is cost: A2 runs 3.10x faster than A1 and 1.94x faster than A0. That is exactly the argument the plan made from memory arithmetic before any GPU time was spent -- correctness is affordable in Mamba-2/3's scalar-A form and not in Mamba-1's -- now measured end to end.",
+    "2026-09-07: PAIRED SENSITIVITY FLOOR measured for free: A4-lo/mid/hi share seed, data order and in_proj shape and differ only in theta_max over a 100x range, yet span 0.335 PPL NON-MONOTONICALLY. That is trajectory sensitivity, not a mechanism, and it sets the resolution of any paired comparison in this screen. The A4-hi vs A2 gap (0.509) sits barely above it.",
+    "2026-09-07: M7-D applied: lowest arm is A4-hi 16.199; A4-hi - A2 = 0.509 = 79% of the 0.642 bar, so the pre-registered rule says advance the SIMPLEST arm, A2. Before spending 133 GPU-h on M8, replicate both at seed 1234 (~10 GPU-h): arms A2-s2 and A4-hi-s2 added.",
+    "2026-09-07: current_phase -> M7_screen_tiebreak"
   ],
   "open_questions": []
 }

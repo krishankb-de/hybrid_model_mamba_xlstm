@@ -116,6 +116,20 @@ for _tag, _theta in (("lo", 0.002), ("mid", 0.02), ("hi", 0.2)):
         expect=_M3_BASE + ["trapezoid=False", "rope=True"],
     )
 
+# --- M7-D tiebreak: replicate the two candidates at a second seed --------------------------
+# A4-hi (16.199) is the lowest arm in the screen and A2 (16.708) is the simplest; the gap is
+# 0.509 PPL, 79% of the pre-registered 0.642 bar, so the rule says advance A2. But the whole
+# theta_max sweep -- same seed, same data order, one lever over a 100x range -- moved val PPL by
+# 0.335 PPL non-monotonically, which is the scale of trajectory sensitivity in a *paired* run.
+# The candidate gap sits barely above that. M8 costs 133 GPU-h; a replication costs ~10.
+for _name, _ov in (("A2", {}),
+                   ("A4-hi", {"mamba3_use_rope": True, "mamba3_theta_max": 0.2})):
+    ARMS["{}-s2".format(_name)] = Arm(
+        config=_M3, overrides=dict(_ov), seed=1234,
+        isolates="M7-D tiebreak: does {} hold its place at a second seed?".format(_name),
+        expect=ARMS[_name].expect,
+    )
+
 # Deliberately absent, so it is not silently re-proposed: `mamba3_mimo_rank > 1` (decision 3,
 # +3.2% params leaves the parameter-matched regime), `mamba3_ngroups > 1` and
 # `mamba3_d_state > 128` (pre-registered as *scaled* arms only, never the headline comparison).

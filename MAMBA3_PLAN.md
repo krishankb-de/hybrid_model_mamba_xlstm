@@ -569,11 +569,52 @@ looked correct. Fixed as a class, not an instance: the whitelist is now derived 
 ⚠ **This means M7-B has not yet tested Prop. 3/4.** A collapse caused by an unreachable
 hyperparameter is evidence about the harness, not about complex-valued state. Reported as such.
 
+**M7-B/G COMPLETE (2026-09-07). The headline is not the architecture — it is the defect.**
+
+| Arm | levers | val PPL | fit | vs A0 s42 |
+|---|---|---|---|---|
+| A0 s42 | Mamba-1, legacy scan | 19.387 | 2:36:50 | — |
+| A0 s1234 | noise-floor twin | 18.933 | 2:36:44 | — |
+| **A1** | **Mamba-1 + exact scan + dt init + no Δ-norm** | **16.294** | 4:11:13 | **−3.093 (−16.0%)** |
+| **A2** | **SSD + 8× state** | **16.708** | **1:20:55** | **−2.679 (−13.8%)** |
+| A3 | + trapezoid | 16.719 | 1:28:00 | −2.668 |
+| A4-lo | + RoPE, `theta_max` 0.002 (0.16 turns) | 16.431 | 1:24:49 | −2.956 |
+| A4-mid | + RoPE, `theta_max` 0.02 (1.6 turns) | 16.534 | 1:31:41 | −2.853 |
+| **A4-hi** | + RoPE, `theta_max` 0.2 (16 turns) | **16.199** | 1:31:23 | −3.188 |
+| A4/A5/A6 | + RoPE, `theta_max` 1.0 (81 turns) | **1166.7** | — | **collapsed** |
+
+**1. Both routes to a correct operator land in the same place.** `A1 − A2 = +0.414 PPL` — **64% of
+the 0.642 bar, not significant**. Fixing the divide-and-clamp and the Δ init on the *existing*
+Mamba-1 architecture recovers −3.09 PPL; migrating to SSD with 8× the state recovers −2.68. **The
+entire measurable quality gain is the correctness fix, not the architecture.**
+
+**2. What SSD buys is cost, and that is exactly what the plan predicted from arithmetic.** A2 trains
+**3.10× faster than A1** and 1.94× faster than the broken A0. The exact scan is affordable in
+Mamba-2/3's scalar-`A` form (19 MB) and not in Mamba-1's `(d_inner, dstate)` form (19.3 GB) — the
+Context section argued this before a single GPU-hour was spent, and A1's 4:11:13 against A2's
+1:20:55 is that argument measured. *That* is the case for Mamba-3 here: not better perplexity, the
+same corrected-operator perplexity at a third of the cost and with 8× the state.
+
+**3. The rope collapse was `theta_max`, confirmed.** 1.0 → 1166; 0.2 → 16.199; 0.02 → 16.534;
+0.002 → 16.431. **My pre-registered *shape* was wrong**: I predicted `lo`/`mid` would recover and
+`hi` would degrade. All three recovered and `hi` was the best arm in the screen. Harm therefore sets
+in somewhere between 16 and 81 turns, not gradually from one turn. Recorded as a wrong prediction,
+not smoothed over.
+
+**4. A paired sensitivity floor, measured for free.** A4-lo/mid/hi share seed, data order and
+`in_proj` shape and differ *only* in `theta_max` across a 100× range — yet they span **0.335 PPL,
+non-monotonically**. That is trajectory sensitivity, not a mechanism, and it sets the resolution of
+every paired comparison here. The A4-hi−A2 gap (0.509) sits barely above it.
+
+**5. M7-D applied.** Lowest arm is A4-hi; `A4-hi − A2 = 0.509 = 79%` of the bar → the pre-registered
+rule says **advance the simplest arm, A2**. Before committing 133 GPU-h to M8, replicate both at
+seed 1234 (~10 GPU-h): arms `A2-s2`, `A4-hi-s2`.
+
 - [x] **M7-C** **Gate: A2 ≤ A0 at 12K.** If the corrected operator is *worse*, **stop and report** — the buggy
       operator was acting as an unintended regularizer. That is a real finding; do not tune around it.
-- [ ] **M7-D** Per-lever deltas. **Pre-registered decision rule (written before the numbers exist):** advance
+- [x] **M7-D** Per-lever deltas. **Pre-registered decision rule (written before the numbers exist):** advance
       the arm with lowest val PPL **only if Δ > 2× seed SD**; otherwise advance the **simplest** arm.
-- [ ] **M7-G** ⚠ **Re-test Prop. 3/4 at a rotation rate that is a position code.** The M7-B rope
+- [x] **M7-G** ⚠ **Re-test Prop. 3/4 at a rotation rate that is a position code.** The M7-B rope
       arms measured `theta_max=1.0` — the only value reachable at the time — not the mechanism.
       Three arms, `A4-lo/mid/hi` at `theta_max` ∈ {0.002, 0.02, 0.2} = {0.16, 1.6, 16} turns over
       512 tokens, everything else identical to A4. Pre-registered reading: if `lo`/`mid` recover to
