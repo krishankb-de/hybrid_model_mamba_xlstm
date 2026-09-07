@@ -1,0 +1,78 @@
+# Parameter-matched Transformer baseline — report-generation (RRG) variant.
+# H100_SCALING_PLAN.md Phase 14A-2.
+#
+# Identical architecture to transformer_150m_baseline.yaml (so a Stage-0 checkpoint
+# loads straight into it), plus the image-prefix keys ReportGenerationLightningModule
+# reads. This mirrors the hybrid_150m_v2.yaml -> hybrid_150m_v2_rrg.yaml delta EXACTLY:
+# every report-gen hyperparameter below is copied verbatim from hybrid_150m_v2_rrg.yaml,
+# so the only difference between the two report-gen runs is the mixer.
+#
+# Param match vs hybrid_150m_v2 = 183.7218M: this config is 183.3869M (-0.18%).
+# The ImagePrefixMapper is built by the lightning module, is identical for both
+# architectures, and therefore does not affect the match.
+
+model_type: "hybrid_lm"
+
+# Architecture — identical to transformer_150m_baseline.yaml
+vocab_size: 50257
+dim: 768
+num_layers: 15
+layer_pattern: ["attention"]
+
+# Attention parameters
+num_heads: 12
+head_dim: 64
+attn_dropout: 0.0
+rope_theta: 10000.0
+
+# Unused by this pattern; kept for schema parity with the hybrid configs.
+state_size: 16
+conv_size: 4
+expand_factor: 2
+dt_rank: null
+use_fast_path: true
+use_tfla: true
+proj_factor: 2
+slstm_hidden_dim: 768
+slstm_num_heads: 4
+use_exponential_gate: true
+
+# Shared parameters
+norm_type: "rms"
+use_mlp: true
+mlp_ratio: 4.0
+
+max_position_embeddings: 1024
+dropout: 0.1
+initializer_range: 0.02
+
+use_cache: true
+tie_word_embeddings: false
+
+use_gradient_checkpointing: false
+proj_head_dropout: 0.1
+norm_topology: pre_rms
+pooling_strategy: attention
+
+# Phase 10B — image prefix. Same k=32 the hybrid uses.
+image_patch_dim: 768
+prefix_k: 32
+
+# Phase 10C — image-tower unfreeze. Must be declared (not just defaulted in
+# train_report_generation.py) because train_report_generation_h100.sh sets both via a
+# Hydra CLI override, which fails under strict-struct mode against an undeclared key.
+vit_unfreeze_blocks: 0
+vit_lr: 1.0e-6
+
+# Optimization — copied verbatim from hybrid_150m_v2_rrg.yaml. Do not re-tune.
+# gradient_clip_val stays 0.5: it was set because the 150M hybrid is spike-fragile.
+# Keeping it identical costs the Transformer nothing and preserves the single lever.
+decoder_lr: 1.0e-5
+head_lr: 3.0e-4
+weight_decay: 0.01
+warmup_steps: 500
+max_steps: 10000
+gradient_clip_val: 0.5
+
+learning_rate: 4.0e-4
+distill: null

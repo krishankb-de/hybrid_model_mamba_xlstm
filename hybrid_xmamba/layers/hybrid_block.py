@@ -8,13 +8,14 @@ import torch
 import torch.nn as nn
 from typing import List, Optional, Literal
 
+from hybrid_xmamba.layers.attention_block import AttentionBlock
 from hybrid_xmamba.layers.mamba_block import MambaBlock
 from hybrid_xmamba.layers.mlstm_block import mLSTMBlock
 from hybrid_xmamba.layers.slstm_block import sLSTMBlock
 from hybrid_xmamba.layers.normalization import RMSNorm
 
 
-LayerType = Literal["mamba", "mlstm", "slstm"]
+LayerType = Literal["mamba", "mlstm", "slstm", "attention"]
 
 
 class HybridBlock(nn.Module):
@@ -28,7 +29,7 @@ class HybridBlock(nn.Module):
     
     Args:
         dim: Model dimension
-        layer_type: Type of layer ('mamba', 'mlstm', 'slstm')
+        layer_type: Type of layer ('mamba', 'mlstm', 'slstm', 'attention')
         norm_type: Type of normalization ('rms', 'layer')
         use_mlp: Whether to include MLP after the mixer
         mlp_ratio: Expansion ratio for MLP
@@ -80,6 +81,14 @@ class HybridBlock(nn.Module):
                             "use_hybrid_norm"}
             filtered_kwargs = {k: v for k, v in layer_kwargs.items() if k in mlstm_params}
             self.mixer = mLSTMBlock(dim, **filtered_kwargs)
+        elif self.layer_type == "attention":
+            # Phase 14A: Transformer-baseline mixer. `head_dim`/`num_heads` are
+            # shared with mLSTM's config keys on purpose -- the matched baseline
+            # reuses the hybrid's head geometry rather than inventing its own.
+            attn_params = {"num_heads", "head_dim", "attn_dropout", "rope_theta",
+                           "max_position_embeddings", "use_hybrid_norm"}
+            filtered_kwargs = {k: v for k, v in layer_kwargs.items() if k in attn_params}
+            self.mixer = AttentionBlock(dim, **filtered_kwargs)
         elif self.layer_type == "slstm":
             # sLSTMBlock parameters (uses slstm_* prefix in config)
             slstm_params = {"num_heads", "use_exponential_gate"}
@@ -128,8 +137,9 @@ class HybridBlock(nn.Module):
             x: Input tensor of shape (batch, seq_len, dim)
             cache: Optional cache for inference
             cu_seqlens: Optional (B, L) int tensor of per-position doc-ids for
-                cross-document boundary resets (Phase 6). Only Mamba/mLSTM mixers
-                consume it; sLSTM passes through unchanged.
+                cross-document boundary resets (Phase 6). Mamba/mLSTM reset their
+                recurrent state on it and attention (Phase 14A) blocks attending
+                across the boundary; sLSTM passes through unchanged.
 
         Returns:
             Output tensor of shape (batch, seq_len, dim)
@@ -137,7 +147,7 @@ class HybridBlock(nn.Module):
         # Mixer with residual
         residual = x
         x = self.norm1(x)
-        if self.layer_type in ("mamba", "mlstm"):
+        if self.layer_type in ("mamba", "mlstm", "attention"):
             x = self.mixer(x, cache=cache, cu_seqlens=cu_seqlens)
         else:
             x = self.mixer(x, cache=cache)

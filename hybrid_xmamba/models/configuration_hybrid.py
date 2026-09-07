@@ -16,7 +16,7 @@ class HybridConfig:
         vocab_size: Size of vocabulary
         dim: Model dimension (hidden size)
         num_layers: Number of transformer-style blocks
-        layer_pattern: Repeating pattern of layer types ['mamba', 'mlstm', 'slstm']
+        layer_pattern: Repeating pattern of layer types ['mamba', 'mlstm', 'slstm', 'attention']
         
         # Mamba specific
         state_size: SSM state dimension for Mamba blocks
@@ -48,7 +48,7 @@ class HybridConfig:
     vocab_size: int = 50257
     dim: int = 768
     num_layers: int = 12
-    layer_pattern: List[Literal["mamba", "mlstm", "slstm"]] = field(
+    layer_pattern: List[Literal["mamba", "mlstm", "slstm", "attention"]] = field(
         default_factory=lambda: ["mamba", "mamba", "mlstm"]
     )
     
@@ -67,6 +67,10 @@ class HybridConfig:
     mlstm_gate_soft_cap: float = 15.0
     mlstm_input_gate_bias_init: float = -10.0
     mlstm_forget_gate_bias_init: float = 0.0
+
+    # Attention parameters (Phase 14A Transformer baseline; unused by hybrid configs)
+    attn_dropout: float = 0.0
+    rope_theta: float = 10000.0
     
     # sLSTM parameters
     slstm_hidden_dim: Optional[int] = None  # Defaults to dim
@@ -142,7 +146,7 @@ class HybridConfig:
             self.slstm_hidden_dim = self.dim
         
         # Validate layer pattern
-        valid_types = {"mamba", "mlstm", "slstm"}
+        valid_types = {"mamba", "mlstm", "slstm", "attention"}
         for layer_type in self.layer_pattern:
             if layer_type not in valid_types:
                 raise ValueError(
@@ -185,6 +189,16 @@ class HybridConfig:
                 "gate_soft_cap": self.mlstm_gate_soft_cap,
                 "input_gate_bias_init": self.mlstm_input_gate_bias_init,
                 "forget_gate_bias_init": self.mlstm_forget_gate_bias_init,
+            })
+        elif layer_type == "attention":
+            # Phase 14A Transformer baseline. Reuses the hybrid's head geometry
+            # (head_dim/num_heads) so the two differ only in the mixer.
+            base_config.update({
+                "num_heads": self.num_heads,
+                "head_dim": self.head_dim,
+                "attn_dropout": self.attn_dropout,
+                "rope_theta": self.rope_theta,
+                "max_position_embeddings": self.max_position_embeddings,
             })
         elif layer_type == "slstm":
             base_config.update({

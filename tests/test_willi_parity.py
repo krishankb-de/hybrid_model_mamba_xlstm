@@ -4214,3 +4214,257 @@ def test_evaluate_sts_uses_script_free_dataset_mirrors():
     stsb_body = src.split("def _load_stsb(")[1].split("\ndef ")[0]
     assert "for dataset_id, kwargs in" in stsb_body
     assert "except Exception as exc:" in stsb_body
+
+
+# ---------------------------------------------------------------------------
+# Phase 14A — parameter-matched Transformer baseline (supervisor review 2026-09-07)
+# ---------------------------------------------------------------------------
+
+# hybrid_150m_v2's instantiated parameter count. The whole point of Phase 14A is a
+# MATCHED baseline, so this number is the spec, not a note.
+HYBRID_150M_V2_PARAMS = 183_721_824
+PARAM_MATCH_TOLERANCE = 0.005  # 0.5%
+
+
+def _instantiate_model_config(config_name):
+    """Build a HybridLanguageModel from a configs/model/*.yaml, as the trainers do."""
+    import dataclasses
+
+    import yaml
+
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    with open(REPO_ROOT / "configs" / "model" / (config_name + ".yaml")) as fh:
+        raw = yaml.safe_load(fh)
+    valid = {f.name for f in dataclasses.fields(HybridConfig)}
+    return HybridLanguageModel(HybridConfig(**{k: v for k, v in raw.items() if k in valid}))
+
+
+def test_hybrid_150m_v2_param_count_is_the_documented_baseline():
+    """Pin the incumbent's size. If this drifts, the 'matched' baseline is no longer
+    matched and Phase 14A's central comparison quietly becomes invalid."""
+    model = _instantiate_model_config("hybrid_150m_v2")
+    total = sum(p.numel() for p in model.parameters())
+    assert total == HYBRID_150M_V2_PARAMS, (
+        "hybrid_150m_v2 is now %d params, not the documented %d. Phase 14A's "
+        "Transformer baseline was matched against the old number -- re-derive the "
+        "baseline's num_layers before running anything."
+        % (total, HYBRID_150M_V2_PARAMS)
+    )
+
+
+@pytest.mark.parametrize(
+    "config_name", ["transformer_150m_baseline", "transformer_150m_baseline_rrg"]
+)
+def test_transformer_baseline_is_parameter_matched_to_the_hybrid(config_name):
+    """THE Phase 14A invariant: the baseline must be parameter-matched.
+
+    'Attention-free matches attention' is only a claim if the two have the same
+    parameter budget. A baseline that silently drifts smaller would make the hybrid
+    look good for the wrong reason.
+    """
+    model = _instantiate_model_config(config_name)
+    total = sum(p.numel() for p in model.parameters())
+    delta = abs(total / HYBRID_150M_V2_PARAMS - 1.0)
+    assert delta < PARAM_MATCH_TOLERANCE, (
+        "%s has %d params vs the hybrid's %d (%.3f%% off, tolerance %.1f%%). The "
+        "comparison is no longer parameter-matched."
+        % (config_name, total, HYBRID_150M_V2_PARAMS, 100 * delta,
+           100 * PARAM_MATCH_TOLERANCE)
+    )
+
+
+@pytest.mark.parametrize(
+    "config_name", ["transformer_150m_baseline", "transformer_150m_baseline_rrg"]
+)
+def test_transformer_baseline_is_pure_attention_and_spends_no_params_on_positions(
+    config_name,
+):
+    """The baseline must actually be a Transformer, and must use RoPE.
+
+    A learned positional table would hand it +0.79M params the hybrid never gets
+    (the hybrid's embedding matrix is exactly vocab x dim), breaking the match.
+    """
+    import yaml
+
+    with open(REPO_ROOT / "configs" / "model" / (config_name + ".yaml")) as fh:
+        raw = yaml.safe_load(fh)
+    assert raw["layer_pattern"] == ["attention"]
+    assert raw["num_layers"] == 15, "15 layers is what makes the param match work"
+    assert raw["mlp_ratio"] == 4.0, "a non-standard FFN width reads as a rigged baseline"
+
+    model = _instantiate_model_config(config_name)
+    pos_params = [
+        n for n, _ in model.named_parameters()
+        if "pos_emb" in n or "position_embedding" in n or "wpe" in n
+    ]
+    assert pos_params == [], "baseline must use RoPE, found learned position params: %s" % pos_params
+
+
+def test_transformer_baseline_shares_the_hybrids_hyperparameters_verbatim():
+    """Single-lever discipline: only the mixer may differ.
+
+    If the baseline's LR/schedule/regularisation drift from the hybrid's, the
+    comparison stops being attributable to architecture.
+    """
+    import yaml
+
+    def load(name):
+        with open(REPO_ROOT / "configs" / "model" / (name + ".yaml")) as fh:
+            return yaml.safe_load(fh)
+
+    hybrid, baseline = load("hybrid_150m_v2"), load("transformer_150m_baseline")
+    for key in ["vocab_size", "dim", "mlp_ratio", "max_position_embeddings", "dropout",
+                "initializer_range", "tie_word_embeddings", "norm_type", "use_mlp",
+                "learning_rate", "weight_decay", "warmup_steps", "gradient_clip_val"]:
+        assert baseline[key] == hybrid[key], (
+            "Phase 14A single-lever violation: %s is %r in the Transformer baseline but "
+            "%r in hybrid_150m_v2. Only the mixer may differ."
+            % (key, baseline[key], hybrid[key])
+        )
+
+    hybrid_rrg, baseline_rrg = load("hybrid_150m_v2_rrg"), load("transformer_150m_baseline_rrg")
+    for key in ["prefix_k", "image_patch_dim", "decoder_lr", "head_lr", "weight_decay",
+                "warmup_steps", "max_steps", "gradient_clip_val", "vit_unfreeze_blocks", "vit_lr"]:
+        assert baseline_rrg[key] == hybrid_rrg[key], (
+            "Phase 14A single-lever violation in the RRG variant: %s is %r vs the "
+            "hybrid's %r." % (key, baseline_rrg[key], hybrid_rrg[key])
+        )
+
+
+def test_attention_layer_type_is_registered_everywhere():
+    """'attention' must be accepted by the config validator AND the block dispatch.
+
+    These are two separate code paths; a mismatch fails at model-build time inside a
+    SLURM job rather than here.
+    """
+    from hybrid_xmamba.layers.hybrid_block import HybridBlock
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+
+    cfg = HybridConfig(dim=64, num_layers=2, layer_pattern=["attention"], num_heads=4,
+                       head_dim=16, vocab_size=128)
+    assert cfg.get_layer_config(0)["num_heads"] == 4
+
+    block = HybridBlock(dim=64, layer_type="attention", num_heads=4, head_dim=16)
+    assert block.mixer.__class__.__name__ == "AttentionBlock"
+
+
+def test_attention_block_is_causal():
+    """A non-causal mixer would leak the answer and make every metric meaningless."""
+    import torch
+
+    from hybrid_xmamba.layers.attention_block import AttentionBlock
+
+    torch.manual_seed(0)
+    block = AttentionBlock(dim=64, num_heads=4, head_dim=16).eval()
+    x = torch.randn(1, 12, 64)
+    with torch.no_grad():
+        y_ref = block(x)
+        x_perturbed = x.clone()
+        x_perturbed[:, 7:] = torch.randn(1, 5, 64)
+        y_perturbed = block(x_perturbed)
+    assert torch.allclose(y_ref[:, :7], y_perturbed[:, :7], atol=1e-6), (
+        "attention is not causal: perturbing future positions changed past outputs"
+    )
+    assert not torch.allclose(y_ref[:, 7:], y_perturbed[:, 7:], atol=1e-6), (
+        "sanity check failed: perturbing the input changed nothing at all"
+    )
+
+
+def test_attention_block_blocks_cross_document_attention():
+    """Stage-0 packs documents; the hybrid resets state at each boundary.
+
+    If attention ignored cu_seqlens it would read context the hybrid provably
+    cannot -- a silent, uncontrolled advantage in the exact comparison Phase 14A
+    exists to make fair.
+    """
+    import torch
+
+    from hybrid_xmamba.layers.attention_block import AttentionBlock
+
+    torch.manual_seed(0)
+    block = AttentionBlock(dim=64, num_heads=4, head_dim=16).eval()
+    x = torch.randn(1, 12, 64)
+    x_edited = x.clone()
+    x_edited[:, :6] = torch.randn(1, 6, 64)  # rewrite document 0 only
+    cu_seqlens = torch.tensor([[0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]])
+
+    with torch.no_grad():
+        masked_a = block(x, cu_seqlens=cu_seqlens)
+        masked_b = block(x_edited, cu_seqlens=cu_seqlens)
+        unmasked_a, unmasked_b = block(x), block(x_edited)
+
+    assert torch.allclose(masked_a[:, 6:], masked_b[:, 6:], atol=1e-6), (
+        "document 1 changed when document 0 was edited -- cu_seqlens masking is broken"
+    )
+    assert not torch.allclose(unmasked_a[:, 6:], unmasked_b[:, 6:], atol=1e-6), (
+        "sanity check failed: without the mask document 1 should have changed, so this "
+        "test would pass even with masking removed"
+    )
+
+
+def test_stage0_150m_wrapper_model_config_is_env_overridable():
+    """Phase 14A-3 reuses this wrapper verbatim; a hardcoded MODEL_CONFIG blocks it."""
+    src = (REPO_ROOT / "scripts" / "train_stage0_150m_h100.sh").read_text()
+    assert 'export MODEL_CONFIG="${MODEL_CONFIG:-hybrid_150m_v2}"' in src, (
+        "train_stage0_150m_h100.sh must accept MODEL_CONFIG from the environment so the "
+        "Transformer baseline can share the hybrid's exact Stage-0 recipe"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 14B — boilerplate / duplicate-template analysis
+# ---------------------------------------------------------------------------
+
+def test_analyze_generation_diversity_recovers_a_known_duplicate_rate():
+    """The core measurement must be right, since a headline claim now rests on it."""
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    try:
+        import analyze_generation_diversity as agd
+    finally:
+        sys.path.pop(0)
+
+    # 6 of 10 texts sit in duplicate clusters (3x "a", 2x "b"); "c".."e" are unique.
+    texts = ["a", "a", "a", "b", "b", "c", "d", "e", "f", "g"]
+    n_clusters, in_cluster, frac, top = agd.duplicate_clusters(texts)
+    assert n_clusters == 2
+    assert in_cluster == 5
+    assert abs(frac - 0.5) < 1e-9
+    assert top == [3, 2]
+
+    assert agd.duplicate_clusters(["x"] * 4)[2] == 1.0        # fully collapsed
+    assert agd.duplicate_clusters(list("abcd"))[2] == 0.0      # fully unique
+
+
+def test_analyze_generation_diversity_orders_corpora_by_repetitiveness():
+    """A templated corpus must score as less diverse than a varied one on every metric.
+
+    Phase 14B's whole argument is a comparison against controls, so the metrics have
+    to order corpora correctly or the comparison means nothing.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    try:
+        import analyze_generation_diversity as agd
+    finally:
+        sys.path.pop(0)
+
+    templated = ["no acute cardiopulmonary process"] * 40
+    varied = ["patient %d shows a focal opacity in segment %d" % (i, i) for i in range(40)]
+
+    assert agd.distinct_n(templated, 2) < agd.distinct_n(varied, 2)
+    assert agd.type_token_ratio(templated) < agd.type_token_ratio(varied)
+    assert agd.self_bleu4(templated, sample=20, refs_per=5) > \
+        agd.self_bleu4(varied, sample=20, refs_per=5)
+
+
+def test_analyze_generation_diversity_warns_when_controls_are_missing():
+    """A bare duplication rate is the exact reporting weakness Phase 14B exists to fix."""
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    try:
+        import analyze_generation_diversity as agd
+    finally:
+        sys.path.pop(0)
+
+    report = agd.render([agd.analyse("generated (model)", ["a", "a", "b"])])
+    assert "No controls were supplied" in report

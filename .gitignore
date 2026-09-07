@@ -92,6 +92,7 @@ multirun/
 !CLAUDE.md
 !analysis/baseline_probe_report.md
 !analysis/h100_scaling_results.md
+!analysis/scan_error_bound.md
 
 
 #Json state files for tracking progress of training plans (regenerated from plan-of-record checkboxes)

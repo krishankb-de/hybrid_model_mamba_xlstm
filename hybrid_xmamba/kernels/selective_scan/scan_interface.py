@@ -10,6 +10,8 @@ OPTIMIZED VERSION:
   instead of re-running a sequential loop.
 """
 
+import os
+
 import torch
 import torch.nn.functional as F
 from typing import Optional
@@ -148,6 +150,51 @@ def selective_scan_parallel(
     return output
 
 
+def selective_scan_sequential_reference(
+    x: torch.Tensor,
+    dt: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    D: torch.Tensor,
+) -> torch.Tensor:
+    """Exact selective scan — the recurrence the Mamba block is SPECIFIED to compute.
+
+    Sequential, float64, no chunking, no division, no clamp, so it cannot be wrong in
+    the way `selective_scan_parallel` is wrong (which divides by
+    `A_cum.clamp(min=1e-8)` and annihilates a token's own contribution wherever the
+    clamp fires -- see `analysis/scan_error_bound.md`).
+
+        A_disc[t] = exp(dt[t] * A);  Bx[t] = dt[t] * B[t] * x[t]
+        h[t] = A_disc[t] * h[t-1] + Bx[t],  h[-1] = 0
+        y[t] = sum_n C[t,n] * h[t,:,n] + D * x[t]
+
+    O(L) sequential and far slower than the chunked path -- this exists to MEASURE the
+    fast path's end-to-end effect (H100_SCALING_PLAN.md Phase 14C-3), not to train with.
+
+    Args:
+        x: (B, L, D)   dt: (B, L, D)   A: (D, N)   B: (B, L, N)   C: (B, L, N)   D: (D,)
+
+    Returns:
+        (B, L, D) in x's dtype.
+    """
+    in_dtype = x.dtype
+    xd, dtd = x.double(), dt.double()
+    Ad, Bd, Cd, Dd = A.double(), B.double(), C.double(), D.double()
+
+    batch, seq_len, dim = xd.shape
+    h = torch.zeros(batch, dim, Ad.shape[1], dtype=torch.float64, device=xd.device)
+
+    outputs = []
+    for t in range(seq_len):
+        a_disc = torch.exp(dtd[:, t].unsqueeze(-1) * Ad.unsqueeze(0))
+        bx = dtd[:, t].unsqueeze(-1) * Bd[:, t].unsqueeze(-2) * xd[:, t].unsqueeze(-1)
+        h = a_disc * h + bx
+        outputs.append(torch.einsum("bdn,bn->bd", h, Cd[:, t]) + Dd.unsqueeze(0) * xd[:, t])
+
+    return torch.stack(outputs, dim=1).to(in_dtype)
+
+
 def selective_scan(
     x: torch.Tensor,
     dt: torch.Tensor,
@@ -198,6 +245,22 @@ def selective_scan(
     # Reference Mamba keeps this SSM scan in fp32 for exactly this reason. Run it in
     # fp32 and cast the result back to the mixer dtype (interface unchanged).
     in_dtype = x.dtype
+
+    # --- Phase 14C-3: opt-in exact operator, for MEASUREMENT only ---
+    # HYBRID_EXACT_SCAN=1 swaps in the exact sequential recurrence so the
+    # end-to-end effect of the clamp defect on the reported metrics can be
+    # measured rather than argued. It is OFF by default, so the training and
+    # evaluation path is byte-identical to every run that produced the numbers
+    # in h100_scaling_state.json -- the Phase 14A operator freeze is respected.
+    # It is O(L) sequential and MUCH slower; never enable it for training.
+    if os.environ.get("HYBRID_EXACT_SCAN", "0") == "1":
+        y = selective_scan_sequential_reference(
+            x.float(), dt.float(), A.float(), B.float(), C.float(), D.float(),
+        ).to(in_dtype)
+        if z is not None:
+            y = y * z
+        return y
+
     y = selective_scan_parallel(
         x.float(), dt.float(), A.float(), B.float(), C.float(), D.float(),
         chunk_size=chunk_size,

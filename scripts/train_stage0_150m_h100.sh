@@ -29,7 +29,12 @@
 
 set -euo pipefail
 
-export MODEL_CONFIG="hybrid_150m_v2"
+# Phase 14A-2: env-overridable so the parameter-matched Transformer baseline can
+# reuse this wrapper verbatim -- same corpus, steps, batch, schedule, everything.
+# The ONLY lever that changes between the hybrid and the baseline is this variable.
+#   MODEL_CONFIG=transformer_150m_baseline EXPERIMENT=h100_stage0_transformer_150m \
+#     sbatch scripts/train_stage0_150m_h100.sh
+export MODEL_CONFIG="${MODEL_CONFIG:-hybrid_150m_v2}"
 export MAX_STEPS="${MAX_STEPS:-120000}"     # ~3B tokens Chinchilla for 150M (eff batch 48)
 export BATCH_SIZE="${BATCH_SIZE:-16}"       # 80GB-safe microbatch
 export ACCUM="${ACCUM:-3}"                  # 16*3 = eff batch 48
@@ -45,7 +50,7 @@ export WARMUP="${WARMUP:-2000}"
 # max_norm=1.0 (~4x baseline) — knocked the 150M into irreversible collapse. Tighten the
 # clip so spikes are bounded near the baseline. β2 (flat 0.999) and LR (flat) were NOT the cause.
 export GRAD_CLIP="${GRAD_CLIP:-0.5}"
-export EXPERIMENT="${EXPERIMENT:-h100_stage0_150m_v2}"
+export EXPERIMENT="${EXPERIMENT:-h100_stage0_150m_v2}"   # override when MODEL_CONFIG is overridden
 
 cd "${SLURM_SUBMIT_DIR:-.}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"
 echo "[wrapper] 150M Stage-0 → delegating to train_stage0_h100.sh (MODEL_CONFIG=${MODEL_CONFIG}, MAX_STEPS=${MAX_STEPS}, BATCH_SIZE=${BATCH_SIZE})"

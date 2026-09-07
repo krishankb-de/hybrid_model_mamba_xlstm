@@ -1,0 +1,88 @@
+# Parameter-matched Transformer baseline (H100_SCALING_PLAN.md Phase 14A).
+#
+# WHY THIS EXISTS: the project's central claim is "attention-free hybrid matches/beats
+# attention-based transformers at better efficiency", but until Phase 14 no trained,
+# parameter-matched Transformer existed anywhere in the repo -- every comparison was
+# against another attention-free variant, a frozen off-the-shelf model, or a
+# nearest-neighbour control. A supervisor review (2026-09-07) flagged this as the
+# highest-priority gap. This config IS the missing baseline.
+#
+# PARAMETER MATCH (computed, not estimated -- assert_transformer_baseline_param_match
+# in tests/test_willi_parity.py enforces it):
+#   hybrid_150m_v2            = 183.7218M
+#   this config (15L, r=4.0)  = 183.3869M  -> -0.18%
+# Depth is 15, not the hybrid's 12, ON PURPOSE. Param-matching holds parameters
+# constant and lets each architecture choose its own shape; 15L/768 is an ordinary
+# decoder (a slightly deeper GPT-2-small). The alternative that keeps 12 layers needs
+# mlp_ratio=5.5 to match params -- a non-standard FFN width that reads as a rigged
+# baseline. A 12L/r=4.0 Transformer is only 162.1M (-11.7%), which handicaps it.
+#
+# RoPE, not learned position embeddings: the hybrid spends EXACTLY ZERO params on
+# positional encoding, so a learned table would hand the baseline +0.79M it never got.
+#
+# SINGLE-LEVER DISCIPLINE: every shared hyperparameter below is copied VERBATIM from
+# hybrid_150m_v2.yaml (lr 4.0e-4, warmup 2000, wd 0.1, max_pos 1024, dropout 0.1,
+# vocab 50257, tie_word_embeddings false). DO NOT re-tune the baseline's LR.
+# Honest limitation to record in the writeup: that LR was sqrt-width-scaled FOR THE
+# HYBRID, so this baseline may run at a suboptimal LR. If it loses on quality, that is
+# the first thing to re-test -- the pre-agreed remedy is a 2-arm probe {4e-4, 6e-4}.
+
+model_type: "hybrid_lm"
+
+# Architecture — pure attention: layer_pattern ["attention"] repeats for all 15 layers.
+vocab_size: 50257
+dim: 768
+num_layers: 15
+layer_pattern: ["attention"]
+
+# Attention parameters
+num_heads: 12          # 768 / 64 = 12, same head geometry as the hybrid's mLSTM
+head_dim: 64
+attn_dropout: 0.0
+rope_theta: 10000.0
+
+# Mamba/mLSTM/sLSTM parameters are unused by this pattern but kept for schema parity
+# with the hybrid configs (HybridConfig is one dataclass for all architectures).
+state_size: 16
+conv_size: 4
+expand_factor: 2
+dt_rank: null
+use_fast_path: true
+use_tfla: true
+proj_factor: 2
+slstm_hidden_dim: 768
+slstm_num_heads: 4
+use_exponential_gate: true
+
+# Shared parameters — identical to hybrid_150m_v2.yaml
+norm_type: "rms"
+use_mlp: true
+mlp_ratio: 4.0
+
+# Training parameters — identical to hybrid_150m_v2.yaml
+max_position_embeddings: 1024
+dropout: 0.1
+initializer_range: 0.02
+
+# Generation parameters
+use_cache: true
+tie_word_embeddings: false
+
+use_gradient_checkpointing: false
+proj_head_dropout: 0.1
+
+# pre_rms, NOT hybrid. HybridNorm is a hybrid-specific design; canonical pre-norm is
+# what "attention-based Transformer baseline" means to a reviewer. Recorded as a
+# stated (small) confound rather than silently chosen. The AttentionBlock DOES
+# implement the HybridNorm analogue (QK-norm) if this is ever set to `hybrid`.
+norm_topology: pre_rms
+pooling_strategy: attention
+
+# Optimization — copied verbatim from hybrid_150m_v2.yaml. Do not re-tune.
+learning_rate: 4.0e-4
+weight_decay: 0.1
+warmup_steps: 2000
+max_steps: 90000
+gradient_clip_val: 1.0
+
+distill: null
