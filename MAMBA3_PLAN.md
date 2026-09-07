@@ -606,9 +606,30 @@ not smoothed over.
 non-monotonically**. That is trajectory sensitivity, not a mechanism, and it sets the resolution of
 every paired comparison here. The A4-hi−A2 gap (0.509) sits barely above it.
 
-**5. M7-D applied.** Lowest arm is A4-hi; `A4-hi − A2 = 0.509 = 79%` of the bar → the pre-registered
-rule says **advance the simplest arm, A2**. Before committing 133 GPU-h to M8, replicate both at
-seed 1234 (~10 GPU-h): arms `A2-s2`, `A4-hi-s2`.
+**5. M7-D applied, and the replication flipped the ordering.**
+
+| Arm | seed 42 | seed 1234 | mean | cross-seed spread |
+|---|---|---|---|---|
+| A0 | 19.387 | 18.933 | 19.160 | 0.454 |
+| **A2** | 16.708 | **16.376** | **16.542** | **0.332** |
+| A4-hi | **16.199** | 18.912 | 17.556 | **2.713** |
+
+A4-hi led A2 by 0.509 PPL at seed 42 — 79% of the bar, so the rule said *advance the simplest, A2*.
+At seed 1234 **A2 wins by 2.536**. On two-seed means A2 is better by **1.014 PPL**, and A4-hi's
+cross-seed spread is **8.2× A2's**: the rope arm is not equal-but-different, it is *high-variance*,
+and its seed-42 lead was a lucky draw.
+
+**The pre-registered rule earned its keep.** Taking the lowest number on the day would have put a
+high-variance arm into a 133 GPU-h pipeline. **Winner: A2.**
+
+**Two M8 blockers found in these logs and fixed.** (i) `ModelCheckpoint(filename=
+"stage0_kd-{step:06d}-{val/loss:.4f}")` — the slash in `val/loss` is a **path separator**, so every
+save created a *directory* `stage0_kd-step=NNNNNN-val/` holding `loss=N.NNNN.ckpt`. Nothing globbing
+`checkpoints/*.ckpt` could see a best checkpoint; only `last.ckpt` was ever visible, which is why
+every arm reported zero checkpoints while holding 2.1 GB. (ii) `val_check_interval` was hard-coded
+at 2000 — at M8-A's 120,000 steps that is **60 validation passes, ~54 h against ~13.5 h of
+training**. Now `VAL_EVERY`, default 2000 for screens and 10000 for M8-A. The val *set* stays at
+15,724 chunks so the number remains comparable to the 13.18 baseline.
 
 - [x] **M7-C** **Gate: A2 ≤ A0 at 12K.** If the corrected operator is *worse*, **stop and report** — the buggy
       operator was acting as an unintended regularizer. That is a real finding; do not tune around it.

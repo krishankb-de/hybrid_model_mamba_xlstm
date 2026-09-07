@@ -164,12 +164,14 @@ the same place.
 is affordable in Mamba-2/3's scalar-`A` form (19 MB) and not in Mamba-1's (19.3 GB) — the argument
 this branch opened with, now measured.
 
-**Trapezoid: null** (A3 − A2 = +0.011, 1.7% of the bar). **RoPE: the collapse was a missing config
-field.** `mamba3_theta_max` was absent from `HybridConfig`, so the block default of 1.0 — 1 rad per
-token, 81 turns over 512 tokens — was the only reachable value. At 0.2 and below every arm trains
-normally, and A4-hi is the lowest in the screen, but only by 0.509 PPL (79% of the bar) against a
-measured 0.335 PPL of paired trajectory sensitivity. `A2-s2` / `A4-hi-s2` replicate at seed 1234
-before M8.
+**Trapezoid: null** (A3 − A2 = +0.011, 1.7% of the bar). **RoPE: rejected as high-variance.** The
+`theta_max=1.0` collapse was a missing config field, and at 0.2 the arm was the lowest in the
+screen — but replication reversed it: A4-hi 16.199 (s42) → **18.912** (s1234) against A2's 16.708 →
+16.376. Cross-seed spread **2.713 vs A2's 0.332**. The seed-42 lead was a lucky draw, and the
+pre-registered rule that said *advance the simplest arm* is what kept it out of a 133 GPU-h
+pipeline.
+
+**Winner: A2**, two-seed mean **16.542** vs A0's 19.160 — **−13.7%**.
 
 ### Baselines any arm must beat
 

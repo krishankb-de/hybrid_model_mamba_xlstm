@@ -4344,3 +4344,34 @@ def test_150m_wrapper_resolves_the_arm_on_the_compute_node():
     assert 'ARM_EXPERIMENT="${EXPERIMENT:-}"' in sh
     assert sh.index('ARM_EXPERIMENT="${EXPERIMENT:-}"') < sh.index('eval "${ARM_ENV}"')
     assert 'export EXPERIMENT="${ARM_EXPERIMENT}"' in sh
+
+
+@pytest.mark.willi_parity
+def test_stage0_checkpoint_filename_has_no_slash_metric():
+    """A metric containing "/" in a ModelCheckpoint filename becomes a path separator.
+
+    `filename="stage0_kd-{step:06d}-{val/loss:.4f}"` made Lightning create a DIRECTORY
+    `stage0_kd-step=NNNNNN-val/` with `loss=N.NNNN.ckpt` inside it, for every save. Nothing
+    globbing `checkpoints/*.ckpt` could find a best checkpoint -- only `last.ckpt` was ever
+    visible, which is why every M7 arm reported zero checkpoints while sitting on 2.1 GB.
+    `monitor="val/loss"` still drives top-k selection; the loss belongs in TensorBoard.
+    """
+    src = (REPO_ROOT / "scripts" / "train_stage0_distill.py").read_text()
+    assert 'filename="stage0_kd-step{step:06d}"' in src
+    assert "{val/loss" not in src, "a slashed metric in a filename becomes a directory"
+    assert 'monitor="val/loss"' in src, "top-k selection still needs the metric"
+
+
+@pytest.mark.willi_parity
+def test_stage0_validation_cadence_is_tunable():
+    """M8-A runs 120,000 steps; at the screen's val_check_interval=2000 that is 60 passes.
+
+    A0 measured ~5.4 h for six passes -- the val set is 15,724 chunks and each pass runs the
+    2.6B teacher alongside the student -- so 60 would cost ~54 h against ~13.5 h of training.
+    The interval must be tunable. The val SET must not be: it stays 15,724 chunks so the number
+    remains comparable to the 13.18 Phase-5 baseline.
+    """
+    sh = (REPO_ROOT / "scripts" / "train_stage0_h100.sh").read_text()
+    assert 'VAL_EVERY="${VAL_EVERY:-2000}"' in sh, "screens keep the 2000-step default"
+    assert "trainer.val_check_interval=${VAL_EVERY}" in sh
+    assert "trainer.val_check_interval=2000" not in sh, "no hard-coded cadence left"

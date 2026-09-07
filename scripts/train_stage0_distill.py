@@ -489,7 +489,13 @@ def main(cfg: DictConfig):
             save_top_k=cfg.callbacks.checkpoint.get("save_top_k", 3),
             save_last=True,
             every_n_train_steps=cfg.callbacks.checkpoint.get("every_n_train_steps", 2000),
-            filename="stage0_kd-{step:06d}-{val/loss:.4f}",
+            # No metric in the filename. "val/loss" contains a slash, and Lightning treats it
+            # as a path separator: every save created a DIRECTORY `stage0_kd-step=NNNNNN-val/`
+            # with `loss=N.NNNN.ckpt` inside it. Nothing globbing `checkpoints/*.ckpt` could
+            # see a best checkpoint -- only `last.ckpt` was ever visible, which is why the M7
+            # arms all reported zero checkpoints. `monitor="val/loss"` still selects top-k; the
+            # loss itself belongs in TensorBoard, not in a path.
+            filename="stage0_kd-step{step:06d}",
         ),
         LearningRateMonitor(logging_interval="step"),
         SignalCheckpointCallback(checkpoint_dir=cfg.checkpoint_dir),
