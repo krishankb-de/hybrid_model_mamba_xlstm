@@ -8,7 +8,7 @@
 > ### ⚡ PLAN REOPENED 2026-09-07 — PHASE 14 (supervisor review). `current_phase: phase14_supervisor_review`.
 > Results were reviewed by the supervisor. Three findings, all about **validity of the central claim**, none about chasing a better number. In the supervisor's own priority order:
 > **(1) HIGHEST — there is no trained, parameter-matched Transformer baseline anywhere in the report.** The thesis is *"attention-free hybrid matches/beats attention-based transformers at better efficiency"*, but every comparison in the writeup is against this project's own architecture variants, an off-the-shelf non-fine-tuned model (BiomedCLIP zero-shot), or a naive nearest-neighbour control — none of which is the baseline the claim is about. **Nothing else matters if this isn't in place.**
-> **(2) The boilerplate/duplicate-template rate was never re-measured on the final (13D) checkpoint** — 73.6% of generations fell into 184 duplicate clusters on a *pre-Phase-13* checkpoint. Biggest validity threat to the primary result: if the generator is still mostly copying templates, "beats retrieval baseline" is hollow, since that is exactly what the retrieval baseline does too.
+> **(2) ✅ CLOSED 2026-09-07 (14B): 73.6% → 29.2%** exact-duplicate clustering on 13D (n=2663), against controls at **0.2%** (references) and **7.3%** (retrieval-NN). Pre-registered outcome **INTERMEDIATE**: the "beats the retrieval floor" result is **not** hollow, but the generator is still ~7× less lexically diverse and 2.3× more self-similar than either control, so the exact-duplicate headline flatters it. Original finding: **the boilerplate/duplicate-template rate was never re-measured on the final (13D) checkpoint** — 73.6% of generations fell into 184 duplicate clusters on a *pre-Phase-13* checkpoint. Biggest validity threat to the primary result: if the generator is still mostly copying templates, "beats retrieval baseline" is hollow, since that is exactly what the retrieval baseline does too.
 > **(3) The disclosed selective-scan correctness defect is stated but neither fixed nor bounded** — the fp32 guard is in, but the `clamp(min=1e-8)` divide-by-decay approximation is still there and there is still no test against an exact reference recurrence. Fix it, or bound it and report the max deviation.
 > Full work breakdown, pre-registered success bars, and exact commands: **Phase 14** below. **Phases 1–13 are unchanged and still valid** — Phase 14 adds the missing baseline and the missing validity checks; it does not re-litigate any closed arm. Retrieval stays closed. **⚠ Operator freeze in force: do not change the selective scan while 14A is running (see 14C).**
 >
@@ -953,7 +953,23 @@ Absolute numbers on both arms are a bit lower than validate.parquet's (harder/la
 **Cost: ~zero.** The 13D official-test-split generations already exist on the cluster (`results/report_gen_tower13d_test_split/hyps.txt`, from the 13D eval) — **no GPU, no regeneration**. Same for the retrieval-NN floor's outputs and the references.
 
 - [x] **14B-1** — **DONE 2026-09-07.** `scripts/analyze_generation_diversity.py` (stdlib-only so it runs in the cluster eval venv; exact-duplicate clustering, distinct-1..4, TTR, sampled self-BLEU-4, and a built-in pre-registered verdict that names which of the three declared outcomes fired). Smoke-tested on a synthetic 75%-templated corpus: recovered 74.0% and correctly separated it from a 15% control. Originally specced as: New `scripts/analyze_generation_diversity.py` (CPU, stdlib + existing deps). Reads a `hyps.txt` and reports: exact-duplicate cluster count, % of generations inside a duplicate cluster, the largest cluster sizes, distinct-1/2/3/4, self-BLEU-4, and type-token ratio. Unit tests + `validate_for_willi.sh`.
-- [ ] **14B-2** — **Run it on three corpora, not one.** This is the substantive fix to how the number was originally reported:
+- [x] **14B-2** — **DONE 2026-09-07 (job 2516811, gx17v1, 4 s wall). Ran on three corpora.**
+
+  | corpus (n=2663, official test split) | unique | dup. clusters | % in a dup. cluster | largest | distinct-2 | distinct-4 | self-BLEU-4 | mean tokens |
+  |---|---|---|---|---|---|---|---|---|
+  | **generated (13D)** | 2138 | 252 | **29.2%** | 29,10,10,10,10 | 0.0299 | 0.0841 | 0.6854 | 58.2 |
+  | references (human) | 2660 | 2 | **0.2%** | 3,2 | 0.2162 | 0.6439 | 0.2974 | 72.3 |
+  | retrieval-NN (real reports) | 2561 | 92 | **7.3%** | 4,3,3,3,3 | 0.2116 | 0.6164 | 0.3046 | 64.0 |
+
+  **The controls paid for themselves.** Two findings the bare percentage would have hidden:
+  1. **The reference corpus is barely duplicated at all (0.2%)** — this plan's standing claim that "MIMIC reports are heavily templated" is true at the *phrase* level (references' own distinct-2 is only 0.216) but **false at the whole-report level**. §1.2 of the writeup has been corrected.
+  2. **The retrieval-NN baseline's 7.3% is a property of retrieval, not of the corpus** — the same gallery report gets returned for several different queries. That is the right reference point for "what a perfect non-generative system scores", and it is 7.3%, not 0%.
+
+  **The exact-duplicate metric flatters the generator.** 29.2% looks like a large win, but on lexical diversity the generator is **~7× less varied** than either control (distinct-2 0.030 vs 0.216/0.212; distinct-4 0.084 vs 0.644/0.616) and **2.3× more self-similar** (self-BLEU-4 0.685 vs 0.297/0.305), and writes shorter reports (58.2 vs 72.3 tokens). Near-duplicates differing by one token do not register as exact duplicates but are still boilerplate — that is where the remaining gap lives, and it is why the diversity columns were included rather than the cluster count alone.
+
+  ⚠️ **Comparability caveat, stated because the headline invites the error:** the 73.6% was measured on `validate.parquet` (n=1433); this is the official test split (n=2663). The −44.4pp change is therefore **split-confounded**. The *direction* is safe — duplicate-cluster rate rises with n, all else equal, so 29.2% on the larger set understates the improvement — but the clean number needs 14B-3.
+
+  ~~Original spec:~~ **Run it on three corpora, not one.** This is the substantive fix to how the number was originally reported:
   1. **13D generations** (the checkpoint under test),
   2. **the reference reports** for the same n=2663 — MIMIC-CXR reports are *themselves* heavily templated, and the plan already measured ~2% exact duplication in the retrieval gallery (6C-3),
   3. **the retrieval-NN baseline's outputs** — these are *real human reports*, so whatever duplication rate they show is the rate a "perfect" non-generative system exhibits.
@@ -967,7 +983,15 @@ Absolute numbers on both arms are a bit lower than validate.parquet's (harder/la
   OUTPUT=analysis/generation_diversity_13d.md \
     sbatch scripts/analyze_diversity_h100.sh
   ```
-- [ ] **14B-3** — Compare against the pre-Phase-13 **73.6% / 184 clusters**. Phase 13 changed decode strategy (greedy→beam), decoder training length, and the image tower; any of the three could have moved templating in either direction. Beam search in particular is known to *increase* mode-seeking, so a rise is a live possibility and must be reported if found.
+- [ ] **14B-3** — **NOW A LIKE-FOR-LIKE RE-RUN, and it is cheap (one job, seconds of compute).** 14B-2 answered the question on the test split; the historical 73.6% is from `validate.parquet` (n=1433), so re-run there to remove the split confound:
+  ```bash
+  HYPS=results/report_gen_tower13d_n1433/hyps.txt \
+  REFS=results/report_gen_tower13d_n1433/refs.txt \
+  BASELINE=results/retrieval_floor_n1433/hyps.txt \
+  OUTPUT=analysis/generation_diversity_13d_n1433.md \
+    sbatch scripts/analyze_diversity_h100.sh
+  ```
+  ~~Original spec:~~ Compare against the pre-Phase-13 **73.6% / 184 clusters**. Phase 13 changed decode strategy (greedy→beam), decoder training length, and the image tower; any of the three could have moved templating in either direction. Beam search in particular is known to *increase* mode-seeking, so a rise is a live possibility and must be reported if found.
 
 **PRE-REGISTERED INTERPRETATION — declared 2026-09-07:** if 13D is still ≥70% templated **and** materially above both controls, then §1's "beats the retrieval floor" headline gets an **explicit qualifier in the abstract**, not merely a bullet in §4 Limitations. If it is at or below the reference corpus's own rate, that is a genuine positive finding and should be stated as one.
 

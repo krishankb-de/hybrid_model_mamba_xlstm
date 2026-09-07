@@ -5,9 +5,10 @@
 > change how results below must be described once measured:
 > **(14A)** there is no trained, parameter-matched Transformer baseline anywhere in this
 > document — §3's caveat to that effect is being replaced by the actual experiment;
-> **(14B)** the 73.6%-templated finding in §1/§4 is from the *pre-Phase-13* checkpoint and is
-> being re-measured on the final 13D checkpoint, with reference-corpus and retrieval-baseline
-> controls the original number lacked;
+> **(14B)** ✅ **DONE 2026-09-07** — re-measured on 13D with controls: 73.6% → **29.2%**
+> exact-duplicate clustering, vs 0.2% (references) and 7.3% (retrieval-NN). Much improved,
+> but still ~7× less lexically diverse and 2.3× more self-similar than either control.
+> Folded into §1.6 and §4.4;
 > **(14C)** the selective-scan defect noted below is being bounded with a committed
 > regression test and an end-to-end measurement.
 > Every number in this document remains a valid measurement of the system as built — none is
@@ -68,6 +69,12 @@ the nearest training report by BiomedCLIP cosine similarity and emit it verbatim
 reports are heavily templated, so n-gram metrics reward copying — a generator that does
 not beat this baseline has not demonstrated it generates anything. This baseline became
 the real floor, tier numbers above notwithstanding.
+
+(Phase 14B refined "heavily templated": MIMIC reports are formulaic at the *phrase*
+level but almost never duplicated *whole* — only 0.2% of the n=2663 references fall in
+an exact-duplicate cluster. The retrieval-NN baseline's own 7.3% comes from the same
+gallery report being retrieved for several different queries, i.e. a property of
+retrieval, not of the corpus.)
 
 ### 1.3 Starting point: a mixed result (Phase 11)
 
@@ -163,10 +170,26 @@ relative.
   near F1=0.0 through every checkpoint in this arc, oversampling included.
 - **ROUGE-L Target tier** (≥0.22) was not reached; the model is competitive on n-gram
   overlap but not yet at published R2Gen-class levels by that specific measure.
-- **Template/boilerplate rate was never re-measured on the final checkpoint.** The
-  73.6%-templated finding is from the original (pre-Phase-13) checkpoint; whether the
-  improved checkpoints still exhibit this to the same degree is an open, unverified
-  question — flagged honestly rather than assumed to have resolved itself.
+- **Template/boilerplate rate: measured (Phase 14B, 2026-09-07), much improved but
+  still the weakest part of the result.** Exact-duplicate clustering on the final 13D
+  checkpoint fell to **29.2%** (252 clusters, n=2663 official test split) from the
+  pre-Phase-13 checkpoint's 73.6%. But the controls — which the original figure was
+  reported without — show the generator is still markedly more formulaic than the text
+  it is scored against:
+
+  | corpus (n=2663) | % in a duplicate cluster | distinct-2 | distinct-4 | self-BLEU-4 | mean tokens |
+  |---|---|---|---|---|---|
+  | **generated (13D)** | **29.2%** | 0.0299 | 0.0841 | 0.6854 | 58.2 |
+  | references (human) | 0.2% | 0.2162 | 0.6439 | 0.2974 | 72.3 |
+  | retrieval-NN (real reports) | 7.3% | 0.2116 | 0.6164 | 0.3046 | 64.0 |
+
+  Two things this changes. First, **the "beats the retrieval floor" result is not
+  hollow** — the generator is no longer mostly emitting a handful of templates, which
+  was the live worry. Second, **the exact-duplicate metric flatters it**: on lexical
+  diversity the generator is ~7× less varied than either control (distinct-2 0.030 vs
+  0.216/0.212) and **2.3× more self-similar** (self-BLEU-4 0.685 vs 0.297/0.305), and it
+  writes shorter reports. Near-duplicates that differ by a token do not register as
+  exact duplicates but are still boilerplate, and that is where the remaining gap lives.
 - **The `3e-5` `vit_lr` arm was never run.** Skipping it was a judgment call based on
   the visible trend (1e-5 already regressed, and 3e-5 was the worst arm on the small
   dataset too), not an empirically confirmed null.
@@ -268,9 +291,20 @@ checkpoint, and do not explain any retrieval or generation number above.
 3. **ROUGE-L Target tier (≥0.22) was not reached** (best: 0.1899). The generator is
    competitive on n-gram overlap relative to the retrieval floor but not yet at
    published R2Gen-class levels by this specific measure.
-4. **Boilerplate/template rate on the final checkpoint is unverified.** The 73.6%
-   exact-duplicate-cluster finding predates the entire Phase 13 improvement arc; whether
-   it improved alongside the metrics above has not been directly re-measured.
+4. **The generator is still substantially more repetitive than the corpus it models**
+   (measured, Phase 14B). Exact-duplicate clustering improved from 73.6% to **29.2%**,
+   but that is still 4× the retrieval-NN baseline's 7.3% and far above the reference
+   corpus's 0.2%, and the lexical-diversity gap is larger than the headline percentage
+   suggests: distinct-2 0.030 vs 0.216 (references), self-BLEU-4 0.685 vs 0.297. The
+   pre-registered decision rule returned **INTERMEDIATE** — neither the "qualifier in
+   the abstract" trigger (≥70% *and* materially above every control) nor the
+   clean-positive trigger (at or below the controls) fired — so it is reported plainly
+   here rather than rounded in either direction.
+   ⚠️ **Comparability caveat:** the 73.6% figure was measured on `validate.parquet`
+   (n=1433) and this one on the official test split (n=2663), so the −44.4pp change is
+   split-confounded. The direction is safe — duplicate-cluster rate *rises* with n, all
+   else equal, so measuring 29.2% on the larger set understates the improvement — but a
+   like-for-like re-run on n=1433 is still outstanding.
 5. **Retrieval R@10 is not a perfect proxy for downstream conditioning quality** — the
    `vit_lr` sweep's `1e-5` arm had the best tower-side retrieval metric of all three arms
    tested, but the worst downstream CheXbert F1. Any future image-tower tuning should
