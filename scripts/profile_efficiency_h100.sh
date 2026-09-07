@@ -42,10 +42,22 @@ ITERS="${ITERS:-10}"
 # Past the 1024 training context on purpose — that is the point of the curve.
 SEQ_LENGTHS="${SEQ_LENGTHS:-256 512 1024 2048 4096 8192 16384}"
 
-if [ "${SCALE}" = "70m" ]; then
-  MODELS="hybrid_70m_v2 mamba_70m_baseline xlstm_70m_baseline"
-else
-  MODELS="hybrid_150m_v2 mamba_150m_baseline xlstm_150m_baseline"
+# Phase 14A-7: MODELS is env-overridable so the parameter-matched Transformer
+# baseline can join the sweep under the IDENTICAL protocol that produced
+# analysis/efficiency_150m/ -- same seq lengths, batch, dtype, iterations.
+# This is what finally replaces the writeup's standing §3 caveat ("there is no
+# attention/transformer baseline in this repo ... the '~2.0 = quadratic
+# attention' reference line is a cited comparison, not a measurement made
+# here") with an actual measurement.
+#   MODELS="hybrid_150m_v2 mamba_150m_baseline xlstm_150m_baseline transformer_150m_baseline" \
+#     OUTPUT_DIR=analysis/efficiency_150m_with_transformer \
+#     sbatch scripts/profile_efficiency_h100.sh
+if [ -z "${MODELS:-}" ]; then
+  if [ "${SCALE}" = "70m" ]; then
+    MODELS="hybrid_70m_v2 mamba_70m_baseline xlstm_70m_baseline"
+  else
+    MODELS="hybrid_150m_v2 mamba_150m_baseline xlstm_150m_baseline"
+  fi
 fi
 
 OUTPUT_DIR="${OUTPUT_DIR:-analysis/efficiency_${SCALE}}"

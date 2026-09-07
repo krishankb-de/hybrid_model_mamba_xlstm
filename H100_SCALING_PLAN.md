@@ -931,12 +931,13 @@ Absolute numbers on both arms are a bit lower than validate.parquet's (harder/la
   **Also add paired bootstrap CIs** (resample the n=2663 test set, 1000 draws, report the 95% CI on the hybrid−Transformer *difference* per metric). Without an interval, "matches" is not a testable statement. Cheap, CPU, reuses the dumped `hyps.txt`/`refs.txt`.
 - [ ] **14A-7** — **Efficiency eval — this is the half of the claim that should win.** Add the Transformer config to `scripts/performance_profile.py` and re-run the *same* protocol that produced `analysis/efficiency_150m/` (H100 80GB, bf16, bs=4, L ∈ {256, 512, 1024, 2048, 4096, 8192, 16384}, forward and forward+backward, latency / peak memory / tok/s):
 
+  Reuse the existing wrapper (`profile_efficiency_h100.sh`, whose `MODELS` was made env-overridable 2026-09-07) rather than a bare `python` call — same login-node restriction as everything else. It runs BOTH the inference and the forward+backward sweep in one job, which is exactly the protocol that produced `analysis/efficiency_150m/`.
   ```bash
-  python scripts/performance_profile.py --sweep \
-    --models hybrid_150m_v2 mamba_150m_baseline xlstm_150m_baseline transformer_150m_baseline \
-    --seq-lengths 256 512 1024 2048 4096 8192 16384 --batch_size 4 --dtype bf16 --backward \
-    --output-dir analysis/efficiency_150m_with_transformer
+  MODELS="hybrid_150m_v2 mamba_150m_baseline xlstm_150m_baseline transformer_150m_baseline" \
+  OUTPUT_DIR=analysis/efficiency_150m_with_transformer \
+    sbatch scripts/profile_efficiency_h100.sh
   ```
+  `performance_profile.py` resolves `--model` from `configs/model/<name>.yaml` first (the yaml is the source of truth, registry only as fallback), so `transformer_150m_baseline` resolves without touching the registry — verified 2026-09-07.
   Expect the measured quadratic exponent (~2.0) that §3 currently only *cites*. Report the crossover length where the hybrid overtakes attention, and the training-peak-memory gap at L=2048 (the hybrid's strongest measured result: 1078ms/54.0GB vs pure-Mamba 1348ms/67.5GB).
 - [ ] **14A-8** — **Rewrite `analysis/h100_scaling_results.md` §1 and §3** with the real baseline, and delete the §3 "no attention baseline in this repo" caveat once it is false.
 
@@ -958,12 +959,13 @@ Absolute numbers on both arms are a bit lower than validate.parquet's (harder/la
   3. **the retrieval-NN baseline's outputs** — these are *real human reports*, so whatever duplication rate they show is the rate a "perfect" non-generative system exhibits.
 
   The 73.6% figure was reported **with no control**, which makes it uninterpretable on its own. A generator at 73.6% against references at 60% is a very different finding from one against references at 5%.
+  ⚠️ **Must go through `sbatch`** — the aisc login node refuses ANY script execution ("This command is not allowed on the login node!", confirmed live in Phase 7E), so `scripts/analyze_diversity_h100.sh` (CPU-only, no GPU, ~20 min wall cap, queue wait dominates) is the entry point. It fail-fasts on a missing input file and warns loudly if either control is omitted.
   ```bash
-  python scripts/analyze_generation_diversity.py \
-    --hyps results/report_gen_tower13d_test_split/hyps.txt \
-    --refs results/report_gen_tower13d_test_split/refs.txt \
-    --baseline results/retrieval_baseline_test_split/hyps.txt \
-    --output analysis/generation_diversity_13d.md
+  HYPS=results/report_gen_tower13d_test_split/hyps.txt \
+  REFS=results/report_gen_tower13d_test_split/refs.txt \
+  BASELINE=results/retrieval_floor_test_split/hyps.txt \
+  OUTPUT=analysis/generation_diversity_13d.md \
+    sbatch scripts/analyze_diversity_h100.sh
   ```
 - [ ] **14B-3** — Compare against the pre-Phase-13 **73.6% / 184 clusters**. Phase 13 changed decode strategy (greedy→beam), decoder training length, and the image tower; any of the three could have moved templating in either direction. Beam search in particular is known to *increase* mode-seeking, so a rise is a live possibility and must be reported if found.
 

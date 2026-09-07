@@ -4468,3 +4468,76 @@ def test_analyze_generation_diversity_warns_when_controls_are_missing():
 
     report = agd.render([agd.analyse("generated (model)", ["a", "a", "b"])])
     assert "No controls were supplied" in report
+
+
+def test_analyze_diversity_slurm_wrapper_exists_and_is_cpu_only():
+    """Phase 14B runs on the cluster, and the login node refuses direct execution.
+
+    Confirmed live in Phase 7E: `python build_mimic_cxr_local.py meta` on lx01 was
+    rejected with "This command is not allowed on the login node!" before making a
+    single request. Anything runnable therefore needs an sbatch entry point.
+    """
+    path = REPO_ROOT / "scripts" / "analyze_diversity_h100.sh"
+    assert path.exists(), "Phase 14B needs a SLURM wrapper; bare python is refused on lx01"
+    src = path.read_text()
+
+    assert "#SBATCH --partition=aisc-batch" in src
+    assert "#SBATCH --account=aisc" in src
+    assert "#SBATCH --qos=aisc" in src
+    # Pure-stdlib text analysis: requesting a GPU would waste a scarce resource
+    # and, on this cluster, queue behind GPU demand for no reason.
+    # Check the DIRECTIVE, not the string -- the header comment legitimately says
+    # "Do not add --gpus", which a naive substring check trips over.
+    gpu_directives = [
+        line for line in src.splitlines()
+        if line.startswith("#SBATCH") and "--gpus" in line
+    ]
+    assert not gpu_directives, (
+        "the diversity analysis is pure-stdlib CPU work; requesting a GPU would "
+        "queue it behind real GPU demand for nothing: %s" % gpu_directives
+    )
+
+    # Must fail loudly rather than emit an empty/half-controlled report -- this
+    # project's documented expensive failure mode is a run that reports success
+    # while doing nothing.
+    assert 'HYPS="${HYPS:?' in src, "HYPS must be required, not silently defaulted"
+    assert "ERROR: HYPS file not found" in src
+    assert "WARNING: no REFS control supplied" in src
+    assert "WARNING: no BASELINE control supplied" in src
+    # set -u safe array expansion, the pattern used by the other wrappers
+    assert '${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}' in src
+
+
+def test_profile_efficiency_wrapper_models_is_env_overridable():
+    """Phase 14A-7 adds the Transformer to the EXISTING efficiency sweep.
+
+    The protocol must stay identical to the one that produced
+    analysis/efficiency_150m/, so the baseline joins that sweep rather than getting
+    a new, subtly-different harness.
+    """
+    src = (REPO_ROOT / "scripts" / "profile_efficiency_h100.sh").read_text()
+    assert 'if [ -z "${MODELS:-}" ]; then' in src, (
+        "MODELS must be env-overridable so transformer_150m_baseline can join the sweep"
+    )
+    # The fallback defaults must survive, so an unset MODELS still reproduces the
+    # original three-model sweep exactly.
+    assert 'MODELS="hybrid_150m_v2 mamba_150m_baseline xlstm_150m_baseline"' in src
+    assert 'MODELS="hybrid_70m_v2 mamba_70m_baseline xlstm_70m_baseline"' in src
+
+
+def test_no_plan_command_invokes_a_bare_python_script_on_the_cluster():
+    """Guard the whole Phase 14 section against the login-node trap.
+
+    Phase 7E cost real time to diagnose; a `python scripts/foo.py` line in the plan
+    is a command someone will paste into lx01 and have rejected.
+    """
+    plan = (REPO_ROOT / "H100_SCALING_PLAN.md").read_text()
+    phase14 = plan.split("### Phase 14 —")[1].split("\n## Verification")[0]
+    offenders = [
+        line.strip() for line in phase14.splitlines()
+        if line.strip().startswith(("python scripts/", "python3 scripts/"))
+    ]
+    assert not offenders, (
+        "Phase 14 contains bare python invocations that the aisc login node will "
+        "refuse; route them through an sbatch wrapper: %s" % offenders
+    )

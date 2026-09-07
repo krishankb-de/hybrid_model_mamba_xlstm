@@ -30,12 +30,18 @@ without pulling anything in. Self-BLEU here is a self-contained implementation u
 only to compare corpora scored within the SAME run -- it is not sacrebleu-comparable
 and must not be quoted as an absolute BLEU.
 
-Usage:
-    python scripts/analyze_generation_diversity.py \
-        --hyps results/report_gen_tower13d_test_split/hyps.txt \
-        --refs results/report_gen_tower13d_test_split/refs.txt \
-        --baseline results/retrieval_baseline_test_split/hyps.txt \
-        --output analysis/generation_diversity_13d.md
+Usage: submit via the SLURM wrapper -- the aisc login node refuses ANY script
+execution ("This command is not allowed on the login node!", Phase 7E), so this
+is never invoked directly on the cluster:
+
+    HYPS=results/report_gen_tower13d_test_split/hyps.txt \
+    REFS=results/report_gen_tower13d_test_split/refs.txt \
+    BASELINE=results/retrieval_floor_test_split/hyps.txt \
+    OUTPUT=analysis/generation_diversity_13d.md \
+      sbatch scripts/analyze_diversity_h100.sh
+
+The bare `python scripts/analyze_generation_diversity.py --hyps ... --refs ...`
+form works locally, and inside the wrapper.
 """
 
 import argparse
