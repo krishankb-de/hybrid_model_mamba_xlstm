@@ -5,6 +5,13 @@
 > Full approved plan: `/Users/krish/.claude/plans/i-want-to-implement-twinkling-ullman.md`.
 > Phase 10A/10B-architecture implementation plan (executed 2026-08-20): `/Users/krish/.claude/plans/pure-hatching-stallman.md`.
 >
+> ### ⚡ PLAN REOPENED 2026-09-07 — PHASE 14 (supervisor review). `current_phase: phase14_supervisor_review`.
+> Results were reviewed by the supervisor. Three findings, all about **validity of the central claim**, none about chasing a better number. In the supervisor's own priority order:
+> **(1) HIGHEST — there is no trained, parameter-matched Transformer baseline anywhere in the report.** The thesis is *"attention-free hybrid matches/beats attention-based transformers at better efficiency"*, but every comparison in the writeup is against this project's own architecture variants, an off-the-shelf non-fine-tuned model (BiomedCLIP zero-shot), or a naive nearest-neighbour control — none of which is the baseline the claim is about. **Nothing else matters if this isn't in place.**
+> **(2) The boilerplate/duplicate-template rate was never re-measured on the final (13D) checkpoint** — 73.6% of generations fell into 184 duplicate clusters on a *pre-Phase-13* checkpoint. Biggest validity threat to the primary result: if the generator is still mostly copying templates, "beats retrieval baseline" is hollow, since that is exactly what the retrieval baseline does too.
+> **(3) The disclosed selective-scan correctness defect is stated but neither fixed nor bounded** — the fp32 guard is in, but the `clamp(min=1e-8)` divide-by-decay approximation is still there and there is still no test against an exact reference recurrence. Fix it, or bound it and report the max deviation.
+> Full work breakdown, pre-registered success bars, and exact commands: **Phase 14** below. **Phases 1–13 are unchanged and still valid** — Phase 14 adds the missing baseline and the missing validity checks; it does not re-litigate any closed arm. Retrieval stays closed. **⚠ Operator freeze in force: do not change the selective scan while 14A is running (see 14C).**
+>
 > **PHASE 13 ARC COMPLETE (2026-09-03). Final checkpoint: `outputs/h100_report_gen_full_ext_4gpu_tower13d/checkpoints/last.ckpt` (13D, `vit_lr=3e-6` image tower + extended decoder training + beam decode), confirmed on both validate.parquet and the official test split. The 3-arm `vit_lr` sweep (1e-6→3e-6→1e-5) found `3e-6` is the peak for downstream usefulness — `1e-5` regressed on every CheXbert metric despite the tower's own retrieval R@10 still climbing, so the `3e-5` arm was skipped as not worth the compute. Summary: 13A (free beam decode) + 13B (extended training) cleared milestone 1 outright (CheXbert-14-micro beats the retrieval floor); 13C/13D (image tower on full data) pushed further, peaking at `3e-6` — CheXbert-14-macro's gap to the floor fell 17.5%→10.7%→7.1%, and CheXbert-5-macro now also beats the floor; 13F (rare-label oversampling) was tried honestly and failed, abandoned. **PLAN OF RECORD FULLY CLOSED (2026-09-03).** Phase 12 writeup done (`analysis/h100_scaling_results.md`, `h100_scaling_state.json`'s `final_verdict`); 12A closed (BIOSSES ρ=0.3829, STS-B ρ=0.4472 measured 2026-09-03, job 2505443 — first STS measurement of any kind in this project; PubMed PPL was already covered by Stage-0's existing val PPL 13.18). All of Phases 12 and 13 are checked off. No open items remain except the honestly-flagged limitations in `analysis/h100_scaling_results.md` §4 (unverified boilerplate rate on the final checkpoint, the never-run `vit_lr=3e-5` arm, Indiana never revisited for generation).** 11D (2026-08-30, official test split n=2663) CONFIRMED the same mixed result as 11B/11C below on a fresh split: generator wins ROUGE-L/BLEU-4/accuracy (0.1816 vs 0.1636 rouge_l), retrieval-NN floor wins CheXbert-14-micro decisively (0.4296 vs 0.3326, +29% rel.) — closing Phase 11 with the negative CheXbert result generalized, not a validate-split fluke. Per user decision 2026-08-30, Phase 13 now spends real compute trying to close this gap (staged: decode strategy → decoder training length [+ optional multi-GPU DDP, code shipped] → full-data image tower retrain → imbalance fix if still needed) before Phase 12's writeup is finalized. Phase 11 (below) is the closed historical record of how the gap was first found. Phase 8 (fetch+pack) and the full-data Phase 10E training run (job 2491338, 191,462 pairs) are DONE (2026-08-28). Full n=1433 eval on validate.parquet (11C full, jobs 2491600/2491687) REVERSES the n=10 preliminary read: generator BEATS the retrieval-NN floor on ROUGE-L/BLEU (rouge_l 0.2075 vs 0.1881; bleu_1 0.2706 vs 0.2605; bleu_4 0.0707 vs 0.0465). Caveat: 1055/1433 (73.6%) generated reports fall into one of 184 exact-duplicate template clusters — real signal but still heavily templated. **11B DONE 2026-08-30 (job 2494784): real CheXbert F1 numbers, n=1433 validate.parquet — 14-label micro/macro 0.3097/0.1548, 5-label micro/macro 0.3059/0.1983, exact-match accuracy 0.3531.** Clears the plan's pre-registered Floor tier (ROUGE-L≥0.15 ✅0.2075, CheXbert-14-micro≥0.25 ✅0.3097) but is well below Target (ROUGE-L≥0.22, CheXbert-14-micro≥0.40). Per-label breakdown: high precision / very low recall almost everywhere (e.g. Atelectasis 0.41P/0.04R, Pleural Effusion 0.73P/0.15R), 4 of 14 labels never predicted at all (Lung Lesion/Pneumonia/Pneumothorax/Pleural Other, F1=0) — consistent with the 73.6% boilerplate-template finding above: the generator is conservative and rarely asserts rare findings. Getting here required finding and fixing FIVE bugs in the unmaintained 2023-era `f1chexbert` package/tooling (wrong assumed API; `HF_HUB_OFFLINE` blocking its download; a swallowed `force_filename`-removed exception; `encode_plus` removed in `transformers>=5.0`, worked around with a fully isolated venv; `_check_targets` gaining a 4th return value in `scikit-learn>=1.8.0`) plus two venv-rebuild tooling failures (`uv venv --clear` unsupported then unreliable on this cluster's NFS home, worked around with an explicit `rm -rf`) — full history in the 11B-infra checkbox below. **Two caveats before treating 0.3097 as final:** (1) this is `validate.parquet`, not the official subject-disjoint test split — that's 11D, still open; (2) the retrieval-NN baseline has no CheXbert F1 yet, so per the plan's own pre-registered rule ("the retrieval baseline's CheXbert F1 is the real floor"), the generator is not yet confirmed to beat it on this metric specifically. **A first attempt at (2) (job 2494817/2495070) was INVALID** (stale arm0 defaults in `retrieval_baseline_h100.sh`/`inspect_report_generation_h100.sh`, both now fixed). **The corrected rerun (jobs 2495080/2495164) is VALID and COMPLETES the floor comparison: retrieval-NN CheXbert F1 (14-label) micro/macro = 0.4145/0.3054, (5-label) micro/macro = 0.4624/0.4118 — both well ABOVE the generator's 0.3097/0.1548 and 0.3059/0.1983.** The result is MIXED, not a clean win: the generator beats the retrieval floor on ROUGE-L/BLEU/accuracy (rouge_l 0.2075 vs 0.1881; exact-match accuracy 0.3531 vs 0.3036) but **loses badly on CheXbert F1**, the more clinically meaningful metric (retrieval +34%/+97%/+51%/+108% relative across 14-micro/14-macro/5-micro/5-macro). Per the plan's own pre-registered rule ("a generator that does not beat its own retrieval baseline has not contributed anything"), the generator has **not** cleared this bar on CheXbert F1, only on n-gram overlap and exact-match accuracy. Full writeup in the 11B/11C checkboxes below. Also open, independent: 11D (official test split), 11E (qualitative appendix).
 > Phases 1/2/4/5/6/6B/6C/6D/6G/7/8/11 are **COMPLETE and CLOSED**. Phase 3 deferred (its lever was measured non-binding for retrieval; report-gen's decoder DDP lever, Phase 13B, does not need it — see Phase 13). Phase 9's arms 9B (full-data recipe-unchanged retrain) and 9C (vit_lr sweep) — deferred 2026-08-20 in favor of moving straight to Phase 10 — are now **REOPENED as Phase 13C/13D**, run to help close the CheXbert gap rather than to chase retrieval R@10 (do not use their results to reopen the closed retrieval numbers above). See `h100_scaling_state.json` notes for the full rationale.
 
@@ -853,6 +860,140 @@ Absolute numbers on both arms are a bit lower than validate.parquet's (harder/la
 
 ---
 
+### Phase 14 — Supervisor review response 🎯 NEW (2026-09-07) — **REOPENS THE PLAN**
+
+**Why:** the results were shown to the supervisor (2026-09-07). Three findings came back. All three are fair, and all three are about **validity of the central claim**, not about squeezing out a better number. The priority order below is the supervisor's, not a re-ranking by this plan.
+
+1. **There is no trained, parameter-matched Transformer baseline anywhere in the report.** The thesis is *"attention-free hybrid matches/beats attention-based transformers at better efficiency."* Every comparison currently in `analysis/h100_scaling_results.md` is against (a) this project's own architecture variants (pure-Mamba, pure-xLSTM), (b) an off-the-shelf, non-fine-tuned model (BiomedCLIP zero-shot), or (c) a naive nearest-neighbour retrieval control. **None of those is the baseline the claim is actually about.** §3 of the writeup already concedes exactly this ("*there is no attention/transformer baseline in this repo … the '~2.0 = quadratic attention' reference line is a cited comparison, not a measurement made here*") — the supervisor's point is that a conceded caveat is not a substitute for the experiment. **Nothing else in Phase 14 matters if 14A is not in place.**
+2. **The boilerplate/duplicate-template rate was never re-measured on the final checkpoint.** 11C found 1055/1433 (**73.6%**) of generations fell into one of **184** exact-duplicate template clusters — on the *pre-Phase-13* checkpoint. `final_verdict.open_items[0]` admits it was never re-checked on **13D**, the checkpoint every headline number comes from. This is the single largest validity threat to the primary result: **if the generator is still mostly emitting templates, "beats the retrieval-NN floor" is hollow, because emitting a plausible templated report is exactly what the retrieval floor does too.**
+3. **The disclosed selective-scan correctness defect is stated but neither fixed nor bounded.** The supervisor checked the branch directly and is correct on every particular: the fp32 guard (2026-07) *is* in (`scan_interface.py:184-200`), but it is a **separate** issue from the underlying `A_cum_safe = A_cum_ci.clamp(min=1e-8)` divide-by-decay approximation (`scan_interface.py:118`, mirrored at `mamba_block.py:229` and `mamba_block_v2.py:343`), which is still there — and `tests/test_kernels.py` has **no** test comparing the chunked scan against an exact reference recurrence (it has `test_selective_scan_doc_boundary_reset` and a TFLA-vs-PyTorch check, neither of which is a correctness bound). Any reviewer told this will ask whether it affects the reported numbers. **Either fix it, or add an explicit error-bound test and report the max deviation.**
+
+**Status of the plan:** `current_phase` moves `plan_closed` → `phase14_supervisor_review`. The Phase 1–13 record below is **unchanged and still valid** — Phase 14 adds the missing baseline and the missing validity checks; it does not re-litigate any closed arm. Retrieval stays closed (do not re-open).
+
+**⚠ OPERATOR FREEZE (load-bearing, read before touching 14C).** The selective-scan operator **must not change** between the incumbent hybrid and the 14A Transformer baseline. The Transformer has no selective scan at all, so applying the 14C fix to the hybrid mid-campaign would make the head-to-head uninterpretable, and would additionally break comparability with every number already in `final_verdict`. **Run 14A on the current, frozen, now-documented operator.** This is also the conservative direction: the defect can only *understate* the hybrid (it annihilates state contributions), so a hybrid win measured on the defective operator is a **lower bound** on the hybrid's true quality. Record this argument in the writeup — it is the answer to "does the bug affect your conclusion?"
+
+**Execution order** (cheapest-and-most-diagnostic first, long pole started as early as possible):
+`14C-1` (CPU, free) → `14B` (CPU, free, no regeneration) → `14A-1`/`14A-2` (local code + config) → **`14A-3` Stage-0 launch (the long pole, ~2-4 GPU-days)** → `14C-2`/`14C-3` while Stage-0 runs → `14A-4`…`14A-8`.
+
+---
+
+#### 14A — Parameter-matched Transformer baseline ⏳ **HIGHEST PRIORITY, NOT STARTED**
+
+**Design decision (integration path).** Add `"attention"` as a fourth `layer_pattern` layer type inside the existing `HybridLanguageModel`, **not** a separate model class. A config of `layer_pattern: ["attention"]` then *is* a pure Transformer. Everything downstream — `ImagePrefixMapper` prefix conditioning, `ReportGenerationLightningModule`, `evaluate_report_generation.py`'s beam search, `score_chexbert_h100.sh`, `performance_profile.py` — is architecture-agnostic and needs **zero** changes. This is both the least-effort path and the one that guarantees the baseline goes through the *identical* pipeline, which is the whole point of a matched baseline.
+
+**Parameter match (computed, not estimated).** Instantiated `hybrid_150m_v2` = **183.7218M** params (embeddings 38.5974M + layers 106.5263M + lm_head 38.5974M, `tie_word_embeddings=false`).
+
+| Transformer candidate | layers | mlp_ratio | total | Δ vs hybrid | verdict |
+|---|---|---|---|---|---|
+| dim=768, **15L**, r=4.0 | 15 | 4.0 | **183.387M** | **−0.18%** | ✅ **PRIMARY** — standard architecture, near-exact param match |
+| dim=768, 12L, r=5.5 | 12 | 5.5 | 183.382M | −0.18% | ❌ rejected — matches params only via a non-standard FFN width; a reviewer reads that as a rigged baseline |
+| dim=768, 12L, r=4.0 | 12 | 4.0 | 162.149M | −11.74% | ⚪ optional secondary — depth-matched but 11.7% *fewer* params, so it handicaps the baseline |
+
+**Chosen: `dim=768, num_layers=15, num_heads=12 (head_dim=64), mlp_ratio=4.0`.** Param-matching holds parameters constant and lets each architecture pick its own shape; 15L/768 is an ordinary pre-norm decoder (a slightly deeper GPT-2-small), not a contrivance. Use **RoPE**, not learned positional embeddings — the hybrid spends **zero** params on positional encoding (`embeddings` is exactly `50257×768`), so a learned table would be an unmatched +0.79M and an unearned advantage.
+
+- [ ] **14A-1** — **Code: `"attention"` layer type.** New `hybrid_xmamba/layers/attention_block.py` — standard pre-norm causal self-attention (RoPE, `F.scaled_dot_product_attention(..., is_causal=True)`, same `dropout`/`initializer_range` conventions as the existing blocks). Wire into: `layers/hybrid_block.py` dispatch (currently imports only `MambaBlock`/`mLSTMBlock`/`sLSTMBlock` at lines 11-13), `models/configuration_hybrid.py:51` `Literal["mamba","mlstm","slstm"]` → add `"attention"`, plus `_validate()`/`get_layer_type()` at lines 146/162. Also make `scripts/train_stage0_150m_h100.sh:32` env-overridable (`export MODEL_CONFIG="${MODEL_CONFIG:-hybrid_150m_v2}"` — currently hardcoded, blocks 14A-3).
+  - **Resolve and record:** what `norm_topology: hybrid` (HybridNorm) means for an attention block. HybridNorm normalizes Q/K/V + Δ/B/C; the Q/K/V half maps onto attention but the design is hybrid-specific. **Decision: use `norm_topology: pre_rms` for the baseline** — canonical pre-norm is what "attention-based Transformer baseline" means to a reviewer. Record it as a stated (small) confound rather than silently choosing.
+  - **Beam-search note:** `evaluate_report_generation.py:151` `beam_search_decode` re-forwards the full sequence each step (no KV cache), so attention is **correct out of the box** and no decode changes are needed. It is O(L²) per step, which is a *fair* depiction of attention decode cost. If the n=2663 eval becomes intractable, add a KV cache **before** running 14A-7, and say so.
+  - Parity tests in `tests/test_willi_parity.py` + `tests/test_layers.py`; `bash scripts/validate_for_willi.sh` must exit 0.
+- [ ] **14A-2** — **Configs.** `configs/model/transformer_150m_baseline.yaml` (Stage-0/LM variant) and `configs/model/transformer_150m_baseline_rrg.yaml` (report-gen variant, mirroring the `hybrid_150m_v2` → `hybrid_150m_v2_rrg` delta exactly: `image_patch_dim: 768`, `prefix_k: 32`, `vit_unfreeze_blocks: 0`, `vit_lr: 1.0e-6`, `decoder_lr: 1.0e-5`, `head_lr: 3.0e-4`, `weight_decay: 0.01`, `warmup_steps: 500`, `max_steps: 10000`, `gradient_clip_val: 0.5`).
+  **Every shared hyperparameter is copied verbatim from the hybrid — `learning_rate: 4.0e-4`, `warmup_steps: 2000`, `weight_decay: 0.1`, `max_position_embeddings: 1024`, `dropout: 0.1`, `vocab_size: 50257`, `tie_word_embeddings: false`. Do NOT re-tune the baseline's LR.** Record as an honest limitation: the LR was √-width-scaled *for the hybrid*, so the Transformer runs at a possibly-suboptimal LR. If the Transformer loses on quality, this is the **first** thing an examiner will attack and the first thing to re-test (a 2-arm LR probe at {4e-4, 6e-4} is the pre-agreed remedy).
+  **Before launching 14A-3**, instantiate both configs and assert `abs(n_params_transformer / 183_721_800 - 1) < 0.005`; add that assertion as a parity test so it cannot silently drift.
+- [ ] **14A-3** — **Stage-0 pretrain (the long pole).** Identical corpus (PubMed), steps, batch, schedule as the hybrid's Phase-5 Stage-0. Single lever = `MODEL_CONFIG`.
+
+  ```bash
+  MODEL_CONFIG=transformer_150m_baseline EXPERIMENT=h100_stage0_transformer_150m sbatch scripts/train_stage0_150m_h100.sh
+  ```
+  Report val PPL against the hybrid's **13.18**. (This is also the first real head-to-head backbone-quality number in the project.)
+- [ ] **14A-4** — **Image tower: REUSE 13D's, unchanged.** `outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt`. Do **not** train a Transformer text tower — that adds a second lever and confounds the decoder comparison.
+  ⚠ **Honest caveat to record in the writeup:** that tower was contrastively co-trained *with the hybrid text encoder*, so its prefix space is mildly hybrid-favouring. If the Transformer wins anyway, the caveat is moot. If it loses **narrowly**, this is the first confound to question, and the remedy (a per-backbone tower retrain, ~7-8h) is pre-agreed.
+- [ ] **14A-5** — **Report-gen decoder train.** Identical to 13D's winning command in every respect except `MODEL_CONFIG`:
+
+  ```bash
+  MODEL_CONFIG=transformer_150m_baseline_rrg NUM_GPUS=4 MAX_STEPS=12000 \
+    IMAGE_ENCODER_CKPT=./outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt \
+    EXPERIMENT=h100_report_gen_transformer_tower13d \
+    sbatch --gpus=4 scripts/train_report_generation_h100.sh
+  ```
+  (Load the 14A-3 Stage-0 checkpoint as the decoder init the same way 13D loaded the hybrid's — mirror whatever `train_report_generation_h100.sh` already does; do not introduce a new init path.)
+- [ ] **14A-6** — **Quality eval, official test split (n=2663), beam_size=3** — the same protocol the 13D headline numbers use:
+
+  ```bash
+  DECODE=beam BEAM_SIZE=3 PARQUET=/sc/home/$USER/dataset/mimic_full/test.parquet \
+    NUM_SAMPLES=999999 DUMP_DIR=results/report_gen_transformer_test_split \
+    CHECKPOINT=./outputs/h100_report_gen_transformer_tower13d/checkpoints/last.ckpt \
+    sbatch scripts/inspect_report_generation_h100.sh
+  DUMP_DIR=results/report_gen_transformer_test_split sbatch scripts/score_chexbert_h100.sh
+  ```
+  Compare against the two rows already in `h100_scaling_state.json.final_verdict`: hybrid 13D (rouge_l 0.1899, CheXbert-14-micro 0.4736) and the retrieval-NN floor (0.1636 / 0.4296).
+  **Also add paired bootstrap CIs** (resample the n=2663 test set, 1000 draws, report the 95% CI on the hybrid−Transformer *difference* per metric). Without an interval, "matches" is not a testable statement. Cheap, CPU, reuses the dumped `hyps.txt`/`refs.txt`.
+- [ ] **14A-7** — **Efficiency eval — this is the half of the claim that should win.** Add the Transformer config to `scripts/performance_profile.py` and re-run the *same* protocol that produced `analysis/efficiency_150m/` (H100 80GB, bf16, bs=4, L ∈ {256, 512, 1024, 2048, 4096, 8192, 16384}, forward and forward+backward, latency / peak memory / tok/s):
+
+  ```bash
+  python scripts/performance_profile.py --sweep \
+    --models hybrid_150m_v2 mamba_150m_baseline xlstm_150m_baseline transformer_150m_baseline \
+    --seq-lengths 256 512 1024 2048 4096 8192 16384 --batch_size 4 --dtype bf16 --backward \
+    --output-dir analysis/efficiency_150m_with_transformer
+  ```
+  Expect the measured quadratic exponent (~2.0) that §3 currently only *cites*. Report the crossover length where the hybrid overtakes attention, and the training-peak-memory gap at L=2048 (the hybrid's strongest measured result: 1078ms/54.0GB vs pure-Mamba 1348ms/67.5GB).
+- [ ] **14A-8** — **Rewrite `analysis/h100_scaling_results.md` §1 and §3** with the real baseline, and delete the §3 "no attention baseline in this repo" caveat once it is false.
+
+**PRE-REGISTERED SUCCESS BAR FOR 14A — declared 2026-09-07, BEFORE any of it is run.** (Project discipline: the bar is fixed while the outcome is unknown.)
+- **Quality — "matches":** the Transformer does **not** beat the hybrid by more than the 95% bootstrap CI on the difference, on CheXbert-14-micro **and** ROUGE-L (official test split, n=2663). "Beats" = hybrid ahead with the CI excluding zero.
+- **Efficiency — "at better efficiency":** hybrid strictly better on training peak memory **and** on latency at L ≥ 2048, at matched params.
+- **PRE-REGISTERED FAILURE STATEMENT:** if the Transformer beats the hybrid on quality at equal parameters, the central claim gets **rewritten**, not quietly dropped — to the efficiency claim alone ("trades *X* quality for *Y* efficiency at matched parameters"), with the quality gap stated numerically in the abstract. Writing this down now is the point; it is not renegotiable after the numbers land.
+
+---
+
+#### 14B — Re-measure boilerplate/template rate on the final (13D) checkpoint ⏳ **NOT STARTED — cheap, do FIRST**
+
+**Cost: ~zero.** The 13D official-test-split generations already exist on the cluster (`results/report_gen_tower13d_test_split/hyps.txt`, from the 13D eval) — **no GPU, no regeneration**. Same for the retrieval-NN floor's outputs and the references.
+
+- [ ] **14B-1** — New `scripts/analyze_generation_diversity.py` (CPU, stdlib + existing deps). Reads a `hyps.txt` and reports: exact-duplicate cluster count, % of generations inside a duplicate cluster, the largest cluster sizes, distinct-1/2/3/4, self-BLEU-4, and type-token ratio. Unit tests + `validate_for_willi.sh`.
+- [ ] **14B-2** — **Run it on three corpora, not one.** This is the substantive fix to how the number was originally reported:
+  1. **13D generations** (the checkpoint under test),
+  2. **the reference reports** for the same n=2663 — MIMIC-CXR reports are *themselves* heavily templated, and the plan already measured ~2% exact duplication in the retrieval gallery (6C-3),
+  3. **the retrieval-NN baseline's outputs** — these are *real human reports*, so whatever duplication rate they show is the rate a "perfect" non-generative system exhibits.
+
+  The 73.6% figure was reported **with no control**, which makes it uninterpretable on its own. A generator at 73.6% against references at 60% is a very different finding from one against references at 5%.
+  ```bash
+  python scripts/analyze_generation_diversity.py \
+    --hyps results/report_gen_tower13d_test_split/hyps.txt \
+    --refs results/report_gen_tower13d_test_split/refs.txt \
+    --baseline results/retrieval_baseline_test_split/hyps.txt \
+    --output analysis/generation_diversity_13d.md
+  ```
+- [ ] **14B-3** — Compare against the pre-Phase-13 **73.6% / 184 clusters**. Phase 13 changed decode strategy (greedy→beam), decoder training length, and the image tower; any of the three could have moved templating in either direction. Beam search in particular is known to *increase* mode-seeking, so a rise is a live possibility and must be reported if found.
+
+**PRE-REGISTERED INTERPRETATION — declared 2026-09-07:** if 13D is still ≥70% templated **and** materially above both controls, then §1's "beats the retrieval floor" headline gets an **explicit qualifier in the abstract**, not merely a bullet in §4 Limitations. If it is at or below the reference corpus's own rate, that is a genuine positive finding and should be stated as one.
+
+---
+
+#### 14C — Bound the selective-scan defect (and state the fix cost honestly) ⏳ **NOT STARTED**
+
+**This defect is already audited — it just never reached this plan, the writeup, or a test.** `MAMBA3_INTEGRATION_PLAN.md` + `mamba3_integration_state.json` (audit 2026-08-16, all numbers CPU-reproduced in this repo at commit `7104902`, float64 sequential ground truth) contain finding **F3**, `verdict: CONFIRMED — more severe than reported`:
+
+> **Mechanism:** where `A_cum[s]` underflows below the clamp while `A_cum_safe[s] = 1e-8`, the intra-chunk term becomes `h_intra[s] = A_cum[t] · (Bx[s]/1e-8) ≈ 0` — **the current token's own contribution to the state is annihilated.**
+
+| Δ (per-step) | 0.001 | 0.01 | 0.1 | 0.3 | 0.705 | 1.0 |
+|---|---|---|---|---|---|---|
+| rel max err vs float64 reference | 6.2e-17 | 3e-16 | **0.539** | **0.719** | **1.053** | **1.089** |
+
+At the model's actual (uninitialized) Δ distribution: **16.2% of channels hit the clamp, 29.7% exceed 1% error, overall rel-max-err 0.358.** The worst case is `norm_topology=hybrid` — i.e. the canonical config this project actually trains (audit F1: Δ mean 0.8229, Δ max 4.6536).
+
+**Why the fix is not free (audit F4, and the reason the "or" branch is the right answer here).** The obvious repair — shrink the chunk so `A_cum` never underflows — *is* verified exact (rel err **1.5e-16** at chunk=8, vs 0.358 at chunk=64), **but only once Δ is properly initialized**; at the current uninitialized Δ≈0.705, *even chunk=2 fails* (rel err 0.398). The Δ initialization is a **training-time** change (the correct `_init_dt_proj` already exists as dead code at `mamba_block_v2.py:159-179`), and audit F2 found it is further erased by `dt_norm` on every v2 config unless that is also changed. So a real fix is `M1+M2` **coupled**, which invalidates every existing checkpoint and costs a full Stage-0 re-run (~4 GPU-days) plus the entire downstream chain — and would break comparability with every number in `final_verdict`. The mask-based exact form (Mamba-2/3 segsum) does **not** port: this is Mamba-1-style with `A` of shape `(d_inner, d_state)`, so the decay mask is `(cs,cs,d,n)` — **19.3 GB at chunk=64**, 1.2 GB even at chunk=16 (audit F4).
+
+- [ ] **14C-1** — **The test the supervisor asked for.** New `tests/test_scan_correctness.py`: an exact float64 sequential reference recurrence, compared against `selective_scan_parallel` over Δ ∈ {1e-3, 1e-2, 0.1, 0.3, 0.705, 1.0} × A ∈ {−1 … −16} × chunk ∈ {4, 8, 16, 32, 64}. **Assert the documented error envelope, not `<1e-6`** — the operator is known-defective, so the test's job is to be a *regression guard on a measured bound* that fails loudly if the deviation ever grows. CPU-only; wire into `scripts/validate_for_willi.sh`. Emit the table to `analysis/scan_error_bound.md` so the number is citable from the writeup.
+- [ ] **14C-2** — **Bound it at the trained checkpoint's real Δ, not just at init.** The audit measured Δ at initialization; a reviewer wants the deviation for the *system as reported*. Hook the live `dt` tensors of the 13D decoder on a real MIMIC batch, dump the empirical Δ distribution, and report the per-channel error distribution + the fraction of channels affected under it. This is a CPU/1-GPU job over one batch.
+- [ ] **14C-3** — **Measure the end-to-end effect — the highest-value item in 14C, one eval job.** Re-run the 13D report-gen eval with `chunk_size=8` **at inference only** (weights untouched; chunk size is a pure inference-time knob in `scan_interface.selective_scan()`, lines 176-183). If ROUGE-L / CheXbert-14-micro move by less than the 14A-6 bootstrap SE, then the answer to *"does the bug affect your reported numbers?"* is **measured, not argued**: no.
+  ⚠ **Caveat to state alongside the result:** per F4, chunk-shrink is only *certified exact* once Δ is initialized, which it is not here. So 14C-3 measures the **change under the shrink**, not a distance to a certified-exact reference. If the delta is large, that is itself the finding and it must be reported as such.
+- [ ] **14C-4** — **Record the decision either way. Recommendation: do NOT apply the fix to the trained system** (rationale above: coupled fix, ~4 GPU-days, invalidates every checkpoint and all comparability, and directly conflicts with the 14A operator freeze). Ship instead the statement that survives peer review:
+  > *The chunk-parallel scan does not compute the specified state-space recurrence exactly: for `A_cum[s] < 1e-8` the clamp annihilates the token's own state contribution. Training and evaluation used the same operator throughout, so all reported numbers are valid measurements of the system as built. The deviation from the specified recurrence is bounded at **[14C-1 table]**, its magnitude under the trained model's own Δ distribution is **[14C-2]**, and its end-to-end effect on the headline metrics is measured at **[14C-3]**.*
+
+  The full operator repair remains owned by `MAMBA3_INTEGRATION_PLAN.md` (phases M1 + M2, currently `current_phase: M0_pin_the_defect`, `status: PLANNED — no code written`). Phase 14 does **not** activate it. Add `analysis/scan_error_bound.md` to `.gitignore`'s allowlist.
+- [ ] **14C-5** — **Correct the `CLAUDE.md` claim while here.** It states Mamba "uses chunk-parallel selective scan Triton kernel"; the audit confirmed `scan_interface.selective_scan()` unconditionally calls the **PyTorch** `selective_scan_parallel` and `selective_scan_triton` is imported but never invoked. This is false for the live path and also bears on how the 14A-7 efficiency curves must be described (they measure the PyTorch scan, not a Triton kernel).
+
+---
+
 ## Verification (each phase gates on)
 1. `bash scripts/validate_for_willi.sh` exits 0 (3.9-syntax hygiene kept, forward-compatible) + H100-env stack smoke on py≥3.10 (Phase 2).
 2. New phase test passes.
@@ -878,6 +1019,15 @@ Absolute numbers on both arms are a bit lower than validate.parquet's (harder/la
 - A run that reports success while doing nothing is the expensive failure mode (`--cut-dirs`, `check=False`). **Every long-running loop needs an assertion that it produced output.**
 
 ## Unresolved questions
+
+**Phase 14 (2026-09-07) — blocking-ish, decide before the noted item:**
+- 14A-2: Transformer LR — copy hybrid's 4e-4 verbatim (single lever), or 2-arm probe {4e-4, 6e-4}? Default: verbatim; probe only if it loses on quality. **Decide before 14A-3.**
+- 14A-4: reuse 13D's hybrid-co-trained image tower (default, single lever) or retrain one per backbone (+7-8h, removes the confound)? **Decide before 14A-5.**
+- 14C-4: accept "bound + report" (recommended), or authorize the coupled M1+M2 operator fix (~4 GPU-days, invalidates every checkpoint, breaks all comparability)? **Decide before writeup.**
+- 14A-1: is a KV cache needed before 14A-7, or is uncached O(L²) decode an acceptable (and fair) depiction of attention cost? Measure first.
+- 14A: run the optional depth-matched 12L/162M secondary, or param-matched 15L only?
+
+**Pre-existing:**
 - PhysioNet credentialing lead time — unknown until 7B is submitted; **everything downstream is gated on it**. Start Phase 10A/10B/11A meanwhile.
 - Report-gen text target: **findings-only** (RRG convention) vs findings+impression (what the retrieval chapter used)? Decide at 8F, record in `build_report.json`.
 - Prefix length `k` for image conditioning — sweep {8,32,64} at 10B; no prior.

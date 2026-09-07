@@ -1,7 +1,21 @@
 # H100 Scaling Results — Hybrid Mamba-xLSTM CXR Report Generation
 
+> ⚠ **THIS DOCUMENT IS SUPERSEDED IN PART — PLAN REOPENED 2026-09-07 (Phase 14, supervisor
+> review).** Three items are now open work rather than accepted limitations, and two of them
+> change how results below must be described once measured:
+> **(14A)** there is no trained, parameter-matched Transformer baseline anywhere in this
+> document — §3's caveat to that effect is being replaced by the actual experiment;
+> **(14B)** the 73.6%-templated finding in §1/§4 is from the *pre-Phase-13* checkpoint and is
+> being re-measured on the final 13D checkpoint, with reference-corpus and retrieval-baseline
+> controls the original number lacked;
+> **(14C)** the selective-scan defect noted below is being bounded with a committed
+> regression test and an end-to-end measurement.
+> Every number in this document remains a valid measurement of the system as built — none is
+> retracted. See `H100_SCALING_PLAN.md` Phase 14.
+
 **Status:** Phase 13 arc complete, Phase 12 writeup complete, Phase 12A (STS/PubMed PPL)
-closed (2026-09-03). Final report-generation checkpoint:
+closed (2026-09-03). **Phase 14 reopened 2026-09-07** (supervisor review — matched-Transformer
+baseline, boilerplate re-measurement, scan error bound). Final report-generation checkpoint:
 `outputs/h100_report_gen_full_ext_4gpu_tower13d/checkpoints/last.ckpt`.
 Full resumable history: `H100_SCALING_PLAN.md` + `h100_scaling_state.json` at repo root.
 
@@ -231,9 +245,13 @@ checkpoint, and do not explain any retrieval or generation number above.
 - **Not a bottleneck at this project's actual sequence lengths.** CXR reports run
   ≤256 tokens, PubMed pretraining ≤512. At L=256, the hybrid is the fastest of the three
   architectures tested (18.08ms vs 19.78/21.12ms).
-- **Caveat**: there is no attention/transformer baseline in this repo. The "~2.0 =
-  quadratic attention" reference line in tooling output is a cited comparison, not a
-  measurement made here.
+- **Caveat (BEING FIXED — Phase 14A)**: there is no attention/transformer baseline in this
+  repo. The "~2.0 = quadratic attention" reference line in tooling output is a cited
+  comparison, not a measurement made here. This is the supervisor's highest-priority
+  finding (2026-09-07): the central claim is about attention-based transformers, and none
+  of the comparisons above is against one. Phase 14A trains a parameter-matched Transformer
+  (768d, 15L, mlp_ratio 4.0, RoPE = 183.4M vs the hybrid's 183.7M) through the identical
+  pipeline and re-runs this exact sweep with it included.
 
 ---
 
