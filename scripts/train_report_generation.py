@@ -184,6 +184,32 @@ def main(cfg: DictConfig):
         missing, unexpected = module.decoder.load_state_dict(state, strict=False)
         print(f"  Loaded. Missing keys: {len(missing)}, Unexpected: {len(unexpected)}")
 
+        # Phase 14A guard. DECODER_CKPT has a DEFAULT (the hybrid's Stage-0
+        # backbone), and the wrapper's existence check passes for it whatever
+        # model you are training -- so pointing a Transformer run at the hybrid's
+        # checkpoint does NOT fail, it loads under strict=False, matches almost
+        # nothing, and trains from random init. That is silent, costs a full
+        # multi-GPU run, and would quietly invalidate the matched-baseline
+        # comparison. "A run that reports success while doing nothing is the
+        # expensive failure mode" -- H100_SCALING_PLAN.md's own lesson.
+        n_decoder_keys = len(module.decoder.state_dict())
+        missing_frac = len(missing) / max(n_decoder_keys, 1)
+        if missing_frac > 0.5:
+            raise RuntimeError(
+                f"Decoder init matched almost nothing: {len(missing)}/{n_decoder_keys} "
+                f"keys missing ({missing_frac:.0%}). This checkpoint is very likely for a "
+                f"DIFFERENT architecture than model={cfg.model.get('model_type')} with "
+                f"layer_pattern={list(cfg.model.get('layer_pattern', []))}. "
+                f"Check DECODER_CKPT ({decoder_ckpt}) -- it defaults to the hybrid's "
+                f"Stage-0 backbone and must be overridden for any other architecture."
+            )
+        if missing_frac > 0.05:
+            print(
+                f"  WARNING: {len(missing)}/{n_decoder_keys} decoder keys ({missing_frac:.0%}) "
+                f"were NOT initialised from the checkpoint. Verify this is intended before "
+                f"trusting the run."
+            )
+
     image_encoder_ckpt = cfg.get("image_encoder_checkpoint", None)
     if image_encoder_ckpt:
         print(f"Image tower: fine-tuned checkpoint {image_encoder_ckpt}")

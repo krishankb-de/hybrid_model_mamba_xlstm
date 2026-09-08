@@ -926,13 +926,17 @@ Absolute numbers on both arms are a bit lower than validate.parquet's (harder/la
   ⚠ **Honest caveat to record in the writeup:** that tower was contrastively co-trained *with the hybrid text encoder*, so its prefix space is mildly hybrid-favouring. If the Transformer wins anyway, the caveat is moot. If it loses **narrowly**, this is the first confound to question, and the remedy (a per-backbone tower retrain, ~7-8h) is pre-agreed.
 - [ ] **14A-5** — **Report-gen decoder train.** Identical to 13D's winning command in every respect except `MODEL_CONFIG`:
 
+  ⚠️ **`DECODER_CKPT` MUST be overridden — this was a real bug in the first draft of this command.** It defaults to `./outputs/h100_stage0_150m_v2/checkpoints/stage0_model_only.pt` (the **hybrid's** Stage-0 backbone) and the wrapper's existence check passes for it no matter which architecture you are training. Omitting it does **not** fail: the load runs under `strict=False`, matches almost nothing, and the Transformer trains **from random init** — silently, at the cost of a full 4-GPU run, and it would quietly invalidate the entire matched-baseline comparison.
   ```bash
-  MODEL_CONFIG=transformer_150m_baseline_rrg NUM_GPUS=4 MAX_STEPS=12000 \
+  MODEL_CONFIG=transformer_150m_baseline_rrg \
+  DECODER_CKPT=./outputs/h100_stage0_transformer_150m/checkpoints/last.ckpt \
+  NUM_GPUS=4 MAX_STEPS=12000 \
     IMAGE_ENCODER_CKPT=./outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt \
     EXPERIMENT=h100_report_gen_transformer_tower13d \
     sbatch --gpus=4 scripts/train_report_generation_h100.sh
   ```
-  (Load the 14A-3 Stage-0 checkpoint as the decoder init the same way 13D loaded the hybrid's — mirror whatever `train_report_generation_h100.sh` already does; do not introduce a new init path.)
+  Passing the Lightning `last.ckpt` directly is fine — `train_report_generation.py:180` does `ckpt.get("state_dict", ckpt)` and strips `model.`/`lm.` prefixes, so it handles both the raw `.ckpt` and the stripped `stage0_model_only.pt` the hybrid used. The Stage-0 module's `teacher.*` and `kd_projection.*` keys land in `unexpected` and are ignored, which is correct.
+  **Check this line in the log before trusting the run:** `Loaded. Missing keys: N, Unexpected: M`. `N` should be near zero. A guard added 2026-09-08 now hard-fails above 50% missing and warns above 5%, but read the number anyway.
 - [ ] **14A-6** — **Quality eval, official test split (n=2663), beam_size=3** — the same protocol the 13D headline numbers use:
 
   ```bash

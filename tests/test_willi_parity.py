@@ -4541,3 +4541,37 @@ def test_no_plan_command_invokes_a_bare_python_script_on_the_cluster():
         "Phase 14 contains bare python invocations that the aisc login node will "
         "refuse; route them through an sbatch wrapper: %s" % offenders
     )
+
+
+def test_decoder_init_guards_against_wrong_architecture_checkpoint():
+    """Phase 14A: DECODER_CKPT has a default, so a wrong one does not fail loudly.
+
+    train_report_generation_h100.sh defaults DECODER_CKPT to the HYBRID's Stage-0
+    backbone and only checks that the file exists. Pointing a Transformer run at it
+    therefore loads under strict=False, matches almost nothing, and trains from
+    random init -- silently, at the cost of a full multi-GPU run, and it would
+    invalidate the matched-baseline comparison that Phase 14A exists to make.
+    """
+    src = (REPO_ROOT / "scripts" / "train_report_generation.py").read_text()
+    assert "missing_frac" in src, "decoder init must measure how much actually loaded"
+    # Slice from the FIRST occurrence onward (str.split cuts at every occurrence,
+    # so [1] would only span the gap between the first two).
+    tail = src[src.index("missing_frac"):][:2500]
+    assert "raise RuntimeError(" in tail, (
+        "a mostly-unmatched decoder init must hard-fail, not warn -- it costs a full run"
+    )
+    # The default really is the hybrid's checkpoint; if that ever changes, this
+    # test's rationale needs revisiting rather than the assertion being deleted.
+    wrapper = (REPO_ROOT / "scripts" / "train_report_generation_h100.sh").read_text()
+    assert "h100_stage0_150m_v2/checkpoints/stage0_model_only.pt" in wrapper
+
+
+def test_plan_14A5_command_overrides_decoder_ckpt():
+    """The plan's own command must not reproduce the bug the guard protects against."""
+    plan = (REPO_ROOT / "H100_SCALING_PLAN.md").read_text()
+    block = plan.split("**14A-5**")[1].split("- [ ] **14A-6**")[0]
+    assert "MODEL_CONFIG=transformer_150m_baseline_rrg" in block
+    assert "DECODER_CKPT=./outputs/h100_stage0_transformer_150m/checkpoints/last.ckpt" in block, (
+        "14A-5's command must override DECODER_CKPT, or the Transformer silently "
+        "initialises from the hybrid's Stage-0 backbone"
+    )
