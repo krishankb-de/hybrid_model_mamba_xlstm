@@ -4673,6 +4673,42 @@ def test_bootstrap_is_paired_and_detects_a_real_difference():
     assert abs(res_tie["rouge_l"]["diff"]) < 1e-12
 
 
+def test_bootstrap_reports_both_accuracy_subsets_and_matches_sklearn():
+    """f1chexbert's "accuracy" is the FIVE-label exact match, not all fourteen.
+
+    Verified in F1CheXbert.forward: accuracy_score(refs_chexbert_5, hyps_chexbert_5).
+    An earlier revision of bootstrap_compare emitted the 14-label version under the
+    bare name "exact_match_accuracy", which read as the same quantity as the
+    0.2163/0.2306 already published in the headline table while actually being
+    0.0349/0.0469 -- a 6x difference under an identical-looking name. Both are now
+    emitted, named for their subset, and both are pinned against sklearn.
+    """
+    import random as _random
+
+    from sklearn.metrics import accuracy_score
+
+    bc = _load_bootstrap_module()
+    rng = _random.Random(0)
+    n, k = 200, 14
+    y_true = [[rng.randint(0, 1) for _ in range(k)] for _ in range(n)]
+    y_pred = [[rng.randint(0, 1) for _ in range(k)] for _ in range(n)]
+    five = [0, 2, 5, 6, 8]
+
+    cache = {"rouge": [0.0] * n, "hyp_toks": [["a"]] * n, "ref_toks": [["a"]] * n,
+             "y_true": y_true, "y_pred": y_pred, "five_idx": five}
+    out = bc.evaluate_subset(range(n), cache)
+
+    assert "exact_match_accuracy_14" in out and "exact_match_accuracy_5" in out
+    assert "exact_match_accuracy" not in out, (
+        "the unqualified name is ambiguous against the published 'accuracy' and "
+        "must not come back"
+    )
+    assert abs(out["exact_match_accuracy_14"] - accuracy_score(y_true, y_pred)) < 1e-12
+    sub_t = [[t[j] for j in five] for t in y_true]
+    sub_p = [[p[j] for j in five] for p in y_pred]
+    assert abs(out["exact_match_accuracy_5"] - accuracy_score(sub_t, sub_p)) < 1e-12
+
+
 def test_bootstrap_refuses_unpaired_inputs():
     """Pairing requires the same studies in the same order; mismatched lengths are
     the one case where that is detectable, and it must abort rather than zip-truncate."""
