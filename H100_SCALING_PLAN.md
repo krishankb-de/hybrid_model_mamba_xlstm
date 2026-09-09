@@ -924,7 +924,19 @@ Absolute numbers on both arms are a bit lower than validate.parquet's (harder/la
   Report val PPL against the hybrid's **13.18**. (This is also the first real head-to-head backbone-quality number in the project.)
 - [ ] **14A-4** — **Image tower: REUSE 13D's, unchanged.** `outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt`. Do **not** train a Transformer text tower — that adds a second lever and confounds the decoder comparison.
   ⚠ **Honest caveat to record in the writeup:** that tower was contrastively co-trained *with the hybrid text encoder*, so its prefix space is mildly hybrid-favouring. If the Transformer wins anyway, the caveat is moot. If it loses **narrowly**, this is the first confound to question, and the remedy (a per-backbone tower retrain, ~7-8h) is pre-agreed.
-- [ ] **14A-5** — **Report-gen decoder train.** Identical to 13D's winning command in every respect except `MODEL_CONFIG`:
+- [x] **14A-5** — **DONE 2026-09-09 (job 2522682, gx12, 4×H100, 36.4 min). Report-gen decoder train.**
+  Init was clean on both sides: decoder `Missing keys: 0, Unexpected: 1`; image tower `Missing: 0, unexpected: 0` (13D tower reused unchanged, as planned). 184,566,528 trainable. 12,000 steps ≈ 8 effective epochs.
+
+  | | hybrid (13B reference) | transformer (14A-5) |
+  |---|---|---|
+  | best `val_lm_loss` | 1.0485 | **1.0143** |
+  | `train/lm_loss_epoch` | 0.919 | **0.847** |
+  | throughput | 1.51 it/s (job 2504565) | **7.96 it/s** (5.3×) |
+
+  ⚠️ **`val_lm_loss` is NOT the paper's metric.** ROUGE-L and CheXbert F1 decide the claim and are unmeasured until 14A-6. Teacher-forced loss and generation quality have come apart before in this project (13A: beam beat greedy on every generation metric at identical loss).
+  The 5.3× throughput is worth noting separately: it **independently confirms 14A-7's synthetic prediction (5.1× at L=256 training) on the real task**, with real data and real DDP rather than random weights.
+
+  ~~Original spec:~~ **Report-gen decoder train.** Identical to 13D's winning command in every respect except `MODEL_CONFIG`:
 
   ⚠️ **`DECODER_CKPT` MUST be overridden — this was a real bug in the first draft of this command.** It defaults to `./outputs/h100_stage0_150m_v2/checkpoints/stage0_model_only.pt` (the **hybrid's** Stage-0 backbone) and the wrapper's existence check passes for it no matter which architecture you are training. Omitting it does **not** fail: the load runs under `strict=False`, matches almost nothing, and the Transformer trains **from random init** — silently, at the cost of a full 4-GPU run, and it would quietly invalidate the entire matched-baseline comparison.
   ```bash

@@ -4575,3 +4575,26 @@ def test_plan_14A5_command_overrides_decoder_ckpt():
         "14A-5's command must override DECODER_CKPT, or the Transformer silently "
         "initialises from the hybrid's Stage-0 backbone"
     )
+
+
+def test_report_generation_eval_guards_against_wrong_model_config():
+    """Phase 14A: --model-config defaults to the hybrid and is NOT auto-detected.
+
+    load_report_generation_module builds the module from the named YAML and then
+    loads weights with strict=False. Evaluating a Transformer checkpoint without
+    overriding MODEL_CONFIG therefore does not crash -- it builds a hybrid, matches
+    almost nothing, and generates from a RANDOMLY INITIALISED decoder. The metrics
+    that come out look plausible and are meaningless, which is worse than a crash:
+    they would be misread as "the baseline generates badly".
+    """
+    src = (REPO_ROOT / "scripts" / "evaluate_report_generation.py").read_text()
+    assert "strict=False" in src, "precondition: the load is non-strict, hence the guard"
+    tail = src[src.index("n_module_keys"):][:2500]
+    assert "raise RuntimeError(" in tail, (
+        "a mostly-unmatched eval load must hard-fail; silent garbage generation would "
+        "be reported as a real result"
+    )
+    wrapper = (REPO_ROOT / "scripts" / "inspect_report_generation_h100.sh").read_text()
+    assert 'MODEL_CONFIG="${MODEL_CONFIG:-hybrid_150m_v2_rrg}"' in wrapper, (
+        "if this default changes, the guard's rationale needs revisiting"
+    )

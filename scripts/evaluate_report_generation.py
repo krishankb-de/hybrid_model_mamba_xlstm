@@ -244,6 +244,33 @@ def load_report_generation_module(checkpoint_path, model_config_name: str = "hyb
     print(f"Loaded checkpoint: {checkpoint_path}")
     print(f"  Missing keys: {len(missing)}, Unexpected: {len(unexpected)}")
 
+    # Phase 14A guard (2026-09-09). --model-config DEFAULTS to hybrid_150m_v2_rrg
+    # and the architecture is NOT auto-detected from the checkpoint: the module is
+    # built from the named YAML, then weights are loaded with strict=False. Point
+    # this at a Transformer checkpoint without overriding MODEL_CONFIG and it does
+    # NOT fail -- it builds a hybrid, matches almost nothing, and generates from a
+    # RANDOMLY INITIALISED decoder. The resulting ROUGE-L/CheXbert numbers look
+    # plausible and are meaningless, which is worse than a crash: they would be
+    # reported as "the baseline generates badly" when the eval was simply
+    # misconfigured. Same trap as the decoder init in train_report_generation.py.
+    n_module_keys = len(module.state_dict())
+    missing_frac = len(missing) / max(n_module_keys, 1)
+    if missing_frac > 0.5:
+        raise RuntimeError(
+            f"Checkpoint init matched almost nothing: {len(missing)}/{n_module_keys} keys "
+            f"missing ({missing_frac:.0%}). --model-config is '{model_config_name}', whose "
+            f"layer_pattern is {list(raw.get('layer_pattern', []))}. This checkpoint is "
+            f"almost certainly a DIFFERENT architecture. Generating now would produce "
+            f"meaningless text from a randomly-initialised decoder -- pass the matching "
+            f"--model-config (MODEL_CONFIG=... for the SLURM wrapper) instead."
+        )
+    if missing_frac > 0.05:
+        print(
+            f"  WARNING: {len(missing)}/{n_module_keys} keys ({missing_frac:.0%}) were NOT "
+            f"loaded from the checkpoint. Verify --model-config matches before trusting "
+            f"any metric from this run."
+        )
+
     module.to(device)
     module.eval()
     return module
