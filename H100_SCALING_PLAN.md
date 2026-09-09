@@ -10,6 +10,7 @@
 > **(1) HIGHEST — there is no trained, parameter-matched Transformer baseline anywhere in the report.** The thesis is *"attention-free hybrid matches/beats attention-based transformers at better efficiency"*, but every comparison in the writeup is against this project's own architecture variants, an off-the-shelf non-fine-tuned model (BiomedCLIP zero-shot), or a naive nearest-neighbour control — none of which is the baseline the claim is about. **Nothing else matters if this isn't in place.**
 > **(2) ✅ CLOSED 2026-09-07 (14B): 73.6% → 36.1%** exact-duplicate clustering on 13D, like-for-like on `validate` (n=1433, the split the historical figure came from), against controls at **1.7%** (references) and **6.4%** (retrieval-NN). On the official test split (n=2663) the same measurement gives 29.2% vs 0.2% / 7.3% — duplication is split-dependent, so always quote the split. Pre-registered outcome **INTERMEDIATE**: the "beats the retrieval floor" result is **not** hollow, but the generator is still ~7× less lexically diverse and 2.3× more self-similar than either control, so the exact-duplicate headline flatters it. Original finding: **the boilerplate/duplicate-template rate was never re-measured on the final (13D) checkpoint** — 73.6% of generations fell into 184 duplicate clusters on a *pre-Phase-13* checkpoint. Biggest validity threat to the primary result: if the generator is still mostly copying templates, "beats retrieval baseline" is hollow, since that is exactly what the retrieval baseline does too.
 > **(3) The disclosed selective-scan correctness defect is stated but neither fixed nor bounded** — the fp32 guard is in, but the `clamp(min=1e-8)` divide-by-decay approximation is still there and there is still no test against an exact reference recurrence. Fix it, or bound it and report the max deviation.
+> ⚡ **14A HEAD-TO-HEAD COMPLETE (2026-09-09) — SPLIT DECISION.** On the official test split (n=2663) the **hybrid wins ALL FOUR CheXbert F1 metrics** (14-micro 0.4736 vs 0.4590, 14-macro 0.2800 vs 0.2774, 5-micro 0.5522 vs 0.5249, 5-macro 0.4487 vs 0.4319) while the **Transformer wins all four surface metrics** (ROUGE-L 0.1936 vs 0.1899, BLEU-1/4, exact-match accuracy). CheXbert F1 asks whether the right *findings* were asserted; ROUGE/BLEU ask whether the *text* matches — and this plan designated CheXbert the more clinically meaningful metric back in Phase 11, when the hybrid was losing on it. The Transformer also wins Stage-0 PPL (11.222 vs 13.18) and **every** efficiency measure (14A-7), though the efficiency benchmark carries a large implementation confound. **Pre-registered quality bar: the CheXbert-14-micro half is CLEARED; the ROUGE-L half turns on a 0.0037 gap and needs the paired bootstrap (tooling shipped, command in 14A-6).**
 > ⚠️ **14A-3 RESULT (2026-09-08): the parameter-matched Transformer BEATS the hybrid on Stage-0 LM perplexity, 11.222 vs 13.18 (−14.9%), under a verified single-lever comparison.** First head-to-head of the project, and it went against the thesis. Stage-0 PPL is a text-only metric and this project has measured it not transferring before (null #1 of 10, on retrieval) — but that null used the backbone as an *encoder*, whereas report generation uses it as a *generator*, which is exactly what LM pretraining optimises. Treat it as a genuine warning sign for 14A-5, not a dismissable metric. The pre-registered failure statement for 14A stands as written.
 > Full work breakdown, pre-registered success bars, and exact commands: **Phase 14** below. **Phases 1–13 are unchanged and still valid** — Phase 14 adds the missing baseline and the missing validity checks; it does not re-litigate any closed arm. Retrieval stays closed. **⚠ Operator freeze in force: do not change the selective scan while 14A is running (see 14C).**
 >
@@ -949,7 +950,37 @@ Absolute numbers on both arms are a bit lower than validate.parquet's (harder/la
   ```
   Passing the Lightning `last.ckpt` directly is fine — `train_report_generation.py:180` does `ckpt.get("state_dict", ckpt)` and strips `model.`/`lm.` prefixes, so it handles both the raw `.ckpt` and the stripped `stage0_model_only.pt` the hybrid used. The Stage-0 module's `teacher.*` and `kd_projection.*` keys land in `unexpected` and are ignored, which is correct.
   **Check this line in the log before trusting the run:** `Loaded. Missing keys: N, Unexpected: M`. `N` should be near zero. A guard added 2026-09-08 now hard-fails above 50% missing and warns above 5%, but read the number anyway.
-- [ ] **14A-6** — **Quality eval, official test split (n=2663), beam_size=3** — the same protocol the 13D headline numbers use:
+- [x] **14A-6** — **DONE 2026-09-09. SPLIT DECISION — THE HYBRID WINS EVERY CheXbert F1 METRIC.** Checkpoint init clean (`Missing keys: 0, Unexpected: 0`).
+
+  | metric (official test, n=2663) | hybrid 13D | transformer | retrieval floor | winner |
+  |---|---|---|---|---|
+  | ROUGE-L | 0.1899 | **0.1936** | 0.1636 | transformer (+2.0%) |
+  | BLEU-1 | 0.2469 | **0.2496** | 0.2372 | transformer (+1.1%) |
+  | BLEU-4 | 0.0542 | **0.0571** | 0.0330 | transformer (+5.3%) |
+  | exact-match accuracy | 0.2163 | **0.2306** | 0.1735 | transformer (+6.6%) |
+  | **CheXbert-14-micro** | **0.4736** | 0.4590 | 0.4296 | **hybrid (+3.2%)** |
+  | **CheXbert-14-macro** | **0.2800** | 0.2774 | 0.3014 | **hybrid (+0.9%)** |
+  | **CheXbert-5-micro** | **0.5522** | 0.5249 | 0.4856 | **hybrid (+5.2%)** |
+  | **CheXbert-5-macro** | **0.4487** | 0.4319 | 0.4284 | **hybrid (+3.9%)** |
+
+  **The split falls along a meaningful axis.** CheXbert F1 asks *did the report assert the right findings*; ROUGE-L/BLEU ask *does the text look like the reference*. The hybrid wins all four of the former, the Transformer all four of the latter. Both beat the retrieval floor on ROUGE-L and CheXbert-14-micro.
+  ⚠️ **This is not post-hoc framing, and that matters.** This plan has called CheXbert F1 "the more clinically meaningful metric" since **Phase 11 (2026-08-30)** — written when the hybrid was *losing* on it by 29% relative. The designation was made when it was inconvenient, which is exactly what makes it usable now. Do not restate it as if it were chosen after seeing this table.
+
+  **PRE-REGISTERED BAR — where it actually stands.** The bar reads: *"the Transformer does NOT beat the hybrid by more than the 95% bootstrap CI on the difference, on CheXbert-14-micro AND ROUGE-L."*
+  - **CheXbert-14-micro: CLEARED outright** — the hybrid is ahead, so no interval is needed to settle this half.
+  - **ROUGE-L: undecided.** The Transformer leads by **0.0037** (2.0% relative). Whether that clears the bar ("within noise" ⇒ matches) or fails it depends entirely on the CI — which is precisely why 14A-6 specified one rather than eyeballing the gap.
+
+  **Run the bootstrap to settle it** (tooling shipped 2026-09-09; CPU-only, no GPU):
+  ```bash
+  A=results/report_gen_tower13d_test_split \
+  B=results/report_gen_transformer_test_split \
+  NAME_A=hybrid_13D NAME_B=transformer \
+  OUTPUT=analysis/bootstrap_hybrid_vs_transformer.md \
+    sbatch scripts/bootstrap_compare_h100.sh
+  ```
+  To get CheXbert F1 intervals as well, first re-run `score_chexbert_h100.sh` for **both** dump dirs — it now also writes `chexbert_labels.json` (per-sample `y_true`/`y_pred`), because micro/macro F1 are not decomposable per sample and so cannot be bootstrapped from the aggregate report. Without them the run still settles the ROUGE-L question, which is the one the bar turns on.
+
+  ~~Original spec:~~ **Quality eval, official test split (n=2663), beam_size=3** — the same protocol the 13D headline numbers use:
 
   ```bash
   DECODE=beam BEAM_SIZE=3 PARQUET=/sc/home/$USER/dataset/mimic_full/test.parquet \

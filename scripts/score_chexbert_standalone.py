@@ -79,6 +79,27 @@ def main():
     if args.output_dir:
         out_dir = Path(args.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Phase 14A-6: per-sample label matrices, so CheXbert F1 can be given a
+        # confidence interval. The aggregate report alone cannot be bootstrapped
+        # -- micro/macro F1 are not decomposable per sample -- and the hybrid vs
+        # Transformer CheXbert margins are small enough (0.4736 vs 0.4590) that
+        # reporting them without an interval would be reading noise.
+        # labeler.get_label() is the same call F1CheXbert makes internally, and
+        # target_names_5_index is its own definition of the 5-label subset, so
+        # neither is reimplemented or guessed here.
+        labels_path = out_dir / "chexbert_labels.json"
+        with open(labels_path, "w") as f:
+            json.dump({
+                "y_true": [labeler.get_label(r) for r in refs],
+                "y_pred": [labeler.get_label(h) for h in hyps],
+                "label_names": list(labeler.target_names),
+                "five_label_indices": list(labeler.target_names_5_index),
+                "hyp_file": args.hyp_file,
+                "ref_file": args.ref_file,
+            }, f)
+        print("  Per-sample labels saved to " + str(labels_path))
+
         results["hyp_file"] = args.hyp_file
         results["ref_file"] = args.ref_file
         results["timestamp"] = datetime.now().isoformat()

@@ -4598,3 +4598,110 @@ def test_report_generation_eval_guards_against_wrong_model_config():
     assert 'MODEL_CONFIG="${MODEL_CONFIG:-hybrid_150m_v2_rrg}"' in wrapper, (
         "if this default changes, the guard's rationale needs revisiting"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 14A-6 — paired bootstrap comparison
+# ---------------------------------------------------------------------------
+
+def _load_bootstrap_module():
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    try:
+        import bootstrap_compare
+        return bootstrap_compare
+    finally:
+        sys.path.pop(0)
+
+
+def test_bootstrap_chexbert_f1_matches_sklearn():
+    """The F1 here is reimplemented (the scorer lives in an isolated venv).
+
+    Reimplemented metrics drift. Pin it against sklearn, which is what produced
+    every CheXbert number already reported.
+    """
+    import random as _random
+
+    from sklearn.metrics import f1_score
+
+    bc = _load_bootstrap_module()
+    rng = _random.Random(0)
+    n, k = 60, 14
+    y_true = [[rng.randint(0, 1) for _ in range(k)] for _ in range(n)]
+    y_pred = [[rng.randint(0, 1) for _ in range(k)] for _ in range(n)]
+
+    for average in ("micro", "macro"):
+        mine = bc.chexbert_f1(y_true, y_pred, average)
+        theirs = f1_score(y_true, y_pred, average=average, zero_division=0)
+        assert abs(mine - theirs) < 1e-9, (
+            "chexbert_f1(%s) = %.10f but sklearn says %.10f" % (average, mine, theirs)
+        )
+
+    # And on a column subset, which is how the 5-label metric is computed.
+    cols = [0, 2, 5, 7, 9]
+    sub_true = [[r[j] for j in cols] for r in y_true]
+    sub_pred = [[r[j] for j in cols] for r in y_pred]
+    for average in ("micro", "macro"):
+        assert abs(bc.chexbert_f1(y_true, y_pred, average, cols)
+                   - f1_score(sub_true, sub_pred, average=average, zero_division=0)) < 1e-9
+
+
+def test_bootstrap_is_paired_and_detects_a_real_difference():
+    """A system that is strictly better must come out significant; a clone must tie.
+
+    The pairing is what makes this sensitive at small effect sizes, so both
+    directions are asserted -- a broken implementation usually fails one.
+    """
+    bc = _load_bootstrap_module()
+    refs = ["the lungs are clear with no acute finding number %d" % i for i in range(80)]
+    good = list(refs)                                    # perfect copy
+    bad = ["something entirely different here %d" % i for i in range(80)]
+
+    cache_good = bc.build_cache(good, refs, None)
+    cache_bad = bc.build_cache(bad, refs, None)
+
+    res, meta = bc.paired_bootstrap(cache_good, cache_bad, n_samples=200, seed=0)
+    assert meta["n"] == 80
+    assert res["rouge_l"]["significant"], "a perfect system vs a wrong one must be significant"
+    assert res["rouge_l"]["diff"] > 0
+    assert res["rouge_l"]["ci_low"] > 0, "CI must exclude zero when the gap is real"
+
+    # Identical systems: the difference is exactly zero in every resample.
+    res_tie, _ = bc.paired_bootstrap(cache_good, bc.build_cache(good, refs, None),
+                                     n_samples=100, seed=0)
+    assert not res_tie["rouge_l"]["significant"], "a system compared to itself must tie"
+    assert abs(res_tie["rouge_l"]["diff"]) < 1e-12
+
+
+def test_bootstrap_refuses_unpaired_inputs():
+    """Pairing requires the same studies in the same order; mismatched lengths are
+    the one case where that is detectable, and it must abort rather than zip-truncate."""
+    bc = _load_bootstrap_module()
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        a, b, r = Path(d) / "a.txt", Path(d) / "b.txt", Path(d) / "r.txt"
+        a.write_text("one\ntwo\nthree\n")
+        b.write_text("one\ntwo\n")
+        r.write_text("one\ntwo\nthree\n")
+        with pytest.raises(SystemExit):
+            bc.main(["--hyps-a", str(a), "--hyps-b", str(b), "--refs", str(r)])
+
+
+def test_score_chexbert_dumps_per_sample_labels():
+    """CheXbert F1 cannot be bootstrapped from the aggregate report alone."""
+    src = (REPO_ROOT / "scripts" / "score_chexbert_standalone.py").read_text()
+    assert "chexbert_labels.json" in src
+    assert "labeler.get_label(r) for r in refs" in src
+    assert "labeler.get_label(h) for h in hyps" in src
+    # The 5-label subset must come from the labeler, not a hardcoded list.
+    assert "labeler.target_names_5_index" in src
+
+
+def test_bootstrap_compare_slurm_wrapper_is_cpu_only():
+    path = REPO_ROOT / "scripts" / "bootstrap_compare_h100.sh"
+    assert path.exists()
+    src = path.read_text()
+    assert "#SBATCH --partition=aisc-batch" in src
+    assert not [l for l in src.splitlines() if l.startswith("#SBATCH") and "--gpus" in l]
+    assert 'A="${A:?' in src and 'B="${B:?' in src
+    assert "ERROR: required file not found" in src
