@@ -948,7 +948,37 @@ Absolute numbers on both arms are a bit lower than validate.parquet's (harder/la
   ```
   Compare against the two rows already in `h100_scaling_state.json.final_verdict`: hybrid 13D (rouge_l 0.1899, CheXbert-14-micro 0.4736) and the retrieval-NN floor (0.1636 / 0.4296).
   **Also add paired bootstrap CIs** (resample the n=2663 test set, 1000 draws, report the 95% CI on the hybrid−Transformer *difference* per metric). Without an interval, "matches" is not a testable statement. Cheap, CPU, reuses the dumped `hyps.txt`/`refs.txt`.
-- [ ] **14A-7** — ⚡ **RUN THIS NOW, IN PARALLEL WITH 14A-5.** It profiles *random* weights (the curves measure architecture, not any trained checkpoint), so it does **not** depend on 14A-3's checkpoint or on 14A-5 finishing. Given 14A-3 went against the hybrid, this is the half of the claim most likely to hold, and it is cheap. **Efficiency eval — this is the half of the claim that should win.** Add the Transformer config to `scripts/performance_profile.py` and re-run the *same* protocol that produced `analysis/efficiency_150m/` (H100 80GB, bf16, bs=4, L ∈ {256, 512, 1024, 2048, 4096, 8192, 16384}, forward and forward+backward, latency / peak memory / tok/s):
+- [x] **14A-7** — **DONE 2026-09-08 (job 2521356, gx12, 3.6 min). THE TRANSFORMER WINS ON EFFICIENCY TOO, AT EVERY LENGTH TESTED. The expected quadratic-attention signature never appeared.**
+
+  **Inference (forward, bs=4), latency / peak memory:**
+
+  | L | hybrid_150m_v2 | transformer_150m_baseline | transformer advantage |
+  |---|---|---|---|
+  | 256 (**the actual task length**) | 24.72 ms / 1.219 GB | **5.03 ms / 0.509 GB** | 4.9× faster, 2.4× less mem |
+  | 2048 | 130.79 ms / 5.714 GB | **16.24 ms / 1.244 GB** | 8.1× faster, 4.6× less mem |
+  | 16384 | 919.06 ms / 41.999 GB | **163.82 ms / 7.152 GB** | 5.6× faster, 5.9× less mem |
+
+  **Training (forward+backward, bs=4):**
+
+  | L | hybrid_150m_v2 | transformer_150m_baseline | transformer advantage |
+  |---|---|---|---|
+  | 256 | 76.10 ms / 7.144 GB | **14.84 ms / 1.327 GB** | 5.1× faster, 5.4× less mem |
+  | 2048 | 1084.39 ms / 53.963 GB | **52.59 ms / 7.555 GB** | **20.6× faster, 7.1× less mem** |
+  | 4096 | **OOM** | 106.63 ms / 14.675 GB | hybrid cannot run at all |
+  | 16384 | **OOM** | 538.06 ms / 57.399 GB | hybrid cannot run at all |
+
+  **Scaling exponents (log-log fit):** inference latency hybrid **0.874** vs transformer **0.865** — *statistically indistinguishable, and nowhere near the 2.0 the writeup's cited reference line predicted.* Training latency: hybrid 1.279, transformer **0.885** — the Transformer scales *better*. Memory: transformer 0.644 (inference) / 0.914 (training) vs hybrid 0.863 / 0.973.
+
+  ### ⚠️ WHY, AND THE CONFOUND THAT MAKES THIS NOT YET AN ARCHITECTURE RESULT
+
+  Two things are happening, and only the first is about architecture:
+
+  1. **`F.scaled_dot_product_attention` dispatches to FlashAttention on H100.** FlashAttention is **O(L) memory**, not O(L²) — it never materialises the L×L matrix. The "~2.0 = quadratic attention" reference line this plan and §3 of the writeup have cited throughout describes *naive* attention, which nobody has shipped since 2022. **The premise of the efficiency claim was out of date.** Attention's FLOPs are still O(L²), and it shows at the tail (8192→16384: transformer latency ×2.30 = exponent 1.20, hybrid ×2.00 = exponent 1.00) — so the hybrid *is* asymptotically flatter. But it is 5.6× behind at L=16384, so the crossover sits around **L ≈ 10⁷–10⁸ tokens**. Practically: never.
+  2. 🔴 **THE COMPARISON IS UNFAIR TO THE HYBRID, AND THE UNFAIRNESS IS ENTIRELY IN THE IMPLEMENTATION.** Per 14C-5 (verified in-repo): `scan_interface.selective_scan()` **unconditionally** calls the PyTorch `selective_scan_parallel`, and `selective_scan_triton` is imported and **never invoked**. It also runs the scan in **fp32** (the 2026-07 stability guard). So this benchmark pits a hand-written, fused, bf16 CUDA FlashAttention kernel against a **fp32 PyTorch loop over chunks**. That is an *implementation* comparison, not an *architecture* comparison, and it is the single most important caveat on every number above. The xLSTM row is the tell: at L=16384 inference it is 349 ms vs pure-Mamba's 1099 ms with *more* parameters — the difference between a path with a real kernel and one without.
+
+  **What can honestly be claimed today:** *as implemented in this repository*, the hybrid is slower and more memory-hungry than a parameter-matched FlashAttention Transformer at every sequence length tested, including the ≤256 tokens this project's actual task uses. The architectural linear-vs-quadratic argument is **not falsified in principle** — the exponents at the tail still favour the hybrid — but it is **not realised here**, and the honest writeup must say so in those words.
+
+  ~~Original spec:~~ **Efficiency eval — this is the half of the claim that should win.** (It did not.) It profiles *random* weights (the curves measure architecture, not any trained checkpoint), so it does **not** depend on 14A-3's checkpoint or on 14A-5 finishing. Given 14A-3 went against the hybrid, this is the half of the claim most likely to hold, and it is cheap. **Efficiency eval — this is the half of the claim that should win.** Add the Transformer config to `scripts/performance_profile.py` and re-run the *same* protocol that produced `analysis/efficiency_150m/` (H100 80GB, bf16, bs=4, L ∈ {256, 512, 1024, 2048, 4096, 8192, 16384}, forward and forward+backward, latency / peak memory / tok/s):
 
   Reuse the existing wrapper (`profile_efficiency_h100.sh`, whose `MODELS` was made env-overridable 2026-09-07) rather than a bare `python` call — same login-node restriction as everything else. It runs BOTH the inference and the forward+backward sweep in one job, which is exactly the protocol that produced `analysis/efficiency_150m/`.
   ```bash
