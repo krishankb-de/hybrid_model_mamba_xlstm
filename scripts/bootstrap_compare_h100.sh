@@ -27,7 +27,9 @@
 #SBATCH --partition=aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
-#SBATCH --exclude=gx13v1
+#SBATCH --exclude=ga03,gx13v1   # ga03: ARM node, the x86 .venv cannot execute
+                                # there ("cannot execute binary file: Exec format
+                                # error", job 2525864). gx13v1: faulty GPU.
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=4
 #SBATCH --time=02:00:00

@@ -4751,6 +4751,35 @@ def test_chexbert_metrics_are_written_before_the_optional_label_dump():
     assert "WARNING: per-sample label dump failed" in body
 
 
+def test_slurm_wrappers_that_source_the_venv_exclude_the_arm_node():
+    """ga03 is ARM; .venv/bin/python3 is an x86 binary.
+
+    Any wrapper that activates the venv MUST exclude ga03, or it dies with
+    "cannot execute binary file: Exec format error" the first time SLURM happens
+    to schedule it there -- which is a silent landmine, since the job runs fine
+    on every other node. Hit live on 2026-09-09 (job 2525864).
+
+    Note the trap that made this easy to get wrong: a script can be pure-stdlib
+    and STILL break, because sourcing the venv puts the x86 interpreter on PATH.
+    "It only needs stdlib" is not a reason to allow ga03; "it never activates the
+    venv" is.
+    """
+    offenders = []
+    for path in sorted((REPO_ROOT / "scripts").glob("*.sh")):
+        src = path.read_text()
+        sources_venv = "source \"${VENV_ACTIVATE}" in src or "source ${VENV_ACTIVATE}" in src
+        if not sources_venv:
+            continue
+        excludes = [l for l in src.splitlines()
+                    if l.startswith("#SBATCH") and "--exclude" in l]
+        if not any("ga03" in l for l in excludes):
+            offenders.append(path.name)
+    assert not offenders, (
+        "these wrappers activate the x86 venv but do not exclude the ARM node ga03: %s"
+        % offenders
+    )
+
+
 def test_bootstrap_compare_slurm_wrapper_is_cpu_only():
     path = REPO_ROOT / "scripts" / "bootstrap_compare_h100.sh"
     assert path.exists()

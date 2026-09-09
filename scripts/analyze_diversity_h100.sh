@@ -51,7 +51,8 @@
 #SBATCH --partition=aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
-#SBATCH --exclude=gx13v1                # faulty GPU (cudaErrorContained, 2026-07-19)
+#SBATCH --exclude=ga03,gx13v1           # ga03: ARM node, x86 .venv incompatible
+                                        # gx13v1: faulty GPU (cudaErrorContained, 2026-07-19)
 #SBATCH --mem=8G
 #SBATCH --cpus-per-task=2
 #SBATCH --time=00:20:00
@@ -61,9 +62,14 @@
 
 set -euo pipefail
 
-# NOTE: ga03 (ARM) is deliberately NOT excluded here, unlike the other eval
-# wrappers. Those exclude it because they need the x86 venv; this analysis is
-# pure-stdlib Python with no compiled dependency, so it runs anywhere.
+# NOTE (corrected 2026-09-09): an earlier revision left ga03 (ARM) unexcluded on
+# the reasoning that this analysis is pure-stdlib and so runs anywhere. That was
+# wrong in a way that only shows up on ARM: the script still SOURCES the x86
+# .venv below, and once activated `python3` resolves to .venv/bin/python3, an
+# x86 binary. On ga03 that dies with "cannot execute binary file: Exec format
+# error" -- exactly what happened to the sibling bootstrap wrapper (job 2525864).
+# The stdlib-only fallback only helps when the venv is ABSENT, not when it is
+# present and wrong for the architecture.
 
 HYPS="${HYPS:?Set HYPS to the generated reports file (hyps.txt from evaluate_report_generation.py --dump-dir)}"
 REFS="${REFS:-}"
