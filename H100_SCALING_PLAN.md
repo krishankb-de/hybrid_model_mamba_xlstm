@@ -980,7 +980,33 @@ Absolute numbers on both arms are a bit lower than validate.parquet's (harder/la
   ```
   To get CheXbert F1 intervals as well, first re-run `score_chexbert_h100.sh` for **both** dump dirs — it now also writes `chexbert_labels.json` (per-sample `y_true`/`y_pred`), because micro/macro F1 are not decomposable per sample and so cannot be bootstrapped from the aggregate report. Without them the run still settles the ROUGE-L question, which is the one the bar turns on.
 
-  ~~Original spec:~~ **Quality eval, official test split (n=2663), beam_size=3** — the same protocol the 13D headline numbers use:
+  ~~Original spec:~~ **Quality eval, official test split (n=2663), beam_size=3**
+
+  #### Bootstrap result (job 2525951, 2026-09-09) — TEXT METRICS ONLY, CheXbert still pending
+
+  | metric | hybrid 13D | transformer | diff | 95% CI | verdict |
+  |---|---|---|---|---|---|
+  | ROUGE-L | 0.1899 | 0.1936 | −0.0038 | [−0.0066, −0.0010] | **transformer wins** |
+  | BLEU-1 | 0.2469 | 0.2496 | −0.0027 | [−0.0057, +0.0002] | tie (CI spans 0) |
+  | BLEU-4 | 0.0542 | 0.0571 | −0.0029 | [−0.0058, +0.0001] | tie (CI spans 0) |
+
+  **The ROUGE-L gap is REAL — the CI excludes zero.** The pre-registered bar required the Transformer *not* to beat the hybrid on CheXbert-14-micro **AND** ROUGE-L. **The ROUGE-L half is FAILED.** Record that plainly; it is the outcome the pre-registered failure statement was written for.
+
+  ⚠️ **A correction to the 14A-6 headline framing.** The earlier reading — "the Transformer wins all four surface metrics" — does not survive the intervals: **BLEU-1 and BLEU-4 are ties.** Only ROUGE-L is a real win. The point estimates all leaned the same way, which is exactly the pattern an interval is supposed to catch, and it did.
+
+  🔴 **THE DECISIVE MEASUREMENT IS STILL MISSING.** Job 2525951 ran at 16:48 but `chexbert_labels.json` was not written until 16:57 — a pure race (the scorer jobs were still running), **not a bug**: both label dumps succeeded (`Per-sample labels saved to ...` in both logs). **Re-run the bootstrap now that the labels exist.** The hybrid leads CheXbert-14-micro by **+0.0146**, nearly 4× the ROUGE-L gap that just proved significant — so there is a real chance that lead is significant too, and it decides which paper this is:
+  - CheXbert CI excludes 0 → *"wins clinical correctness, loses text overlap"* — a genuine trade-off result.
+  - CheXbert CI spans 0 → *"loses text overlap, ties clinical correctness"* — a materially weaker claim.
+  Do not write either sentence until the interval is in hand.
+
+  ```bash
+  A=results/report_gen_tower13d_test_split \
+  B=results/report_gen_transformer_test_split \
+  NAME_A=hybrid_13D NAME_B=transformer \
+  OUTPUT=analysis/bootstrap_hybrid_vs_transformer.md \
+    sbatch scripts/bootstrap_compare_h100.sh
+  ```
+  (`exact_match_accuracy` was added to the bootstrap 2026-09-09 so all eight headline metrics get an interval, not seven.) — the same protocol the 13D headline numbers use:
 
   ```bash
   DECODE=beam BEAM_SIZE=3 PARQUET=/sc/home/$USER/dataset/mimic_full/test.parquet \

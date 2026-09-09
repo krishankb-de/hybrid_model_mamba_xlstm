@@ -115,6 +115,12 @@ def evaluate_subset(idx: Sequence[int], cache: Dict) -> Dict[str, float]:
         if five:
             out["chexbert_5_micro"] = chexbert_f1(y_true, y_pred, "micro", five)
             out["chexbert_5_macro"] = chexbert_f1(y_true, y_pred, "macro", five)
+        # Exact-match label-set accuracy: the same quantity chexbert_metrics.json
+        # reports as "accuracy". Included so all eight headline metrics get an
+        # interval rather than seven of them.
+        out["exact_match_accuracy"] = sum(
+            1 for t, p in zip(y_true, y_pred) if list(t) == list(p)
+        ) / len(y_true)
     return out
 
 
