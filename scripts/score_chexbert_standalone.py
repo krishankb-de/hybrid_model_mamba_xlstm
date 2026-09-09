@@ -80,6 +80,20 @@ def main():
         out_dir = Path(args.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        # PRIMARY OUTPUT FIRST. The per-sample label dump below is an add-on for
+        # Phase 14A-6's bootstrap, and it must never be able to take down the
+        # metrics file that every earlier phase depends on. It did exactly that
+        # on 2026-09-09 (job 2525606): the dump raised before this write, so a
+        # 15-minute scoring run produced NO output at all despite having already
+        # computed the correct numbers and printed them to the log.
+        results["hyp_file"] = args.hyp_file
+        results["ref_file"] = args.ref_file
+        results["timestamp"] = datetime.now().isoformat()
+        out_path = out_dir / "chexbert_metrics.json"
+        with open(out_path, "w") as f:
+            json.dump(results, f, indent=2)
+        print("\n  Results saved to " + str(out_path))
+
         # Phase 14A-6: per-sample label matrices, so CheXbert F1 can be given a
         # confidence interval. The aggregate report alone cannot be bootstrapped
         # -- micro/macro F1 are not decomposable per sample -- and the hybrid vs
@@ -88,25 +102,25 @@ def main():
         # labeler.get_label() is the same call F1CheXbert makes internally, and
         # target_names_5_index is its own definition of the 5-label subset, so
         # neither is reimplemented or guessed here.
-        labels_path = out_dir / "chexbert_labels.json"
-        with open(labels_path, "w") as f:
-            json.dump({
-                "y_true": [labeler.get_label(r) for r in refs],
-                "y_pred": [labeler.get_label(h) for h in hyps],
-                "label_names": list(labeler.target_names),
-                "five_label_indices": list(labeler.target_names_5_index),
-                "hyp_file": args.hyp_file,
-                "ref_file": args.ref_file,
-            }, f)
-        print("  Per-sample labels saved to " + str(labels_path))
-
-        results["hyp_file"] = args.hyp_file
-        results["ref_file"] = args.ref_file
-        results["timestamp"] = datetime.now().isoformat()
-        out_path = out_dir / "chexbert_metrics.json"
-        with open(out_path, "w") as f:
-            json.dump(results, f, indent=2)
-        print("\n  Results saved to " + str(out_path))
+        # get_label() returns numpy int64, which json cannot serialise -- hence
+        # the explicit int()/str() coercion (caught live, job 2525606).
+        try:
+            labels_path = out_dir / "chexbert_labels.json"
+            with open(labels_path, "w") as f:
+                json.dump({
+                    "y_true": [[int(v) for v in labeler.get_label(r)] for r in refs],
+                    "y_pred": [[int(v) for v in labeler.get_label(h)] for h in hyps],
+                    "label_names": [str(x) for x in labeler.target_names],
+                    "five_label_indices": [int(i) for i in labeler.target_names_5_index],
+                    "hyp_file": args.hyp_file,
+                    "ref_file": args.ref_file,
+                }, f)
+            print("  Per-sample labels saved to " + str(labels_path))
+        except Exception as exc:
+            print("  WARNING: per-sample label dump failed (%s: %s). The metrics "
+                  "above are unaffected and were already written; CheXbert F1 "
+                  "simply will not get a bootstrap CI."
+                  % (type(exc).__name__, exc))
 
     return results
 

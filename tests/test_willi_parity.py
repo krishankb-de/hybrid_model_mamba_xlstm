@@ -17,6 +17,7 @@ Or directly (must be inside the willi_parity conda env):
 """
 
 import ast
+import json
 import re
 import sys
 import os
@@ -4691,10 +4692,63 @@ def test_score_chexbert_dumps_per_sample_labels():
     """CheXbert F1 cannot be bootstrapped from the aggregate report alone."""
     src = (REPO_ROOT / "scripts" / "score_chexbert_standalone.py").read_text()
     assert "chexbert_labels.json" in src
-    assert "labeler.get_label(r) for r in refs" in src
-    assert "labeler.get_label(h) for h in hyps" in src
+    # Match the CALLS, not the comprehension text -- the int() coercion added
+    # 2026-09-09 rewrote the surrounding expression and broke a stricter match.
+    assert "labeler.get_label(r)" in src and "for r in refs" in src
+    assert "labeler.get_label(h)" in src and "for h in hyps" in src
     # The 5-label subset must come from the labeler, not a hardcoded list.
     assert "labeler.target_names_5_index" in src
+
+
+def test_chexbert_label_payload_is_json_serialisable_with_numpy_ints():
+    """f1chexbert's get_label() returns numpy int64, which json REFUSES.
+
+    Caught live on 2026-09-09 (job 2525606): a 15-minute scoring run computed the
+    correct metrics, printed them, then died with
+    "TypeError: Object of type int64 is not JSON serializable" -- and because the
+    label dump ran BEFORE the metrics write, the run produced no output at all.
+    This reproduces the exact failure with real numpy scalars and pins the fix.
+    """
+    import numpy as np
+
+    # Exactly what labeler.get_label() hands back: a list of numpy int64.
+    raw_labels = [np.int64(v) for v in (1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)]
+    raw_five_idx = [np.int64(i) for i in (0, 2, 5, 6, 8)]
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        json.dumps({"y_true": [raw_labels]})
+
+    coerced = {
+        "y_true": [[int(v) for v in raw_labels]],
+        "y_pred": [[int(v) for v in raw_labels]],
+        "five_label_indices": [int(i) for i in raw_five_idx],
+    }
+    round_tripped = json.loads(json.dumps(coerced))
+    assert round_tripped["y_true"] == [[1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]]
+    assert round_tripped["five_label_indices"] == [0, 2, 5, 6, 8]
+
+    src = (REPO_ROOT / "scripts" / "score_chexbert_standalone.py").read_text()
+    assert "[int(v) for v in labeler.get_label(r)]" in src
+    assert "[int(v) for v in labeler.get_label(h)]" in src
+    assert "[int(i) for i in labeler.target_names_5_index]" in src
+
+
+def test_chexbert_metrics_are_written_before_the_optional_label_dump():
+    """An add-on must not be able to destroy the output every phase depends on.
+
+    Job 2525606 lost a full scoring run because the label dump raised before
+    chexbert_metrics.json was written. Ordering plus a try/except is the fix; both
+    are asserted because either alone still leaves a way to lose the metrics.
+    """
+    src = (REPO_ROOT / "scripts" / "score_chexbert_standalone.py").read_text()
+    body = src.split("if args.output_dir:")[1]
+    metrics_pos = body.index("chexbert_metrics.json")
+    labels_pos = body.index("chexbert_labels.json")
+    assert metrics_pos < labels_pos, (
+        "chexbert_metrics.json must be written BEFORE the optional label dump"
+    )
+    assert "try:" in body[:labels_pos + 200], "the label dump must be guarded"
+    assert "WARNING: per-sample label dump failed" in body
 
 
 def test_bootstrap_compare_slurm_wrapper_is_cpu_only():
