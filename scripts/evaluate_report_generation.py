@@ -214,7 +214,66 @@ def build_decoder_config(model_cfg: Dict) -> HybridConfig:
     return HybridConfig(**{k: v for k, v in model_cfg.items() if k in fields})
 
 
-def load_report_generation_module(checkpoint_path, model_config_name: str = "hybrid_150m_v2_rrg", device: str = "cpu"):
+def resolve_prefix_k(checkpoint_path, yaml_prefix_k: int, override: Optional[int] = None) -> int:
+    """Determine the prefix_k a checkpoint was TRAINED with.
+
+    WHY THIS IS NOT OPTIONAL (Phase 14, 2026-09-10). `prefix_k` sets only the
+    output width of `F.adaptive_avg_pool1d`, which has NO PARAMETERS -- both
+    `token_proj` and `out_proj` are k-independent. So a k=8 checkpoint loads into
+    a k=32 module with `Missing keys: 0, Unexpected: 0` and then silently
+    generates from 32 prefix tokens instead of 8. It is a train/inference
+    mismatch that produces plausible-looking metrics, and NO key-count guard can
+    detect it, because the parameter set is genuinely identical.
+
+    `ReportGenerationLightningModule` does not call `save_hyperparameters()`, so
+    k is not in the checkpoint either. It IS in `run_metadata.json`, which
+    `write_run_metadata()` drops beside the run's output dir with the fully
+    resolved Hydra config -- that is what this reads.
+
+    Precedence: explicit override > run_metadata.json > the model YAML.
+    A conflict between an override and run_metadata is a hard error, not a
+    warning: one of the two is wrong and guessing which would silently corrupt
+    the evaluation.
+    """
+    import json as _json
+
+    detected = None
+    meta_path = Path(checkpoint_path).resolve().parent.parent / "run_metadata.json"
+    if meta_path.exists():
+        try:
+            with open(meta_path) as fh:
+                cfg = _json.load(fh).get("resolved_config", {})
+            detected = cfg.get("model", {}).get("prefix_k")
+        except Exception as exc:  # malformed metadata must not block an eval
+            print("  WARNING: could not read %s (%s)" % (meta_path, exc))
+
+    if override is not None:
+        if detected is not None and int(detected) != int(override):
+            raise RuntimeError(
+                "prefix_k conflict: --prefix-k=%d was passed but %s records the "
+                "checkpoint was TRAINED with prefix_k=%d. One of these is wrong; "
+                "resolve it rather than guessing -- an incorrect k silently "
+                "changes the number of image-prefix tokens at inference and "
+                "cannot be detected from the state dict."
+                % (override, meta_path, detected)
+            )
+        return int(override)
+
+    if detected is not None:
+        if int(detected) != int(yaml_prefix_k):
+            print("  prefix_k=%d detected from run_metadata.json (the model YAML "
+                  "says %d) -- using the trained value."
+                  % (int(detected), int(yaml_prefix_k)))
+        return int(detected)
+
+    print("  WARNING: no run_metadata.json beside the checkpoint; falling back to "
+          "prefix_k=%d from the model YAML. If this checkpoint was trained with a "
+          "different k, the evaluation is silently WRONG -- pass --prefix-k."
+          % int(yaml_prefix_k))
+    return int(yaml_prefix_k)
+
+
+def load_report_generation_module(checkpoint_path, model_config_name: str = "hybrid_150m_v2_rrg", device: str = "cpu", prefix_k: Optional[int] = None):
     """Load a trained ReportGenerationLightningModule from a Lightning .ckpt
     for inference. Mirrors evaluate_lm.py's checkpoint-loading convention
     (defensive _orig_mod. prefix strip, missing/unexpected key counts printed)."""
@@ -225,11 +284,15 @@ def load_report_generation_module(checkpoint_path, model_config_name: str = "hyb
     raw = OmegaConf.to_container(OmegaConf.load(model_cfg_path), resolve=True)
     decoder_config = build_decoder_config(raw)
 
+    resolved_k = resolve_prefix_k(
+        checkpoint_path, int(raw.get("prefix_k", 32)), override=prefix_k
+    )
     module = ReportGenerationLightningModule(
         decoder_config=decoder_config,
         image_patch_dim=int(raw.get("image_patch_dim", 768)),
-        prefix_k=int(raw.get("prefix_k", 32)),
+        prefix_k=resolved_k,
     )
+    print("  prefix_k = %d" % resolved_k)
     module.load_image_encoder()  # registers image_encoder as a submodule so its
                                   # keys (saved in the .ckpt — see 10E's note that
                                   # the frozen ViT is checkpointed too) actually load.
@@ -333,7 +396,10 @@ def run_checkpoint_inspection(args) -> None:
     from transformers import AutoTokenizer
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    module = load_report_generation_module(args.checkpoint, args.model_config, device=device)
+    module = load_report_generation_module(
+        args.checkpoint, args.model_config, device=device,
+        prefix_k=getattr(args, "prefix_k", None),
+    )
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
     # BiomedCLIP CLIP normalisation — matches cxr_mimic_arm0.yaml/cxr_mimic_full.yaml.
@@ -665,6 +731,12 @@ def main():
                         help="Path to a trained ReportGenerationLightningModule .ckpt — "
                              "generates from real images (--parquet) and prints "
                              "generated-vs-reference text instead of computing metrics")
+    parser.add_argument("--prefix-k", type=int, default=None,
+                        help="Number of image-prefix tokens the checkpoint was TRAINED "
+                             "with. Auto-detected from run_metadata.json when present; "
+                             "pass explicitly only when that file is missing. A wrong "
+                             "value cannot be detected from the state dict (k has no "
+                             "parameters) and silently invalidates the evaluation.")
     parser.add_argument("--model-config", type=str, default="hybrid_150m_v2_rrg",
                         help="Model config name under configs/model/ (for --checkpoint mode)")
     parser.add_argument("--parquet", type=str, default=None,

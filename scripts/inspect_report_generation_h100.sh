@@ -37,6 +37,13 @@ VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 # back to the arm0/... paths explicitly if an arm0-specific check is needed.
 CHECKPOINT="${CHECKPOINT:-./outputs/h100_report_gen_full/checkpoints/last.ckpt}"
 MODEL_CONFIG="${MODEL_CONFIG:-hybrid_150m_v2_rrg}"
+# Phase 14 (2026-09-10): prefix_k is normally AUTO-DETECTED from the
+# run_metadata.json beside the checkpoint. Set PREFIX_K only when that file is
+# missing. A wrong k cannot be caught from the state dict -- k sets the output
+# width of adaptive_avg_pool1d, which has no parameters, so a k=8 checkpoint
+# loads into a k=32 module reporting "Missing keys: 0" and then generates from
+# the wrong number of image-prefix tokens.
+PREFIX_K="${PREFIX_K:-}"
 # Default to VALIDATION images, not train -- generations on train images look
 # artificially good even under genuine overfitting; validation is the honest check.
 PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/validate.parquet}"
@@ -87,6 +94,7 @@ fi
 python scripts/evaluate_report_generation.py \
   --checkpoint "${CHECKPOINT}" \
   --model-config "${MODEL_CONFIG}" \
+  ${PREFIX_K:+--prefix-k "${PREFIX_K}"} \
   --parquet "${PARQUET}" \
   --num-samples "${NUM_SAMPLES}" \
   --decode "${DECODE}" \

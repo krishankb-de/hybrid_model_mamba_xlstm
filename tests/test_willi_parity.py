@@ -4824,3 +4824,56 @@ def test_bootstrap_compare_slurm_wrapper_is_cpu_only():
     assert not [l for l in src.splitlines() if l.startswith("#SBATCH") and "--gpus" in l]
     assert 'A="${A:?' in src and 'B="${B:?' in src
     assert "ERROR: required file not found" in src
+
+
+def test_resolve_prefix_k_detects_trained_value_and_rejects_conflicts():
+    """prefix_k is invisible to every key-count guard, so it needs its own.
+
+    k sets only the output width of F.adaptive_avg_pool1d, which has NO
+    parameters -- token_proj and out_proj are both k-independent. A k=8
+    checkpoint therefore loads into a k=32 module with "Missing keys: 0,
+    Unexpected: 0" and silently generates from 32 prefix tokens instead of 8.
+    ReportGenerationLightningModule does not save_hyperparameters(), so k is not
+    in the checkpoint; run_metadata.json is the only record.
+    """
+    import tempfile
+
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    try:
+        import evaluate_report_generation as erg
+    finally:
+        sys.path.pop(0)
+
+    with tempfile.TemporaryDirectory() as d:
+        run_dir = Path(d) / "run"
+        (run_dir / "checkpoints").mkdir(parents=True)
+        ckpt = run_dir / "checkpoints" / "last.ckpt"
+        ckpt.write_text("")
+        (run_dir / "run_metadata.json").write_text(
+            json.dumps({"resolved_config": {"model": {"prefix_k": 8}}})
+        )
+
+        # Detected value beats the YAML default.
+        assert erg.resolve_prefix_k(str(ckpt), yaml_prefix_k=32) == 8
+        # A matching override is fine.
+        assert erg.resolve_prefix_k(str(ckpt), 32, override=8) == 8
+        # A CONFLICTING override must hard-fail, not silently pick one.
+        with pytest.raises(RuntimeError, match="prefix_k conflict"):
+            erg.resolve_prefix_k(str(ckpt), 32, override=64)
+
+    # No metadata: fall back to the YAML, but say so loudly.
+    with tempfile.TemporaryDirectory() as d:
+        run_dir = Path(d) / "run"
+        (run_dir / "checkpoints").mkdir(parents=True)
+        ckpt = run_dir / "checkpoints" / "last.ckpt"
+        ckpt.write_text("")
+        assert erg.resolve_prefix_k(str(ckpt), yaml_prefix_k=32) == 32
+        assert erg.resolve_prefix_k(str(ckpt), 32, override=8) == 8
+
+
+def test_inspect_wrapper_exposes_prefix_k():
+    src = (REPO_ROOT / "scripts" / "inspect_report_generation_h100.sh").read_text()
+    assert 'PREFIX_K="${PREFIX_K:-}"' in src
+    assert '${PREFIX_K:+--prefix-k "${PREFIX_K}"}' in src, (
+        "must expand to nothing when unset so auto-detection stays the default path"
+    )
