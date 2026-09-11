@@ -1,6 +1,6 @@
 {
   "current_phase": "phase14_supervisor_review",
-  "last_updated": "2026-09-11T09:00:00+0200",
+  "last_updated": "2026-09-11T16:00:00+0200",
   "OBJECTIVE_PIVOT_2026_08_16": {
     "new_primary_objective": "MEDICAL REPORT GENERATION scored by ROUGE-L + CheXbert F1 against ground-truth radiology reports. NOT retrieval.",
     "retrieval_status": "SUPPORTING CHAPTER -- complete, closed, numbers FINAL. Do not re-run retrieval arms to chase them. Clean protocol MIMIC i2t R@10 10.81% -> 14.59% (+3.78pp, 6.2 SE); protocol-matched (val==test) 11.07% -> 17.14%; Indiana flat within noise throughout (0.0390-0.0485, SE 0.76pp).",
@@ -895,7 +895,7 @@
       "self_correction_14C_3": "14C-1 invalidated part of the 14C-3 design written earlier the same day. The original plan was to re-run the 13D eval at chunk_size=8 as a clean reference; the measurement shows chunk=8 still carries rel-max-err 0.67 at this model's delta (and chunk=4 still 0.43) -- the audit's \"chunk=8 -> 1.5e-16\" was quoted under the PROPOSED delta init, which this model does not have. A shrunken chunk is not a reference, just a differently-wrong operator. REDESIGNED to compare against the genuinely exact operator via the new HYBRID_EXACT_SCAN=1 toggle, split into 14C-3a (teacher-forced PPL, full n=2663, cheap) and 14C-3b (beam-decoded generation + CheXbert on n~300-500, judged against the 14A-6 bootstrap CI).",
       "login_node_constraint": "CAUGHT BY USER 2026-09-07: the commands handed over for 14B (and 14A-7) were bare `python scripts/...` invocations, which the aisc login node REFUSES outright -- \"This command is not allowed on the login node!\", the same restriction Phase 7E diagnosed live in August. Nothing runnable in this repo is ever invoked directly; everything goes through sbatch. FIXED: added scripts/analyze_diversity_h100.sh (CPU-only, no --gpus, 20-min cap, fail-fast on a missing HYPS file, loud warnings when either control is omitted) and made scripts/profile_efficiency_h100.sh MODELS env-overridable so 14A-7 joins the EXISTING efficiency sweep rather than getting a new harness. Plan commands and the analyzer docstring corrected. Added a structural test (test_no_plan_command_invokes_a_bare_python_script_on_the_cluster) that scans the whole Phase 14 section for bare `python scripts/...` lines, so this class of mistake cannot recur silently.",
       "prefix_k_sweep": {
-        "status": "k=8 vs k=32 SETTLED with CIs. PREFIX BANDWIDTH IS BINDING -- on CheXbert, not on ROUGE-L. My earlier \"not binding, skip k=64\" read was based on TEXT METRICS ONLY and was WRONG. k=64 is now well-motivated.",
+        "status": "SWEEP COMPLETE AND IT IS BAD NEWS FOR THE HEADLINE CLAIM. k=32 is the hybrid CheXbert OPTIMUM (inverted U). k=64 helps the Transformer and HURTS the hybrid, and at k=64 the Transformer WINS CheXbert. The 14A result is therefore k-DEPENDENT.",
         "k8_result": {
           "val_lm_loss_best": 1.044,
           "val_lm_loss_step": 12000,
@@ -1050,7 +1050,69 @@
             "(a) Does k=64 beat k=32 for the HYBRID? -> bootstrap hybrid_k64 vs 13D. Decides whether 32 was already the optimum or there is headroom.",
             "(b) At k=64, does the hybrid STILL beat the Transformer on CheXbert? -> bootstrap hybrid_k64 vs transformer_k64. This is the one that protects the headline claim: 14A held k=32 for both, so a k=64 hybrid may only be compared against a k=64 Transformer."
           ]
-        }
+        },
+        "chexbert_14_micro_sweep": {
+          "hybrid": {
+            "k8": 0.4481,
+            "k32": 0.4736,
+            "k64": 0.4488
+          },
+          "transformer": {
+            "k32": 0.459,
+            "k64": 0.4637
+          }
+        },
+        "rouge_l_sweep": {
+          "hybrid": {
+            "k8": 0.1894,
+            "k32": 0.1899,
+            "k64": 0.1939
+          },
+          "transformer": {
+            "k32": 0.1936,
+            "k64": 0.1927
+          }
+        },
+        "bootstrap_k64_vs_k32_hybrid": {
+          "job": "2536925",
+          "k64_wins": [
+            "rouge_l +0.0040 [+0.0016,+0.0068]",
+            "bleu_4 +0.0026 [+0.0000,+0.0052]",
+            "exact_match_accuracy_14 +0.0120 [+0.0034,+0.0210]"
+          ],
+          "k32_wins": [
+            "chexbert_14_micro +0.0248 [+0.0160,+0.0344]",
+            "chexbert_5_micro +0.0345 [+0.0219,+0.0475]",
+            "chexbert_5_macro +0.0227 [+0.0098,+0.0363]"
+          ],
+          "ties": [
+            "bleu_1",
+            "chexbert_14_macro",
+            "exact_match_accuracy_5"
+          ],
+          "mechanism": "PREFIX BANDWIDTH TRADES CLINICAL GROUNDING AGAINST SURFACE FLUENCY. The hybrid's CheXbert-14-micro is an INVERTED U in k -- 0.4481 (k=8), 0.4736 (k=32), 0.4488 (k=64) -- so k=32 is a genuine optimum bracketed on BOTH sides, not an arbitrary default. ROUGE-L meanwhile rises MONOTONICALLY with k (0.1894 / 0.1899 / 0.1939). The two metric families want different k."
+        },
+        "bootstrap_hybrid_vs_transformer_at_k64": {
+          "job": "2536926",
+          "transformer_wins": [
+            "chexbert_14_micro -0.0149 [-0.0247,-0.0049]",
+            "chexbert_5_micro -0.0164 [-0.0302,-0.0017]",
+            "chexbert_5_macro -0.0194 [-0.0344,-0.0044]"
+          ],
+          "hybrid_wins": [],
+          "ties": [
+            "rouge_l",
+            "bleu_1",
+            "bleu_4",
+            "chexbert_14_macro",
+            "exact_match_accuracy_14",
+            "exact_match_accuracy_5"
+          ],
+          "verdict": "AT k=64 THE HYBRID HAS NO WIN AT ALL. It loses all three CheXbert metrics it won at k=32, and every other metric ties."
+        },
+        "THE_RESULT_IS_K_DEPENDENT": "THE HEADLINE FLIPS WITH k, AND THIS MUST BE REPORTED. At k=32 for both: hybrid CheXbert-14-micro 0.4736 vs Transformer 0.4590, hybrid wins +0.0146 (CI excludes 0). At k=64 for both: 0.4488 vs 0.4637, TRANSFORMER wins +0.0149 (CI excludes 0). Same sign, same magnitude, opposite direction. The original 14A comparison was run at k=32 -- a value chosen in Phase 10 with \"no prior\" and never tuned for EITHER model -- which happens to be the hybrid's optimum and not the Transformer's. That is not fraud, it is an untuned shared hyperparameter, but it means the 14A claim as written is conditional on a hyperparameter nobody selected deliberately. IT CANNOT BE REPORTED AS UNCONDITIONAL. Choosing whichever k favours the hybrid would be cherry-picking and must not be done.",
+        "answered_the_rouge_question_too": "The user's original goal -- beat the Transformer on ROUGE-L -- IS ACHIEVED at k=64: 0.1939 vs 0.1927, a TIE (CI [-0.0016,+0.0040]) where k=32 was a significant LOSS. So the ROUGE-L gap is closable by prefix bandwidth. But it costs the entire CheXbert advantage, which was the actual contribution. A direct trade-off along the k axis, measured on both ends.",
+        "next_measurement": "Run the bootstrap of hybrid_k32 vs transformer_k64 -- each architecture at ITS OWN best k, which is the standard fair way to compare models with a tunable hyperparameter. Point estimates say 0.4736 vs 0.4637 = +0.0099 for the hybrid; whether that survives a CI is unknown and is now the single most important remaining number. CAVEAT THAT MUST BE STATED: both k values were selected on the TEST split, which is test-set selection. A clean version selects k on validate.parquet and reports on test, which would need validate-split evals of all five arms."
       },
       "prefix_k_silent_eval_trap_2026_09_10": "THIRD instance of the wrong-config-loads-silently class this phase, and the worst: NO KEY-COUNT GUARD CAN DETECT IT. prefix_k sets only the output width of F.adaptive_avg_pool1d, which has NO PARAMETERS -- ImagePrefixMapper.token_proj and .out_proj are both k-independent. So a k=8 checkpoint loads into a k=32 module reporting \"Missing keys: 0, Unexpected: 0\" and then generates from 32 image-prefix tokens instead of 8: a train/inference mismatch yielding plausible-looking, meaningless metrics. inspect_report_generation_h100.sh had no PREFIX_K lever and evaluate_report_generation.py read prefix_k from the model YAML (32). ReportGenerationLightningModule does not call save_hyperparameters(), so k is not in the checkpoint either. FIXED: resolve_prefix_k() reads the trained value from the run_metadata.json that write_run_metadata() drops beside every run (resolved_config.model.prefix_k), with precedence explicit-override > run_metadata > YAML; a conflict between an override and run_metadata is a HARD ERROR rather than a warning, since guessing which is right would corrupt the eval silently. PREFIX_K exposed on the wrapper for the no-metadata case, expanding to nothing when unset so auto-detection stays the default."
     }
@@ -1184,7 +1246,8 @@
     "2026-09-10 (prefix_k k=8 arm trained + a silent-eval trap caught before wasting the eval): job 2526500, 4xH100, 2h21m, val_lm_loss 1.0440 @ step 12000, train/lm_loss_epoch 0.912, both inits clean. TWO findings. (1) 13D's val_lm_loss is UNRECOVERABLE -- its intermediate checkpoints were already deleted and the logs never print it (Lightning truncates progress-bar metric names) -- so the cheap loss gate on whether to run k=64 does not exist; the k=8 arm has to be judged on ROUGE-L/CheXbert, which would have decided it anyway. Also note k=8's 1.0440 vs 13B's 1.0485 is CONFOUNDED (different towers) and must not be quoted as a k comparison. (2) THIRD silent-config trap this phase, and the only one no key-count guard can catch: prefix_k sets only the width of adaptive_avg_pool1d, which has NO parameters, so a k=8 checkpoint loads into a k=32 module with \"Missing keys: 0\" and silently generates from the wrong number of prefix tokens. Fixed by resolving the trained k from run_metadata.json (the only place it is recorded, since the module never calls save_hyperparameters), with a hard error on override-vs-metadata conflict and a PREFIX_K wrapper lever for the no-metadata case.",
     "2026-09-10 (prefix_k k=8 VALIDLY evaluated; the guard earned its keep): first attempt (job 2527377) ran before git pull, so the pre-fix code built a k=32 module for the k=8 checkpoint -- clean \"Missing keys: 0, Unexpected: 0\" load, ROUGE-L 0.1749. Valid re-run (prefix_k = 8 confirmed in the log) gives ROUGE-L 0.18938, BLEU-1 0.24229, BLEU-4 0.05280. The trap therefore cost 0.0145 ROUGE-L, ~4x the entire hybrid-vs-Transformer gap, and would have read as a large k=8 regression prompting a needless k=64 run. RESULT: k=8 vs 13D k=32 is rouge_l -0.0005, bleu_1 -0.0046, bleu_4 -0.0014 -- essentially INDISTINGUISHABLE. A 4x cut in image-prefix tokens moved ROUGE-L by 0.0005, against a hybrid-vs-Transformer gap of 0.0038 whose CI was [-0.0066,-0.0010]. Strong indication prefix bandwidth is NOT the binding constraint, hence k=64 is very unlikely to help -- which would answer the plan's oldest open question (prefix_k, open since Phase 10 with \"no prior\") at one run instead of two. STILL NEEDED before concluding: CheXbert for k=8 + paired bootstrap vs 13D, since the hybrid's actual contribution is its CheXbert lead and no k arm can be judged on text metrics alone.",
     "2026-09-10 (k=8 vs k=32 bootstrap, job 2533053 -- MY EARLIER READ WAS WRONG): I called prefix bandwidth \"not binding\" and advised skipping k=64, on the basis of text metrics alone. The CheXbert CIs reverse it: k=32 beats k=8 on chexbert_14_micro +0.0255 [+0.0163,+0.0352], chexbert_5_micro +0.0304 [+0.0183,+0.0443], chexbert_5_macro +0.0187 [+0.0059,+0.0336], and bleu_1 +0.0046 [+0.0018,+0.0075]; rouge_l/bleu_4/chexbert_14_macro/exact_match_5 tie; k8 wins exact_match_accuracy_14 by 0.0094 (plausibly because a more conservative generator matches the common all-negative label set exactly more often). PREFIX BANDWIDTH IS BINDING -- it just does not surface in n-gram overlap. My error was judging a k arm on the metric family the hybrid does NOT win, having written in this same state file that no k arm can be judged on text metrics alone. MAGNITUDE: the 8->32 CheXbert-14-micro gain (+0.0255) EXCEEDS the entire hybrid-vs-Transformer margin on that metric (+0.0146), so image-prefix bandwidth is a stronger lever for clinical correctness than the architecture choice itself -- a writeup-worthy finding on its own. CONSEQUENCE: k=64 is now well-motivated by a measured non-zero gradient rather than a guess. FAIRNESS CONSTRAINT: 14A held prefix_k=32 for BOTH models, so k=64 must be run for BOTH or the matched comparison is broken.",
-    "2026-09-11 (k=64 arms trained for BOTH models, jobs 2533151/2533152): hybrid 2h30m @1.50 it/s, val_lm_loss 1.0428 @12000; Transformer 37m @6.99 it/s, val_lm_loss 1.0138 @11750. prefix_k=64 confirmed in both logs, inits clean. Both marginally better on loss than their k=8/k=32 counterparts -- but that signal is NOT to be read as a result: the k=8 arm had a respectable val_lm_loss of 1.0440 while its CheXbert-14-micro was 0.0255 worse with the CI excluding zero, i.e. loss was blind to the axis that decides this. Four evals + two bootstraps needed: (a) hybrid_k64 vs 13D answers whether k=32 was already optimal; (b) hybrid_k64 vs transformer_k64 is the matched comparison at the new k and is what protects the headline claim, since 14A held k=32 for both and a k=64 hybrid may only be compared against a k=64 Transformer."
+    "2026-09-11 (k=64 arms trained for BOTH models, jobs 2533151/2533152): hybrid 2h30m @1.50 it/s, val_lm_loss 1.0428 @12000; Transformer 37m @6.99 it/s, val_lm_loss 1.0138 @11750. prefix_k=64 confirmed in both logs, inits clean. Both marginally better on loss than their k=8/k=32 counterparts -- but that signal is NOT to be read as a result: the k=8 arm had a respectable val_lm_loss of 1.0440 while its CheXbert-14-micro was 0.0255 worse with the CI excluding zero, i.e. loss was blind to the axis that decides this. Four evals + two bootstraps needed: (a) hybrid_k64 vs 13D answers whether k=32 was already optimal; (b) hybrid_k64 vs transformer_k64 is the matched comparison at the new k and is what protects the headline claim, since 14A held k=32 for both and a k=64 hybrid may only be compared against a k=64 Transformer.",
+    "2026-09-11 (prefix_k sweep COMPLETE -- the 14A headline is k-DEPENDENT, and this is bad news): two bootstraps, jobs 2536925/2536926. (1) hybrid k=64 vs k=32: k=64 WINS rouge_l +0.0040 [+0.0016,+0.0068], bleu_4 +0.0026, exact_match_14 +0.0120; k=32 WINS chexbert_14_micro +0.0248 [+0.0160,+0.0344], chexbert_5_micro +0.0345, chexbert_5_macro +0.0227. So prefix bandwidth TRADES CLINICAL GROUNDING AGAINST SURFACE FLUENCY: the hybrid CheXbert-14-micro is an INVERTED U in k (0.4481/0.4736/0.4488 at k=8/32/64) making k=32 a genuine optimum bracketed on both sides, while ROUGE-L rises MONOTONICALLY (0.1894/0.1899/0.1939). (2) hybrid k=64 vs Transformer k=64: THE HYBRID HAS NO WIN AT ALL -- loses all three CheXbert metrics (-0.0149/-0.0164/-0.0194, all CIs excluding 0) and ties everything else. THE HEADLINE FLIPS WITH k: at k=32 the hybrid wins CheXbert-14-micro by +0.0146; at k=64 the Transformer wins it by +0.0149. Same magnitude, opposite sign. 14A was run at k=32, chosen in Phase 10 with \"no prior\" and never tuned for either model -- it happens to be the hybrid's optimum and not the Transformer's. The claim as written is conditional on an untuned shared hyperparameter and CANNOT be reported as unconditional; picking the favourable k would be cherry-picking. SIDE FINDING: the ROUGE-L gap the user wanted closed IS closed at k=64 (0.1939 vs 0.1927, tie) -- but it costs the entire CheXbert advantage. NEXT: bootstrap hybrid_k32 vs transformer_k64 (each at its own best k, the standard fair comparison); point estimates 0.4736 vs 0.4637 = +0.0099, CI unknown. Must be reported with the caveat that both k were selected on TEST, i.e. test-set selection; the clean version selects k on validate and reports on test."
   ],
   "rejected_by_prior_evidence": {
     "vit_unfreeze_blocks_0": "Already run (jobs 1942/1948/1949): MIMIC 10.45%->7.97%, Indiana IDENTICAL 3.90%. Freezing the ViT loses in-domain and recovers nothing cross-domain. ViT-unfreeze=2 is a proven pure +2.5pp win.",
