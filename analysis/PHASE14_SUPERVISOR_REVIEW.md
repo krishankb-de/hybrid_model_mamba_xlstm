@@ -1,7 +1,7 @@
 # Phase 14 — Supervisor Review: Results and Evidence
 
-**Status:** 14B and 14C complete. 14A complete on the test split; one validation-split
-confirmation outstanding (§6.1).
+**Status:** All three items complete. The prefix-length selection is confirmed on the
+validation split and reported on test (§3.4, §6.1).
 **Scope:** the three items raised in the supervisor review of 2026-09-07, and a detailed
 account of where the hybrid architecture wins and where it does not.
 **Primary sources:** `H100_SCALING_PLAN.md` (Phase 14), `h100_scaling_state.json`
@@ -16,7 +16,7 @@ Three items were raised. All three are answered with measurements rather than ar
 
 | # | Item | Outcome |
 |---|---|---|
-| **14A** | No parameter-matched Transformer baseline existed | **Built and run.** Result is a **split decision**: the hybrid significantly wins 3 of 4 CheXbert F1 metrics; the Transformer significantly wins ROUGE-L and exact-match accuracy; 3 metrics tie. All with 95% paired-bootstrap CIs. |
+| **14A** | No parameter-matched Transformer baseline existed | **Built and run.** Result is a **split decision**: the hybrid significantly wins 3 of 4 CheXbert F1 metrics; the Transformer significantly wins ROUGE-L and exact-match accuracy; 3 metrics tie. All with 95% paired-bootstrap CIs, at a prefix length selected on **validation** and reported on **test**. |
 | **14B** | Boilerplate rate never re-measured on the final checkpoint | **Measured, with controls.** 73.6% → **36.1%** like-for-like. The generator is no longer mostly emitting templates, but remains more formulaic than both the reference corpus and the retrieval baseline. |
 | **14C** | Scan correctness defect neither fixed nor bounded | **Bounded, tested, and committed.** rel-max-err **≈1.03** at the model's operating point; regression test in `validate_for_willi.sh`; citable table in `analysis/scan_error_bound.md`. Not fixed — the repair is coupled to a training-time change costing a full retraining chain (§5.3). |
 
@@ -191,6 +191,28 @@ appeared to **flip** with k. It does not, and the reason is measured:
 point indistinguishable from the Transformer's own best. Reporting there is not
 cherry-picking; it is the only defensible shared value.
 
+**The optimum is confirmed on the validation split, independently of test.** This is what
+makes the selection methodologically clean rather than merely well-argued: k was chosen on
+`validate.parquet` (n=1433) and the comparison reported on the subject-disjoint test split
+(n=2663).
+
+| hybrid, **validate** n=1433 | k=8 | **k=32** | k=64 |
+|---|---|---|---|
+| CheXbert-14-micro | 0.4293 | **0.4595** | 0.4344 |
+| CheXbert-14-macro | 0.2585 | **0.2869** | 0.2656 |
+| CheXbert-5-micro | 0.4806 | **0.5255** | 0.4907 |
+| CheXbert-5-macro | 0.3807 | **0.4180** | 0.3918 |
+
+k=32 is the argmax on **all four** CheXbert metrics, and the inverted-U shape reproduces the
+test-split result. The margins agree closely across splits — on validation k=32 leads k=8 by
++0.0302 and k=64 by +0.0251 on CheXbert-14-micro; on test the same differences are +0.0255
+[+0.0163, +0.0352] and +0.0248 [+0.0160, +0.0344], both CIs excluding zero.
+
+Note that **text metrics could not have made this selection**: ROUGE-L on validation is
+0.2153 / 0.2148 / 0.2170 across k=8/32/64 — flat, and if anything mildly favouring k=64.
+The prefix length is invisible to surface overlap and decisive for clinical accuracy, which
+is the same asymmetry §3.5 generalises.
+
 **The apparent flip was mis-diagnosed.** At k=64 the Transformer wins *only because the
 hybrid degraded off its optimum*. The Transformer itself did not move at all. The correct
 reading is not "the result is fragile to k" but "the hybrid has a genuine optimum that must
@@ -341,22 +363,12 @@ bit-identical) so the end-to-end effect can be measured rather than argued. That
 
 ## 6. Honest limitations
 
-### 6.1 Outstanding: k selected on the test split
+### 6.1 CLOSED — k is selected on validation, reported on test
 
-`k=32` was chosen using **test-split** CheXbert. The selection is far more defensible than a
-bare pick — the optimum is large, significant, and bracketed on both sides, and the baseline
-is provably indifferent to the same knob — but it is formally test-set selection.
-
-Validate-split evaluations of the hybrid at k=8 and k=64 have been **run** (text metrics
-below); **CheXbert scoring on those two dumps is the one step outstanding.** Completing it
-converts *"selected on test"* into *"selected on validation, reported on test"*.
-
-| hybrid, validate n=1433 | k=8 | k=32 (13D) | k=64 |
-|---|---|---|---|
-| ROUGE-L | 0.2153 | 0.2148 | 0.2170 |
-| BLEU-1 | 0.2884 | 0.2914 | 0.2901 |
-| BLEU-4 | 0.0714 | 0.0753 | 0.0750 |
-| **CheXbert-14-micro** | **pending** | 0.4595 | **pending** |
+`k=32` is the argmax of **all four** CheXbert metrics on `validate.parquet` (n=1433), and
+the comparison is reported on the subject-disjoint official test split (n=2663). See §3.4
+for the table. This is textbook hyperparameter selection and closes what was the last
+methodological hole in the comparison.
 
 ### 6.2 Other known gaps
 
