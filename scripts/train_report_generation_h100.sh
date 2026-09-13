@@ -61,6 +61,23 @@ GRAD_CLIP="${GRAD_CLIP:-0.5}"
 # model per k, not a single model handling variable k at inference).
 PREFIX_K="${PREFIX_K:-32}"
 
+# Phase 15B-2 — training seed. configs/config.yaml pins `seed: 42` and NO
+# wrapper exposed it before this lever, so every report-generation run in this
+# project's history (13A-13F, 14A, every prefix_k arm) used seed 42 and the
+# generation table reports no seed variance at all -- which is supervisor
+# review item 3 of 2026-09-13. The default is 42 deliberately: it reproduces
+# every existing arm bit-for-bit, so adding this lever changes nothing until
+# it is set. `pl.seed_everything(cfg.seed, workers=True)` in
+# train_report_generation.py seeds decoder/prefix_mapper init, the
+# WeightedRandomSampler (when 13F's lever is on) and dataloader worker order.
+#
+# Run matched seeds across ARMS (same {42,43,44} for hybrid and Transformer),
+# not independent draws: it makes the 15B-4 comparison paired-by-seed, which
+# removes the "this seed was just a good seed" variance that an unpaired
+# comparison would leave in -- the same argument bootstrap_compare.py makes
+# for pairing over studies.
+SEED="${SEED:-42}"
+
 VIT_UNFREEZE="${VIT_UNFREEZE:-0}"   # 0 = frozen image tower (10C default until
                                      # a Phase-9 best contrastive checkpoint exists)
 VIT_LR="${VIT_LR:-1e-6}"
@@ -149,6 +166,12 @@ if [ -n "${IMAGE_ENCODER_CKPT}" ] && [ ! -f "${IMAGE_ENCODER_CKPT}" ]; then
 fi
 echo "Image encoder checkpoint: ${IMAGE_ENCODER_CKPT:-<stock BiomedCLIP, unchanged default>}"
 echo "Oversample rare findings: ${OVERSAMPLE_RARE} (weight=${OVERSAMPLE_WEIGHT})"
+# Phase 15B-2: emit the seed POSITIVELY. Phase 14's hardest-won lesson is that
+# a silent default cannot be detected by its absence -- the prefix_k trap cost
+# 0.0145 ROUGE-L and was caught only because a `prefix_k = 8` line was missing
+# from a log. Two seed arms whose logs do not state their seed are
+# indistinguishable from one arm run twice, which would silently destroy 15B.
+echo "Training seed: ${SEED}"
 
 EXTRA_ARGS=()
 if [ -n "${IMAGE_ENCODER_CKPT}" ]; then
@@ -161,6 +184,7 @@ python scripts/train_report_generation.py \
   model=${MODEL_CONFIG} \
   dataset=${DATASET_CONFIG} \
   trainer=${TRAINER_CFG} \
+  seed=${SEED} \
   trainer.max_steps=${MAX_STEPS} \
   trainer.accumulate_grad_batches=1 \
   trainer.val_check_interval=250 \

@@ -3688,6 +3688,8 @@ def test_train_report_generation_h100_slurm_wrapper_hydra_overrides_compose():
         "TRAINER_CFG": "h100_single_gpu",
         # Phase 13F
         "OVERSAMPLE_RARE": "false", "OVERSAMPLE_WEIGHT": "5.0",
+        # Phase 15B-2
+        "SEED": "42",
     }
 
     # Extract the python invocation block verbatim (between the `python
@@ -3734,6 +3736,48 @@ def test_train_report_generation_h100_slurm_wrapper_hydra_overrides_compose():
     # Phase 13F
     assert cfg.dataset.oversample_rare_findings is False
     assert cfg.dataset.oversample_weight == 5.0
+    # Phase 15B-2: the seed must reach Hydra as an int, and the wrapper's
+    # default must stay 42 so adding the lever reproduces every pre-15B arm
+    # bit-for-bit rather than silently re-seeding the whole project's history.
+    assert cfg.seed == 42
+    assert isinstance(cfg.seed, int)
+
+
+@pytest.mark.willi_parity
+def test_report_gen_wrapper_exposes_seed_lever_and_logs_it():
+    """Phase 15B-2. Supervisor review item 3 (2026-09-13) is that the
+    generation table has no seed variance. The cause is structural, not an
+    oversight in reporting: configs/config.yaml pins `seed: 42` and NO wrapper
+    ever exposed it, so 13A-13F, 14A and every prefix_k arm are literally the
+    same seed. A multi-seed campaign is impossible until the lever exists.
+
+    Asserts three things, each a separate failure this project has already
+    paid for once:
+      1. SEED is declared with a default of 42 -- NOT a fresh random default,
+         which would silently make new runs incomparable with every existing
+         checkpoint.
+      2. `seed=${SEED}` is actually in the python invocation. A declared-but-
+         unused env var is the 13F-era trap: the wrapper prints a value it is
+         not passing.
+      3. The resolved seed is ECHOED. The prefix_k trap (Phase 14, cost
+         0.0145 ROUGE-L) was caught only by noticing a missing log line; two
+         seed arms whose logs never state their seed are indistinguishable
+         from one arm run twice, which would void 15B entirely.
+    """
+    sh = (REPO_ROOT / "scripts" / "train_report_generation_h100.sh").read_text()
+
+    assert 'SEED="${SEED:-42}"' in sh, (
+        "SEED lever missing or its default drifted off 42 -- a non-42 default "
+        "silently breaks comparability with every pre-Phase-15 checkpoint"
+    )
+    assert "seed=${SEED}" in sh, (
+        "SEED is declared but never passed to train_report_generation.py -- "
+        "the wrapper would print a seed it does not actually use"
+    )
+    assert 'echo "Training seed: ${SEED}"' in sh, (
+        "the resolved seed must be echoed into the job log; without a positive "
+        "line, a wrong seed is undetectable (see the prefix_k trap)"
+    )
 
 
 # ---------------------------------------------------------------------------
