@@ -12,6 +12,18 @@ defaults:
 # Global settings
 seed: 42
 debug: false
+
+# Phase 15B-3 (2026-09-14) — how many "best" checkpoints ModelCheckpoint keeps
+# ALONGSIDE last.ckpt. This was hardcoded to 3, so every report-generation run
+# wrote 4 x 2.4 GB = 9.6 GB. NOTHING in this project has ever evaluated a
+# top-k checkpoint: every CHECKPOINT= in H100_SCALING_PLAN.md, every eval
+# command, and every headline number points at last.ckpt. The other three were
+# pure overhead, and they are what exhausted the 200 GiB home quota mid-campaign
+# and killed 3 of the 4 Phase-15B seed arms.
+#
+# Default stays 3 so no existing recipe changes behaviour. Set 0 for any arm
+# whose only consumer is last.ckpt -- i.e. all of them -- to cut 7.2 GB per run.
+save_top_k: 3
 project_name: "hybrid-xmamba"
 experiment_name: "default"
 

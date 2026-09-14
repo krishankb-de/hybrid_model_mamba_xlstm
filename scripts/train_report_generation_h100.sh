@@ -78,6 +78,15 @@ PREFIX_K="${PREFIX_K:-32}"
 # for pairing over studies.
 SEED="${SEED:-42}"
 
+# Phase 15B-3 — how many "best" checkpoints to keep BESIDES last.ckpt.
+# Hardcoded 3 until 2026-09-14, i.e. 4 x 2.4 GB = 9.6 GB per report-gen run.
+# Every CHECKPOINT= in this project points at last.ckpt and always has, so the
+# other three were never read by anything -- and they are what filled the
+# 200 GiB home quota and killed 3 of the 4 first Phase-15B seed arms
+# (job 2542399: "OSError: [Errno 122] Disk quota exceeded ... last.ckpt").
+# Default 3 preserves every existing recipe; use 0 for seed/ablation arms.
+SAVE_TOP_K="${SAVE_TOP_K:-3}"
+
 VIT_UNFREEZE="${VIT_UNFREEZE:-0}"   # 0 = frozen image tower (10C default until
                                      # a Phase-9 best contrastive checkpoint exists)
 VIT_LR="${VIT_LR:-1e-6}"
@@ -172,6 +181,7 @@ echo "Oversample rare findings: ${OVERSAMPLE_RARE} (weight=${OVERSAMPLE_WEIGHT})
 # from a log. Two seed arms whose logs do not state their seed are
 # indistinguishable from one arm run twice, which would silently destroy 15B.
 echo "Training seed: ${SEED}"
+echo "save_top_k: ${SAVE_TOP_K} (checkpoints kept BESIDES last.ckpt; each ~2.4 GB)"
 
 EXTRA_ARGS=()
 if [ -n "${IMAGE_ENCODER_CKPT}" ]; then
@@ -185,6 +195,7 @@ python scripts/train_report_generation.py \
   dataset=${DATASET_CONFIG} \
   trainer=${TRAINER_CFG} \
   seed=${SEED} \
+  save_top_k=${SAVE_TOP_K} \
   trainer.max_steps=${MAX_STEPS} \
   trainer.accumulate_grad_batches=1 \
   trainer.val_check_interval=250 \

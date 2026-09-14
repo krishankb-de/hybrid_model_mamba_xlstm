@@ -3688,8 +3688,8 @@ def test_train_report_generation_h100_slurm_wrapper_hydra_overrides_compose():
         "TRAINER_CFG": "h100_single_gpu",
         # Phase 13F
         "OVERSAMPLE_RARE": "false", "OVERSAMPLE_WEIGHT": "5.0",
-        # Phase 15B-2
-        "SEED": "42",
+        # Phase 15B-2 / 15B-3
+        "SEED": "42", "SAVE_TOP_K": "3",
     }
 
     # Extract the python invocation block verbatim (between the `python
@@ -3741,6 +3741,36 @@ def test_train_report_generation_h100_slurm_wrapper_hydra_overrides_compose():
     # bit-for-bit rather than silently re-seeding the whole project's history.
     assert cfg.seed == 42
     assert isinstance(cfg.seed, int)
+    # Phase 15B-3: save_top_k must reach Hydra as an int and default to 3, so
+    # pre-15B recipes keep writing exactly what they wrote before.
+    assert cfg.save_top_k == 3
+    assert isinstance(cfg.save_top_k, int)
+
+
+@pytest.mark.willi_parity
+def test_report_gen_wrapper_exposes_save_top_k_and_checkpoint_count_is_not_hardcoded():
+    """Phase 15B-3. Every report-generation run wrote save_top_k=3 PLUS
+    last.ckpt -- 4 x 2.4 GB = 9.6 GB per arm -- while every eval command in
+    this project loads last.ckpt and nothing else. The three extra files were
+    never read by anything, and they exhausted the 200 GiB home quota partway
+    through the first seed campaign, killing 3 of 4 arms with
+    "OSError: [Errno 122] Disk quota exceeded" on the last.ckpt write
+    (job 2542399).
+
+    Guards the lever and, more importantly, that the count is no longer a
+    literal in the training script -- a hardcoded 3 is what made this
+    un-tunable when it mattered.
+    """
+    sh = (REPO_ROOT / "scripts" / "train_report_generation_h100.sh").read_text()
+    py = (REPO_ROOT / "scripts" / "train_report_generation.py").read_text()
+
+    assert 'SAVE_TOP_K="${SAVE_TOP_K:-3}"' in sh, "SAVE_TOP_K lever missing or default drifted off 3"
+    assert "save_top_k=${SAVE_TOP_K}" in sh, "SAVE_TOP_K declared but not passed to Hydra"
+    assert "save_top_k=3" not in py, (
+        "save_top_k is hardcoded again in train_report_generation.py -- it must "
+        "read cfg.save_top_k so seed/ablation arms can drop to 0"
+    )
+    assert 'cfg.get("save_top_k"' in py, "train_report_generation.py must read save_top_k from cfg"
 
 
 @pytest.mark.willi_parity

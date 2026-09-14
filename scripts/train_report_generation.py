@@ -226,7 +226,11 @@ def main(cfg: DictConfig):
             dirpath=cfg.checkpoint_dir,
             monitor="val/lm_loss",
             mode="min",
-            save_top_k=3,
+            # Phase 15B-3: was hardcoded 3. See configs/config.yaml's save_top_k
+            # for why -- 4 x 2.4 GB per run exhausted the home quota and killed
+            # 3 of 4 seed arms, and no eval in this project has ever loaded
+            # anything but last.ckpt. save_top_k=0 keeps last.ckpt only.
+            save_top_k=int(cfg.get("save_top_k", 3)),
             save_last=True,
             # NOT {val/lm_loss:.4f} -- Lightning does not sanitize '/' inside a
             # filename interpolation, so that produced a literal nested
