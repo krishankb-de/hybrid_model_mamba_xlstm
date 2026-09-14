@@ -66,6 +66,35 @@ def _f1_from_counts(tp: float, fp: float, fn: float) -> float:
     return (2 * tp / denom) if denom > 0 else 0.0
 
 
+def chexbert_f1_per_label(y_true: Sequence[Sequence[int]], y_pred: Sequence[Sequence[int]],
+                          cols: Optional[Sequence[int]] = None) -> List[float]:
+    """Per-label F1, in the order of `cols` (all 14 by default).
+
+    Phase 15B-5. macro F1 is the mean of exactly this list, so computing it here
+    and averaging costs nothing extra -- chexbert_f1(..., "macro") delegates.
+
+    WHY THIS EXISTS: 15C targets rare findings specifically (Lung Lesion,
+    Pleural Other, Pneumothorax). Judging it on macro F1 alone cannot
+    distinguish "the rare labels moved" from "a common label drifted and
+    dragged the mean" -- and 13F failed in precisely that ambiguity, reporting
+    label-specific scatter across two doses that no interval could separate
+    from run-to-run noise. A per-label interval is the instrument that was
+    missing.
+    """
+    n_labels = len(y_true[0]) if y_true else 0
+    idx = list(cols) if cols is not None else list(range(n_labels))
+
+    scores = []
+    for j in idx:
+        tp = fp = fn = 0.0
+        for t_row, p_row in zip(y_true, y_pred):
+            tp += t_row[j] and p_row[j]
+            fp += (not t_row[j]) and p_row[j]
+            fn += t_row[j] and (not p_row[j])
+        scores.append(_f1_from_counts(tp, fp, fn))
+    return scores
+
+
 def chexbert_f1(y_true: Sequence[Sequence[int]], y_pred: Sequence[Sequence[int]],
                 average: str, cols: Optional[Sequence[int]] = None) -> float:
     """micro / macro F1 over a binary label matrix, matching sklearn's convention.
@@ -86,18 +115,14 @@ def chexbert_f1(y_true: Sequence[Sequence[int]], y_pred: Sequence[Sequence[int]]
                 fn += t_row[j] and (not p_row[j])
         return _f1_from_counts(tp, fp, fn)
 
-    scores = []
-    for j in idx:
-        tp = fp = fn = 0.0
-        for t_row, p_row in zip(y_true, y_pred):
-            tp += t_row[j] and p_row[j]
-            fp += (not t_row[j]) and p_row[j]
-            fn += t_row[j] and (not p_row[j])
-        scores.append(_f1_from_counts(tp, fp, fn))
+    scores = chexbert_f1_per_label(y_true, y_pred, idx)
     return sum(scores) / len(scores) if scores else 0.0
 
 
-def evaluate_subset(idx: Sequence[int], cache: Dict) -> Dict[str, float]:
+PER_LABEL_PREFIX = "label::"
+
+
+def evaluate_subset(idx: Sequence[int], cache: Dict, per_label: bool = False) -> Dict[str, float]:
     """All metrics for one system on one resample of study indices."""
     out = {"rouge_l": sum(cache["rouge"][i] for i in idx) / len(idx)}
 
@@ -111,7 +136,16 @@ def evaluate_subset(idx: Sequence[int], cache: Dict) -> Dict[str, float]:
         y_pred = [cache["y_pred"][i] for i in idx]
         five = cache.get("five_idx")
         out["chexbert_14_micro"] = chexbert_f1(y_true, y_pred, "micro")
-        out["chexbert_14_macro"] = chexbert_f1(y_true, y_pred, "macro")
+        if per_label:
+            # macro IS the mean of the per-label list, so compute once and reuse
+            # rather than walking the label matrix twice.
+            per = chexbert_f1_per_label(y_true, y_pred)
+            out["chexbert_14_macro"] = sum(per) / len(per) if per else 0.0
+            names = cache.get("label_names") or ["label_%d" % j for j in range(len(per))]
+            for name, score in zip(names, per):
+                out[PER_LABEL_PREFIX + name] = score
+        else:
+            out["chexbert_14_macro"] = chexbert_f1(y_true, y_pred, "macro")
         if five:
             out["chexbert_5_micro"] = chexbert_f1(y_true, y_pred, "micro", five)
             out["chexbert_5_macro"] = chexbert_f1(y_true, y_pred, "macro", five)
@@ -147,11 +181,15 @@ def build_cache(hyps, refs, labels_path: Optional[str]) -> Dict:
         cache["y_true"] = payload["y_true"]
         cache["y_pred"] = payload["y_pred"]
         cache["five_idx"] = payload.get("five_label_indices")
+        # Written by score_chexbert_standalone.py from labeler.target_names, so
+        # the per-label rows carry the labeler's own names rather than indices
+        # this script would have to guess an ordering for.
+        cache["label_names"] = payload.get("label_names")
     return cache
 
 
 def paired_bootstrap(cache_a: Dict, cache_b: Dict, n_samples: int, seed: int,
-                     alpha: float = 0.05) -> Tuple[Dict, Dict]:
+                     alpha: float = 0.05, per_label: bool = False) -> Tuple[Dict, Dict]:
     """Resample study indices ONCE per draw and score both systems on them.
 
     Pairing is the whole point: the same studies are hard for both systems, so
@@ -161,15 +199,15 @@ def paired_bootstrap(cache_a: Dict, cache_b: Dict, n_samples: int, seed: int,
     n = len(cache_a["rouge"])
     rng = random.Random(seed)
 
-    point_a = evaluate_subset(range(n), cache_a)
-    point_b = evaluate_subset(range(n), cache_b)
+    point_a = evaluate_subset(range(n), cache_a, per_label)
+    point_b = evaluate_subset(range(n), cache_b, per_label)
     metrics = [m for m in point_a if m in point_b]
 
     diffs: Dict[str, List[float]] = {m: [] for m in metrics}
     for _ in range(n_samples):
         idx = [rng.randrange(n) for _ in range(n)]
-        sub_a = evaluate_subset(idx, cache_a)
-        sub_b = evaluate_subset(idx, cache_b)
+        sub_a = evaluate_subset(idx, cache_a, per_label)
+        sub_b = evaluate_subset(idx, cache_b, per_label)
         for m in metrics:
             diffs[m].append(sub_a[m] - sub_b[m])
 
@@ -208,19 +246,42 @@ def render(results: Dict, meta: Dict, name_a: str, name_b: str) -> str:
     out.append("\nA positive difference favours **%s**. A result is called only when the "
                "95%% CI excludes zero.\n" % name_a)
 
+    def _verdict(r: Dict) -> str:
+        if r["significant"]:
+            return "**%s wins**" % (name_a if r["diff"] > 0 else name_b)
+        return "tie (CI spans 0)"
+
+    # Per-label rows go in their own section (Phase 15B-5): keeping them out of
+    # the headline table means every bootstrap report produced before per-label
+    # existed stays byte-comparable with one produced after.
+    main = {m: r for m, r in results.items() if not m.startswith(PER_LABEL_PREFIX)}
+    per_label = {m[len(PER_LABEL_PREFIX):]: r for m, r in results.items()
+                 if m.startswith(PER_LABEL_PREFIX)}
+
     out.append("\n| metric | %s | %s | diff | 95%% CI | verdict |\n" % (name_a, name_b))
     out.append("|---|---|---|---|---|---|\n")
-    for m, r in results.items():
-        if r["significant"]:
-            verdict = "**%s wins**" % (name_a if r["diff"] > 0 else name_b)
-        else:
-            verdict = "tie (CI spans 0)"
+    for m, r in main.items():
         out.append("| %s | %.4f | %.4f | %+.4f | [%+.4f, %+.4f] | %s |\n"
-                   % (m, r["a"], r["b"], r["diff"], r["ci_low"], r["ci_high"], verdict))
+                   % (m, r["a"], r["b"], r["diff"], r["ci_low"], r["ci_high"], _verdict(r)))
 
-    wins_a = [m for m, r in results.items() if r["significant"] and r["diff"] > 0]
-    wins_b = [m for m, r in results.items() if r["significant"] and r["diff"] < 0]
-    ties = [m for m, r in results.items() if not r["significant"]]
+    if per_label:
+        out.append("\n## Per-label CheXbert-14 F1\n")
+        out.append("\nmacro F1 is the unweighted mean of this column, so a macro move is only "
+                   "interpretable once you can see which labels produced it. Sorted by the "
+                   "size of the difference.\n")
+        out.append("\n| label | %s | %s | diff | 95%% CI | verdict |\n" % (name_a, name_b))
+        out.append("|---|---|---|---|---|---|\n")
+        for m, r in sorted(per_label.items(), key=lambda kv: -abs(kv[1]["diff"])):
+            out.append("| %s | %.4f | %.4f | %+.4f | [%+.4f, %+.4f] | %s |\n"
+                       % (m, r["a"], r["b"], r["diff"], r["ci_low"], r["ci_high"], _verdict(r)))
+        moved = [m for m, r in per_label.items() if r["significant"]]
+        out.append("\n**Labels that moved (CI excludes 0): %s**\n"
+                   % (", ".join(sorted(moved)) or "none — every per-label difference "
+                      "is within noise"))
+
+    wins_a = [m for m, r in main.items() if r["significant"] and r["diff"] > 0]
+    wins_b = [m for m, r in main.items() if r["significant"] and r["diff"] < 0]
+    ties = [m for m, r in main.items() if not r["significant"]]
     out.append("\n## Summary\n")
     out.append("\n- **%s wins (CI excludes 0):** %s\n" % (name_a, ", ".join(wins_a) or "none"))
     out.append("- **%s wins (CI excludes 0):** %s\n" % (name_b, ", ".join(wins_b) or "none"))
@@ -242,6 +303,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--bootstrap-samples", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--output", default=None)
+    ap.add_argument("--per-label", action="store_true",
+                    help="Phase 15B-5: add a per-label CheXbert-14 F1 section with CIs. "
+                         "Needed to judge whether a rare-finding intervention moved the "
+                         "labels it targeted, or merely moved the macro mean.")
     args = ap.parse_args(argv)
 
     hyps_a, hyps_b, refs = (read_lines(args.hyps_a), read_lines(args.hyps_b),
@@ -254,7 +319,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     cache_a = build_cache(hyps_a, refs, args.labels_a)
     cache_b = build_cache(hyps_b, refs, args.labels_b)
-    results, meta = paired_bootstrap(cache_a, cache_b, args.bootstrap_samples, args.seed)
+    if args.per_label and cache_a.get("y_true") is None:
+        raise SystemExit(
+            "--per-label needs CheXbert label matrices: pass --labels-a/--labels-b "
+            "(chexbert_labels.json, written by score_chexbert_standalone.py).")
+    results, meta = paired_bootstrap(cache_a, cache_b, args.bootstrap_samples, args.seed,
+                                     per_label=args.per_label)
 
     report = render(results, meta, args.name_a, args.name_b)
     print(report)

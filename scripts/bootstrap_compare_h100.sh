@@ -70,6 +70,15 @@ EXTRA_ARGS=()
 if [ -f "${A}/chexbert_labels.json" ] && [ -f "${B}/chexbert_labels.json" ]; then
   EXTRA_ARGS+=(--labels-a "${A}/chexbert_labels.json" --labels-b "${B}/chexbert_labels.json")
   echo "CheXbert label matrices found -- CheXbert F1 will get confidence intervals too."
+  # Phase 15B-5. PER_LABEL=true adds a per-label CheXbert-14 section with CIs.
+  # Only meaningful with the label matrices, so it is gated inside this branch
+  # rather than added unconditionally -- passing --per-label without them is a
+  # hard error in the script, and a wrapper should not be able to construct a
+  # call that cannot run.
+  if [ "${PER_LABEL:-false}" = "true" ]; then
+    EXTRA_ARGS+=(--per-label)
+    echo "Per-label CheXbert-14 F1 intervals: ENABLED"
+  fi
 else
   echo "WARNING: chexbert_labels.json missing in ${A} and/or ${B}."
   echo "         Only ROUGE-L/BLEU will get intervals. To include CheXbert F1, re-run"

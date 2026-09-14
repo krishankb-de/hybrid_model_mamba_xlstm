@@ -4720,6 +4720,71 @@ def test_bootstrap_chexbert_f1_matches_sklearn():
                    - f1_score(sub_true, sub_pred, average=average, zero_division=0)) < 1e-9
 
 
+def test_bootstrap_per_label_f1_matches_sklearn_and_averages_to_macro():
+    """Phase 15B-5. Two invariants, both load-bearing for judging 15C.
+
+    1. Per-label F1 must match sklearn's `average=None` exactly, same pin as
+       the micro/macro reimplementation above.
+    2. The mean of the per-label list must equal macro F1 to floating point.
+       macro is now COMPUTED from this list in the per_label path, so if the
+       two ever disagreed the headline macro row and the per-label section of
+       the same report would contradict each other -- the kind of internal
+       inconsistency a reviewer spots immediately.
+    """
+    import random as _random
+
+    from sklearn.metrics import f1_score
+
+    bc = _load_bootstrap_module()
+    rng = _random.Random(7)
+    n, k = 80, 14
+    y_true = [[rng.randint(0, 1) for _ in range(k)] for _ in range(n)]
+    y_pred = [[rng.randint(0, 1) for _ in range(k)] for _ in range(n)]
+
+    mine = bc.chexbert_f1_per_label(y_true, y_pred)
+    theirs = f1_score(y_true, y_pred, average=None, zero_division=0)
+    assert len(mine) == k
+    for j, (a, b) in enumerate(zip(mine, theirs)):
+        assert abs(a - b) < 1e-9, "label %d: %.10f vs sklearn %.10f" % (j, a, b)
+
+    assert abs(sum(mine) / len(mine) - bc.chexbert_f1(y_true, y_pred, "macro")) < 1e-12
+
+
+def test_bootstrap_per_label_rows_are_namespaced_and_keep_the_main_table_intact():
+    """Phase 15B-5. Per-label rows must not leak into the headline table.
+
+    Every bootstrap report this project has already published (the k=32
+    head-to-head, the k-sweeps, 15B-1 vs the retrieval floor) has a nine-row
+    main table. If --per-label added 14 more rows to it, a new report would no
+    longer be comparable at a glance with the ones in
+    analysis/PHASE14_SUPERVISOR_REVIEW.md. The prefix keeps them separable and
+    the renderer splits on it.
+    """
+    bc = _load_bootstrap_module()
+    n, k = 40, 14
+    y_true = [[(i + j) % 2 for j in range(k)] for i in range(n)]
+    y_pred = [[(i + j) % 2 for j in range(k)] for i in range(n)]
+    names = ["Finding%d" % j for j in range(k)]
+    cache = {
+        "rouge": [0.5] * n,
+        "hyp_toks": [["a", "b"]] * n,
+        "ref_toks": [["a", "b"]] * n,
+        "y_true": y_true, "y_pred": y_pred,
+        "five_idx": [0, 1, 2, 3, 4], "label_names": names,
+    }
+
+    plain = bc.evaluate_subset(range(n), cache, per_label=False)
+    rich = bc.evaluate_subset(range(n), cache, per_label=True)
+
+    assert not any(m.startswith(bc.PER_LABEL_PREFIX) for m in plain)
+    assert sum(m.startswith(bc.PER_LABEL_PREFIX) for m in rich) == k
+    # The non-per-label metrics must be bit-identical between the two paths --
+    # turning the flag on may ADD rows, never change an existing number.
+    for m, v in plain.items():
+        assert rich[m] == v, "metric %s changed when --per-label was enabled" % m
+    assert bc.PER_LABEL_PREFIX + "Finding3" in rich
+
+
 def test_bootstrap_is_paired_and_detects_a_real_difference():
     """A system that is strictly better must come out significant; a clone must tie.
 
