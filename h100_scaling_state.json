@@ -1,6 +1,6 @@
 {
   "current_phase": "phase15_thesis_strength",
-  "last_updated": "2026-09-14T19:00:00+0200",
+  "last_updated": "2026-09-15T21:00:00+0200",
   "OBJECTIVE_PIVOT_2026_08_16": {
     "new_primary_objective": "MEDICAL REPORT GENERATION scored by ROUGE-L + CheXbert F1 against ground-truth radiology reports. NOT retrieval.",
     "retrieval_status": "SUPPORTING CHAPTER -- complete, closed, numbers FINAL. Do not re-run retrieval arms to chase them. Clean protocol MIMIC i2t R@10 10.81% -> 14.59% (+3.78pp, 6.2 SE); protocol-matched (val==test) 11.07% -> 17.14%; Indiana flat within noise throughout (0.0390-0.0485, SE 0.76pp).",
@@ -1145,7 +1145,7 @@
         },
         "THIS_RESOLVES_THE_K_DEPENDENCE": "The earlier worry -- \"the headline flips with k\" -- is now properly explained, and it is NOT symmetric fragility. At k=64 the Transformer wins ONLY because the HYBRID DEGRADED off its optimum (k=32 -> k=64 costs the hybrid -0.0248 CheXbert-14-micro, CI excluding zero). The Transformer itself did not move AT ALL (all nine ties). So the flip is entirely attributable to mis-configuring the hybrid, not to the Transformer benefiting. \"The result is fragile to k\" was the wrong reading; the right one is \"the hybrid has a genuine optimum that must be used, and the Transformer does not care.\"",
         "k32_is_now_a_PRINCIPLED_shared_choice": "k=32 is the one value at which NEITHER model is disadvantaged, and this is measured rather than asserted: (a) the hybrid has a SIGNIFICANT preference for k=32 over BOTH k=8 (+0.0255 [+0.0163,+0.0352]) and k=64 (+0.0248 [+0.0160,+0.0344]) -- an optimum bracketed on both sides; (b) the Transformer is statistically INDIFFERENT between k=32 and k=64 on all nine metrics. Therefore reporting the comparison at k=32 is not cherry-picking: it is the hybrid's measured optimum AND a point indistinguishable from the Transformer's own best. The best-vs-best comparison (hybrid@32 vs Transformer@64) was, if anything, UNFAIR TO THE HYBRID -- it handed the Transformer the benefit of a random upward fluctuation that a CI says is not real.",
-        "headline_restored": "AT k=32, matched for both: hybrid WINS CheXbert-14-micro +0.0146 [+0.0052,+0.0240], CheXbert-5-micro +0.0273 [+0.0147,+0.0410], CheXbert-5-macro +0.0187 [+0.0033,+0.0308]. Transformer WINS rouge_l -0.0038 [-0.0066,-0.0010] and exact_match_accuracy_14 -0.0120 [-0.0210,-0.0034]. Ties: bleu_1, bleu_4, chexbert_14_macro. This is the original 14A split decision, now with the k-sensitivity confound RESOLVED rather than left hanging.",
+        "headline_restored": "AT k=32, matched for both: hybrid WINS CheXbert-14-micro +0.0146 [+0.0052,+0.0240], CheXbert-5-micro +0.0273 [+0.0147,+0.0410], CheXbert-5-macro +0.0168 [+0.0033,+0.0308]. Transformer WINS rouge_l -0.0038 [-0.0066,-0.0010] and exact_match_accuracy_14 -0.0120 [-0.0210,-0.0034]. Ties: bleu_1, bleu_4, chexbert_14_macro. This is the original 14A split decision, now with the k-sensitivity confound RESOLVED rather than left hanging.",
         "remaining_rigor_gap": "k=32 was still selected using TEST-split CheXbert. The selection is far more defensible than before -- the optimum is large, significant, and bracketed on both sides -- but it is formally test-set selection. CLEAN FIX, ~3 h in parallel: evaluate the hybrid k=8 and k=64 on validate.parquet (the k=32 validate dump already exists at results/report_gen_tower13d_n1433), confirm the optimum reproduces there, then report test. That converts \"selected on test\" into \"selected on validation, reported on test\"."
       },
       "prefix_k_silent_eval_trap_2026_09_10": "THIRD instance of the wrong-config-loads-silently class this phase, and the worst: NO KEY-COUNT GUARD CAN DETECT IT. prefix_k sets only the output width of F.adaptive_avg_pool1d, which has NO PARAMETERS -- ImagePrefixMapper.token_proj and .out_proj are both k-independent. So a k=8 checkpoint loads into a k=32 module reporting \"Missing keys: 0, Unexpected: 0\" and then generates from 32 image-prefix tokens instead of 8: a train/inference mismatch yielding plausible-looking, meaningless metrics. inspect_report_generation_h100.sh had no PREFIX_K lever and evaluate_report_generation.py read prefix_k from the model YAML (32). ReportGenerationLightningModule does not call save_hyperparameters(), so k is not in the checkpoint either. FIXED: resolve_prefix_k() reads the trained value from the run_metadata.json that write_run_metadata() drops beside every run (resolved_config.model.prefix_k), with precedence explicit-override > run_metadata > YAML; a conflict between an override and run_metadata is a HARD ERROR rather than a warning, since guessing which is right would corrupt the eval silently. PREFIX_K exposed on the wrapper for the no-metadata case, expanding to nothing when unset so auto-detection stays the default.",
@@ -1232,7 +1232,7 @@
       },
       "blocks": {
         "15A_published_baselines": "DRAFTED 2026-09-13, analysis/PUBLISHED_BASELINES.md (ccf59ad). Supervisor right on macro (0.2800 below all modern systems but DCL 0.284), but the 0.386-0.417 band is 7B-84B params or retrieval-augmented; nearest param-comparable PromptMRG ~0.2B macro 0.381. OPEN: own example-F1 (samples avg, zero compute), Janus-CXR (DO NOT CITE), RA-RRG BLEU/ROUGE-L.",
-        "15B_statistical_rigor": "IN PROGRESS. 15B-1 DONE (job 2542384: 13D wins 7 vs floor, floor wins chexbert_14_macro -0.0214 [-0.0340,-0.0081]). 15B-2 DONE (be3e8b8). 15B-5 DONE (6556410). 15B-3 training DONE for all four new arms 2026-09-14 (2542397 hybrid s43, 2542912 hybrid s44, 2542913 transformer s43, 2542914 transformer s44), generation + CheXbert PENDING. 15B-4 pending those.",
+        "15B_statistical_rigor": "IN PROGRESS. 15B-1 DONE (job 2542384; its 14-micro margin over the floor is seed-42-dependent: seeds 43/44 hybrid +0.0084/+0.0028). 15B-2 DONE (be3e8b8). 15B-3 DONE 2026-09-15 (generation 2544442-2544445, prefix_k=32 and Missing keys 0 in all four; scoring 2545312-2545315; recipe parity with seed 42 verified from logs + git). 15B-4 PARTIAL: CheXbert half computed -- Phase 14's CheXbert wins do NOT replicate across seeds (see seed_band_15B4). Pending: per-seed bootstraps (ROUGE-L/BLEU/EM-14 + CIs), seed-42 example-F1, 13D re-decode cmp. 15B-5 DONE (6556410).",
         "15C_aux_multilabel_loss": "NOT_STARTED, gated on 15B-3/15B-5. Mechanism A chosen: head on mean-pooled prefix_embeds. B rejected on principle (under teacher forcing the pooled report representation already contains the report, so the aux task is solvable from text alone -- no grounding pressure). C rejected (brittle span detector, reproduces 13F shape). aux_lambda defaults 0.0 = zero behaviour change on ship. pos_weight capped at 10 (uncapped Pleural Other ~100x; 13F showed 5x already damaged common labels). lambda probed {0.1,0.5} at seed 42, SELECTED ON VALIDATION, reported on test.",
         "15D_retrieval_framing": "NOT_STARTED. Edits only. Expected small -- h100_scaling_results.md section 2 is already titled \"Retrieval (Supporting Chapter)\". State once, explicitly, that the chapter trails the best specialised retrieval architecture."
       },
@@ -1241,15 +1241,210 @@
       "seed_arms": {
         "hybrid": {
           "42": "outputs/h100_report_gen_full_ext_4gpu_tower13d/checkpoints/last.ckpt -> results/report_gen_tower13d_test_split (scored)",
-          "43": "outputs/h100_report_gen_tower13d_seed43/checkpoints/last.ckpt (job 2542397) -> results/report_gen_hybrid_seed43_test_split (PENDING)",
-          "44": "outputs/h100_report_gen_tower13d_seed44/checkpoints/last.ckpt (job 2542912) -> results/report_gen_hybrid_seed44_test_split (PENDING)"
+          "43": "outputs/h100_report_gen_tower13d_seed43/checkpoints/last.ckpt (job 2542397) -> results/report_gen_hybrid_seed43_test_split (gen 2544442, scored 2545312)",
+          "44": "outputs/h100_report_gen_tower13d_seed44/checkpoints/last.ckpt (job 2542912) -> results/report_gen_hybrid_seed44_test_split (gen 2544443, scored 2545313)"
         },
         "transformer": {
           "42": "outputs/h100_report_gen_transformer_tower13d/checkpoints/last.ckpt -> results/report_gen_transformer_test_split (scored)",
-          "43": "outputs/h100_report_gen_transformer_seed43/checkpoints/last.ckpt (job 2542913) -> results/report_gen_transformer_seed43_test_split (PENDING)",
-          "44": "outputs/h100_report_gen_transformer_seed44/checkpoints/last.ckpt (job 2542914) -> results/report_gen_transformer_seed44_test_split (PENDING)"
+          "43": "outputs/h100_report_gen_transformer_seed43/checkpoints/last.ckpt (job 2542913) -> results/report_gen_transformer_seed43_test_split (gen 2544444, scored 2545314)",
+          "44": "outputs/h100_report_gen_transformer_seed44/checkpoints/last.ckpt (job 2542914) -> results/report_gen_transformer_seed44_test_split (gen 2544445, scored 2545315)"
         },
-        "checkpoint_convention": "ALL six arms are evaluated from last.ckpt (step 12000), never best-by-val-loss. Seeds 43/44 ran SAVE_TOP_K=0 so only last.ckpt exists; seed 42 was always evaluated from last.ckpt too. Consistent by construction; measured gap immaterial (seed 43 last 1.0462 vs best 1.0460)."
+        "checkpoint_convention": "ALL six arms are evaluated from last.ckpt (step 12000), never best-by-val-loss. Seeds 43/44 ran SAVE_TOP_K=0 so only last.ckpt exists; seed 42 was always evaluated from last.ckpt too. Consistent by construction; measured gap immaterial (seed 43 last 1.0462 vs best 1.0460).",
+        "recipe_parity_verified_2026_09_15": "13D training log 2502981 vs seed-43 log 2542397: first 60 lines differ only in date/node/GPU temps/seed lines; both reach max_steps=12000. Training-path commits since 13D (33ca7f8, fc2471e, be3e8b8, da27523) are behaviour-neutral for these arms. Seed 42 stays in the pool."
+      },
+      "seed_band_15B4": {
+        "status": "PARTIAL 2026-09-15 -- CheXbert F1 + exact-match-5 only; text metrics pending per-seed bootstraps",
+        "accuracy_key_is_exact_match_5": true,
+        "per_seed": {
+          "hybrid": {
+            "chexbert_14_micro": [
+              0.4736,
+              0.43798,
+              0.43243
+            ],
+            "chexbert_14_macro": [
+              0.28,
+              0.25724,
+              0.26091
+            ],
+            "chexbert_5_micro": [
+              0.5522,
+              0.48095,
+              0.49279
+            ],
+            "chexbert_5_macro": [
+              0.4487,
+              0.39453,
+              0.4146
+            ],
+            "exact_match_5": [
+              0.2163,
+              0.21442,
+              0.21817
+            ],
+            "example_f1_samples_avg": [
+              null,
+              0.37261,
+              0.36149
+            ]
+          },
+          "transformer": {
+            "chexbert_14_micro": [
+              0.459,
+              0.44549,
+              0.42847
+            ],
+            "chexbert_14_macro": [
+              0.2774,
+              0.27299,
+              0.25723
+            ],
+            "chexbert_5_micro": [
+              0.5249,
+              0.50494,
+              0.47969
+            ],
+            "chexbert_5_macro": [
+              0.4319,
+              0.41979,
+              0.39925
+            ],
+            "exact_match_5": [
+              0.2306,
+              0.22343,
+              0.2193
+            ],
+            "example_f1_samples_avg": [
+              null,
+              0.3835,
+              0.36642
+            ]
+          },
+          "seed_order": [
+            42,
+            43,
+            44
+          ]
+        },
+        "mean_sd": {
+          "hybrid": {
+            "chexbert_14_micro": [
+              0.448,
+              0.0223
+            ],
+            "chexbert_14_macro": [
+              0.266,
+              0.0122
+            ],
+            "chexbert_5_micro": [
+              0.5087,
+              0.0382
+            ],
+            "chexbert_5_macro": [
+              0.4193,
+              0.0274
+            ],
+            "exact_match_5": [
+              0.2163,
+              0.0019
+            ]
+          },
+          "transformer": {
+            "chexbert_14_micro": [
+              0.4443,
+              0.0153
+            ],
+            "chexbert_14_macro": [
+              0.2692,
+              0.0106
+            ],
+            "chexbert_5_micro": [
+              0.5032,
+              0.0227
+            ],
+            "chexbert_5_macro": [
+              0.417,
+              0.0165
+            ],
+            "exact_match_5": [
+              0.2244,
+              0.0057
+            ]
+          },
+          "paired_diff_hybrid_minus_transformer": {
+            "chexbert_14_micro": {
+              "per_seed": [
+                0.0146,
+                -0.0075,
+                0.004
+              ],
+              "mean_sd": [
+                0.0037,
+                0.0111
+              ]
+            },
+            "chexbert_14_macro": {
+              "per_seed": [
+                0.0026,
+                -0.0158,
+                0.0037
+              ],
+              "mean_sd": [
+                -0.0032,
+                0.0109
+              ]
+            },
+            "chexbert_5_micro": {
+              "per_seed": [
+                0.0273,
+                -0.024,
+                0.0131
+              ],
+              "mean_sd": [
+                0.0055,
+                0.0265
+              ]
+            },
+            "chexbert_5_macro": {
+              "per_seed": [
+                0.0168,
+                -0.0253,
+                0.0154
+              ],
+              "mean_sd": [
+                0.0023,
+                0.0239
+              ]
+            },
+            "exact_match_5": {
+              "per_seed": [
+                -0.0143,
+                -0.009,
+                -0.0011
+              ],
+              "mean_sd": [
+                -0.0081,
+                0.0066
+              ]
+            }
+          }
+        },
+        "zero_f1_labels": {
+          "hybrid_43": [
+            "Pleural Other"
+          ],
+          "hybrid_44": [
+            "Lung Lesion",
+            "Pleural Other"
+          ],
+          "transformer_43": [],
+          "transformer_44": [
+            "Pneumothorax",
+            "Pleural Other"
+          ]
+        },
+        "verdict": "Phase 14's 'hybrid significantly wins 3 CheXbert F1 metrics' is a seed-42 result: every CheXbert F1 paired difference changes sign across seeds, Transformer leads all of them at seed 43. Across 3 seeds the architectures are indistinguishable on CheXbert F1; only exact-match-5 is same-sign (Transformer 3/3). Seed 42 is the high draw for both (13D selected as best 13-series arm; same-seed k=8/k=64 hybrids 0.4481/0.4488 sit with seeds 43/44, so Phase 14's k=32-optimum claim is likely the same draw).",
+        "15C_rule_reanchor_PROPOSED_not_adopted": "(a) aux 3-seed mean 14-macro > 0.2660 + 0.0122 = 0.2782, gain positive at >=2/3 seeds paired; (b) no-regression-below-floor judged on 3-seed mean 14-micro, not per seed (hybrid s44 is only +0.0028 above the floor)."
       }
     }
   },
@@ -1393,7 +1588,9 @@
     "2026-09-13 (15B-1 DONE, jobs 2542358/2542384): CIs on generator vs retrieval floor -- the literal \"Table 3 has no CIs\" complaint. 13D wins 7 with CI excluding zero (rouge_l +0.0263, bleu_4 +0.0212, chexbert_14_micro +0.0440, chexbert_5_micro +0.0665, chexbert_5_macro +0.0203, bleu_1, exact_match_5); floor wins chexbert_14_macro -0.0214 [-0.0340,-0.0081]; exact_match_14 ties. The macro deficit is now interval-backed, confirming supervisor item 2 with a measurement.",
     "2026-09-14 (15B-3 QUOTA INCIDENT, then recovered): first seed campaign lost 3 of 4 arms -- home at 195.7/200 GiB. 2542399 died Errno 122 Disk quota exceeded on last.ckpt (the preceding \"Invalid cross-device link\" is a red herring: shutil.move falls back to copy, and the copy hit quota); 2542398/2542400 FAILED exit 9/1 at ~42 min. Root cause: save_top_k=3 + last = 9.6 GB/arm while nothing in the project has ever loaded a top-k checkpoint. SAVE_TOP_K lever shipped (da27523). Reclaimed 28.6 GB top-k files + superseded report-gen/prefix_k arms. Retrieval checkpoints DELIBERATELY KEPT after I initially listed them for deletion and was challenged: D0/D1c/6g_cleansplit/6g7_vit2_cleansplit back the 11.07/17.14/14.59/10.81% headline numbers, and D1a/D1b the depth dose-response.",
     "2026-09-14 (15B-3 TRAINING COMPLETE): re-runs with SAVE_TOP_K=0 all COMPLETED exit 0:0 -- hybrid s44 2542912 (2h15m09s), transformer s43 2542913 (26m31s), transformer s44 2542914 (26m30s); hybrid s43 2542397 had already completed. One 2.4 GB last.ckpt each, correct Training seed lines. Wall time fell (transformer ~37m->26m, hybrid 2h30m->2h15m) consistent with removing top-k checkpoint writes. Generation + CheXbert on all four PENDING.",
-    "2026-09-14 (15B-5 DONE, 6556410): bootstrap_compare.py --per-label gives per-label CheXbert-14 F1 CIs in a separate section. The instrument 15C needs: 13F was uninterpretable because a macro move cannot be attributed to specific labels without per-label intervals."
+    "2026-09-14 (15B-5 DONE, 6556410): bootstrap_compare.py --per-label gives per-label CheXbert-14 F1 CIs in a separate section. The instrument 15C needs: 13F was uninterpretable because a macro move cannot be attributed to specific labels without per-label intervals.",
+    "2026-09-15 (15B-3 DONE): generation 2544442-2544445 (prefix_k=32, Missing keys 0, all four) + CheXbert 2545312-2545315. Recipe parity with seed 42 verified: 13D log 2502981 vs seed-43 log 2542397 differ only in date/node/seed lines; training-path commits since 13D are behaviour-neutral. Seed 42 stays in the pool.",
+    "2026-09-15 (15B-4 PARTIAL -- PHASE 14 CHEXBERT WINS DO NOT REPLICATE): hybrid-Transformer 14-micro +0.0146/-0.0075/+0.0040 (mean +0.0037 +/- 0.0111 SD); every CheXbert F1 diff changes sign; Transformer leads all at seed 43; only exact-match-5 same-sign (Transformer 3/3). Hybrid 14-micro 0.448 +/- 0.022, macro 0.266 +/- 0.012; 13D is the high draw. 15C rule needs re-anchoring (proposal recorded, not adopted). Also fixed: Phase 14 5-macro diff printed +0.0187 was the k32-vs-k8 diff; true +0.0168. Pending: per-seed bootstraps, seed-42 example-F1, 13D re-decode cmp."
   ],
   "rejected_by_prior_evidence": {
     "vit_unfreeze_blocks_0": "Already run (jobs 1942/1948/1949): MIMIC 10.45%->7.97%, Indiana IDENTICAL 3.90%. Freezing the ViT loses in-domain and recovers nothing cross-domain. ViT-unfreeze=2 is a proven pure +2.5pp win.",

@@ -91,10 +91,14 @@ studies, so each resample draws one index set and scores both on it — removing
 | **CheXbert-14-micro** | **0.4736** | 0.4590 | **+0.0146** | **[+0.0052, +0.0240]** | **hybrid** |
 | CheXbert-14-macro | 0.2800 | 0.2774 | +0.0026 | [−0.0080, +0.0141] | tie |
 | **CheXbert-5-micro** | **0.5522** | 0.5249 | **+0.0273** | **[+0.0147, +0.0410]** | **hybrid** |
-| **CheXbert-5-macro** | **0.4487** | 0.4319 | **+0.0187** | **[+0.0033, +0.0308]** | **hybrid** |
+| **CheXbert-5-macro** | **0.4487** | 0.4319 | **+0.0168** | **[+0.0033, +0.0308]** | **hybrid** |
 | exact-match accuracy (14-label) | 0.0349 | 0.0469 | −0.0120 | [−0.0210, −0.0034] | **transformer** |
 
 **Hybrid wins 3. Transformer wins 2. Three ties.** Both beat the retrieval-NN floor.
+
+> **⚠ Seed replication, 2026-09-15 (Phase 15B-4, `H100_SCALING_PLAN.md`).** Every row above is **one training seed (42)**; the CIs measure sampling over studies, not training variance. At seeds 43 and 44 the CheXbert F1 differences change sign (14-micro: +0.0146 / −0.0075 / +0.0040, paired mean +0.0037 ± 0.0111 SD), so the three hybrid wins do **not** replicate; across 3 seeds the architectures are indistinguishable on CheXbert F1. Cite the 15B-4 seed table for any architecture claim.
+>
+> *Correction, same date:* the 5-macro diff was previously printed as +0.0187 (+4.3%) — that is the k=32-vs-k=8 difference, pasted into this row. 0.4487 − 0.4319 = **+0.0168 (+3.9%)**, matching `h100_scaling_state.json`; the CI was always the correct one.
 
 ### 2.4 Where the Transformer wins outright
 
@@ -144,7 +148,7 @@ it is worth pointing a reviewer at it.
 | metric | absolute gain | relative | what it measures |
 |---|---|---|---|
 | CheXbert-5-micro | +0.0273 | **+5.2%** | the five clinically weightiest findings: cardiomegaly, edema, consolidation, atelectasis, pleural effusion |
-| CheXbert-5-macro | +0.0187 | **+4.3%** | the same five, unweighted by prevalence |
+| CheXbert-5-macro | +0.0168 | **+3.9%** | the same five, unweighted by prevalence |
 | CheXbert-14-micro | +0.0146 | **+3.2%** | all fourteen CheXpert labels, prevalence-weighted |
 
 The largest and most robust win is on the **5-label subset** — the findings that drive
