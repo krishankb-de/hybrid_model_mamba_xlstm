@@ -95,6 +95,7 @@ multirun/
 !analysis/scan_error_bound.md
 !analysis/PHASE14_SUPERVISOR_REVIEW.md
 !analysis/PUBLISHED_BASELINES.md
+!analysis/PHASE15C_AUX_LOSS.md
 
 
 #Json state files for tracking progress of training plans (regenerated from plan-of-record checkboxes)
