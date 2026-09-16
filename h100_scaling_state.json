@@ -1,6 +1,6 @@
 {
   "current_phase": "phase15_thesis_strength",
-  "last_updated": "2026-09-16T12:00:00+0200",
+  "last_updated": "2026-09-16T19:30:00+0200",
   "OBJECTIVE_PIVOT_2026_08_16": {
     "new_primary_objective": "MEDICAL REPORT GENERATION scored by ROUGE-L + CheXbert F1 against ground-truth radiology reports. NOT retrieval.",
     "retrieval_status": "SUPPORTING CHAPTER -- complete, closed, numbers FINAL. Do not re-run retrieval arms to chase them. Clean protocol MIMIC i2t R@10 10.81% -> 14.59% (+3.78pp, 6.2 SE); protocol-matched (val==test) 11.07% -> 17.14%; Indiana flat within noise throughout (0.0390-0.0485, SE 0.76pp).",
@@ -1233,7 +1233,7 @@
       "blocks": {
         "15A_published_baselines": "DRAFTED 2026-09-13, analysis/PUBLISHED_BASELINES.md (ccf59ad). Supervisor right on macro (0.2800 below all modern systems but DCL 0.284), but the 0.386-0.417 band is 7B-84B params or retrieval-augmented; nearest param-comparable PromptMRG ~0.2B macro 0.381. OPEN: own example-F1 (samples avg, zero compute), Janus-CXR (DO NOT CITE), RA-RRG BLEU/ROUGE-L.",
         "15B_statistical_rigor": "DONE 2026-09-16, all five items. 15B-1 DONE but PARTLY SUPERSEDED (its 'wins 7 of 9 vs floor' is seed-42 only). 15B-2 be3e8b8. 15B-3 DONE (gen 2544442-45, scoring 2545312-15, recipe parity verified). 15B-4 DONE (bootstraps 2546523-2546526; re-decode 2546521 gave a byte-identical hyps.txt, so the eval path has not drifted). 15B-5 6556410. HEADLINE: Phase 14's split decision does NOT replicate in either direction; across 3 seeds the architectures are indistinguishable on 8 of 10 metrics. Seed SD is 3-15x the bootstrap half-width.",
-        "15C_aux_multilabel_loss": "CODE SHIPPED 2026-09-16 (15C-1 + 15C-2), lambda probe next. Mechanism A (head on mean-pooled prefix_embeds). Levers AUX_LAMBDA (default 0.0) / AUX_POS_WEIGHT_CAP (default 10.0, FIXED across arms -- lambda is the only lever). Zero-behaviour-change is TESTED, not asserted: at lambda=0 no head is constructed, so no aux_head.* key enters the checkpoint and decoder/prefix_mapper init stays bit-identical (the head is built LAST because constructing an nn.Linear consumes global-RNG draws). Unlabelled studies arrive with mask 0.0 and are skipped. val/lm_loss stays the ModelCheckpoint monitor. Harness 9/9, 230 tests. NEXT: 50-step GPU smoke, then lambda in {0.1, 0.5} at seed 42, selected on validate.parquet against 13D's existing validate dump. SMOKE PASSED 2026-09-16 (job 2548455, 50 steps, 1 GPU, gx10): aux_head built (10,752 params, visible in the model summary), 'Aux CheXpert loss: lambda=0.1 cap=10.0' echoed, CheXpert targets cover 191462/191462 train and 1433/1433 validation rows (100%, so the mask never fires on this build), pos_weight capped at 10.0 for the six rarest labels and 2.03-4.11 for the common ones (No Finding 2.03, Support Devices 2.45, Pleural Effusion 3.28, Lung Opacity 3.43, Atelectasis 3.94, Cardiomegaly 4.11, Edema 7.46). train/aux_loss made prog_bar so the 2h15 arms show it live.",
+        "15C_aux_multilabel_loss": "NEGATIVE RESULT 2026-09-16, pre-registered stop rule FIRED. Code shipped 15C-1/15C-2 (harness 9/9, 230 tests). Probe jobs 2548850 (lambda=0.1) / 2548851 (lambda=0.5), seed 42, 12000 steps, 4 GPUs; decode 2550145/2550153, scoring 2550637/2550638; baseline = 13D's own validate dump (job 2503223, same seed/recipe/decode, n=1433). NEITHER lambda improves validate CheXbert-14-macro (0.2869 baseline -> 0.2853 at 0.1, -0.0016 = 1/8 of the seed SD; -> 0.2712 at 0.5, -0.0157, harmful on every metric). Monotone downward dose-response, so not merely under-dosed. Per-label: at 0.1 Lung Lesion and Pleural Other are STILL exactly 0.000 despite pos_weight 10; at 0.5 they move off zero (0.018/0.041) while Consolidation and Fracture collapse to 0.000 and Lung Opacity drops 0.257->0.238 -- 13F's help-the-rare-hurt-the-rest trade, bought with a loss term instead of a sampler. 15C-4 (3 seeds) does NOT run.",
         "15D_retrieval_framing": "NOT_STARTED. Edits only. Expected small -- h100_scaling_results.md section 2 is already titled \"Retrieval (Supporting Chapter)\". State once, explicitly, that the chapter trails the best specialised retrieval architecture."
       },
       "key_fairness_property": "The 15C aux head (~10.7k params) lives OUTSIDE the evaluated model: evaluate_report_generation.py:306 loads strict=False so aux_head.* lands in `unexpected` and is ignored, and the guard at line 321 inspects only `missing`. The evaluated network stays parameter-identical to 13D, so 14A matched-parameter claim survives 15C intact.",
@@ -1696,7 +1696,71 @@
           "reframes_15C": "The largest single macro deficit is LUNG OPACITY (support 1027, 21% of the s43 summed-F1 deficit) -- a COMMON label, not a rare finding. The supervisor's 'driven by rare findings' framing is half right: rare labels contribute, but the biggest loss is a common label the model under-mentions. Watch Lung Opacity / Pneumonia / Atelectasis in 15C's per-label CIs, not only Lung Lesion / Pleural Other."
         }
       },
-      "15C_targeting_decision_2026_09_16": "User delegated: 15C targets the WHOLE label set, not only the rare findings. Justification is the per-label-vs-floor evidence (seed_band_15B4.per_label_vs_floor_15C_targets): the largest single macro deficit is Lung Opacity (support 1027). pos_weight cap stays 10.0 and aux_lambda remains the only lever that moves, so attribution stays single-lever."
+      "15C_targeting_decision_2026_09_16": "User delegated: 15C targets the WHOLE label set, not only the rare findings. Justification is the per-label-vs-floor evidence (seed_band_15B4.per_label_vs_floor_15C_targets): the largest single macro deficit is Lung Opacity (support 1027). pos_weight cap stays 10.0 and aux_lambda remains the only lever that moves, so attribution stays single-lever.",
+      "15C_result": {
+        "verdict": "NEGATIVE -- one designed attempt, reported honestly",
+        "validate_n1433": {
+          "baseline_13D": {
+            "chexbert_14_micro": 0.4595,
+            "chexbert_14_macro": 0.2869,
+            "chexbert_5_micro": 0.5255,
+            "chexbert_5_macro": 0.418,
+            "exact_match_5": 0.3859
+          },
+          "aux_lambda_0.1": {
+            "chexbert_14_micro": 0.45342,
+            "chexbert_14_macro": 0.28534,
+            "chexbert_5_micro": 0.51786,
+            "chexbert_5_macro": 0.42414,
+            "exact_match_5": 0.37195,
+            "example_f1": 0.38259
+          },
+          "aux_lambda_0.5": {
+            "chexbert_14_micro": 0.44602,
+            "chexbert_14_macro": 0.27118,
+            "chexbert_5_micro": 0.50257,
+            "chexbert_5_macro": 0.39712,
+            "exact_match_5": 0.37404,
+            "example_f1": 0.37708
+          }
+        },
+        "per_label_validate_14_f1": {
+          "aux_lambda_0.1": {
+            "Enlarged Cardiomediastinum": 0.162,
+            "Cardiomegaly": 0.585,
+            "Lung Opacity": 0.257,
+            "Lung Lesion": 0.0,
+            "Edema": 0.416,
+            "Consolidation": 0.052,
+            "Pneumonia": 0.247,
+            "Atelectasis": 0.431,
+            "Pneumothorax": 0.054,
+            "Pleural Effusion": 0.637,
+            "Pleural Other": 0.0,
+            "Fracture": 0.017,
+            "Support Devices": 0.708,
+            "No Finding": 0.429
+          },
+          "aux_lambda_0.5": {
+            "Enlarged Cardiomediastinum": 0.176,
+            "Cardiomegaly": 0.595,
+            "Lung Opacity": 0.238,
+            "Lung Lesion": 0.018,
+            "Edema": 0.361,
+            "Consolidation": 0.0,
+            "Pneumonia": 0.202,
+            "Atelectasis": 0.407,
+            "Pneumothorax": 0.027,
+            "Pleural Effusion": 0.623,
+            "Pleural Other": 0.041,
+            "Fracture": 0.0,
+            "Support Devices": 0.72,
+            "No Finding": 0.389
+          }
+        },
+        "mechanism_read": "The aux head grounds the CONNECTOR's pooled representation in CheXpert labels, but what the decoder WRITES does not follow: at the dose that leaves common labels intact, the weighted rare labels are still never mentioned; at the dose that makes them appear, common labels collapse. Training-loss fit is untouched (train lm_loss 0.911 at 0.1 vs 0.913 at 0.5), so this is a generation-behaviour change, not an optimisation failure.",
+        "what_it_rules_out": "Mechanism A (aux multi-label loss on mean-pooled prefix_embeds) at lambda in {0.1, 0.5} with pos_weight cap 10, U-Zeros targets, 150M decoder, k=32. It does NOT rule out label-conditioned DECODING (e.g. PromptMRG's diagnosis-driven prompts, which put predicted labels in the decoder's INPUT rather than in an auxiliary loss) -- that is the honest 'what I would try next' line for the thesis, not a run this budget can afford."
+      }
     }
   },
   "open_questions": {
@@ -1844,7 +1908,8 @@
     "2026-09-15 (15B-4 PARTIAL -- PHASE 14 CHEXBERT WINS DO NOT REPLICATE): hybrid-Transformer 14-micro +0.0146/-0.0075/+0.0040 (mean +0.0037 +/- 0.0111 SD); every CheXbert F1 diff changes sign; Transformer leads all at seed 43; only exact-match-5 same-sign (Transformer 3/3). Hybrid 14-micro 0.448 +/- 0.022, macro 0.266 +/- 0.012; 13D is the high draw. 15C rule needs re-anchoring (proposal recorded, not adopted). Also fixed: Phase 14 5-macro diff printed +0.0187 was the k32-vs-k8 diff; true +0.0168. Pending: per-seed bootstraps, seed-42 example-F1, 13D re-decode cmp.",
     "2026-09-16 (15B-4 DONE, 15B COMPLETE -- jobs 2546521-2546526): PHASE 14'S SPLIT DECISION DOES NOT REPLICATE IN EITHER DIRECTION. Hybrid's 3 CheXbert wins and Transformer's ROUGE-L win were seed-42-only; 8 of 10 metrics indistinguishable across 3 seeds. Survivors: BLEU-1 (hybrid 2/3) and exact-match-5/14 (Transformer 3/3, significant at s42 only). Re-decode of 13D with today's code = byte-identical hyps.txt, so this is training-draw variance, not eval drift; seed 42 is the high CheXbert draw AND the low ROUGE-L draw in both arms. Seed SD is 3-15x the bootstrap half-width. vs floor across seeds: text+exact-match robust, CheXbert micro a tie at 2/3 seeds, 14-macro loses at 3/3. Per-label vs floor REFRAMES 15C: biggest macro deficit is Lung Opacity (support 1027, common), not the rare labels. 15A-5.1 closed: example-F1 hybrid 0.3790 +/- 0.0214, Transformer 0.3817 +/- 0.0144, floor 0.3691.",
     "2026-09-16 (15C-1 + 15C-2 SHIPPED, commit pending): aux CheXpert head on the mean-pooled image prefix. AUX_LAMBDA default 0.0 builds NO head -- tested bit-identical decoder/prefix_mapper init and no aux_head.* checkpoint key, so the 15B-4 seed band stays the valid baseline; aux state dict loads into an eval module with missing==[] and every aux_* key in unexpected (the fairness property). Unlabelled studies masked out (mask 0.0), pos_weight from the TRAIN split only, cap 10.0 fixed across arms, val/lm_loss still the checkpoint monitor. validate_for_willi.sh 9/9, 230 passed. Success rule re-anchored and ADOPTED (paired macro > +0.0122 and positive at >=2/3 seeds; micro judged on the 3-seed mean vs 0.4296).",
-    "2026-09-16 (15C GPU smoke, job 2548455): aux path runs end-to-end on H100. 100% CheXpert coverage on the Phase-8 build (mask never fires), pos_weight cap=10 binds on the 6 rarest labels, decoder init Missing 0 / image tower Missing 0, 50 steps in 32s at 1.56 it/s. ACCOUNT EXPIRY 2026-09-29 (13 days) -- extension ticket needed, and HOME is deleted 6 months after expiry, so DUA-covered checkpoints must be archived off-cluster before then."
+    "2026-09-16 (15C GPU smoke, job 2548455): aux path runs end-to-end on H100. 100% CheXpert coverage on the Phase-8 build (mask never fires), pos_weight cap=10 binds on the 6 rarest labels, decoder init Missing 0 / image tower Missing 0, 50 steps in 32s at 1.56 it/s. ACCOUNT EXPIRY 2026-09-29 (13 days) -- extension ticket needed, and HOME is deleted 6 months after expiry, so DUA-covered checkpoints must be archived off-cluster before then.",
+    "2026-09-16 (15C-3 NEGATIVE, stop rule fired -- jobs 2548850/2548851 train, 2550145/2550153 decode, 2550637/2550638 score): neither lambda improves validate CheXbert-14-macro vs 13D's own validate dump (0.2869 -> 0.2853 at lambda=0.1, -0.0016 = 1/8 seed SD; -> 0.2712 at 0.5, harmful on all metrics, monotone dose-response). Per-label shows 13F's shape: at 0.1 Lung Lesion/Pleural Other still exactly 0.000 despite pos_weight 10; at 0.5 they move off zero while Consolidation/Fracture collapse to 0.000. 15C-4's 3 seeds do NOT run, per the rule declared before the probe. ~7 GPU-hours returned to a budget that ends with the account on 2026-09-29."
   ],
   "rejected_by_prior_evidence": {
     "vit_unfreeze_blocks_0": "Already run (jobs 1942/1948/1949): MIMIC 10.45%->7.97%, Indiana IDENTICAL 3.90%. Freezing the ViT loses in-domain and recovers nothing cross-domain. ViT-unfreeze=2 is a proven pure +2.5pp win.",
