@@ -1500,6 +1500,8 @@ class ReportGenerationLightningModule(pl.LightningModule):
         warmup_steps: int = 500,
         max_steps: int = 10000,
         gradient_clip_val: float = 0.5,
+        aux_lambda: float = 0.0,
+        aux_num_labels: int = 14,
     ):
         super().__init__()
         from hybrid_xmamba.models.prefix_mapper import ImagePrefixMapper
@@ -1524,6 +1526,29 @@ class ReportGenerationLightningModule(pl.LightningModule):
         # Not loaded here — see load_image_encoder(). None means batches
         # must supply a precomputed "patch_grid" tensor directly.
         self.image_encoder = None
+
+        # --- Phase 15C-2: auxiliary multi-label CheXpert head (mechanism A) ---
+        # Attaches to the MEAN-POOLED image prefix, i.e. the connector's own
+        # output, because that is the component the LM loss barely trains for
+        # findings that rarely appear in text. Discarded at decode time:
+        # evaluate_report_generation.py loads with strict=False, so aux_head.*
+        # lands in `unexpected` and the evaluated network stays
+        # parameter-identical to 13D (14A's matched-parameter claim survives).
+        #
+        # Built ONLY when aux_lambda > 0, and built LAST, for two reasons that
+        # both matter to 15B-4's seed band: (1) with lambda=0 the state dict is
+        # byte-for-byte the shape every prior arm wrote, so no checkpoint or
+        # eval path changes; (2) constructing a module consumes draws from the
+        # global RNG, so creating it after the decoder and prefix_mapper leaves
+        # THEIR initialisation identical to a run without this code at all.
+        self.aux_lambda = float(aux_lambda)
+        self.aux_num_labels = int(aux_num_labels)
+        self.aux_head = None
+        if self.aux_lambda > 0:
+            self.aux_head = nn.Linear(decoder_config.dim, self.aux_num_labels)
+            self.register_buffer(
+                "aux_pos_weight", torch.ones(self.aux_num_labels), persistent=True,
+            )
 
     def load_image_encoder(self, vit_lr: float = 1e-6, image_encoder_checkpoint: Optional[str] = None):
         """Load the frozen (or partially unfrozen) BiomedCLIP visual tower.
@@ -1566,6 +1591,21 @@ class ReportGenerationLightningModule(pl.LightningModule):
             for p in targets:
                 p.requires_grad = True
             self.image_encoder.train()
+
+    def set_aux_pos_weight(self, pos_weight: List[float]):
+        """Phase 15C-2: install the class-imbalance weights for the aux BCE.
+
+        Called from train_report_generation.py once the TRAIN split's label
+        matrix exists (prevalence must come from train, never from the split
+        it is reported on). Separate from __init__ so the module keeps being
+        constructible before the dataloaders — the order every prior arm used.
+        """
+        if self.aux_head is None:
+            raise RuntimeError("aux_pos_weight set but aux_lambda == 0 — the head does not exist.")
+        w = torch.as_tensor(pos_weight, dtype=torch.float)
+        if w.shape != (self.aux_num_labels,):
+            raise ValueError(f"pos_weight must have {self.aux_num_labels} entries, got {tuple(w.shape)}")
+        self.aux_pos_weight = w.to(self.aux_pos_weight.device)
 
     def _patch_grid(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """(B, 3, H, W) -> (B, N, patch_dim) pre-pooling ViT patch grid."""
@@ -1615,6 +1655,30 @@ class ReportGenerationLightningModule(pl.LightningModule):
             # keeps using "val/lm_loss" (a plain dict-key lookup, no filesystem
             # implication); only the filename= template needs the flat key.
             self.log("val_lm_loss_ckpt", loss, on_epoch=True)
+
+        # --- Phase 15C-2: auxiliary CheXpert-14 loss on the mean-pooled prefix ---
+        # Logged separately from lm_loss, and `val/lm_loss` (the ModelCheckpoint
+        # monitor) is logged ABOVE this block on purpose: checkpoint selection
+        # must stay the pure LM criterion every prior arm used, or the aux arms
+        # would not be comparable with the 15B-4 seed band.
+        if self.aux_head is not None and "chexpert_labels" in batch:
+            aux_logits = self.aux_head(prefix_embeds.mean(dim=1).float())
+            aux_target = batch["chexpert_labels"].float()
+            per_sample = F.binary_cross_entropy_with_logits(
+                aux_logits, aux_target, pos_weight=self.aux_pos_weight, reduction="none",
+            ).mean(dim=1)
+
+            mask = batch.get("chexpert_label_mask")
+            if mask is None:
+                aux_loss = per_sample.mean()
+            else:
+                mask = mask.float()
+                aux_loss = (per_sample * mask).sum() / mask.sum().clamp(min=1.0)
+
+            self.log(f"{split}/aux_loss", aux_loss, on_step=(split == "train"), on_epoch=True)
+            loss = loss + self.aux_lambda * aux_loss
+            self.log(f"{split}/total_loss", loss, on_step=(split == "train"), on_epoch=True)
+
         if split == "train":
             # self.trainer raises RuntimeError (not None) when no Trainer is
             # attached — e.g. a unit test calling training_step() directly.
@@ -1638,6 +1702,16 @@ class ReportGenerationLightningModule(pl.LightningModule):
             {"params": list(self.prefix_mapper.parameters()),
              "lr": self.head_lr, "weight_decay": self.weight_decay},
         ]
+        if self.aux_head is not None:
+            # Phase 15C-2: same LR as the prefix_mapper -- both are freshly
+            # initialised small modules on top of a pretrained backbone, which
+            # is the split head_lr exists for. Omitting this group would leave
+            # the head at its random init, turning the aux gradient reaching
+            # the connector into noise rather than a label signal.
+            param_groups.append({
+                "params": list(self.aux_head.parameters()),
+                "lr": self.head_lr, "weight_decay": self.weight_decay,
+            })
         if self.image_encoder is not None and self.vit_unfreeze_blocks > 0:
             vit_params = [p for p in self.image_encoder.parameters() if p.requires_grad]
             if vit_params:

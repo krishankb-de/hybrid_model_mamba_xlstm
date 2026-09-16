@@ -76,3 +76,15 @@ gradient_clip_val: 0.5
 
 learning_rate: 4.0e-4
 distill: null
+
+# Phase 15C — auxiliary multi-label CheXpert loss (supervisor item 2 of
+# 2026-09-13). aux_lambda scales a BCEWithLogitsLoss on a 14-way head over the
+# MEAN-POOLED image prefix; the head is discarded at decode time (loaded
+# strict=False, lands in `unexpected`), so the evaluated network stays
+# parameter-identical to 13D. 0.0 = the head is never constructed, which
+# keeps both the state dict and the RNG stream identical to every arm in
+# 15B-4's seed band. Declared here (not only as a cfg.model.get default)
+# because train_report_generation_h100.sh sets both via Hydra CLI override,
+# and strict-struct mode rejects an undeclared key.
+aux_lambda: 0.0
+aux_pos_weight_cap: 10.0

@@ -5016,3 +5016,294 @@ def test_inspect_wrapper_exposes_prefix_k():
     assert '${PREFIX_K:+--prefix-k "${PREFIX_K}"}' in src, (
         "must expand to nothing when unset so auto-detection stays the default path"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 15C — auxiliary multi-label CheXpert loss on the mean-pooled image
+# prefix. The supervisor's item 2 of 2026-09-13. Every test here exists to
+# protect ONE property: with aux_lambda=0.0 (the default) nothing in this
+# feature runs, so the 15B-4 seed band stays the valid baseline for 15C.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.willi_parity
+def test_chexpert_14_label_order_matches_f1chexbert_target_names():
+    """Spec-lock on the target order. chexbert_labels.json's `label_names`,
+    15B-5's per-label CIs and every per-label table in analysis/ are in this
+    order; a permuted aux target would train the head against the wrong
+    findings while every loss curve still looked healthy."""
+    from scripts.train_report_generation import CHEXPERT_14_LABELS
+
+    assert CHEXPERT_14_LABELS == [
+        "Enlarged Cardiomediastinum", "Cardiomegaly", "Lung Opacity", "Lung Lesion",
+        "Edema", "Consolidation", "Pneumonia", "Atelectasis", "Pneumothorax",
+        "Pleural Effusion", "Pleural Other", "Fracture", "Support Devices", "No Finding",
+    ]
+
+
+@pytest.mark.willi_parity
+def test_load_chexpert_label_matrix_u_zeros_and_omits_unknown_studies(tmp_path):
+    """U-Zeros per column (1.0 positive; 0.0/-1.0/NaN negative), selection BY
+    NAME (the CSV's own column order is alphabetical and must not matter), and
+    a study with no CSV row is ABSENT from the dict -- never a row of zeros,
+    which would teach 'no findings' from missing data."""
+    import pandas as pd
+    from scripts.train_report_generation import CHEXPERT_14_LABELS, load_chexpert_label_matrix
+
+    rows = {"study_id": [10, 20]}
+    for label in sorted(CHEXPERT_14_LABELS):          # deliberately NOT our order
+        rows[label] = [0.0, 0.0]
+    rows["Lung Opacity"] = [1.0, 0.0]
+    rows["Pleural Other"] = [-1.0, 1.0]
+    rows["No Finding"] = [float("nan"), 0.0]
+    csv_path = tmp_path / "chexpert.csv.gz"
+    pd.DataFrame(rows).to_csv(csv_path, index=False, compression="gzip")
+
+    matrix = load_chexpert_label_matrix([10, 20, 99], str(csv_path))
+
+    assert set(matrix) == {10, 20}, "a study absent from the CSV must be absent here"
+    assert len(matrix[10]) == 14
+    idx = {label: i for i, label in enumerate(CHEXPERT_14_LABELS)}
+    assert matrix[10][idx["Lung Opacity"]] == 1.0
+    assert matrix[10][idx["Pleural Other"]] == 0.0      # -1.0 (uncertain) -> negative
+    assert matrix[10][idx["No Finding"]] == 0.0         # NaN -> negative
+    assert matrix[20][idx["Pleural Other"]] == 1.0
+    assert sum(matrix[20]) == 1.0
+
+
+@pytest.mark.willi_parity
+def test_compute_aux_pos_weight_caps_rare_labels_and_survives_zero_positives():
+    """(N - n_pos)/n_pos, capped. The cap is load-bearing: uncapped, a ~1%
+    label gives ~100x and 13F showed 5x already damaged common labels."""
+    from scripts.train_report_generation import compute_aux_pos_weight
+
+    # 100 studies, 2 labels: label 0 positive in 50 (ratio 1.0), label 1 in 1
+    # (ratio 99.0 -> capped), label 2 never positive.
+    matrix = {}
+    for i in range(100):
+        matrix[i] = [1.0 if i < 50 else 0.0, 1.0 if i == 0 else 0.0, 0.0]
+
+    w = compute_aux_pos_weight(matrix, cap=10.0, num_labels=3)
+    assert w[0] == pytest.approx(1.0)
+    assert w[1] == pytest.approx(10.0), "uncapped this would be 99.0"
+    assert w[2] == 1.0, "a label with no positives must not divide by zero"
+    assert compute_aux_pos_weight({}, cap=10.0, num_labels=3) == [1.0, 1.0, 1.0]
+
+
+@pytest.mark.willi_parity
+def test_aux_lambda_zero_builds_no_head_and_leaves_the_state_dict_untouched():
+    """The single most important property in 15C: at the default the head is
+    never constructed, so (a) no aux_head.* key enters the checkpoint, and
+    (b) the decoder/prefix_mapper initialisation is bit-identical to a module
+    built before this feature existed -- constructing an nn.Linear consumes
+    global-RNG draws, which is why the head is built LAST and only when on."""
+    import torch
+    from hybrid_xmamba.training.lightning_module import ReportGenerationLightningModule
+
+    torch.manual_seed(0)
+    baseline = ReportGenerationLightningModule(decoder_config=_tiny_cpu_config(), prefix_k=4)
+    torch.manual_seed(0)
+    explicit_off = ReportGenerationLightningModule(
+        decoder_config=_tiny_cpu_config(), prefix_k=4, aux_lambda=0.0,
+    )
+    torch.manual_seed(0)
+    aux_on = ReportGenerationLightningModule(
+        decoder_config=_tiny_cpu_config(), prefix_k=4, aux_lambda=0.5,
+    )
+
+    assert baseline.aux_head is None and explicit_off.aux_head is None
+    assert aux_on.aux_head is not None
+    assert not any(k.startswith("aux_") for k in baseline.state_dict())
+    assert any(k.startswith("aux_head.") for k in aux_on.state_dict())
+
+    for key, tensor in baseline.state_dict().items():
+        assert torch.equal(tensor, explicit_off.state_dict()[key]), key
+        assert torch.equal(tensor, aux_on.state_dict()[key]), (
+            f"{key} moved when the aux head was added -- the head must be built LAST"
+        )
+
+
+@pytest.mark.willi_parity
+def test_aux_head_is_discarded_by_a_strict_false_eval_load():
+    """The fairness property the writeup claims: the evaluated network stays
+    parameter-identical to 13D because evaluate_report_generation.py loads
+    strict=False and inspects only `missing`."""
+    import torch
+    from hybrid_xmamba.training.lightning_module import ReportGenerationLightningModule
+
+    torch.manual_seed(0)
+    trained = ReportGenerationLightningModule(
+        decoder_config=_tiny_cpu_config(), prefix_k=4, aux_lambda=0.5,
+    )
+    torch.manual_seed(0)
+    at_eval = ReportGenerationLightningModule(decoder_config=_tiny_cpu_config(), prefix_k=4)
+
+    missing, unexpected = at_eval.load_state_dict(trained.state_dict(), strict=False)
+    assert list(missing) == [], f"eval model is missing weights: {missing}"
+    assert all(k.startswith("aux_") for k in unexpected), unexpected
+    assert any(k.startswith("aux_head.") for k in unexpected)
+
+
+@pytest.mark.willi_parity
+def test_aux_loss_adds_lambda_times_bce_and_reaches_the_prefix_mapper():
+    """total = lm_loss + aux_lambda * BCEWithLogits(head(prefix.mean(1)), y),
+    reconstructed independently; and the gradient must reach the prefix_mapper
+    -- if it did not, the mechanism (reshape the connector's representation)
+    could not work at all, whatever the loss curve did."""
+    import torch
+    import torch.nn.functional as F
+    from hybrid_xmamba.training.lightning_module import ReportGenerationLightningModule
+
+    torch.manual_seed(0)
+    mod = ReportGenerationLightningModule(
+        decoder_config=_tiny_cpu_config(), prefix_k=4, aux_lambda=0.5,
+    )
+    mod.set_aux_pos_weight([2.0] * 14)
+    # eval(), not train(): prefix_mapper has dropout, so in train mode each
+    # forward draws a different mask and no two losses are comparable. Dropout
+    # is orthogonal to what this test pins; gradients still flow in eval mode.
+    mod.eval()
+
+    B, L = 3, 8
+    batch = {
+        "input_ids": torch.randint(0, 100, (B, L)),
+        "patch_grid": torch.randn(B, 197, 768),
+        "chexpert_labels": torch.zeros(B, 14),
+        "chexpert_label_mask": torch.ones(B),
+    }
+    batch["chexpert_labels"][0, 2] = 1.0
+
+    lm_only = mod._step({k: v for k, v in batch.items() if not k.startswith("chexpert")}, "val")
+    total = mod._step(batch, "val")
+
+    with torch.no_grad():
+        prefix = mod.prefix_mapper(batch["patch_grid"])
+        logits = mod.aux_head(prefix.mean(dim=1).float())
+        expected_aux = F.binary_cross_entropy_with_logits(
+            logits, batch["chexpert_labels"], pos_weight=torch.full((14,), 2.0),
+        )
+    assert total.item() == pytest.approx((lm_only + 0.5 * expected_aux).item(), rel=1e-5)
+
+    mod.zero_grad()
+    total.backward()
+    for name, param in mod.prefix_mapper.named_parameters():
+        assert param.grad is not None and torch.isfinite(param.grad).all(), name
+    for name, param in mod.aux_head.named_parameters():
+        assert param.grad is not None, f"aux_head.{name} got no gradient"
+
+    # And the head must actually be optimised -- a head left at random init
+    # turns the aux gradient into noise rather than a label signal.
+    groups = mod.configure_optimizers()["optimizer"].param_groups
+    head_ids = {id(p) for p in mod.aux_head.parameters()}
+    assert any(any(id(p) in head_ids for p in g["params"]) for g in groups)
+
+
+@pytest.mark.willi_parity
+def test_aux_loss_masks_out_studies_with_no_chexpert_row():
+    """mask=0 samples must not contribute. Averaging them in would train the
+    head towards all-negative on exactly the studies whose labels are unknown."""
+    import torch
+    from hybrid_xmamba.training.lightning_module import ReportGenerationLightningModule
+
+    torch.manual_seed(0)
+    mod = ReportGenerationLightningModule(
+        decoder_config=_tiny_cpu_config(), prefix_k=4, aux_lambda=1.0,
+    )
+    mod.set_aux_pos_weight([1.0] * 14)
+    mod.eval()
+
+    B, L = 4, 8
+    base = {
+        "input_ids": torch.randint(0, 100, (B, L)),
+        "patch_grid": torch.randn(B, 197, 768),
+        "chexpert_labels": torch.zeros(B, 14),
+    }
+    base["chexpert_labels"][2:] = 1.0        # the two masked-out rows differ wildly
+
+    with torch.no_grad():
+        masked = mod._step({**base, "chexpert_label_mask": torch.tensor([1.0, 1.0, 0.0, 0.0])}, "val")
+        first_two_only = mod._step({
+            "input_ids": base["input_ids"], "patch_grid": base["patch_grid"],
+            "chexpert_labels": base["chexpert_labels"],
+            "chexpert_label_mask": torch.tensor([1.0, 1.0, 0.0, 0.0]),
+        }, "val")
+        all_in = mod._step({**base, "chexpert_label_mask": torch.ones(B)}, "val")
+
+    assert masked.item() == pytest.approx(first_two_only.item())
+    assert masked.item() != pytest.approx(all_in.item()), "the mask changed nothing"
+
+
+@pytest.mark.willi_parity
+def test_set_aux_pos_weight_rejects_wrong_length_and_a_missing_head():
+    import torch
+    from hybrid_xmamba.training.lightning_module import ReportGenerationLightningModule
+
+    torch.manual_seed(0)
+    off = ReportGenerationLightningModule(decoder_config=_tiny_cpu_config(), prefix_k=4)
+    with pytest.raises(RuntimeError, match="aux_lambda == 0"):
+        off.set_aux_pos_weight([1.0] * 14)
+
+    on = ReportGenerationLightningModule(
+        decoder_config=_tiny_cpu_config(), prefix_k=4, aux_lambda=0.1,
+    )
+    with pytest.raises(ValueError, match="14 entries"):
+        on.set_aux_pos_weight([1.0] * 13)
+
+
+@pytest.mark.willi_parity
+def test_image_text_dataset_emits_chexpert_keys_only_when_labels_are_supplied():
+    """ImageTextDataset is shared with the CLOSED retrieval chapter, so the
+    default __getitem__ payload must not gain a key."""
+    import torch
+    from omegaconf import OmegaConf
+    from PIL import Image
+    from transformers import AutoTokenizer
+
+    from scripts.train_contrastive import ImageTextDataset
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    except Exception as exc:                      # offline CI without the tokenizer cached
+        pytest.skip(f"tokenizer unavailable: {exc}")
+    tokenizer.pad_token = tokenizer.eos_token
+
+    cfg = OmegaConf.create({"dataset": {"max_length": 8, "image_size": 8}})
+    rows = [{"findings": "f", "impression": "i", "study_id": 10,
+             "image": Image.new("RGB", (8, 8))}]
+
+    plain = ImageTextDataset(rows, tokenizer, cfg)[0]
+    assert set(plain) == {"input_ids", "attention_mask", "pixel_values"}
+
+    labelled = ImageTextDataset(rows, tokenizer, cfg, chexpert_labels={10: [1.0] + [0.0] * 13})[0]
+    assert labelled["chexpert_labels"].shape == (14,)
+    assert labelled["chexpert_labels"][0] == 1.0
+    assert labelled["chexpert_label_mask"].item() == 1.0
+
+    unknown = ImageTextDataset(rows, tokenizer, cfg, chexpert_labels={99: [1.0] + [0.0] * 13})[0]
+    assert unknown["chexpert_label_mask"].item() == 0.0
+    assert torch.equal(unknown["chexpert_labels"], torch.zeros(14))
+
+
+@pytest.mark.willi_parity
+def test_train_report_generation_h100_wrapper_exposes_aux_levers():
+    """AUX_LAMBDA defaults to 0.0 (baseline recipe), is always passed to Hydra,
+    and is echoed POSITIVELY -- Phase 14's prefix_k lesson: a silent default
+    cannot be detected by its absence, and an aux arm whose log does not state
+    lambda is indistinguishable from a baseline re-run."""
+    sh = (REPO_ROOT / "scripts" / "train_report_generation_h100.sh").read_text()
+    assert 'AUX_LAMBDA="${AUX_LAMBDA:-0.0}"' in sh
+    assert 'AUX_POS_WEIGHT_CAP="${AUX_POS_WEIGHT_CAP:-10.0}"' in sh
+    assert "model.aux_lambda=${AUX_LAMBDA}" in sh
+    assert "model.aux_pos_weight_cap=${AUX_POS_WEIGHT_CAP}" in sh
+    assert "Aux CheXpert loss: lambda=${AUX_LAMBDA}" in sh
+
+
+@pytest.mark.willi_parity
+def test_rrg_model_configs_declare_aux_keys():
+    """Hydra strict-struct mode rejects a CLI override for an undeclared key --
+    the same trap that cost a smoke run in 13A (job 2478622). Both report-gen
+    arms must declare them, or the matched Transformer baseline cannot run the
+    same recipe."""
+    for name in ("hybrid_150m_v2_rrg", "transformer_150m_baseline_rrg"):
+        text = (REPO_ROOT / "configs" / "model" / f"{name}.yaml").read_text()
+        assert "aux_lambda: 0.0" in text, name
+        assert "aux_pos_weight_cap: 10.0" in text, name

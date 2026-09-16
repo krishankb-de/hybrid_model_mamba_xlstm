@@ -208,7 +208,9 @@ class ImageTextDataset(Dataset):
       - findings / impression (text)
     """
 
-    def __init__(self, hf_dataset, tokenizer, cfg, is_train: bool = False):
+    def __init__(self, hf_dataset, tokenizer, cfg, is_train: bool = False,
+                 chexpert_labels=None, chexpert_num_labels: int = 14,
+                 study_id_field: str = "study_id"):
         self.data = hf_dataset
         self.tokenizer = tokenizer
         self.max_length = cfg.dataset.max_length
@@ -216,6 +218,19 @@ class ImageTextDataset(Dataset):
         self.findings_field = cfg.dataset.get("findings_field", "findings")
         self.impression_field = cfg.dataset.get("impression_field", "impression")
         self.img_transform = build_image_transform(cfg, is_train=is_train)
+
+        # Phase 15C-1 — OPTIONAL per-study CheXpert-14 target vector for the
+        # auxiliary multi-label loss. DEFAULT None, and when it is None
+        # __getitem__ returns exactly the keys it always has: this class is
+        # shared with the CLOSED retrieval chapter (Phases 1-6G), whose
+        # behaviour must not move. Only report-gen passes a dict, and only
+        # when model.aux_lambda > 0 (see train_report_generation.py).
+        # Mapping is study_id -> 14 floats in CHEXPERT_14_LABELS order,
+        # U-Zeros (1.0 -> 1.0; {0.0, -1.0, NaN} -> 0.0), built by
+        # scripts/train_report_generation.py::load_chexpert_label_matrix.
+        self.chexpert_labels = chexpert_labels
+        self.chexpert_num_labels = chexpert_num_labels
+        self.study_id_field = study_id_field
 
     def __len__(self):
         return len(self.data)
@@ -256,11 +271,29 @@ class ImageTextDataset(Dataset):
             
         pixel_values = self.img_transform(img)
 
-        return {
+        out = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "pixel_values": pixel_values,
         }
+
+        # Phase 15C-1 — opt-in only (see __init__). A study with no row in the
+        # CheXpert CSV gets an all-zeros target AND mask 0.0, so the aux loss
+        # skips it entirely rather than teaching "this image has no findings"
+        # from missing data -- the same conservative choice 13F's weight-1.0
+        # default makes for an unknown study.
+        if self.chexpert_labels is not None:
+            study_id = item.get(self.study_id_field)
+            vec = None if study_id is None else self.chexpert_labels.get(int(study_id))
+            out["chexpert_labels"] = torch.tensor(
+                vec if vec is not None else [0.0] * self.chexpert_num_labels,
+                dtype=torch.float,
+            )
+            out["chexpert_label_mask"] = torch.tensor(
+                1.0 if vec is not None else 0.0, dtype=torch.float,
+            )
+
+        return out
 
 
 # ---------------------------------------------------------------------------

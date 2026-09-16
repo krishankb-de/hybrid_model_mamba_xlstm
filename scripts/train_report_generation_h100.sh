@@ -134,6 +134,21 @@ fi
 OVERSAMPLE_RARE="${OVERSAMPLE_RARE:-false}"
 OVERSAMPLE_WEIGHT="${OVERSAMPLE_WEIGHT:-5.0}"
 
+# Phase 15C — auxiliary multi-label CheXpert loss on the mean-pooled image
+# prefix (supervisor item 2 of 2026-09-13: "a multi-label CheXpert-class loss
+# is the right next attempt" at the CheXbert-14-macro gap). AUX_LAMBDA is the
+# ONLY lever that moves across 15C's arms: 0.0 (default) builds no head at all
+# and reproduces the 15B-4 baseline exactly, so this code changes nothing
+# until it is set. AUX_POS_WEIGHT_CAP stays 10.0 in every arm -- uncapped,
+# Pleural Other's ~1% prevalence gives ~100x, and 13F showed 5x already
+# damaged 4+ common high-support labels.
+#
+# 15C-3 probes {0.1, 0.5} at seed 42, SELECTED ON validate.parquet and
+# reported on test.parquet -- the same validation-split discipline that
+# closed the prefix_k selection question in Phase 14 section 6.1.
+AUX_LAMBDA="${AUX_LAMBDA:-0.0}"
+AUX_POS_WEIGHT_CAP="${AUX_POS_WEIGHT_CAP:-10.0}"
+
 MIMIC_CACHE_DIR="${MIMIC_CACHE_DIR:-/sc/home/$USER/dataset/mimic_cxr_cache}"
 EXPERIMENT="${EXPERIMENT:-h100_report_gen_150m_v2_k${PREFIX_K}}"
 
@@ -175,6 +190,7 @@ if [ -n "${IMAGE_ENCODER_CKPT}" ] && [ ! -f "${IMAGE_ENCODER_CKPT}" ]; then
 fi
 echo "Image encoder checkpoint: ${IMAGE_ENCODER_CKPT:-<stock BiomedCLIP, unchanged default>}"
 echo "Oversample rare findings: ${OVERSAMPLE_RARE} (weight=${OVERSAMPLE_WEIGHT})"
+echo "Aux CheXpert loss: lambda=${AUX_LAMBDA} pos_weight_cap=${AUX_POS_WEIGHT_CAP} (0.0 = OFF, baseline recipe)"
 # Phase 15B-2: emit the seed POSITIVELY. Phase 14's hardest-won lesson is that
 # a silent default cannot be detected by its absence -- the prefix_k trap cost
 # 0.0145 ROUGE-L and was caught only because a `prefix_k = 8` line was missing
@@ -209,6 +225,8 @@ python scripts/train_report_generation.py \
   dataset.oversample_rare_findings=${OVERSAMPLE_RARE} \
   dataset.oversample_weight=${OVERSAMPLE_WEIGHT} \
   model.prefix_k=${PREFIX_K} \
+  model.aux_lambda=${AUX_LAMBDA} \
+  model.aux_pos_weight_cap=${AUX_POS_WEIGHT_CAP} \
   model.decoder_lr=${DECODER_LR} \
   model.head_lr=${HEAD_LR} \
   model.gradient_clip_val=${GRAD_CLIP} \

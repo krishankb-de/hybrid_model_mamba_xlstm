@@ -25,7 +25,7 @@ Example (once data + a decoder checkpoint exist):
 import os
 import sys
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -83,6 +83,84 @@ def compute_rare_finding_sample_weights(
     return [oversample_weight if sid in positive_study_ids else 1.0 for sid in study_ids]
 
 
+# Phase 15C-1 — the CheXbert-14 label order, as f1chexbert's
+# `target_names` emits it. The aux targets MUST be in this order: 15B-5's
+# per-label CIs, chexbert_labels.json's `label_names`, and every per-label
+# table in analysis/ are all in it, and a silently permuted target vector
+# would train the head against the wrong findings while every loss curve
+# still looked healthy. The CheXpert CSV's own columns are alphabetical;
+# load_chexpert_label_matrix() selects BY NAME, so the CSV's order is
+# irrelevant and this list is the single source of truth.
+CHEXPERT_14_LABELS = [
+    "Enlarged Cardiomediastinum", "Cardiomegaly", "Lung Opacity", "Lung Lesion",
+    "Edema", "Consolidation", "Pneumonia", "Atelectasis", "Pneumothorax",
+    "Pleural Effusion", "Pleural Other", "Fracture", "Support Devices", "No Finding",
+]
+
+
+def load_chexpert_label_matrix(
+    study_ids: List[int],
+    chexpert_csv: str,
+    labels: Optional[List[str]] = None,
+) -> Dict[int, List[float]]:
+    """Phase 15C-1: study_id -> 14 floats in CHEXPERT_14_LABELS order.
+
+    U-Zeros convention (1.0 -> positive; {0.0, -1.0, NaN} -> negative),
+    matching compute_rare_finding_sample_weights() verbatim so 15C and 13F
+    stay directly comparable (user decision 2026-09-13, chosen over masking
+    uncertains out).
+
+    A study_id absent from the CSV is simply ABSENT from the returned dict --
+    never a row of zeros. ImageTextDataset turns that into mask 0.0, so the
+    aux loss skips the sample instead of learning "no findings" from missing
+    data. Same conservative shape as 13F's weight-1.0 default.
+
+    Pure function (no dataset/dataloader construction) so it is CPU-unit-
+    testable against a tiny on-disk CSV fixture.
+    """
+    import pandas as pd
+
+    labels = list(labels) if labels else list(CHEXPERT_14_LABELS)
+    df = pd.read_csv(chexpert_csv, usecols=["study_id"] + labels)
+    df = df[df["study_id"].isin(set(study_ids))]
+    return {
+        int(row["study_id"]): [1.0 if row[label] == 1.0 else 0.0 for label in labels]
+        for _, row in df.iterrows()
+    }
+
+
+def compute_aux_pos_weight(
+    label_matrix: Dict[int, List[float]],
+    cap: float = 10.0,
+    num_labels: int = 14,
+) -> List[float]:
+    """Phase 15C-2: BCEWithLogitsLoss pos_weight per label, = (N - n_pos)/n_pos, capped.
+
+    The cap is load-bearing, not decoration. Uncapped, Pleural Other's ~1%
+    prevalence gives ~100x, and 13F showed 5x oversampling already damaged
+    four-plus common high-support labels. cap=10.0 is the pre-registered
+    default and stays FIXED across 15C's arms: aux_lambda is the only lever
+    that moves, so any effect is attributable to it alone.
+
+    A label with zero positives in the train split gets weight 1.0 (no signal
+    to amplify), never a division by zero.
+    """
+    n = len(label_matrix)
+    if n == 0:
+        return [1.0] * num_labels
+    counts = [0.0] * num_labels
+    for vec in label_matrix.values():
+        for i, v in enumerate(vec):
+            counts[i] += float(v)
+    out = []
+    for n_pos in counts:
+        if n_pos <= 0:
+            out.append(1.0)
+        else:
+            out.append(min((n - n_pos) / n_pos, float(cap)))
+    return out
+
+
 def prepare_report_gen_dataloader(cfg: DictConfig, split: str, tokenizer) -> DataLoader:
     """{input_ids, attention_mask, pixel_values} batches from the Phase 8
     local MIMIC-CXR-JPG parquet build, via train_contrastive.py's
@@ -90,6 +168,22 @@ def prepare_report_gen_dataloader(cfg: DictConfig, split: str, tokenizer) -> Dat
     """
     dataset = load_mimic_cxr(cfg, split, tokenizer, teacher_tokenizer=None)
     batch_size = cfg.dataset.batch_size if split == "train" else cfg.dataset.eval_batch_size
+
+    # Phase 15C-1 — attach aux targets iff the aux loss is actually on. One
+    # lever (model.aux_lambda) turns on the head, the targets and the batch
+    # key together; at the default 0.0 nothing here runs and the batch keys
+    # are exactly what every arm in 15B-4's seed band trained on.
+    if float(cfg.model.get("aux_lambda", 0.0)) > 0:
+        split_study_ids = [int(s) for s in dataset.data["study_id"]]
+        dataset.chexpert_labels = load_chexpert_label_matrix(
+            study_ids=split_study_ids, chexpert_csv=cfg.dataset.chexpert_csv,
+        )
+        dataset.chexpert_num_labels = len(CHEXPERT_14_LABELS)
+        # Rows, not studies: a study with several images is several rows, and
+        # it is the row coverage the aux loss actually sees.
+        covered = sum(1 for s in split_study_ids if s in dataset.chexpert_labels)
+        print(f"  [aux] {split}: CheXpert targets cover {covered}/{len(split_study_ids)} rows "
+              f"({covered / max(len(split_study_ids), 1):.1%}); the rest are masked out of the aux loss")
 
     sampler = None
     shuffle = (split == "train")
@@ -170,6 +264,10 @@ def main(cfg: DictConfig):
         warmup_steps=cfg.model.warmup_steps,
         max_steps=cfg.trainer.max_steps,
         gradient_clip_val=cfg.model.gradient_clip_val,
+        # Phase 15C-2. Default 0.0 => no head is built, nothing is logged, and
+        # the state dict matches every arm in the 15B-4 seed band exactly.
+        aux_lambda=float(cfg.model.get("aux_lambda", 0.0)),
+        aux_num_labels=len(CHEXPERT_14_LABELS),
     )
 
     # Optional decoder init (Phase 10D — the Stage-0/joint-trained 150M backbone).
@@ -276,6 +374,27 @@ def main(cfg: DictConfig):
     print("Preparing dataloaders...")
     train_dl = prepare_report_gen_dataloader(cfg, "train", tokenizer)
     val_dl = prepare_report_gen_dataloader(cfg, "validation", tokenizer)
+
+    # Phase 15C-2: prevalence comes from the TRAIN split only -- computing it
+    # on validate/test would leak the split the arm is judged on into the
+    # objective. Done after the dataloaders (that is where the label matrix
+    # is built) and before fit(), so the head never takes a step at ones.
+    if module.aux_lambda > 0:
+        pos_weight = compute_aux_pos_weight(
+            train_dl.dataset.chexpert_labels,
+            cap=float(cfg.model.get("aux_pos_weight_cap", 10.0)),
+            num_labels=len(CHEXPERT_14_LABELS),
+        )
+        module.set_aux_pos_weight(pos_weight)
+        # Printed POSITIVELY, per Phase 14's prefix_k lesson: a silent default
+        # cannot be detected by its absence, and an aux arm whose log does not
+        # state lambda is indistinguishable from a baseline re-run.
+        print(f"Aux CheXpert loss: lambda={module.aux_lambda} "
+              f"cap={float(cfg.model.get('aux_pos_weight_cap', 10.0))}")
+        for label, w in zip(CHEXPERT_14_LABELS, pos_weight):
+            print(f"  aux pos_weight  {label:<28} {w:6.2f}")
+    else:
+        print("Aux CheXpert loss: OFF (aux_lambda=0.0) — baseline recipe, aux_head not built")
 
     print(f"Dataset      : {cfg.dataset.dataset_name}")
     print(f"Prefix k     : {module.prefix_k}")
