@@ -153,6 +153,9 @@ unpopulated rather than filled with the 14-label numbers.
 **On macro-F1 the supervisor's concern is confirmed, and should be stated plainly.** 0.2800 is
 below every system in §3.2 except DCL (0.284, statistically indistinguishable at this
 project's measured seed/bootstrap scale). The modern range really is 0.38–0.42.
+**Worse: 0.2800 is a single seed and the high draw.** Over seeds 42/43/44 (Phase 15B-4) the
+macro mean is **0.2660 ± 0.0122**, so the like-for-like gap is ~0.014 *wider* than the number
+the supervisor was shown, not narrower.
 
 **But the comparison set is not parameter-comparable, and that is the substantive point.**
 Every system in the 0.386–0.417 macro band is either an LLM-scale model — MAIRA-1, M4CXR and
@@ -171,8 +174,10 @@ axis independently of any cross-paper comparison.
 
 **Three things genuinely favour this project and should be said once, without inflation:**
 
-1. **CheXbert-14-micro 0.4736 is within the published field's range** — above DCL and
-   PromptMRG's parameter class on that metric, though below the 7B+ tier's 0.536–0.585.
+1. **CheXbert-14-micro is within the published field's range** — 0.4736 at seed 42, and
+   **0.4480 ± 0.0223 over three seeds**, above DCL and PromptMRG's parameter class on that
+   metric, though below the 7B+ tier's 0.536–0.585. The tier call survives the seed
+   replication: the lowest of the three draws is 0.4324.
 2. **The 183M parameter count is 38–460× smaller** than the systems that beat it on macro-F1.
    None of the papers in §3.2 reports a parameter-matched comparison at all.
 3. **No comparable paper publishes a prefix-length sweep** (`analysis/PHASE14_SUPERVISOR_REVIEW.md`
@@ -194,6 +199,60 @@ them. **That is the strongest available answer to "why is your macro-F1 low" —
 property of the task, reproduced independently here.** Recorded here as a finding and as
 future work; it is **not** a substitute for 15C, which remains the supervisor's nominated
 mechanism and is authorised as one designed attempt.
+
+---
+
+### 4.2 How much of the "0.28 vs 0.40" gap survives a like-for-like reading — the verdict (15A-3)
+
+Written after 15B (seeds + CIs) and 15C (the aux-loss attempt), so every number here is the
+3-seed mean, not the best draw. **The plan pre-registered both outcomes — that the gap survives,
+and that it does not — before the sourcing was done. The answer is split, and the split is the
+finding.**
+
+**On macro-F1 the gap survives, and widens.** Every adjustment available either leaves it alone
+or makes it worse:
+
+| adjustment | effect on the gap |
+|---|---|
+| Seed replication (15B-4) | **widens it**: 0.2800 → 0.2660 ± 0.0122 |
+| Labeler | none — CheXbert on both sides |
+| Label set | none — 14 labels on both sides |
+| Parameter scale | the only real mitigation, and it is large: the 0.386–0.417 band is 7B–84B or retrieval-augmented; the nearest parameter-comparable system, PromptMRG (~0.2B), is at 0.381 |
+| Target text (findings+impression here vs findings-only there) | **unquantified**, and claimed as a credit by nobody here; §2 |
+| Test split (n=2663 official subject-disjoint, frontal-only, vs 3,858 images elsewhere) | **unquantified** |
+
+Against the *parameter-comparable* comparator the shortfall is **0.381 − 0.266 = 0.115**, and
+15C establishes it is not closed by the mechanism the field would reach for first: an auxiliary
+multi-label CheXpert loss moved the target by a sixth of one seed SD (`PHASE15C_AUX_LOSS.md`).
+
+**On the metric this lineage actually reports, the gap does NOT survive — this project is
+mid-field.** §3.1's table is example-based F1, and the project's row is **0.3790 ± 0.0214**:
+
+- **above** R2Gen 0.276, M2TR 0.308, METransformer 0.311, KiUT 0.321, M2KT 0.352, MKSG 0.371
+- **level with** CvT2DistilGPT2 0.384 (inside one seed SD)
+- **below** CliBert 0.415, RGRG 0.447, PromptMRG 0.476
+
+So "this project is far behind the field on clinical accuracy" is **true on macro-F1 and false
+on example-F1**, against the same papers and the same labeler. The two metrics disagree because
+macro-F1 averages 14 labels unweighted and is therefore dominated by the rarest ones — which is
+exactly what §4.1's retrieval-floor arithmetic already showed.
+
+**The calibration that makes this concrete.** A *real radiologist report*, retrieved for a
+visually similar but different patient, scores macro **0.3014** under this evaluation — above
+every generator arm this project has trained, and still 0.08 below the modern band. A metric on
+which a genuine human report scores 0.30 is not measuring writing quality alone; it is heavily
+measuring whether rare findings are named at all. **That does not excuse the gap, but it does
+set what closing it would require**: not better prose, but a mechanism that puts rare-label
+mentions into the text — and the evidence from 15C is that grounding the image representation
+is not that mechanism.
+
+**What this licenses in the thesis.** (1) State the macro gap plainly, at 0.2660 ± 0.0122, with
+the parameter-scale context and without claiming the target-text confound closes it. (2) State
+that on example-F1 — the metric four of the five supervisor-named systems actually report — the
+project sits mid-field at 0.3790 ± 0.0214. (3) State that the field's own best macro system is
+retrieval-augmented and that this project's retrieval control independently beats its generator
+on macro, so the direction the evidence points is hybrid retrieval-generation, which this
+project has the components for but did not build. Nothing beyond those three is supported.
 
 ---
 

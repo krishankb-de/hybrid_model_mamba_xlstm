@@ -31,12 +31,21 @@ produced the pretrained image tower the generator conditions on and a complete,
 falsified-alternatives account of what does and does not move a CXR joint embedding
 space, but is not itself the thing being optimized anymore.
 
-The headline result: the image-conditioned decoder **beats a retrieval-nearest-neighbor
-baseline on CheXbert F1**, the plan's own pre-registered success criterion, on the
-official held-out test split — not just on a validation split, and not on a single
-lucky checkpoint. Getting there took three real, single-lever interventions (a free
-decoding-strategy fix, an extended training run, and a full-data image-tower retrain)
-and one honest negative result (rare-label oversampling, tried at two doses, abandoned).
+The headline result, stated at the precision three training seeds support (Phase 15B):
+the image-conditioned decoder **beats a retrieval-nearest-neighbour baseline on text
+overlap and exact-match at every seed** (ROUGE-L, BLEU-1, BLEU-4, exact-match-5; each
+CI excluding zero at all three), **ties it on CheXbert micro-F1** (significant at one
+seed of three), and **trails it on CheXbert-14 macro-F1 at all three seeds**. Getting
+there took three real, single-lever interventions (a free decoding-strategy fix, an
+extended training run, and a full-data image-tower retrain) and **two honest negative
+results**: rare-label oversampling (13F, two doses) and an auxiliary multi-label
+CheXpert loss (15C, two doses, stopped by a pre-registered rule —
+`analysis/PHASE15C_AUX_LOSS.md`).
+
+⚠ **An earlier version of this line claimed the generator beats the floor "on CheXbert
+F1 … not on a single lucky checkpoint".** That was measured at one training seed. Seeds
+43 and 44 (Phase 15B-3/4) show the CheXbert margin is seed-dependent, and the claim is
+corrected above rather than quietly dropped.
 
 ---
 
@@ -159,8 +168,22 @@ from 17.5% (original checkpoint) to 7.1% across three successive, single-lever
 improvements (13B → 13E/13C → 13D) — a monotonic trend confirmed on both the validation
 and official test splits, not a single favorable measurement.
 
+> **⚠ Seed replication (Phase 15B-4, 2026-09-16) — read this table as ONE training seed.**
+> The whole table above is seed 42. Two further seeds of the identical recipe give
+> hybrid means ± SD of **ROUGE-L 0.1949 ± 0.0047, CheXbert-14-micro 0.4480 ± 0.0223,
+> 14-macro 0.2660 ± 0.0122, CheXbert-5-micro 0.5086 ± 0.0382, example-F1 0.3790 ± 0.0214**
+> — i.e. **13D is the high draw on CheXbert and the low draw on ROUGE-L**, and the
+> seed SD is 3–15× the width of the bootstrap CIs. Against the floor, across all three
+> seeds: ROUGE-L, BLEU-1, BLEU-4 and exact-match-5 win every time (CI excluding zero);
+> **CheXbert-14-micro is significant at seed 42 only** (+0.0440) and a tie at seeds 43/44
+> (+0.0084, +0.0029); **CheXbert-14-macro loses at all three** (−0.0214, −0.0441, −0.0404).
+> The honest one-line form is: *better text, equal clinical micro-F1, worse macro-F1 than
+> copying a visually similar patient's real report.* Report means ± SD, not this column,
+> for any architecture or floor comparison.
+
 **Tier scoring**: Floor is cleared on both axes. Target's CheXbert bar (≥0.40
-14-micro) is cleared with room to spare (0.4736). Target's ROUGE-L bar (≥0.22) is not
+14-micro) is cleared with room to spare (0.4736 at seed 42, and **at all three seeds** —
+the lowest draw is 0.4324, so this tier call survives the seed replication). Target's ROUGE-L bar (≥0.22) is not
 reached (0.1899) — the closest approach in the whole project, but short by ~14%
 relative.
 
@@ -217,6 +240,19 @@ Finished as a research question before the objective pivot to report generation;
 here because it produced the image tower report generation conditions on, and because
 one of its own findings (the `vit_lr` inverted-U) was directly re-tested and extended in
 Phase 13D above.
+
+> **Where this chapter sits in the field, stated once (Phase 15D).** These numbers beat
+> naive and off-the-shelf baselines by a wide, measured margin — stock BiomedCLIP scores
+> **3.40%** i2t R@10 on this project's own protocol (Phase 6C tower grid, N=3063) against
+> this chapter's 17.14% — and they beat this project's own fine-tuned variants at every
+> ablation. **They do not approach the current best specialised CXR retrieval
+> architectures**, which are purpose-built for this task and report substantially higher
+> recall. No number is quoted for them here, for the same reason Janus-CXR is not quoted
+> in `PUBLISHED_BASELINES.md` §5.2: none was read from a paper's own table under this
+> project's sourcing rule. **This chapter is supporting evidence — that the architecture
+> can be trained into a working joint embedding space, and that image-tower adaptation
+> depth is the dominant lever — not a competitive retrieval result, and it should never
+> be presented as the headline.** The headline is report generation (§1).
 
 | Metric | Best (`val==test` selection) | Best (clean protocol) | Tier |
 |---|---|---|---|
