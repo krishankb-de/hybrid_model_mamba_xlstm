@@ -1675,7 +1675,13 @@ class ReportGenerationLightningModule(pl.LightningModule):
                 mask = mask.float()
                 aux_loss = (per_sample * mask).sum() / mask.sum().clamp(min=1.0)
 
-            self.log(f"{split}/aux_loss", aux_loss, on_step=(split == "train"), on_epoch=True)
+            # prog_bar on train: an aux arm costs 2h15, and the ONLY in-log
+            # evidence that the aux term is alive (labels collated, mask not
+            # all-zero, head learning) would otherwise be a tfevents scalar
+            # nobody reads until afterwards. Same "emit it positively"
+            # discipline as the seed and prefix_k lines.
+            self.log(f"{split}/aux_loss", aux_loss, prog_bar=(split == "train"),
+                     on_step=(split == "train"), on_epoch=True)
             loss = loss + self.aux_lambda * aux_loss
             self.log(f"{split}/total_loss", loss, on_step=(split == "train"), on_epoch=True)
 
