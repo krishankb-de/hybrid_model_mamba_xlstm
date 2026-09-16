@@ -100,13 +100,15 @@ named actually live.
 | **RGRG** | 2023 | 0.461 | 0.475 | 0.447 | 0.373 | 0.126 | 0.168 | 0.264 |
 | PromptMRG | 2024 | 0.501 | 0.509 | **0.476** | 0.398 | 0.112 | 0.157 | 0.268 |
 | — | | | | | | | | |
-| **this project — hybrid 13D** | 2026 | — | — | **⬜ see §5.1** | 0.2469 | 0.0542 | — | 0.1899 |
-| **this project — matched Transformer** | 2026 | — | — | **⬜ see §5.1** | 0.2496 | 0.0571 | — | 0.1936 |
+| **this project — hybrid, 3 seeds** | 2026 | 0.4415 | 0.3789 | **0.3790 ± 0.0214** | 0.2508 ± 0.0034 | 0.0578 ± 0.0032 | — | 0.1949 ± 0.0047 |
+| **this project — matched Transformer, 3 seeds** | 2026 | 0.4524 | 0.3768 | **0.3817 ± 0.0144** | 0.2478 ± 0.0022 | 0.0575 ± 0.0016 | — | 0.1952 ± 0.0021 |
 | **this project — retrieval-NN floor** | 2026 | 0.4095 | 0.3898 | **0.3691** | 0.2372 | 0.0330 | — | 0.1636 |
 
-The floor's row is complete because its `samples avg` block was read directly from
-`results/retrieval_floor_test_split/chexbert_metrics.json`. **The same field exists in the
-generator dumps and simply has not been read out yet** — see §5.1. It requires no compute.
+**Updated 2026-09-16 (Phase 15B-4).** The generator rows are now **mean ± SD over seeds 42/43/44**, read from each
+arm's `samples avg` block; precision/recall are 3-seed means. On this lineage's own metric the project sits
+between M2TR (0.308) and MKSG (0.371) — **above the retrieval-NN floor it is measured against, and far below
+PromptMRG (0.476)**. The BLEU/ROUGE-L columns remain non-comparable for the reason in §2: this project's targets
+are findings **+ impression**, while the R2Gen lineage generates findings only.
 
 ### 3.2 Macro / micro F1 group — the modern LLM-scale tier
 
@@ -125,8 +127,9 @@ uses — see `compute_rare_finding_sample_weights()`'s U-Zeros note).
 | Med-PaLM M | **84B** | 0.536 | 0.398 | — |
 | **RA-RRG** | — | **0.585** | **0.417** | **0.507** |
 | — | | | | |
-| **this project — hybrid 13D** | **0.183B** | **0.4736** | **0.2800** | ⬜ §5.1 |
-| **this project — matched Transformer** | **0.183B** | 0.4590 | 0.2774 | ⬜ §5.1 |
+| **this project — hybrid, 3 seeds** | **0.183B** | **0.4480 ± 0.0223** | **0.2660 ± 0.0122** | 0.3790 ± 0.0214 |
+| **this project — matched Transformer, 3 seeds** | **0.183B** | 0.4443 ± 0.0153 | 0.2692 ± 0.0106 | 0.3817 ± 0.0144 |
+| *(the single 13D run previously quoted here)* | 0.183B | *0.4736* | *0.2800* | *0.4029* |
 | **this project — retrieval-NN floor** | n/a | 0.4296 | **0.3014** | 0.3691 |
 
 RA-RRG's BLEU/ROUGE-L cells are deliberately absent (§1, finding 2). Its macro-F1 of 0.417 is
@@ -196,7 +199,10 @@ mechanism and is authorised as one designed attempt.
 
 ## 5. What is NOT verified
 
-### 5.1 ⬜ This project's own example-based F1 — OPEN, zero compute needed
+### 5.1 ✅ This project's own example-based F1 — **CLOSED 2026-09-16** (was: OPEN, zero compute)
+
+Read out for all six arms and folded into §3.1/§3.2 as mean ± SD over seeds 42/43/44: **hybrid 0.3790 ± 0.0214**, **Transformer 0.3817 ± 0.0144**, floor 0.3691. Seed 42 alone gives 0.4029 / 0.3951 — the high draw, which is exactly why these rows are now seed means (`H100_SCALING_PLAN.md` 15B-4). The original instruction is kept below for provenance.
+
 
 `chexbert_metrics.json` already contains a `samples avg` block (example-based P/R/F1); it has
 simply never been read out, because Phases 11–14 reported micro and macro only. Without it,

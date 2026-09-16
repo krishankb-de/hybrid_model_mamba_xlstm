@@ -1,6 +1,6 @@
 {
   "current_phase": "phase15_thesis_strength",
-  "last_updated": "2026-09-15T21:00:00+0200",
+  "last_updated": "2026-09-16T10:30:00+0200",
   "OBJECTIVE_PIVOT_2026_08_16": {
     "new_primary_objective": "MEDICAL REPORT GENERATION scored by ROUGE-L + CheXbert F1 against ground-truth radiology reports. NOT retrieval.",
     "retrieval_status": "SUPPORTING CHAPTER -- complete, closed, numbers FINAL. Do not re-run retrieval arms to chase them. Clean protocol MIMIC i2t R@10 10.81% -> 14.59% (+3.78pp, 6.2 SE); protocol-matched (val==test) 11.07% -> 17.14%; Indiana flat within noise throughout (0.0390-0.0485, SE 0.76pp).",
@@ -1232,7 +1232,7 @@
       },
       "blocks": {
         "15A_published_baselines": "DRAFTED 2026-09-13, analysis/PUBLISHED_BASELINES.md (ccf59ad). Supervisor right on macro (0.2800 below all modern systems but DCL 0.284), but the 0.386-0.417 band is 7B-84B params or retrieval-augmented; nearest param-comparable PromptMRG ~0.2B macro 0.381. OPEN: own example-F1 (samples avg, zero compute), Janus-CXR (DO NOT CITE), RA-RRG BLEU/ROUGE-L.",
-        "15B_statistical_rigor": "IN PROGRESS. 15B-1 DONE (job 2542384; its 14-micro margin over the floor is seed-42-dependent: seeds 43/44 hybrid +0.0084/+0.0028). 15B-2 DONE (be3e8b8). 15B-3 DONE 2026-09-15 (generation 2544442-2544445, prefix_k=32 and Missing keys 0 in all four; scoring 2545312-2545315; recipe parity with seed 42 verified from logs + git). 15B-4 PARTIAL: CheXbert half computed -- Phase 14's CheXbert wins do NOT replicate across seeds (see seed_band_15B4). Pending: per-seed bootstraps (ROUGE-L/BLEU/EM-14 + CIs), seed-42 example-F1, 13D re-decode cmp. 15B-5 DONE (6556410).",
+        "15B_statistical_rigor": "DONE 2026-09-16, all five items. 15B-1 DONE but PARTLY SUPERSEDED (its 'wins 7 of 9 vs floor' is seed-42 only). 15B-2 be3e8b8. 15B-3 DONE (gen 2544442-45, scoring 2545312-15, recipe parity verified). 15B-4 DONE (bootstraps 2546523-2546526; re-decode 2546521 gave a byte-identical hyps.txt, so the eval path has not drifted). 15B-5 6556410. HEADLINE: Phase 14's split decision does NOT replicate in either direction; across 3 seeds the architectures are indistinguishable on 8 of 10 metrics. Seed SD is 3-15x the bootstrap half-width.",
         "15C_aux_multilabel_loss": "NOT_STARTED, gated on 15B-3/15B-5. Mechanism A chosen: head on mean-pooled prefix_embeds. B rejected on principle (under teacher forcing the pooled report representation already contains the report, so the aux task is solvable from text alone -- no grounding pressure). C rejected (brittle span detector, reproduces 13F shape). aux_lambda defaults 0.0 = zero behaviour change on ship. pos_weight capped at 10 (uncapped Pleural Other ~100x; 13F showed 5x already damaged common labels). lambda probed {0.1,0.5} at seed 42, SELECTED ON VALIDATION, reported on test.",
         "15D_retrieval_framing": "NOT_STARTED. Edits only. Expected small -- h100_scaling_results.md section 2 is already titled \"Retrieval (Supporting Chapter)\". State once, explicitly, that the chapter trails the best specialised retrieval architecture."
       },
@@ -1253,7 +1253,7 @@
         "recipe_parity_verified_2026_09_15": "13D training log 2502981 vs seed-43 log 2542397: first 60 lines differ only in date/node/GPU temps/seed lines; both reach max_steps=12000. Training-path commits since 13D (33ca7f8, fc2471e, be3e8b8, da27523) are behaviour-neutral for these arms. Seed 42 stays in the pool."
       },
       "seed_band_15B4": {
-        "status": "PARTIAL 2026-09-15 -- CheXbert F1 + exact-match-5 only; text metrics pending per-seed bootstraps",
+        "status": "COMPLETE 2026-09-16 -- all 10 metrics x 3 seeds, per-seed bootstrap CIs",
         "accuracy_key_is_exact_match_5": true,
         "per_seed": {
           "hybrid": {
@@ -1283,9 +1283,29 @@
               0.21817
             ],
             "example_f1_samples_avg": [
-              null,
+              0.40288,
               0.37261,
               0.36149
+            ],
+            "rouge_l": [
+              0.1899,
+              0.1991,
+              0.1957
+            ],
+            "bleu_1": [
+              0.2469,
+              0.2524,
+              0.2531
+            ],
+            "bleu_4": [
+              0.0542,
+              0.0604,
+              0.0588
+            ],
+            "exact_match_14": [
+              0.0349,
+              0.0447,
+              0.0345
             ]
           },
           "transformer": {
@@ -1315,9 +1335,29 @@
               0.2193
             ],
             "example_f1_samples_avg": [
-              null,
+              0.3951,
               0.3835,
               0.36642
+            ],
+            "rouge_l": [
+              0.1936,
+              0.1976,
+              0.1945
+            ],
+            "bleu_1": [
+              0.2496,
+              0.2484,
+              0.2453
+            ],
+            "bleu_4": [
+              0.0571,
+              0.0593,
+              0.0562
+            ],
+            "exact_match_14": [
+              0.0469,
+              0.0473,
+              0.0424
             ]
           },
           "seed_order": [
@@ -1347,6 +1387,26 @@
             "exact_match_5": [
               0.2163,
               0.0019
+            ],
+            "rouge_l": [
+              0.1949,
+              0.0047
+            ],
+            "bleu_1": [
+              0.2508,
+              0.0034
+            ],
+            "bleu_4": [
+              0.0578,
+              0.0032
+            ],
+            "exact_match_14": [
+              0.038,
+              0.0058
+            ],
+            "example_f1": [
+              0.379,
+              0.0214
             ]
           },
           "transformer": {
@@ -1369,6 +1429,26 @@
             "exact_match_5": [
               0.2244,
               0.0057
+            ],
+            "rouge_l": [
+              0.1952,
+              0.0021
+            ],
+            "bleu_1": [
+              0.2478,
+              0.0022
+            ],
+            "bleu_4": [
+              0.0575,
+              0.0016
+            ],
+            "exact_match_14": [
+              0.0455,
+              0.0027
+            ],
+            "example_f1": [
+              0.3817,
+              0.0144
             ]
           },
           "paired_diff_hybrid_minus_transformer": {
@@ -1426,6 +1506,61 @@
                 -0.0081,
                 0.0066
               ]
+            },
+            "rouge_l": {
+              "per_seed": [
+                -0.0038,
+                0.0015,
+                0.0012
+              ],
+              "mean_sd": [
+                -0.0004,
+                0.003
+              ]
+            },
+            "bleu_1": {
+              "per_seed": [
+                -0.0027,
+                0.0039,
+                0.0079
+              ],
+              "mean_sd": [
+                0.003,
+                0.0054
+              ]
+            },
+            "bleu_4": {
+              "per_seed": [
+                -0.0029,
+                0.0011,
+                0.0026
+              ],
+              "mean_sd": [
+                0.0003,
+                0.0028
+              ]
+            },
+            "exact_match_14": {
+              "per_seed": [
+                -0.012,
+                -0.0026,
+                -0.0079
+              ],
+              "mean_sd": [
+                -0.0075,
+                0.0047
+              ]
+            },
+            "example_f1": {
+              "per_seed": [
+                0.0078,
+                -0.0109,
+                -0.0049
+              ],
+              "mean_sd": [
+                -0.0027,
+                0.0095
+              ]
             }
           }
         },
@@ -1443,8 +1578,123 @@
             "Pleural Other"
           ]
         },
-        "verdict": "Phase 14's 'hybrid significantly wins 3 CheXbert F1 metrics' is a seed-42 result: every CheXbert F1 paired difference changes sign across seeds, Transformer leads all of them at seed 43. Across 3 seeds the architectures are indistinguishable on CheXbert F1; only exact-match-5 is same-sign (Transformer 3/3). Seed 42 is the high draw for both (13D selected as best 13-series arm; same-seed k=8/k=64 hybrids 0.4481/0.4488 sit with seeds 43/44, so Phase 14's k=32-optimum claim is likely the same draw).",
-        "15C_rule_reanchor_PROPOSED_not_adopted": "(a) aux 3-seed mean 14-macro > 0.2660 + 0.0122 = 0.2782, gain positive at >=2/3 seeds paired; (b) no-regression-below-floor judged on 3-seed mean 14-micro, not per seed (hybrid s44 is only +0.0028 above the floor)."
+        "verdict": "Phase 14's split decision does NOT replicate in either direction: the hybrid's 3 CheXbert wins and the Transformer's ROUGE-L win were all seed-42-only. Across 3 seeds the architectures are indistinguishable on 8 of 10 metrics; the survivors are BLEU-1 (hybrid ahead 2/3, CI excludes 0 at both new seeds) and exact-match-5/14 (Transformer ahead 3/3, CI excludes 0 at seed 42 only). Seed 42 is the high draw for CheXbert and the LOW draw for ROUGE-L in BOTH arms -- a training draw, not drift (re-decode byte-identical). Phase 14's k=32 optimum is likely the same draw.",
+        "15C_rule_reanchor_PROPOSED_not_adopted": "(a) aux 3-seed mean 14-macro > 0.2660 + 0.0122 = 0.2782, gain positive at >=2/3 seeds paired; (b) no-regression-below-floor judged on 3-seed mean 14-micro, not per seed (hybrid s44 is only +0.0028 above the floor).",
+        "eval_path_not_drifted": "Job 2546521 re-decoded 13D's last.ckpt with 2026-09-16 code into results/report_gen_tower13d_redecode_test_split; cmp against the 2026-09-03 hyps.txt = byte-identical. So seed 42's numbers are reproducible and the cross-seed spread is a TRAINING draw, not eval drift.",
+        "vs_retrieval_floor_across_seeds": {
+          "robust_generator_wins_3_of_3_seeds": [
+            "rouge_l",
+            "bleu_1",
+            "bleu_4",
+            "exact_match_5"
+          ],
+          "chexbert_14_micro": "+0.0440 (s42, CI excludes 0) / +0.0084 (s43, tie) / +0.0029 (s44, tie) -- seed-42-only win",
+          "chexbert_5_micro": "+0.0665 (s42, win) / -0.0047 (s43, tie) / +0.0071 (s44, tie)",
+          "chexbert_5_macro": "+0.0203 (s42, win) / -0.0339 (s43, FLOOR wins) / -0.0138 (s44, tie)",
+          "chexbert_14_macro": "-0.0214 / -0.0441 / -0.0404 -- FLOOR WINS AT ALL THREE SEEDS",
+          "exact_match_14": "tie (s42) / +0.0184 win (s43) / tie (s44) -- never loses",
+          "licensed_claim": "Better text and exact-match than copying a visually-similar neighbour's report; EQUAL clinical micro-F1; WORSE macro-F1."
+        },
+        "per_label_vs_floor_15C_targets": {
+          "floor_wins_both_new_seeds": {
+            "Lung Opacity": {
+              "support": 1027,
+              "hybrid": [
+                0.2189,
+                0.186
+              ],
+              "floor": 0.4011,
+              "diff": [
+                -0.1822,
+                -0.2151
+              ]
+            },
+            "Lung Lesion": {
+              "support": 177,
+              "hybrid": [
+                0.0112,
+                0.0
+              ],
+              "floor": 0.1419,
+              "diff": [
+                -0.1307,
+                -0.1419
+              ]
+            },
+            "Pneumonia": {
+              "support": 549,
+              "hybrid": [
+                0.1126,
+                0.1331
+              ],
+              "floor": 0.2102,
+              "diff": [
+                -0.0976,
+                -0.0771
+              ]
+            },
+            "Atelectasis": {
+              "support": 958,
+              "hybrid": [
+                0.3449,
+                0.3759
+              ],
+              "floor": 0.4423,
+              "diff": [
+                -0.0974,
+                -0.0664
+              ]
+            },
+            "Pleural Other": {
+              "support": 111,
+              "hybrid": [
+                0.0,
+                0.0
+              ],
+              "floor": 0.0963,
+              "diff": [
+                -0.0963,
+                -0.0963
+              ]
+            },
+            "Pneumothorax": {
+              "support": 84,
+              "hybrid": [
+                0.0392,
+                0.0331
+              ],
+              "floor": 0.1311,
+              "diff": [
+                -0.0919,
+                -0.0981
+              ]
+            }
+          },
+          "hybrid_wins_both_new_seeds": {
+            "Support Devices": {
+              "support": 1192,
+              "diff": [
+                0.1105,
+                0.1177
+              ]
+            },
+            "Enlarged Cardiomediastinum": {
+              "support": 708,
+              "diff": [
+                0.094,
+                0.0692
+              ]
+            },
+            "Cardiomegaly": {
+              "support": 1159,
+              "diff": [
+                0.0578,
+                0.0446
+              ]
+            }
+          },
+          "reframes_15C": "The largest single macro deficit is LUNG OPACITY (support 1027, 21% of the s43 summed-F1 deficit) -- a COMMON label, not a rare finding. The supervisor's 'driven by rare findings' framing is half right: rare labels contribute, but the biggest loss is a common label the model under-mentions. Watch Lung Opacity / Pneumonia / Atelectasis in 15C's per-label CIs, not only Lung Lesion / Pleural Other."
+        }
       }
     }
   },
@@ -1590,7 +1840,8 @@
     "2026-09-14 (15B-3 TRAINING COMPLETE): re-runs with SAVE_TOP_K=0 all COMPLETED exit 0:0 -- hybrid s44 2542912 (2h15m09s), transformer s43 2542913 (26m31s), transformer s44 2542914 (26m30s); hybrid s43 2542397 had already completed. One 2.4 GB last.ckpt each, correct Training seed lines. Wall time fell (transformer ~37m->26m, hybrid 2h30m->2h15m) consistent with removing top-k checkpoint writes. Generation + CheXbert on all four PENDING.",
     "2026-09-14 (15B-5 DONE, 6556410): bootstrap_compare.py --per-label gives per-label CheXbert-14 F1 CIs in a separate section. The instrument 15C needs: 13F was uninterpretable because a macro move cannot be attributed to specific labels without per-label intervals.",
     "2026-09-15 (15B-3 DONE): generation 2544442-2544445 (prefix_k=32, Missing keys 0, all four) + CheXbert 2545312-2545315. Recipe parity with seed 42 verified: 13D log 2502981 vs seed-43 log 2542397 differ only in date/node/seed lines; training-path commits since 13D are behaviour-neutral. Seed 42 stays in the pool.",
-    "2026-09-15 (15B-4 PARTIAL -- PHASE 14 CHEXBERT WINS DO NOT REPLICATE): hybrid-Transformer 14-micro +0.0146/-0.0075/+0.0040 (mean +0.0037 +/- 0.0111 SD); every CheXbert F1 diff changes sign; Transformer leads all at seed 43; only exact-match-5 same-sign (Transformer 3/3). Hybrid 14-micro 0.448 +/- 0.022, macro 0.266 +/- 0.012; 13D is the high draw. 15C rule needs re-anchoring (proposal recorded, not adopted). Also fixed: Phase 14 5-macro diff printed +0.0187 was the k32-vs-k8 diff; true +0.0168. Pending: per-seed bootstraps, seed-42 example-F1, 13D re-decode cmp."
+    "2026-09-15 (15B-4 PARTIAL -- PHASE 14 CHEXBERT WINS DO NOT REPLICATE): hybrid-Transformer 14-micro +0.0146/-0.0075/+0.0040 (mean +0.0037 +/- 0.0111 SD); every CheXbert F1 diff changes sign; Transformer leads all at seed 43; only exact-match-5 same-sign (Transformer 3/3). Hybrid 14-micro 0.448 +/- 0.022, macro 0.266 +/- 0.012; 13D is the high draw. 15C rule needs re-anchoring (proposal recorded, not adopted). Also fixed: Phase 14 5-macro diff printed +0.0187 was the k32-vs-k8 diff; true +0.0168. Pending: per-seed bootstraps, seed-42 example-F1, 13D re-decode cmp.",
+    "2026-09-16 (15B-4 DONE, 15B COMPLETE -- jobs 2546521-2546526): PHASE 14'S SPLIT DECISION DOES NOT REPLICATE IN EITHER DIRECTION. Hybrid's 3 CheXbert wins and Transformer's ROUGE-L win were seed-42-only; 8 of 10 metrics indistinguishable across 3 seeds. Survivors: BLEU-1 (hybrid 2/3) and exact-match-5/14 (Transformer 3/3, significant at s42 only). Re-decode of 13D with today's code = byte-identical hyps.txt, so this is training-draw variance, not eval drift; seed 42 is the high CheXbert draw AND the low ROUGE-L draw in both arms. Seed SD is 3-15x the bootstrap half-width. vs floor across seeds: text+exact-match robust, CheXbert micro a tie at 2/3 seeds, 14-macro loses at 3/3. Per-label vs floor REFRAMES 15C: biggest macro deficit is Lung Opacity (support 1027, common), not the rare labels. 15A-5.1 closed: example-F1 hybrid 0.3790 +/- 0.0214, Transformer 0.3817 +/- 0.0144, floor 0.3691."
   ],
   "rejected_by_prior_evidence": {
     "vit_unfreeze_blocks_0": "Already run (jobs 1942/1948/1949): MIMIC 10.45%->7.97%, Indiana IDENTICAL 3.90%. Freezing the ViT loses in-domain and recovers nothing cross-domain. ViT-unfreeze=2 is a proven pure +2.5pp win.",
