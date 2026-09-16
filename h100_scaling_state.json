@@ -1,6 +1,6 @@
 {
   "current_phase": "phase15_thesis_strength",
-  "last_updated": "2026-09-16T19:30:00+0200",
+  "last_updated": "2026-09-16T23:30:00+0200",
   "OBJECTIVE_PIVOT_2026_08_16": {
     "new_primary_objective": "MEDICAL REPORT GENERATION scored by ROUGE-L + CheXbert F1 against ground-truth radiology reports. NOT retrieval.",
     "retrieval_status": "SUPPORTING CHAPTER -- complete, closed, numbers FINAL. Do not re-run retrieval arms to chase them. Clean protocol MIMIC i2t R@10 10.81% -> 14.59% (+3.78pp, 6.2 SE); protocol-matched (val==test) 11.07% -> 17.14%; Indiana flat within noise throughout (0.0390-0.0485, SE 0.76pp).",
@@ -1759,7 +1759,57 @@
           }
         },
         "mechanism_read": "The aux head grounds the CONNECTOR's pooled representation in CheXpert labels, but what the decoder WRITES does not follow: at the dose that leaves common labels intact, the weighted rare labels are still never mentioned; at the dose that makes them appear, common labels collapse. Training-loss fit is untouched (train lm_loss 0.911 at 0.1 vs 0.913 at 0.5), so this is a generation-behaviour change, not an optimisation failure.",
-        "what_it_rules_out": "Mechanism A (aux multi-label loss on mean-pooled prefix_embeds) at lambda in {0.1, 0.5} with pos_weight cap 10, U-Zeros targets, 150M decoder, k=32. It does NOT rule out label-conditioned DECODING (e.g. PromptMRG's diagnosis-driven prompts, which put predicted labels in the decoder's INPUT rather than in an auxiliary loss) -- that is the honest 'what I would try next' line for the thesis, not a run this budget can afford."
+        "what_it_rules_out": "Mechanism A (aux multi-label loss on mean-pooled prefix_embeds) at lambda in {0.1, 0.5} with pos_weight cap 10, U-Zeros targets, 150M decoder, k=32. It does NOT rule out label-conditioned DECODING (e.g. PromptMRG's diagnosis-driven prompts, which put predicted labels in the decoder's INPUT rather than in an auxiliary loss) -- that is the honest 'what I would try next' line for the thesis, not a run this budget can afford.",
+        "test_split_n2663_lambda_0.1": {
+          "note": "For the record only; the stop rule already fired on validate. Paired with 13D at the same seed 42.",
+          "jobs": "decode 2550683, scoring 2550703",
+          "aux_lambda_0.1": {
+            "chexbert_14_micro": 0.47145,
+            "chexbert_14_macro": 0.28202,
+            "chexbert_5_micro": 0.54949,
+            "chexbert_5_macro": 0.44729,
+            "exact_match_5": 0.22869,
+            "example_f1": 0.40369
+          },
+          "baseline_13D": {
+            "chexbert_14_micro": 0.4736,
+            "chexbert_14_macro": 0.28,
+            "chexbert_5_micro": 0.5522,
+            "chexbert_5_macro": 0.4487,
+            "exact_match_5": 0.2163,
+            "example_f1": 0.40288
+          },
+          "paired_diff": {
+            "chexbert_14_macro": 0.002,
+            "chexbert_14_micro": -0.0022,
+            "chexbert_5_micro": -0.0027,
+            "chexbert_5_macro": -0.0014,
+            "exact_match_5": 0.0124,
+            "example_f1": 0.0008
+          },
+          "per_label_f1": {
+            "Enlarged Cardiomediastinum": 0.2426,
+            "Cardiomegaly": 0.6509,
+            "Lung Opacity": 0.3005,
+            "Lung Lesion": 0.0109,
+            "Edema": 0.4359,
+            "Consolidation": 0.0358,
+            "Pneumonia": 0.1975,
+            "Atelectasis": 0.4794,
+            "Pneumothorax": 0.0444,
+            "Pleural Effusion": 0.6344,
+            "Pleural Other": 0.0,
+            "Fracture": 0.0321,
+            "Support Devices": 0.6944,
+            "No Finding": 0.1894
+          },
+          "read": "Both splits agree on 'nothing happened': macro +0.0020 on test vs -0.0016 on validate, opposite signs, each ~1/6 of one training-seed SD. Lung Lesion and Pleural Other -- the two labels at maximum pos_weight -- are still at zero on test."
+        },
+        "validate_text_metric_bootstraps": {
+          "jobs": "2550663 (lambda=0.1), 2550664 (lambda=0.5)",
+          "result": "ALL TEXT METRICS TIE at both doses. lambda=0.1: rouge_l -0.0002 [-0.0037,+0.0033], bleu_1 +0.0014, bleu_4 +0.0008. lambda=0.5: rouge_l +0.0005, bleu_1 -0.0021, bleu_4 -0.0015. So lambda=0.5's CheXbert damage is NOT general text degradation -- the model writes equally well and labels worse.",
+          "GAP": "CheXbert CIs were SKIPPED: results/report_gen_tower13d_n1433 predates the label-dump fix (14e683a) and has no chexbert_labels.json. Re-score that dump, then re-run both bootstraps with PER_LABEL=true."
+        }
       }
     }
   },
@@ -1909,7 +1959,8 @@
     "2026-09-16 (15B-4 DONE, 15B COMPLETE -- jobs 2546521-2546526): PHASE 14'S SPLIT DECISION DOES NOT REPLICATE IN EITHER DIRECTION. Hybrid's 3 CheXbert wins and Transformer's ROUGE-L win were seed-42-only; 8 of 10 metrics indistinguishable across 3 seeds. Survivors: BLEU-1 (hybrid 2/3) and exact-match-5/14 (Transformer 3/3, significant at s42 only). Re-decode of 13D with today's code = byte-identical hyps.txt, so this is training-draw variance, not eval drift; seed 42 is the high CheXbert draw AND the low ROUGE-L draw in both arms. Seed SD is 3-15x the bootstrap half-width. vs floor across seeds: text+exact-match robust, CheXbert micro a tie at 2/3 seeds, 14-macro loses at 3/3. Per-label vs floor REFRAMES 15C: biggest macro deficit is Lung Opacity (support 1027, common), not the rare labels. 15A-5.1 closed: example-F1 hybrid 0.3790 +/- 0.0214, Transformer 0.3817 +/- 0.0144, floor 0.3691.",
     "2026-09-16 (15C-1 + 15C-2 SHIPPED, commit pending): aux CheXpert head on the mean-pooled image prefix. AUX_LAMBDA default 0.0 builds NO head -- tested bit-identical decoder/prefix_mapper init and no aux_head.* checkpoint key, so the 15B-4 seed band stays the valid baseline; aux state dict loads into an eval module with missing==[] and every aux_* key in unexpected (the fairness property). Unlabelled studies masked out (mask 0.0), pos_weight from the TRAIN split only, cap 10.0 fixed across arms, val/lm_loss still the checkpoint monitor. validate_for_willi.sh 9/9, 230 passed. Success rule re-anchored and ADOPTED (paired macro > +0.0122 and positive at >=2/3 seeds; micro judged on the 3-seed mean vs 0.4296).",
     "2026-09-16 (15C GPU smoke, job 2548455): aux path runs end-to-end on H100. 100% CheXpert coverage on the Phase-8 build (mask never fires), pos_weight cap=10 binds on the 6 rarest labels, decoder init Missing 0 / image tower Missing 0, 50 steps in 32s at 1.56 it/s. ACCOUNT EXPIRY 2026-09-29 (13 days) -- extension ticket needed, and HOME is deleted 6 months after expiry, so DUA-covered checkpoints must be archived off-cluster before then.",
-    "2026-09-16 (15C-3 NEGATIVE, stop rule fired -- jobs 2548850/2548851 train, 2550145/2550153 decode, 2550637/2550638 score): neither lambda improves validate CheXbert-14-macro vs 13D's own validate dump (0.2869 -> 0.2853 at lambda=0.1, -0.0016 = 1/8 seed SD; -> 0.2712 at 0.5, harmful on all metrics, monotone dose-response). Per-label shows 13F's shape: at 0.1 Lung Lesion/Pleural Other still exactly 0.000 despite pos_weight 10; at 0.5 they move off zero while Consolidation/Fracture collapse to 0.000. 15C-4's 3 seeds do NOT run, per the rule declared before the probe. ~7 GPU-hours returned to a budget that ends with the account on 2026-09-29."
+    "2026-09-16 (15C-3 NEGATIVE, stop rule fired -- jobs 2548850/2548851 train, 2550145/2550153 decode, 2550637/2550638 score): neither lambda improves validate CheXbert-14-macro vs 13D's own validate dump (0.2869 -> 0.2853 at lambda=0.1, -0.0016 = 1/8 seed SD; -> 0.2712 at 0.5, harmful on all metrics, monotone dose-response). Per-label shows 13F's shape: at 0.1 Lung Lesion/Pleural Other still exactly 0.000 despite pos_weight 10; at 0.5 they move off zero while Consolidation/Fracture collapse to 0.000. 15C-4's 3 seeds do NOT run, per the rule declared before the probe. ~7 GPU-hours returned to a budget that ends with the account on 2026-09-29.",
+    "2026-09-16 (15C test-split confirmation, jobs 2550683/2550703 + validate bootstraps 2550663/2550664): lambda=0.1 on the official test split moves CheXbert-14-macro +0.0020 (0.2800 -> 0.2820), i.e. 1/6 of a training-seed SD, and validate moved -0.0016 -- opposite signs, both noise. Lung Lesion/Pleural Other still at zero on test despite maximum pos_weight. Text metrics tie at BOTH doses, so lambda=0.5's CheXbert damage is not general text degradation. OPEN: the 13D validate dump has no chexbert_labels.json (predates 14e683a), so those bootstraps carry text rows only."
   ],
   "rejected_by_prior_evidence": {
     "vit_unfreeze_blocks_0": "Already run (jobs 1942/1948/1949): MIMIC 10.45%->7.97%, Indiana IDENTICAL 3.90%. Freezing the ViT loses in-domain and recovers nothing cross-domain. ViT-unfreeze=2 is a proven pure +2.5pp win.",

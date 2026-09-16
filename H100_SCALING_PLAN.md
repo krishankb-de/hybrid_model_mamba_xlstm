@@ -1313,6 +1313,23 @@ At the model's actual (uninitialized) Δ distribution: **16.2% of channels hit t
 
   **What this rules out.** The aux head trains against CheXpert targets the decoder demonstrably cannot be made to *mention*: grounding the connector's pooled representation is not sufficient to change what the LM writes. That is a cleaner negative than 13F's, because the seed band from 15B-4 makes "smaller than training noise" a quantified statement rather than an impression.
 
+  **TEST-SPLIT CONFIRMATION of λ=0.1 (2026-09-16, decode job 2550683, scoring 2550703; n=2663, paired with 13D at the same seed 42).** Run for the record only — no selection happens on it, because the rule already stopped 15C at the validate step.
+
+  | metric (official test, n=2663) | 13D baseline | aux λ=0.1 | Δ | vs 3-seed SD |
+  |---|---|---|---|---|
+  | **CheXbert-14-macro** | 0.2800 | 0.2820 | **+0.0020** | 0.16 × SD (0.0122) |
+  | CheXbert-14-micro | 0.4736 | 0.4715 | −0.0022 | 0.10 × SD (0.0223) |
+  | CheXbert-5-micro | 0.5522 | 0.5495 | −0.0027 | — |
+  | CheXbert-5-macro | 0.4487 | 0.4473 | −0.0014 | — |
+  | exact-match-5 | 0.2163 | 0.2287 | +0.0124 | (validate moved −0.0139, i.e. opposite — noise) |
+  | example-F1 | 0.4029 | 0.4037 | +0.0008 | — |
+
+  **Both splits agree, and they agree on "nothing happened".** The target metric moves +0.0020 on test and −0.0016 on validate — opposite signs, each about a sixth of one training-seed SD. **Lung Lesion (0.0109) and Pleural Other (0.0000) are still at zero on test**, the two labels carrying the maximum `pos_weight`.
+
+  **Text metrics are untouched at BOTH doses** (validate paired bootstraps, jobs 2550663/2550664): λ=0.1 gives ROUGE-L −0.0002 [−0.0037,+0.0033], BLEU-1 +0.0014, BLEU-4 +0.0008; λ=0.5 gives ROUGE-L +0.0005, BLEU-1 −0.0021, BLEU-4 −0.0015 — every CI spans zero. So λ=0.5's CheXbert damage is **not** a general degradation of the text: the model writes equally well and labels worse.
+
+  ⚠ **Those bootstraps carry text metrics only.** `results/report_gen_tower13d_n1433` predates the label-dump fix (14e683a, 2026-09-09), so it has no `chexbert_labels.json` and the CheXbert rows were skipped with a warning. Re-score that dump and re-run to close it — see 15C-5.
+
   Original spec:
 
   **Recipe (2026-09-16), baseline = 13D itself (seed 42, same recipe, `results/report_gen_tower13d_n1433`):**
