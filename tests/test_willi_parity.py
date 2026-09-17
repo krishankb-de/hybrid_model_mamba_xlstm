@@ -5482,6 +5482,21 @@ def _model_yaml(name):
     return yaml.safe_load((REPO_ROOT / "configs" / "model" / f"{name}.yaml").read_text())
 
 
+def _v3_stage0_operator():
+    """(arm name, {scan_impl, tfla_impl}) the V3 chain trains Stage-0 with by default: the arm's
+    yaml overlaid with the arm's own overrides -- exactly what the ARM resolver applies."""
+    import importlib.util
+    chain = (REPO_ROOT / "scripts" / "submit_v3_chain.sh").read_text()
+    m = re.search(r'local ARM="\$\{ARM:-([A-Za-z0-9-]+)\}"', chain)
+    assert m, "submit_v3_chain.sh must declare a default ARM"
+    spec = importlib.util.spec_from_file_location("m3arms", REPO_ROOT / "scripts" / "mamba3_arms.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    arm = mod.ARMS[m.group(1)]
+    base = _model_yaml(arm.config)
+    op = {k: arm.overrides.get(k, base[k]) for k in ("scan_impl", "tfla_impl")}
+    return m.group(1), op
+
+
 @pytest.mark.willi_parity
 def test_m3_rrg_config_is_m3_plus_exactly_the_rrg_delta():
     """V1-B: the Mamba-3 report-gen config mirrors the hybrid_150m_v2 -> _rrg delta EXACTLY,
@@ -5492,12 +5507,33 @@ def test_m3_rrg_config_is_m3_plus_exactly_the_rrg_delta():
     dropped = {k for k in v2 if k not in v2_rrg}
     changed = {k for k in v2_rrg if k not in v2 or v2_rrg[k] != v2[k]}
     expected = {k: (v2_rrg[k] if k in changed else m3[k]) for k in (set(m3) - dropped) | changed}
+    # V2-D: the ONE sanctioned difference beyond the rrg delta -- the decoder runs the operator
+    # the winning Stage-0 arm trained with (A2x: tfla_impl=exact). hybrid_150m_m3.yaml itself stays
+    # legacy because it defines the M7 arms A2..A6.
+    expected.update(_v3_stage0_operator()[1])
     assert m3_rrg == expected, {
         "missing": sorted(set(expected) - set(m3_rrg)),
         "extra": sorted(set(m3_rrg) - set(expected)),
         "differ": sorted(k for k in set(expected) & set(m3_rrg) if expected[k] != m3_rrg[k]),
     }
     assert m3_rrg["layer_pattern"].count("mamba3") == 9 and m3_rrg["layer_pattern"].count("mlstm") == 3
+
+
+@pytest.mark.willi_parity
+def test_v3_decoder_config_runs_the_operator_its_stage0_arm_trained_with():
+    """V2-D: scan_impl / tfla_impl carry no parameters, so a decoder built with `legacy` loads an
+    `exact`-trained Stage-0 checkpoint with Missing keys: 0 and silently fine-tunes and evaluates a
+    different recurrence. The chain trains Stage-0 through ARM (hybrid_150m_m3 + overrides) and
+    trains/evaluates the decoder through hybrid_150m_m3_rrg -- two routes that must agree."""
+    arm, op = _v3_stage0_operator()
+    rrg = _model_yaml("hybrid_150m_m3_rrg")
+    assert arm == "A2x", "V2-D (2026-09-17): A2x advanced -- 15.566 / 15.788 vs A2 16.708 / 16.376"
+    assert op == {"scan_impl": "legacy", "tfla_impl": "exact"}, op
+    assert {k: rrg[k] for k in op} == op, (
+        "hybrid_150m_m3_rrg.yaml runs %s but the V3 Stage-0 arm %s trains with %s"
+        % ({k: rrg[k] for k in op}, arm, op))
+    chain = (REPO_ROOT / "scripts" / "submit_v3_chain.sh").read_text()
+    assert chain.count("MODEL_CONFIG=hybrid_150m_m3_rrg") == 2, "decoder AND eval must use the rrg config"
 
 
 @pytest.mark.willi_parity
@@ -5610,8 +5646,16 @@ def test_v3_chain_script_is_source_safe_and_only_submits_existing_wrappers():
         assert (REPO_ROOT / w).exists() and "#SBATCH --exclude=ga03" in wsrc, w
     # the levers the plan's recipe depends on are all threaded
     for lever in ("ARM=", "SEEDS", "SAVE_TOP_K=0", "NUM_GPUS=4", "MAX_STEPS=12000", "PREFIX_K",
-                  "DECODE=beam", "BEAM_SIZE=3", "PER_LABEL=true", "IMAGE_ENCODER_CKPT", "DRY_RUN"):
+                  "DECODE=beam", "BEAM_SIZE=3", "PER_LABEL=true", "IMAGE_ENCODER_CKPT", "DRY_RUN",
+                  "EVAL_TIME"):
         assert lever in src, lever
+    # V2-D: every incumbent dump the 15B-4 table came from (h100_scaling_state.json seed_arms), so all
+    # nine paired bootstraps are submitted -- none silently skipped.
+    for d in ("results/report_gen_tower13d_test_split", "results/report_gen_hybrid_seed43_test_split",
+              "results/report_gen_hybrid_seed44_test_split", "results/report_gen_transformer_test_split",
+              "results/report_gen_transformer_seed43_test_split",
+              "results/report_gen_transformer_seed44_test_split"):
+        assert d in src, d
 
 
 _PKG_IMPORT = re.compile(r"^\s*(from|import)\s+hybrid_xmamba\b", re.M)

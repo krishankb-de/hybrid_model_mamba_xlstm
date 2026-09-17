@@ -27,7 +27,12 @@ use_fast_path: true
 # before 2026-09 byte-for-byte (including the divide-and-clamp defect, analysis/scan_error_bound.md);
 # "exact" is the division-free fix (M1-E / M1-H). The M7 screen and every published number ran legacy.
 scan_impl: "legacy"
-tfla_impl: "legacy"
+# V2-D (2026-09-17, array 2552165): A2x advanced -- the Stage-0 backbone this decoder loads is trained
+# with the mLSTM recurrence corrected (val PPL 15.566 / 15.788 vs A2's 16.708 / 16.376). This flag has no
+# parameters, so a legacy decoder would load that checkpoint with Missing keys: 0 and silently run a
+# different operator. Deliberately differs from hybrid_150m_m3.yaml, which still defines the M7 arms.
+# Parity test: test_v3_decoder_config_runs_the_operator_its_stage0_arm_trained_with.
+tfla_impl: "exact"
 
 # Mamba-3 parameters. Every flag here is the Mamba-2 reduction; the ablation arms override them.
 mamba3_d_state: 128        # 8x the Mamba-1 setting, +1.4% params (B/C shared across heads)

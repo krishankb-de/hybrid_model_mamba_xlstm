@@ -46,7 +46,7 @@ The login node executes nothing scripted. Cluster invariants and the login-node 
 | 4 | **Gate**: staged — the 12K screen decides the arm (done: A2; A2x re-screen pending), the full pipeline decides the claim on the official n=2663 test split **with 3 decoder seeds**, paired to the incumbents' seeds. |
 | 5 | **Retrain**: Stage-0 for the winner only; **tower reused from 13D**; decoder × 3 seeds. |
 | 6 | `d_state=128`, `headdim=64`, `ngroups=1`, `expand=2` (parameter-matched, +0.26%). |
-| 7 | **`scan_impl` / `tfla_impl` defaults stay `legacy` for reproduction. Every yaml with a recurrent layer pins both explicitly** (`test_every_recurrent_model_yaml_pins_the_operator_explicitly`); `hybrid_150m_m3*` pins whatever V2-D decides. |
+| 7 | **`scan_impl` / `tfla_impl` defaults stay `legacy` for reproduction. Every yaml with a recurrent layer pins both explicitly** (`test_every_recurrent_model_yaml_pins_the_operator_explicitly`); V2-D decided A2x: `hybrid_150m_m3_rrg` pins `tfla_impl: exact`; `hybrid_150m_m3` stays `legacy` (it defines the M7 arms) and Stage-0 gets `exact` via `ARM=A2x`, with a parity test that the two agree. |
 | 8 | `layer_pattern` stays 9 mamba3 + 3 mlstm through V3; the ratio is re-opened only as gated phase V5-C. |
 | 9 | py3.9/willi retirement is **deferred to V4-B** (after V3 is submitted) — the harness is the gate mid-campaign and it passes under a real 3.9.23. |
 | 10 | **Claim rule for V3** (mirrors 15C-4 as re-anchored): a Mamba-3 win over an incumbent on a metric is claimed only if the paired-by-seed mean exceeds **one baseline seed SD** (15B-4 table) **and** the sign holds at ≥2/3 seeds. Per-seed bootstrap CIs are reported alongside, never substituted. "Indistinguishable across 3 seeds" is the expected and reportable outcome. |
@@ -70,7 +70,7 @@ The login node executes nothing scripted. Cluster invariants and the login-node 
 
 Per-seed source: `H100_SCALING_PLAN.md` 15B-4 table; incumbents' per-seed dumps live under `results/` on the
 cluster (seed 42: `results/report_gen_tower13d_test_split`, `results/report_gen_transformer_test_split`; 43/44:
-the 15B-3 dump dirs — resolve with `ls results/` and record here before V3-D). Pre-registered tiers unchanged:
+`results/report_gen_{hybrid,transformer}_seed{43,44}_test_split`, from `h100_scaling_state.json` → `seed_arms`; all six are defaults in `submit_v3_chain.sh`). Pre-registered tiers unchanged:
 ROUGE-L Floor 0.15 / Target 0.22 / Stretch 0.26; CheXbert-14-micro 0.25 / 0.40 / 0.50.
 
 ## The screen result the pipeline builds on (M7, carried; full record below)
@@ -82,9 +82,23 @@ ROUGE-L Floor 0.15 / Target 0.22 / Stretch 0.26; CheXbert-14-micro 0.25 / 0.40 /
 | **A2** (Mamba3Block = Mamba-2 SSD, `d_state` 128) | **16.708** / 16.376 (s1234) | **1:20:55** | −13.8%, **1.94× faster**; A1−A2 not significant |
 | A3 (+ trapezoid) | 16.719 | 1:28:00 | null (+0.011) |
 | A4-hi (+ RoPE, `theta_max` 0.2) / s1234 | 16.199 / 18.912 | 1:31:23 | high-variance; rejected by the pre-registered rule |
+| **A2x** (A2 + `tfla_impl=exact`, V2-C) | **15.566 / 15.788** | wall 5:45 / 5:57 | **−0.865 PPL vs A2 on the 2-seed mean; advanced (V2-D)** |
 
-**Winner A2. The headline is the defect, not the architecture; what SSD buys is the cost of being correct.**
-A2 was screened with `tfla_impl=legacy`; V2 screens A2x.
+**Winner of M7: A2. Winner of V2: A2x**, which carries into V3.
+
+⚠ **Correction to the M7 headline (2026-09-17).** M7 concluded *"the headline is the defect, not the architecture"* from
+A1 − A2 = +0.414 PPL (not significant). That comparison was not like-for-like: **A1 had both recurrences corrected**
+(`scan_impl=exact`, `tfla_impl=exact`; its fingerprint in the V2-A preflight says so) while **A2 still ran the defective
+mLSTM** (`tfla_impl=legacy`). With both corrected on both sides, A2x s42 **15.566** vs A1 s42 **16.294** = **−0.728 PPL**,
+1.13× the bar, with a single A1 seed. The revised reading: correcting the mLSTM is worth ~0.87 PPL on its own (A2 → A2x);
+once both operators are correct, SSD + 8× state is ahead of corrected Mamba-1 by ~0.7 PPL — just above the bar, and
+unreplicated on A1's side. The defect remains the largest single effect (A0 → A1 −3.09 PPL).
+
+⚠ **Speed claims need re-checking from wall clocks.** The progress bar's elapsed column is not the training time:
+A2x shows `1:52:35`, yet 36,000 micro-batches at the bar's own 1.75 it/s is 5.7 h, which matches the job's wall clock
+(5:45:18). M7's "A2 1.94× faster than A0" compared that same column. Same-column *rates* are A0 1.36, A2 2.18 (300-step
+probe), A2x 1.75 it/s: exact TFLA costs ~20% throughput vs A2, and A2x is ~1.3× A0. Settle it with
+`sacct -j 2513005,2513632,2515666 --format=JobID,Elapsed,NodeList` before any speed number reaches the writeup.
 
 ---
 
@@ -763,21 +777,41 @@ mechanical; the semantic reconciliation is listed under V0-A/B. Merge commit **`
 
 ### V2 — Re-validate on the H100 and screen A2x (~3 h wall + queue)
 
-- [ ] **V2-A** `sbatch scripts/preflight_mamba3_h100.sh` (CPU, ~2 min) on the merged code, which has never run on the cluster: fingerprints for A0/A1/A2/A2x at 150M, the parameter band, Δ at init, the CPU suite.
+- [x] **V2-A** `sbatch scripts/preflight_mamba3_h100.sh` (CPU, ~2 min) on the merged code, which has never run on the cluster: fingerprints for A0/A1/A2/A2x at 150M, the parameter band, Δ at init, the CPU suite.
   ⚠ **Attempt 1 FAILED (job 2552094, 2026-09-17, 13 s):** `python scripts/mamba3_arms.py verify` → `ModuleNotFoundError: No module named 'hybrid_xmamba'`. Running a script puts `scripts/` on `sys.path`, not the repo root, and the aisc `.venv` has **no editable install** of the package — only the laptop venv does, which is why every local check passed. `mamba3_arms.py` was the one script importing the package without inserting the repo root (27 others do); `env` never hit it because it imports nothing from the package. Its `afterok` dependant, the probe 2552095, went `DependencyNeverSatisfied`, and the screen array 2552097 waited on it. **Fixed** by the same `sys.path.insert` convention, plus two tests: a static rule over every `scripts/*.py`, and a subprocess reproduction with `python -S` (no `.pth` finder) that fails with the cluster's exact error when the fix is removed. Gate 1 measured at 25 s on 4 threads.
-- [ ] **V2-B** 300-step GPU probe: `ARM=A2x STEPS=300 EXPERIMENT=m3v2_probe_A2x sbatch --time=00:30:00 scripts/train_stage0_150m_h100.sh`. Log must show `mamba3x9 … tfla_impl=exact`, finite descending loss, no NaN; throughput vs A2's 2.18 steps/s (exact TFLA measured 1.03× on CPU — confirm on GPU).
-- [ ] **V2-C** Paired screen: `ARMS="A2x A2x-s2" VAL_EVERY=12000 SAVE_TOP_K_SCREEN=0 sbatch --array=0-1 scripts/screen_arms_h100.sh` — 12,000 steps, warmup 500, seeds 42/1234, the M7 val set unchanged (pairs with A2 16.708 / A2-s2 16.376), one validation pass at the end (~2.5 h each, parallel).
-- [ ] **V2-D** **Pre-registered rule, written before the numbers exist:** A2x advances to V3 **unless** (i) its 2-seed mean val PPL exceeds A2's 2-seed mean **16.542** by more than the M7 bar **0.642 PPL**, or (ii) it spikes/NaNs. Otherwise A2 advances and exact TFLA is reported as a screen-level null with the mLSTM defect left in the trained system (decode cache demonstrated on random weights only). Pin the chosen `tfla_impl` into `hybrid_150m_m3.yaml` + `_rrg` (V1-E test) **before** V3-A launches; record both PPLs in the arms table of the state file.
+- [x] **V2-B** 300-step GPU probe: `ARM=A2x STEPS=300 EXPERIMENT=m3v2_probe_A2x sbatch --time=00:30:00 scripts/train_stage0_150m_h100.sh`. Log must show `mamba3x9 … tfla_impl=exact`, finite descending loss, no NaN; throughput vs A2's 2.18 steps/s (exact TFLA measured 1.03× on CPU — confirm on GPU).
+- [x] **V2-C** Paired screen: `ARMS="A2x A2x-s2" VAL_EVERY=12000 SAVE_TOP_K_SCREEN=0 sbatch --array=0-1 scripts/screen_arms_h100.sh` — 12,000 steps, warmup 500, seeds 42/1234, the M7 val set unchanged (pairs with A2 16.708 / A2-s2 16.376), one validation pass at the end (~2.5 h each, parallel).
+- [x] **V2-D** **Pre-registered rule, written before the numbers exist:** A2x advances to V3 **unless** (i) its 2-seed mean val PPL exceeds A2's 2-seed mean **16.542** by more than the M7 bar **0.642 PPL**, or (ii) it spikes/NaNs. Otherwise A2 advances and exact TFLA is reported as a screen-level null with the mLSTM defect left in the trained system (decode cache demonstrated on random weights only). Pin the chosen `tfla_impl` into `hybrid_150m_m3.yaml` + `_rrg` (V1-E test) **before** V3-A launches; record both PPLs in the arms table of the state file.
+
+**V2 RESULT (2026-09-17). Preflight 2552163 passed; probe 2552164 exited 0; screen array 2552165 (both tasks on gx07).**
+
+| Arm | seed 42 | seed 1234 | 2-seed mean | cross-seed spread |
+|---|---|---|---|---|
+| A0 (Mamba-1, both operators legacy) | 19.387 | 18.933 | 19.160 | 0.454 |
+| A1 (Mamba-1, both operators exact) | 16.294 | — | — | — |
+| A2 (SSD, TFLA legacy) | 16.708 | 16.376 | 16.542 | 0.332 |
+| **A2x (SSD, TFLA exact)** | **15.566** | **15.788** | **15.677** | **0.222** |
+
+- **The rule fired in A2x's favour**: better, not merely not-worse. Paired deltas −1.142 / −0.588; mean **−0.865 PPL
+  (−5.2%)**, 1.35× the 0.642 bar; both seeds agree. A2x is also the most seed-stable arm measured.
+- **Pairing caveat.** A2x validated with `VAL_EVERY=12000`, A2 with 2000. Validation creates a fresh dataloader
+  iterator, which draws from the global RNG, so the two trajectories diverge after the first validation even at the
+  same seed. The pairing is therefore weaker than M7's within-screen pairs. It does not affect the decision.
+- **Cost.** 5:45:18 and 5:57:14 wall for 12,000 steps (≈1.73 s/step all-in), 1.75 / 1.71 it/s. The V2-C estimate of
+  ~2.5 h per arm was wrong (see the speed correction above).
+- **Pinned for V3.** `hybrid_150m_m3_rrg.yaml` runs `tfla_impl: "exact"`; `hybrid_150m_m3.yaml` stays `legacy` because it
+  defines the M7 arms A2–A6. Stage-0 receives `exact` through `ARM=A2x`. `test_v3_decoder_config_runs_the_operator_its_stage0_arm_trained_with`
+  pins that the two routes agree — the flag has no parameters, so a mismatch would load with `Missing keys: 0`.
 
 ### V3 — Full pipeline on the winner, matched to the 14A/15B protocol (~5–6 days wall)
 
 `source scripts/submit_v3_chain.sh` the moment V2-D decides (`DRY_RUN=1` first). One Stage-0 at seed 42 (as both
 incumbents have); decoder seeds 42/43/44 paired with 15B-3; 13D tower reused.
 
-- [ ] **V3-A** Stage-0 150M, 120K steps (`ARM=<A2x|A2> STEPS=120000 WARMUP_STEPS=2000 VAL_EVERY=10000 SAVE_TOP_K=1 EXPERIMENT=h100_stage0_150m_m3`), recipe otherwise identical to Phase 5 / 14A-3 (bs 16×3, LR 4e-4, clip 0.5, `GRAD_CKPT=true` — no harvesting under the deadline). Expect ~24 h wall (13.5 h fit at A2's rate + 12 validation passes on the unchanged 15,724-chunk val set, kept so PPL stays comparable). **Gate: val PPL reported against 13.18 (hybrid) and 11.222 (Transformer)**; there is no Stage-0 seed band for any of the three — say so; the 12K-screen spread (0.33–0.45 PPL) is the only noise estimate. If preempted, resume from `last.ckpt` via `train_stage0_distill_resume.py` rather than restarting (FM9).
+- [ ] **V3-A** Stage-0 150M, 120K steps (`ARM=<A2x|A2> STEPS=120000 WARMUP_STEPS=2000 VAL_EVERY=10000 SAVE_TOP_K=1 EXPERIMENT=h100_stage0_150m_m3`), recipe otherwise identical to Phase 5 / 14A-3 (bs 16×3, LR 4e-4, clip 0.5, `GRAD_CKPT=true` — no harvesting under the deadline). Expect **~58 h wall** at A2x's measured 1.73 s/step all-in (V2-C), inside the wrapper's 4-day limit; the unchanged 15,724-chunk val set is kept so PPL stays comparable. A single preemption restarts from step 0 (FM9) — check `sacct` daily. **Gate: val PPL reported against 13.18 (hybrid) and 11.222 (Transformer)**; there is no Stage-0 seed band for any of the three — say so; the 12K-screen spread (0.33–0.45 PPL) is the only noise estimate. If preempted, resume from `last.ckpt` via `train_stage0_distill_resume.py` rather than restarting (FM9).
 - [ ] **V3-B** Tower: reuse `outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt` unchanged (14A-4 caveat: co-trained with the legacy hybrid text encoder; recorded, not fixed). No run.
 - [ ] **V3-C** Decoder × 3 (chain stage 2): `MODEL_CONFIG=hybrid_150m_m3_rrg`, `DECODER_CKPT=<V3-A last.ckpt>`, `NUM_GPUS=4 MAX_STEPS=12000 SEED=<s> SAVE_TOP_K=0 AUX_LAMBDA=0.0 PREFIX_K=32`, 13D tower. Read each log: `Missing keys: 0`, `prefix_k = 32`, `Training seed: <s>`, `Aux CheXpert loss: OFF`.
-- [ ] **V3-D** Eval × 3 → CheXbert × 3 → bootstraps × 9 (chain stages 3–5): official test split n=2663, `DECODE=beam BEAM_SIZE=3`, the incumbents' uncached path; `PER_LABEL=true` bootstraps per seed vs hybrid (same seed), vs Transformer (same seed), vs the floor → `analysis/bootstrap_m3_vs_{hybrid,transformer,floor}_seed{42,43,44}.md`. Apply decision 10; report mean ± SD per metric, never one seed. **Before submitting:** resolve the 15B-3 dump dirs for seeds 43/44 on the cluster and pass them as `HYBRID_DUMP_43=… TRANSFORMER_DUMP_43=…` etc.
+- [ ] **V3-D** Eval × 3 → CheXbert × 3 → bootstraps × 9 (chain stages 3–5): official test split n=2663, `DECODE=beam BEAM_SIZE=3`, the incumbents' uncached path; `PER_LABEL=true` bootstraps per seed vs hybrid (same seed), vs Transformer (same seed), vs the floor → `analysis/bootstrap_m3_vs_{hybrid,transformer,floor}_seed{42,43,44}.md`. Apply decision 10; report mean ± SD per metric, never one seed. All six incumbent dump dirs are defaulted in the chain (resolved 2026-09-17 from `h100_scaling_state.json`). The decode runs with `EVAL_TIME=12:00:00` because this decoder's uncached beam speed is unmeasured.
 - [ ] **V3-E** Diversity re-measure on the seed-42 dump (`analyze_diversity_h100.sh`, controls = references + floor) — the boilerplate confound on any ROUGE-L movement.
 - [ ] **V3-F** Efficiency + decode: `MODELS="hybrid_150m_v2 hybrid_150m_m3 transformer_150m_baseline" OUTPUT_DIR=analysis/efficiency_150m_m3 sbatch scripts/profile_efficiency_h100.sh` (the 14A-7 protocol, random weights) plus `performance_profile.py --decode` for the O(L²)→O(L) curve (`tfla_impl=exact`, random weights suffice). Pre-registered: SSD is matmul-shaped so the 14A-7 gap should narrow; report exponents and crossover whichever way it lands.
 - [ ] **V3-G** Tick/notes/evidence after every job; never re-run a checkpoint-producing step without reading its log first.
@@ -833,11 +867,11 @@ commands (`squeue`, `sacct`, `grep`, `cat`, `ls`) remain fine interactively.
 | Item | GPU-h | Wall |
 |---|---|---|
 | V2 probe + A2x screen (2 seeds, parallel) | ~6 | ~3 h + queue |
-| V3-A Stage-0 (A2 rate, ×1.5 retry) | ~36 | ~1–1.5 d |
+| V3-A Stage-0 (A2x measured 1.73 s/step; ×1.5 retry budget) | ~58–87 | ~2.5–3.5 d |
 | V3-C decoder ×3 (4 GPU, ~2 h each, parallel) | ~24 | ~2 h |
 | V3-D eval + CheXbert ×3 + bootstraps ×9 | ~20 | ~8 h |
 | V3-E/F | ~1 | minutes |
-| **Total V2–V3** | **~90** | **~5–6 d** → lands ≈ 2026-09-25 if V1 closes 2026-09-18 |
+| **Total V3** | **~105–135** | **~4–5 d** → lands ≈ 2026-09-22 if submitted 2026-09-17 and not preempted |
 
 **Cut order if the budget bites:** V5 entirely; V3-F's forward+backward sweep (keep inference + decode); a third
 decoder seed (report 2 and say so); never the Stage-0 validation set (comparability with 13.18).
@@ -885,4 +919,5 @@ decoder seed (report 2 and say so); never the Stage-0 validation set (comparabil
 
 - Extension: confirmed or not? If not, V3 must be submitted by 2026-09-20 to land before the 29th with any retry margin.
 - V5-A (14C-3 on 13D, ~4 GPU-h): run inside V3's window or defer?
-- Seed-43/44 incumbent dump dirs on the cluster (`ls results/`) — record them in the Baselines section before V3-D.
+- Speed: re-derive M7's A0/A2 wall clocks with `sacct` before quoting any speed-up (see the M7 correction).
+- A1 has one seed. If the A2x-vs-A1 gap (−0.728) goes into the writeup as an architecture claim, an `A1-s2` arm (~8 h) is the pre-agreed way to make it two-seed.

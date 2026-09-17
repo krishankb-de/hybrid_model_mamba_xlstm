@@ -25,9 +25,12 @@
 #   STAGE0_EXPERIMENT     STAGE0_STEPS=120000 STAGE0_WARMUP=2000 VAL_EVERY=10000 STAGE0_SAVE_TOP_K=1
 #   SEEDS="42 43 44"      TOWER_CKPT=<13D image tower>   PARQUET=<official test split>
 #   RESULTS_PREFIX=results/report_gen_m3_test_split      (per-seed dump dirs get _s<seed>)
-#   HYBRID_DUMP_<seed> / TRANSFORMER_DUMP_<seed>   incumbent dumps for the paired bootstraps
-#                          (seed 42 defaults to the 13D / 14A dumps; 43/44 must be given, else
-#                           that comparison is SKIPPED with a message -- never silently unpaired)
+#   HYBRID_DUMP_<seed> / TRANSFORMER_DUMP_<seed>   incumbent dumps for the paired bootstraps. All six
+#                          default to the dirs the 15B-4 seed table came from
+#                          (h100_scaling_state.json seed_arms); an unset one is SKIPPED loudly.
+#   EVAL_TIME=12:00:00     walltime for the beam decode. The wrapper's own 06:30:00 fitted the Mamba-1
+#                          hybrid; this decoder's uncached beam speed is unmeasured and exact TFLA
+#                          trained ~20% slower (1.75 vs 2.18 it/s), and a TIMEOUT cancels the chain.
 #   FLOOR_DUMP=results/retrieval_floor_test_split
 # ============================================================================
 
@@ -58,7 +61,12 @@ _v3_chain() {
   local RESULTS_PREFIX="${RESULTS_PREFIX:-results/report_gen_m3_test_split}"
   local FLOOR_DUMP="${FLOOR_DUMP:-results/retrieval_floor_test_split}"
   local HYBRID_DUMP_42="${HYBRID_DUMP_42:-results/report_gen_tower13d_test_split}"
+  local HYBRID_DUMP_43="${HYBRID_DUMP_43:-results/report_gen_hybrid_seed43_test_split}"
+  local HYBRID_DUMP_44="${HYBRID_DUMP_44:-results/report_gen_hybrid_seed44_test_split}"
   local TRANSFORMER_DUMP_42="${TRANSFORMER_DUMP_42:-results/report_gen_transformer_test_split}"
+  local TRANSFORMER_DUMP_43="${TRANSFORMER_DUMP_43:-results/report_gen_transformer_seed43_test_split}"
+  local TRANSFORMER_DUMP_44="${TRANSFORMER_DUMP_44:-results/report_gen_transformer_seed44_test_split}"
+  local EVAL_TIME="${EVAL_TIME:-12:00:00}"
   local dep_stage0
 
   echo "=== V3 chain: ARM=${ARM} seeds=[${SEEDS}] stage0=${STAGE0_EXPERIMENT} tower=${TOWER_CKPT} ===" >&2
@@ -95,7 +103,7 @@ _v3_chain() {
       "MODEL_CONFIG=hybrid_150m_m3_rrg" "PREFIX_K=32" "DECODE=beam" "BEAM_SIZE=3" \
       "PARQUET=${PARQUET}" "NUM_SAMPLES=999999" "DUMP_DIR=${dump}" \
       "CHECKPOINT=./outputs/${exp}/checkpoints/last.ckpt" \
-      -- --dependency=afterok:${dec} scripts/inspect_report_generation_h100.sh) || return 1
+      -- --time=${EVAL_TIME} --dependency=afterok:${dec} scripts/inspect_report_generation_h100.sh) || return 1
 
     # 4. CheXbert (its own venv), writes chexbert_metrics.json + chexbert_labels.json
     cx=$(_v3_submit "chexbert s${seed}" "DUMP_DIR=${dump}" \

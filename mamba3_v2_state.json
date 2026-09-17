@@ -1,7 +1,7 @@
 {
-  "current_phase": "V2_screen_a2x",
-  "last_updated": "2026-09-17T11:25:45+02:00",
-  "status": "V0+V1 COMPLETE locally (commits b191178 + V1). Next on the cluster: V2-A preflight sbatch, V2-B 300-step A2x probe, V2-C 'ARMS=\"A2x A2x-s2\" VAL_EVERY=12000 SAVE_TOP_K_SCREEN=0 sbatch --array=0-1 scripts/screen_arms_h100.sh', then V2-D decides the V3 arm.",
+  "current_phase": "V3_full_pipeline",
+  "last_updated": "2026-09-17T19:26:55+02:00",
+  "status": "V2 COMPLETE: A2x advanced (2-seed mean 15.677 vs A2 16.542). hybrid_150m_m3_rrg pinned tfla_impl=exact; chain carries all six incumbent dumps + EVAL_TIME=12h. Next: push, then `DRY_RUN=1 source scripts/submit_v3_chain.sh` and submit on the cluster. Stage-0 at the measured rate is ~58 h.",
   "plan_of_record": "MAMBA3_PLAN_V2.md",
   "branch": {
     "name": "h100_mamba3_v2",
@@ -392,18 +392,23 @@
     "A2x": {
       "desc": "A2 + tfla_impl=exact (mLSTM recurrence corrected too)",
       "role": "V2-C: re-screen the winner with the whole model on the specified recurrences; cacheable decode",
-      "status": "pending",
+      "status": "done",
       "submit": "ARMS=\"A2x A2x-s2\" VAL_EVERY=12000 SAVE_TOP_K_SCREEN=0 sbatch --array=0-1 scripts/screen_arms_h100.sh",
-      "val_ppl": null,
-      "job_id": null
+      "val_ppl": 15.566,
+      "job_id": "array 2552165_0 (JobID 2552437), gx07",
+      "wall": "5:45:18 (13:18:10 -> 19:03:28)",
+      "train_rate": "1.75 it/s",
+      "verdict": "ADVANCED by the V2-D rule. Beats A2 at both seeds: 15.566 vs 16.708 (s42), 15.788 vs 16.376 (s1234); 2-seed mean 15.677 vs 16.542 = -0.865 PPL (-5.2%), 1.35x the 0.642 bar. Cross-seed spread 0.222, the lowest of any replicated arm."
     },
     "A2x-s2": {
       "desc": "A2x replicated at seed 1234",
       "role": "V2-D is judged on the 2-seed mean vs A2 16.708 / A2-s2 16.376",
-      "status": "pending",
+      "status": "done",
       "submit": "(same array as A2x)",
-      "val_ppl": null,
-      "job_id": null
+      "val_ppl": 15.788,
+      "job_id": "array 2552165_1 (JobID 2552165), gx07",
+      "wall": "5:57:14 (13:18:10 -> 19:15:24)",
+      "train_rate": "1.71 it/s"
     }
   },
   "pre_registered": {
@@ -851,26 +856,34 @@
     },
     "V2": {
       "title": "Re-validate on the H100 and screen A2x (~3 h wall + queue)",
-      "status": "pending",
+      "status": "complete",
       "checkboxes": {
         "V2-A": {
-          "done": false,
+          "done": true,
           "desc": "sbatch scripts/preflight_mamba3_h100.sh (CPU, ~2 min) on the merged code, which has never run on the cluster: fingerprints for A0/A1/A2/A2x at 150M, the para..."
         },
         "V2-B": {
-          "done": false,
+          "done": true,
           "desc": "300-step GPU probe: ARM=A2x STEPS=300 EXPERIMENT=m3v2_probe_A2x sbatch --time=00:30:00 scripts/train_stage0_150m_h100.sh. Log must show mamba3x9 … tfla_impl=..."
         },
         "V2-C": {
-          "done": false,
+          "done": true,
           "desc": "Paired screen: ARMS=\"A2x A2x-s2\" VAL_EVERY=12000 SAVE_TOP_K_SCREEN=0 sbatch --array=0-1 scripts/screen_arms_h100.sh — 12,000 steps, warmup 500, seeds 42/1234..."
         },
         "V2-D": {
-          "done": false,
+          "done": true,
           "desc": "Pre-registered rule, written before the numbers exist: A2x advances to V3 unless (i) its 2-seed mean val PPL exceeds A2's 2-seed mean 16.542 by more than the..."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "preflight_job": "2552163",
+        "preflight_result": "15 arms OK; A0 Delta 0.8063, A1 0.0224; 425 passed",
+        "probe_job": "2552164 exit 0 (afterok satisfied; log not reviewed)",
+        "screen_array": "2552165",
+        "A2x_s42": "15.566",
+        "A2x_s1234": "15.788",
+        "mean_vs_A2": "-0.865 PPL (-5.2%)"
+      },
       "verdict": null
     },
     "V3": {
@@ -1024,7 +1037,13 @@
     "2026-09-17: V1-A..F shipped locally: MAMBA3_PLAN_V2.md + mamba3_v2_state.json (M0-M7 carried verbatim, V0-V5 new, decision 7 superseded by explicit yaml pins); hybrid_150m_m3_rrg.yaml (exact rrg delta, parity-tested); A2x/A2x-s2 arms (hybrid_150m_m3.yaml had NO scan_impl/tfla_impl key -- the override would have been rejected by Hydra strict-struct); VAL_EVERY exported by the screen array; checkpoint_arch.py sniffer (one owned parameter per mixer family, ambiguity refused) wired into evaluate_cxr_retrieval.py (now raises on critical misses, matching STS) and evaluate_sts.py; train_contrastive.py >50%-missing guard; submit_v3_chain.sh (sourced, bash+zsh identical, DRY_RUN=1 prints 16 submissions).",
     "2026-09-17: V1 COMPLETE. pytest 423 passed / 1 skipped / 21 xfailed; validate_for_willi.sh 9/9 under Python 3.9.23 (five-type Gate 6); report-gen smoke, smoke_arch_refactor 5/5, 15 arms verify at 150M incl. A2x (tfla_impl=exact). Next: V2 on the H100 -- preflight sbatch, 300-step A2x probe, then the A2x/A2x-s2 screen array.",
     "2026-09-17: current_phase -> V2_screen_a2x",
-    "2026-09-17: V2-A attempt 1 FAILED (job 2552094): mamba3_arms.py verify -> ModuleNotFoundError hybrid_xmamba. Cause: script dir, not repo root, is on sys.path, and the aisc .venv has no editable install (the laptop venv does, so every local check passed). Probe 2552095 -> DependencyNeverSatisfied; array 2552097 chained behind it. Fixed with the repo-root sys.path.insert used by 27 other scripts + a static test over scripts/*.py + a python -S subprocess reproduction (fails with the cluster error without the fix). Resubmit after scancel 2552095 2552097 + git pull."
+    "2026-09-17: V2-A attempt 1 FAILED (job 2552094): mamba3_arms.py verify -> ModuleNotFoundError hybrid_xmamba. Cause: script dir, not repo root, is on sys.path, and the aisc .venv has no editable install (the laptop venv does, so every local check passed). Probe 2552095 -> DependencyNeverSatisfied; array 2552097 chained behind it. Fixed with the repo-root sys.path.insert used by 27 other scripts + a static test over scripts/*.py + a python -S subprocess reproduction (fails with the cluster error without the fix). Resubmit after scancel 2552095 2552097 + git pull.",
+    "2026-09-17: V2-A PASSED (job 2552163, gx14, 2 min 31 s): all 15 arms build the claimed operator at 150M incl. A2x tfla_impl=exact; Delta at init A0 0.8063 / A1 0.0224; cluster CPU suite 425 passed / 1 skipped / 21 xfailed in 109 s.",
+    "2026-09-17: V2-B probe job 2552164 (gx09) exited 0 -- the screen's afterok dependency on it was satisfied. Its log was not reviewed; superseded by the two screen logs, which show the same fingerprint (mamba3x9, tfla_impl=exact, 184,192,200) and finite, falling loss over 12,000 steps.",
+    "2026-09-17: V2-C/V2-D. Screen array 2552165 (both tasks gx07, VAL_EVERY=12000): A2x s42 val PPL 15.566, A2x s1234 15.788. Paired vs A2: -1.142 / -0.588; 2-seed mean 15.677 vs 16.542 = -0.865 PPL (-5.2%, 1.35x the 0.642 bar). Rule: A2x advances. Pinned tfla_impl=exact in hybrid_150m_m3_rrg.yaml (hybrid_150m_m3.yaml stays legacy: it defines the M7 arms; Stage-0 gets exact through ARM=A2x) with a parity test that the decoder config runs the Stage-0 arm's operator.",
+    "2026-09-17: CORRECTION to the M7 headline ('the gain is the defect, not the architecture'): A1 (Mamba-1, 16.294) had BOTH recurrences corrected (scan_impl=exact, tfla_impl=exact), while A2 (16.708) still ran legacy TFLA -- so A1 vs A2 was not like-for-like. With both corrected, A2x s42 15.566 beats A1 s42 16.294 by 0.728 PPL (1.13x the bar; A1 has one seed). Revised reading: fixing the mLSTM recurrence is worth ~0.87 PPL on its own (A2 -> A2x), and once both operators are correct, SSD + 8x state is ahead of corrected Mamba-1 by ~0.7 PPL -- just above the bar, single-seed on A1's side.",
+    "2026-09-17: SPEED, re-read from wall clocks: A2x took 5:45:18 and 5:57:14 for 12,000 steps (~1.73 s/step all-in). The progress bar's '1:52:35' is NOT the training time: 36,000 micro-batches at its own 1.75 it/s is 5.7 h, which matches the wall clock, so V2-C's '~2.5 h per arm' estimate was wrong. M7's '1.94x faster' (A0 2:36:50 vs A2 1:20:55) compared that same column and needs re-checking from wall clocks (sacct Elapsed for 2513005 / 2513632_0 / 2515666). Same-column rates: A0 1.36, A2 2.18 (300-step probe), A2x 1.75 it/s -- exact TFLA costs ~20% throughput vs A2, and A2x is ~1.3x A0. V3-A Stage-0 at 120K steps: ~58 h, not ~24 h.",
+    "2026-09-17: current_phase -> V3_full_pipeline"
   ],
   "open_questions": []
 }

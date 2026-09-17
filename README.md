@@ -7,7 +7,7 @@ A research implementation of a hybrid architecture combining **Mamba** (Selectiv
 
 ## 🔬 This branch: `h100_mamba3_v2` — Mamba-3 backbone upgrade, version 2
 
-**Status: M0–V1 complete, 62/82 checkboxes.** Plan of record: [`MAMBA3_PLAN_V2.md`](MAMBA3_PLAN_V2.md);
+**Status: M0–V2 complete, 66/82 checkboxes.** Plan of record: [`MAMBA3_PLAN_V2.md`](MAMBA3_PLAN_V2.md);
 live state: [`mamba3_v2_state.json`](mamba3_v2_state.json). Cut from `h100_scaling` @ `8137221` (Phase 15 closed) with the version-1 branch `h100_scaling_mamba3` (M0–M7) merged at `b191178`; every published configuration was measured byte-identical across the merge.
 **This branch is never merged without an explicit instruction** — `h100_scaling` keeps the approved
 results reproducible.
@@ -203,7 +203,7 @@ not transfer, but neither is a win assumed. That is what the M7 screen measures.
 | M7 | Timing probe + short-run screen  — H100 | 🔄 8/9 |
 | V0 | Port the Mamba-3 branch onto the Phase-14/15 baseline (local, no GPU) ✅ COMPLETE 2026-09-17 | ✅ 6/6 |
 | V1 | Re-baseline the plan and harden the seams (local) | ✅ 7/7 |
-| V2 | Re-validate on the H100 and screen A2x (~3 h wall + queue) | ⬜ 0/4 |
+| V2 | Re-validate on the H100 and screen A2x (~3 h wall + queue) | ✅ 4/4 |
 | V3 | Full pipeline on the winner, matched to the 14A/15B protocol (~5–6 days wall) | ⬜ 0/7 |
 | V4 | Writeup + cleanup (after V3) | ⬜ 0/5 |
 | V5 | Gated / optional (only with confirmed cluster access) | ⬜ 0/3 |
