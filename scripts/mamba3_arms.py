@@ -26,7 +26,14 @@ Submitting one arm (the wrapper resolves ARM on the compute node -- the login no
 import argparse
 import shlex
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, NamedTuple
+
+# `python scripts/mamba3_arms.py` puts scripts/ on sys.path, not the repo root, and the aisc .venv has
+# no editable install of hybrid_xmamba (only a laptop venv does). Same convention as every other
+# script here. Without it the V2-A preflight died at `verify` (job 2552094); `env` never noticed
+# because it imports nothing from the package.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 SCREEN_STEPS = 12000        # M7-B: short enough to screen 8 arms, long enough for WSD to decay
 SCREEN_WARMUP = 500

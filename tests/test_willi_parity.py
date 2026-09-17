@@ -5614,6 +5614,57 @@ def test_v3_chain_script_is_source_safe_and_only_submits_existing_wrappers():
         assert lever in src, lever
 
 
+_PKG_IMPORT = re.compile(r"^\s*(from|import)\s+hybrid_xmamba\b", re.M)
+
+
+@pytest.mark.willi_parity
+def test_every_script_that_imports_the_package_puts_the_repo_root_on_sys_path():
+    """V2-A, job 2552094: `python scripts/mamba3_arms.py verify` died on the cluster with
+    `ModuleNotFoundError: No module named 'hybrid_xmamba'`. Running `python scripts/x.py` puts
+    scripts/ on sys.path, not the repo root, and the cluster .venv has no editable install of the
+    package -- only this laptop's venv does, which is why every local run passed. The other
+    scripts insert the root themselves; this pins the convention for all of them."""
+    offenders = []
+    for path in sorted((REPO_ROOT / "scripts").glob("*.py")):
+        src = path.read_text()
+        if _PKG_IMPORT.search(src) and "sys.path.insert(0" not in src:
+            offenders.append(path.name)
+    assert not offenders, (
+        "scripts import hybrid_xmamba without inserting the repo root on sys.path; they work only "
+        "where the package is pip-installed (not the aisc .venv): %s" % offenders
+    )
+
+
+@pytest.mark.willi_parity
+def test_mamba3_arms_verify_runs_without_an_installed_package():
+    """Reproduces job 2552094 exactly: an interpreter that cannot see an installed/editable
+    hybrid_xmamba (`-S` skips site, so no .pth finder runs; site-packages is re-added through
+    PYTHONPATH only so torch and yaml still import), launched from the repo root exactly as the
+    preflight's `python scripts/mamba3_arms.py verify` is. The repo root as cwd does NOT hide the
+    bug: running a script puts its own directory on sys.path, never the cwd."""
+    import subprocess
+    import sysconfig
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (sysconfig.get_paths()["purelib"], sysconfig.get_paths()["platlib"]) if p
+    )
+    # The reproduction needs torch + yaml to import without `site`. If this interpreter cannot do
+    # that, the environment cannot express the condition -- skip loudly rather than fail and block
+    # the cluster preflight on a test-harness limitation. The static test above still guards the rule.
+    probe = subprocess.run([sys.executable, "-S", "-c", "import torch, yaml"],
+                           cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=300)
+    if probe.returncode != 0:
+        pytest.skip("torch/yaml do not import under `python -S` here: %s" % probe.stderr.strip()[-300:])
+    proc = subprocess.run(
+        [sys.executable, "-S", str(REPO_ROOT / "scripts" / "mamba3_arms.py"), "verify"],
+        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=600,
+    )
+    out = proc.stdout + proc.stderr
+    assert "No module named 'hybrid_xmamba'" not in out, out[-2000:]
+    assert proc.returncode == 0, out[-2000:]
+
+
 @pytest.mark.willi_parity
 def test_state_helper_points_at_the_v2_plan_and_accepts_v_phase_ids():
     """V1-A: the helper is the only thing allowed to tick a checkbox; it must read the V2 files
