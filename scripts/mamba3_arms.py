@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The M7 ablation ladder, in one place (MAMBA3_PLAN.md M5 / M7-B).
+"""The M7 ablation ladder, in one place (MAMBA3_PLAN_V2.md M5 / M7-B).
 
 Arms A2..A6 are not separate yaml files. They are `hybrid_150m_m3.yaml` plus a handful of
 `model.mamba3_*=...` overrides, which is why every flag is *declared* in that yaml: Hydra's
@@ -17,10 +17,10 @@ exactly one definition of each arm exists and *both* the pre-flight and the subm
     python scripts/mamba3_arms.py env A3               # shell exports for sbatch
     python scripts/mamba3_arms.py verify [--full]      # build each arm, check its fingerprint
 
-Submitting one arm:
+Submitting one arm (the wrapper resolves ARM on the compute node -- the login node refuses python):
 
-    eval "$(python scripts/mamba3_arms.py env A5)"
-    sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh
+    ARM=A5 sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh
+    ARMS="A2x A2x-s2" VAL_EVERY=12000 SAVE_TOP_K_SCREEN=0 sbatch --array=0-1 scripts/screen_arms_h100.sh
 """
 
 import argparse
@@ -129,6 +129,24 @@ for _name, _ov in (("A2", {}),
         isolates="M7-D tiebreak: does {} hold its place at a second seed?".format(_name),
         expect=ARMS[_name].expect,
     )
+
+# --- V2 (MAMBA3_PLAN_V2.md V2-C): A2 with the mLSTM recurrence corrected as well -----------
+# A2 was screened with tfla_impl=legacy, so its 3 mLSTM layers still divide by a clamped
+# forget-gate cumulative product (M1-C: rel-max-err 0.882 at the shipped init) and the M6 decode
+# cache cannot serve that checkpoint (M6 finding 1). A2x flips ONLY tfla_impl; everything else,
+# including in_proj's shape and the seed, is A2's, so the delta is paired. Judged on the 2-seed
+# mean against A2 (16.708) / A2-s2 (16.376): A2x advances to the full pipeline unless it is worse
+# by more than the 0.642 PPL bar or it spikes (pre-registered, V2-D).
+ARMS["A2x"] = Arm(
+    config=_M3, overrides={"tfla_impl": "exact"}, seed=SCREEN_SEED,
+    isolates="exact TFLA on top of A2: the whole model on the specified recurrences, cacheable decode",
+    expect=_M3_BASE + ["tfla_impl=exact", "conv=True", "trapezoid=False", "rope=False", "bc_bias=none"],
+)
+ARMS["A2x-s2"] = Arm(
+    config=_M3, overrides={"tfla_impl": "exact"}, seed=1234,
+    isolates="A2x at the second seed -- the V2-D rule is judged on the 2-seed mean, not one draw",
+    expect=ARMS["A2x"].expect,
+)
 
 # Deliberately absent, so it is not silently re-proposed: `mamba3_mimo_rank > 1` (decision 3,
 # +3.2% params leaves the parameter-matched regime), `mamba3_ngroups > 1` and

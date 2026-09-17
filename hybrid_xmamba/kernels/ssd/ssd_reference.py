@@ -1,6 +1,6 @@
 """Sequential reference for the SSD recurrence, and the single-token decode step.
 
-These are one thing wearing two hats, which is why they live together (MAMBA3_PLAN.md M2-A):
+These are one thing wearing two hats, which is why they live together (MAMBA3_PLAN_V2.md M2-A):
 
 * `ssd_sequential_reference` is the oracle every chunked-scan test is checked against. It runs in
   float64 by default and is a plain Python loop, because an oracle has to be obviously correct
@@ -51,7 +51,7 @@ def ssd_step(
         y_t = C_t^T h_t + D * x_t
 
     This is both the float64 oracle's inner loop and the O(1) decode step
-    (MAMBA3_PLAN.md M2-A, M6-A): one function, so a decode path cannot drift from the reference
+    (MAMBA3_PLAN_V2.md M2-A, M6-A): one function, so a decode path cannot drift from the reference
     it is checked against. `coeff` and `extra_terms` mirror `ssd_chunked_scan` exactly, which is
     what lets the trapezoidal rule decode without a second code path -- its `beta B_{t-1} x_{t-1}`
     term is just another triple over the same decay.
@@ -114,7 +114,7 @@ def ssd_sequential_reference(
             sets the decay, and the exponential-trapezoidal rule scales the input by
             `gamma = lambda * dt` while the decay stays `exp(dt A)`.
         extra_terms: additional `(coefficient, B, x)` triples summed into the state -- the
-            trapezoidal rule's `beta * B_{t-1} x_{t-1}` term (MAMBA3_PLAN.md M3).
+            trapezoidal rule's `beta * B_{t-1} x_{t-1}` term (MAMBA3_PLAN_V2.md M3).
 
     Returns:
         (batch, seqlen, nheads, headdim)

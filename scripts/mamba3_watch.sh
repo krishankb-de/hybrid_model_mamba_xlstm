@@ -72,24 +72,24 @@ hr
 echo "=== 3. per-arm progress ==="
 # Lightning's progress bar is written with carriage returns and only lands in the log
 # when the run ENDS, so a live job shows nothing there. The checkpoints are the honest
-# mid-run signal: one every 2,000 steps, and `auto_insert_metric_name: false` puts the
-# val loss straight into the filename (checkpoint-<epoch>-<val_loss>.ckpt).
-for d in outputs/m3_screen_*; do
+# mid-run signal. Since M7-D the filename is stage0_kd-step{step:06d}.ckpt (the old
+# template put val/loss in the name and its slash made every save a DIRECTORY), so the
+# step number is what a filename carries; the val loss itself is in the log/tfevents.
+for d in outputs/m3_screen_* outputs/h100_stage0_150m_m3*; do
   [ -d "$d" ] || continue
   arm=$(basename "$d")
   ck="$d/checkpoints"
-  n=$(ls -1 "$ck"/checkpoint-*.ckpt 2>/dev/null | wc -l | tr -d ' ')
-  best=$(ls -1 "$ck"/checkpoint-*.ckpt 2>/dev/null | sed -E 's/.*-([0-9]+\.[0-9]+)\.ckpt/\1/' \
-           | sort -g | head -1)
+  n=$(ls -1 "$ck"/stage0_kd-step*.ckpt 2>/dev/null | wc -l | tr -d ' ')
+  last_step=$(ls -1 "$ck"/stage0_kd-step*.ckpt 2>/dev/null | sed -E 's/.*step0*([0-9]+)\.ckpt/\1/' \
+                | sort -n | tail -1)
   last_mtime=$(ls -1t "$ck"/*.ckpt 2>/dev/null | head -1 | xargs -r stat -c %y 2>/dev/null \
                  | cut -d. -f1)
-  # exp() without python: awk is not blocked and is everywhere.
-  ppl=$( [ -n "$best" ] && awk -v l="$best" 'BEGIN{printf "%.3f", exp(l)}' )
-  printf "  %-22s ckpts=%-3s best val/loss=%-8s ppl=%-9s last write: %s\n" \
-         "$arm" "${n:-0}" "${best:-–}" "${ppl:-–}" "${last_mtime:-–}"
+  has_last=$( [ -f "$ck/last.ckpt" ] && echo yes || echo no )
+  printf "  %-28s ckpts=%-3s last step=%-7s last.ckpt=%-3s last write: %s\n" \
+         "$arm" "${n:-0}" "${last_step:-–}" "$has_last" "${last_mtime:-–}"
 done
 echo
-echo "  a finished 12,000-step arm has 6 checkpoints; each is one val pass (every 2,000 steps)"
+echo "  step checkpoints appear every VAL_EVERY steps (SAVE_TOP_K>0); last.ckpt is written at the end"
 echo
 # Real failures only. Matching bare "inf" hits config.json, dataset_infos.json and [INFO];
 # matching "Error" hits nothing useful either. Anchor on things that are actually fatal.

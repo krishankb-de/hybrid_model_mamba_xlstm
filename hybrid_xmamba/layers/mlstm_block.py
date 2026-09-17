@@ -37,7 +37,7 @@ class mLSTMBlock(nn.Module):
         forget_gate_bias_init: Initial bias for f_gate_proj
     """
 
-    # MAMBA3_PLAN.md M2-E: declared capability, read by `HybridBlock`. `_forward_segmented` re-runs the block per document segment.
+    # MAMBA3_PLAN_V2.md M2-E: declared capability, read by `HybridBlock`. `_forward_segmented` re-runs the block per document segment.
     supports_cu_seqlens = True
     def __init__(
         self,
@@ -65,7 +65,7 @@ class mLSTMBlock(nn.Module):
 
         self.inner_dim = self.num_heads * head_dim
         self.use_tfla = use_tfla
-        # MAMBA3_PLAN.md M1-H: "legacy" keeps the pre-2026-09 numerics (defect included)
+        # MAMBA3_PLAN_V2.md M1-H: "legacy" keeps the pre-2026-09 numerics (defect included)
         # so existing checkpoints stay bit-reproducible; "exact" removes the reciprocal.
         if tfla_impl not in ("legacy", "exact"):
             raise ValueError(f"tfla_impl must be 'legacy' or 'exact', got {tfla_impl!r}")

@@ -1,11 +1,11 @@
-"""Numerical-correctness tests for the recurrent operators (MAMBA3_PLAN.md, phase M1).
+"""Numerical-correctness tests for the recurrent operators (MAMBA3_PLAN_V2.md, phase M1).
 
 These pin a defect, they are not regression tests for working code. `tests/test_kernels.py`
 asserts only shape / no-NaN / no-Inf on the selective scan, and gates the whole class behind
 `torch.cuda.is_available()`, so it never runs in CI -- which is exactly how the defect below
 survived. Everything here is CPU-collected and unconditionally run.
 
-The defect (MAMBA3_PLAN.md, Context 1). Both chunked scans compute
+The defect (MAMBA3_PLAN_V2.md, Context 1). Both chunked scans compute
 
     h_intra[t] = A_cum[t] * cumsum(Bx / A_cum.clamp(min=1e-8))[t]
 
@@ -28,15 +28,15 @@ from hybrid_xmamba.kernels.selective_scan.scan_interface import (
 from hybrid_xmamba.layers.mamba_block import MambaBlock
 
 # Deltas span the reference Mamba init range logU[1e-3, 1e-1] and the range this repo actually
-# operates in: Delta ~ 0.70 (pre_rms) / 0.82 (hybrid, canonical), measured in MAMBA3_PLAN.md.
+# operates in: Delta ~ 0.70 (pre_rms) / 0.82 (hybrid, canonical), measured in MAMBA3_PLAN_V2.md.
 DELTAS: List[float] = [1e-3, 1e-2, 1e-1, 0.3, 0.705, 1.0]
 CHUNKS: List[int] = [8, 64]
 TOL = 1e-6
 
-_FLIPS = "strict=True, so it fails loudly the moment it starts passing (MAMBA3_PLAN.md M1-I)."
-_DEFECT_SCAN = f"MAMBA3_PLAN.md M1: divide-and-clamp in the selective scan. Fixed by M1-E/M1-G. {_FLIPS}"
-_DEFECT_TFLA = f"MAMBA3_PLAN.md M1: divide-and-clamp in the TFLA intra-chunk term. Fixed by M1-H. {_FLIPS}"
-_DEFECT_DELTA = f"MAMBA3_PLAN.md M1: no Mamba dt init, and dt_norm would erase one. Fixed by M1-F. {_FLIPS}"
+_FLIPS = "strict=True, so it fails loudly the moment it starts passing (MAMBA3_PLAN_V2.md M1-I)."
+_DEFECT_SCAN = f"MAMBA3_PLAN_V2.md M1: divide-and-clamp in the selective scan. Fixed by M1-E/M1-G. {_FLIPS}"
+_DEFECT_TFLA = f"MAMBA3_PLAN_V2.md M1: divide-and-clamp in the TFLA intra-chunk term. Fixed by M1-H. {_FLIPS}"
+_DEFECT_DELTA = f"MAMBA3_PLAN_V2.md M1: no Mamba dt init, and dt_norm would erase one. Fixed by M1-F. {_FLIPS}"
 
 
 def _xfail_if(condition: bool, reason: str = _DEFECT_SCAN):
@@ -44,7 +44,7 @@ def _xfail_if(condition: bool, reason: str = _DEFECT_SCAN):
     return [pytest.mark.xfail(strict=True, reason=reason)] if condition else []
 
 
-# "legacy" reproduces the pre-2026-09 numerics on purpose (MAMBA3_PLAN.md decision 7), so its
+# "legacy" reproduces the pre-2026-09 numerics on purpose (MAMBA3_PLAN_V2.md decision 7), so its
 # failures are permanent xfails, not a TODO. "exact" must pass everywhere -- those are the cases
 # that make M1 a fix rather than a description.
 SCAN_IMPLS = ("legacy", "exact")
@@ -406,7 +406,7 @@ def test_tfla_exact_survives_extreme_decay(forget_bias, chunk_size):
 def test_legacy_scan_path_is_unchanged():
     """M1-I: `scan_impl="legacy"` must still be the original operator, bit for bit.
 
-    Decision 7 in MAMBA3_PLAN.md keeps `legacy` as the default through the screen precisely so
+    Decision 7 in MAMBA3_PLAN_V2.md keeps `legacy` as the default through the screen precisely so
     the A0 control arm and every number published before 2026-09 stay reproducible. If this ever
     drifts, that comparison is void -- so it is asserted, not assumed.
     """
@@ -1242,7 +1242,7 @@ def test_parity_needs_delta_large_enough_to_reach_a_half_turn():
 # credited with a quality difference at M7.
 #   bc_bias    -- `none` and `zero_init` are the same operator; `one_init` is a genuine arm
 #   use_conv   -- dropping the short conv is a real change, and moves parameters by a known amount
-#   mimo_rank  -- plumbed at rank 1 (bit-identical), never run (MAMBA3_PLAN.md decision 3)
+#   mimo_rank  -- plumbed at rank 1 (bit-identical), never run (MAMBA3_PLAN_V2.md decision 3)
 # ---------------------------------------------------------------------------
 
 
@@ -1435,14 +1435,14 @@ def _arms_module():
 def test_the_arm_ladder_matches_the_plan_state():
     """One ladder, two files, and they must agree.
 
-    `mamba3_state.json` records what each arm is *for* and whether it has run; `mamba3_arms.py`
+    `mamba3_v2_state.json` records what each arm is *for* and whether it has run; `mamba3_arms.py`
     records how to build and submit it. If the two drift, the screen either skips an arm or runs
     one nothing will know how to interpret.
     """
     import json
 
     arms = _arms_module().ARMS
-    state = json.load(open("mamba3_state.json"))["arms"]
+    state = json.load(open("mamba3_v2_state.json"))["arms"]
     assert set(arms) == set(state), (
         "ladder mismatch -- arms.py has {}, state has {}".format(
             sorted(set(arms) - set(state)), sorted(set(state) - set(arms))
@@ -1450,6 +1450,12 @@ def test_the_arm_ladder_matches_the_plan_state():
     )
     assert {"A0", "A0-seed", "A1", "A2", "A3", "A4", "A5", "A6"} <= set(arms), (
         "the M7-B ladder must stay intact -- those runs are on record"
+    )
+    assert {"A2x", "A2x-s2"} <= set(arms), (
+        "V2-C: the exact-TFLA re-screen of the winner must be in the ladder"
+    )
+    assert "tfla_impl=exact" in arms["A2x"].expect and arms["A2x"].overrides == {"tfla_impl": "exact"}, (
+        "A2x flips ONLY tfla_impl -- anything else and its delta against A2 is not paired"
     )
     assert {"A4-lo", "A4-mid", "A4-hi"} <= set(arms), (
         "M7-G: the rope re-test. The M7-B rope arms measured theta_max=1.0, the only value "
@@ -1479,7 +1485,7 @@ def test_the_screen_is_a_paired_comparison():
     # the seed, which is the one thing the screen cannot otherwise measure. A0-seed gave the
     # noise floor; A2-s2 / A4-hi-s2 are the M7-D tiebreak (A4-hi leads A2 by 0.509 PPL, 79% of
     # the bar, against 0.335 PPL of measured paired trajectory sensitivity).
-    replicas = {"A0-seed": "A0", "A2-s2": "A2", "A4-hi-s2": "A4-hi"}
+    replicas = {"A0-seed": "A0", "A2-s2": "A2", "A4-hi-s2": "A4-hi", "A2x-s2": "A2x"}
     for replica, base in replicas.items():
         assert replica in arms and base in arms, "{} has no base arm".format(replica)
         assert arms[replica].seed != arms[base].seed, (
@@ -1542,7 +1548,7 @@ def test_arm_overrides_survive_hydra_and_reach_the_mixer(arm_name):
 # ---------------------------------------------------------------------------
 # FM5 again, and the most expensive instance of it so far: a lever the block
 # accepts, the dispatcher does not forward, and nobody notices until a screen
-# arm collapses. See the M7-B rope result in MAMBA3_PLAN.md.
+# arm collapses. See the M7-B rope result in MAMBA3_PLAN_V2.md.
 # ---------------------------------------------------------------------------
 
 

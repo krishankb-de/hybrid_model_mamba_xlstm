@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Keep MAMBA3_PLAN.md checkboxes and mamba3_state.json in sync.
+"""Keep MAMBA3_PLAN_V2.md checkboxes and mamba3_v2_state.json in sync.
 
-The plan-of-record contract (MAMBA3_PLAN.md, "State-tracking contract") requires ticking a
+The plan-of-record contract (MAMBA3_PLAN_V2.md, "State-tracking contract") requires ticking a
 checkbox AND updating the state file after every meaningful change. Doing that by hand twice
 is how a plan and its state drift apart, so this is the single entry point.
 
-    python scripts/mamba3_state.py tick M0-A [M0-B ...] [--note "..."] [--evidence k=v ...]
+    python scripts/mamba3_state.py tick V0-A [V0-B ...] [--note "..."] [--evidence k=v ...]
     python scripts/mamba3_state.py note "..."
-    python scripts/mamba3_state.py phase M1_pin_the_defect [--status "..."]
-    python scripts/mamba3_state.py show [M0]
+    python scripts/mamba3_state.py phase V1_rebaseline [--status "..."]
+    python scripts/mamba3_state.py show [V0]
     python scripts/mamba3_state.py sync          # regenerate state phases from plan checkboxes
 
-`sync` is the documented recovery path: if mamba3_state.json is lost, the plan's checkboxes are
+`sync` is the documented recovery path: if mamba3_v2_state.json is lost, the plan's checkboxes are
 ground truth and this rebuilds the phase tree from them.
 """
 import argparse
@@ -23,11 +23,11 @@ import sys
 from typing import Dict, List, Optional, Tuple
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-PLAN = ROOT / "MAMBA3_PLAN.md"
-STATE = ROOT / "mamba3_state.json"
+PLAN = ROOT / "MAMBA3_PLAN_V2.md"
+STATE = ROOT / "mamba3_v2_state.json"
 
-CHECKBOX_RE = re.compile(r"^(- \[)( |x)(\] \*\*)(M\d+-[A-Z]\d*)(\*\*\s+)(.*)$")
-PHASE_RE = re.compile(r"^### (M\d+)\s+—\s+(.*)$")
+CHECKBOX_RE = re.compile(r"^(- \[)( |x)(\] \*\*)([MV]\d+-[A-Z]\d*)(\*\*\s+)(.*)$")
+PHASE_RE = re.compile(r"^### ([MV]\d+)\s+—\s+(.*)$")
 
 
 def _now() -> str:
@@ -174,7 +174,7 @@ def main() -> int:
     elif args.cmd == "sync":
         state = refresh_phases(state)
         save_state(state)
-        print("state phases regenerated from MAMBA3_PLAN.md checkboxes")
+        print("state phases regenerated from MAMBA3_PLAN_V2.md checkboxes")
 
     elif args.cmd == "readme":
         state = refresh_phases(state)

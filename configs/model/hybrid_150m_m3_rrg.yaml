@@ -1,22 +1,21 @@
-# 150M hybrid v2 — report-generation (RRG) decoder variant (Phase 10, H100_SCALING_PLAN.md).
-# Identical architecture to hybrid_150m_v2.yaml (same decoder, checkpoint-loadable
-# against a Stage-0/contrastive-trained 150M v2 backbone per Phase 10D) plus the
-# image-prefix keys ReportGenerationLightningModule reads:
-#   image_patch_dim — ViT patch embedding dim (768 for BiomedCLIP ViT-B/16)
-#   prefix_k        — number of image-prefix tokens (ImagePrefixMapper's k);
-#                      the depth-analogue lever Phase 10B sweeps {8, 32, 64} over.
-# pooling_strategy/proj_head_dropout are HybridTextEncoder-only keys, irrelevant
-# to bare HybridLanguageModel generation — kept for schema parity, harmless.
+# 150M Mamba-3 — report-generation (RRG) decoder variant (MAMBA3_PLAN_V2.md V1-B).
+# hybrid_150m_m3.yaml plus EXACTLY the hybrid_150m_v2 -> hybrid_150m_v2_rrg delta (image-prefix
+# keys, image-tower unfreeze, decoder/head LRs, the Phase-15C aux keys at 0.0), the same way
+# transformer_150m_baseline_rrg mirrors it. A parity test pins the delta, so the decoder
+# comparison against both incumbents differs in ONE thing: the sequence-mixing backbone.
+# Loaded from the Mamba-3 Stage-0 checkpoint (V3-A) with the 13D image tower reused unchanged
+# (V3-B) -- the 14A-4 protocol.
 
 model_type: "hybrid_lm"
 
-# Architecture — identical to hybrid_150m_v2.yaml
+# Architecture
 vocab_size: 50257
 dim: 768
 num_layers: 12
-layer_pattern: ["mamba", "mamba", "mamba", "mamba", "mlstm", "mlstm", "mlstm", "mamba", "mamba", "mamba", "mamba", "mamba"]
+layer_pattern: ["mamba3", "mamba3", "mamba3", "mamba3", "mlstm", "mlstm", "mlstm", "mamba3", "mamba3", "mamba3", "mamba3", "mamba3"]
 
-# Mamba parameters
+# Mamba-1 parameters — retained so this config still resolves against HybridConfig, but unused:
+# no `mamba` layers remain in the pattern above.
 state_size: 16
 conv_size: 4
 expand_factor: 2
@@ -30,9 +29,30 @@ use_fast_path: true
 scan_impl: "legacy"
 tfla_impl: "legacy"
 
+# Mamba-3 parameters. Every flag here is the Mamba-2 reduction; the ablation arms override them.
+mamba3_d_state: 128        # 8x the Mamba-1 setting, +1.4% params (B/C shared across heads)
+mamba3_head_dim: 64        # -> nheads = 1536 / 64 = 24
+mamba3_ngroups: 1          # multi-value attention: one B/C for all heads
+mamba3_chunk_size: 64
+mamba3_use_conv: true      # dropped as an arm at M5, not by default
+mamba3_conv_size: 4
+mamba3_use_trapezoid: false   # M3 arm
+mamba3_use_rope: false        # M4 arm
+mamba3_rope_fraction: 0.5
+mamba3_theta_max: 1.0      # per-token angular rate cap; see the M7-B rope collapse
+mamba3_dt_min: 1.0e-3      # Delta ~ logU[dt_min, dt_max] at init
+mamba3_dt_max: 1.0e-1
+mamba3_dt_init_floor: 1.0e-4
+mamba3_bc_bias: "none"        # M5 arm ("one_init" is the paper's setting)
+mamba3_mimo_rank: 1           # plumbed, never run (decision 3)
+mamba3_a_mode: "static"       # "data_dependent" is Mamba-3's own default
+mamba3_a_floor: 1.0e-4
+mamba3_dt_limit: 1.0          # replaces the RMSNorm that used to bound Delta by accident
+mamba3_use_outproj_norm: false
+
 # mLSTM parameters
-head_dim: 64
-num_heads: 12
+head_dim: 64           # keep 64 (matrix state ∝ head_dim²); num_heads scales instead
+num_heads: 12          # 768 / 64 = 12
 use_tfla: true
 proj_factor: 2
 

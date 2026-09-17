@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# MAMBA3_PLAN.md M7-B0 — the short-run screen, as one SLURM job array.
+# MAMBA3_PLAN_V2.md M7-B0 — the short-run screen, as one SLURM job array.
 #
 # One submission instead of five; each task takes an H100 as one frees, so the queue
 # wait is paid once in parallel rather than five times in series.
@@ -8,6 +8,7 @@
 #     sbatch --array=0-4 scripts/screen_arms_h100.sh          # A2..A6
 #     sbatch --array=0-4%2 scripts/screen_arms_h100.sh        # ...at most 2 at a time
 #     ARMS="A3 A5" sbatch --array=0-1 scripts/screen_arms_h100.sh
+#     ARMS="A2x A2x-s2" VAL_EVERY=12000 SAVE_TOP_K_SCREEN=0 sbatch --array=0-1 scripts/screen_arms_h100.sh  # V2-C
 #
 # The arm table is NOT written here. It lives in scripts/mamba3_arms.py, which is also
 # what the pre-flight verifies -- so an arm cannot be screened with a lever the
@@ -43,6 +44,10 @@ ARMS="${ARMS:-A2 A3 A4 A5 A6}"
 STEPS="${STEPS:-12000}"
 WARMUP_STEPS="${WARMUP_STEPS:-500}"
 SAVE_TOP_K_SCREEN="${SAVE_TOP_K_SCREEN:-1}"   # screen arms are not pipeline inputs; 1 is plenty
+# Validation cadence. The M7 screen validated every 2,000 steps on 15,724 chunks with the 2.6B
+# teacher resident -- ~5 h of an 8 h arm. A single pass at the end (VAL_EVERY=12000) gives the
+# same step-12,000 number for a third of the wall clock; the val SET is unchanged either way.
+VAL_EVERY="${VAL_EVERY:-2000}"
 
 cd "${SLURM_SUBMIT_DIR:-.}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"
 mkdir -p logs
@@ -71,7 +76,7 @@ echo "branch: $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)
 # exported in the login shell would silently funnel ALL FIVE arms into one output
 # directory, each overwriting the last one's checkpoints. Clear it.
 unset EXPERIMENT
-export ARM STEPS WARMUP_STEPS
+export ARM STEPS WARMUP_STEPS VAL_EVERY
 export SAVE_TOP_K="${SAVE_TOP_K_SCREEN}"
 bash scripts/train_stage0_150m_h100.sh
 

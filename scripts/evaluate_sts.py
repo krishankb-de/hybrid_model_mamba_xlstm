@@ -46,6 +46,7 @@ from scipy.stats import spearmanr
 
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
+from hybrid_xmamba.utils.checkpoint_arch import infer_architecture
 
 
 # ---------------------------------------------------------------------------
@@ -88,25 +89,18 @@ def load_encoder(checkpoint_path: str, device: str = "cuda") -> HybridTextEncode
         512,
     )
     # Auto-detect architecture from the checkpoint so v1 AND v2 load exact-match
-    # (hardcoding [mamba,mamba,mlstm]+pre_rms mismapped the v2 backbone — same bug
-    #  class fixed in evaluate_cxr_retrieval.py). mamba blocks carry mixer.A_log;
-    # HybridNorm adds dt_norm/B_norm/C_norm (mamba) + v_norm (mlstm).
-    layer_pattern = []
-    for i in range(num_layers):
-        mixer_keys = [k for k in state if f"lm.layers.{i}.mixer." in k]
-        is_mamba = any("A_log" in k or "conv1d" in k for k in mixer_keys)
-        layer_pattern.append("mamba" if is_mamba else "mlstm")
-    norm_topology = "hybrid" if any(
-        (".dt_norm." in k or ".v_norm." in k or ".B_norm." in k or ".C_norm." in k)
-        for k in state
-    ) else "pre_rms"
+    # (hardcoding [mamba,mamba,mlstm]+pre_rms mismapped the v2 backbone). MAMBA3_PLAN_V2.md
+    # V1-D: shared sniffer with evaluate_cxr_retrieval.py -- one fingerprint per mixer family,
+    # ambiguity refused, sizes read from tensor shapes instead of the hard-coded state_size=16.
+    arch = infer_architecture(state, prefix="lm.layers.")
+    layer_pattern, norm_topology = arch.layer_pattern, arch.norm_topology
     print(f"  detected layer_pattern={layer_pattern}, norm_topology={norm_topology}")
     cfg = HybridConfig(
         dim=dim, num_layers=num_layers,
         layer_pattern=layer_pattern,
         norm_topology=norm_topology,
         vocab_size=50257, max_position_embeddings=1024,
-        state_size=16, conv_size=4, expand_factor=2, head_dim=64,
+        head_dim=64, **arch.size_kwargs(),
         use_tfla=True, proj_factor=2, slstm_hidden_dim=dim, slstm_num_heads=4,
         norm_type="rms", use_mlp=True, mlp_ratio=4.0, dropout=0.0,
     )

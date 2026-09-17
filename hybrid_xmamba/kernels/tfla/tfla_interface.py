@@ -82,7 +82,7 @@ def tfla_forward_parallel(
         chunk_size: Size of each chunk for parallel processing
         tfla_impl: "legacy" (default) keeps the pre-2026-09 numerics, defect included, so
             existing checkpoints stay bit-reproducible. "exact" re-centres the intra-chunk decay
-            instead of dividing by it. MAMBA3_PLAN.md M1-H.
+            instead of dividing by it. MAMBA3_PLAN_V2.md M1-H.
 
     Returns:
         Output tensor (B, H, L, D)
@@ -134,7 +134,7 @@ def tfla_forward_parallel(
     # ============================================================
     k_gated_intra = k_c * i_c  # (B, H, nc, C, D) per-dimension input gating
     if tfla_impl == "legacy":
-        # MAMBA3_PLAN.md M1-C: `f_cum` underflows 1e-6 within a chunk for any realistic forget
+        # MAMBA3_PLAN_V2.md M1-C: `f_cum` underflows 1e-6 within a chunk for any realistic forget
         # gate -- 70.9% of (t, d) entries at the shipped forget_gate_bias_init=0.0 -- and the
         # clamp then pins the denominator, so decay[i, j] collapses to ~0 even for j close to i.
         # Measured rel-max-err vs an fp64 sequential reference: 0.882 at the shipped settings.

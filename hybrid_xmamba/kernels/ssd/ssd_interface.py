@@ -1,4 +1,4 @@
-"""Chunked SSD scan -- the Mamba-2/3 state space dual (MAMBA3_PLAN.md M2-B).
+"""Chunked SSD scan -- the Mamba-2/3 state space dual (MAMBA3_PLAN_V2.md M2-B).
 
 Why this exists rather than a patch to `selective_scan`. Mamba-1 parameterizes `A` as
 `(d_inner, dstate)`, one decay per channel *and* state. Computing the intra-chunk term exactly
@@ -93,7 +93,7 @@ def ssd_chunked_scan(
         extra_terms: additional `(coefficient, B, x)` triples summed into the state. The
             recurrence is linear in its input, so each is another pass over the *same* decay
             mask -- which is exactly how the trapezoidal rule's `beta * B_{t-1} x_{t-1}` term is
-            added (MAMBA3_PLAN.md M3) without a second mask or a second scan. Unused at M2.
+            added (MAMBA3_PLAN_V2.md M3) without a second mask or a second scan. Unused at M2.
 
     Returns:
         (batch, seqlen, nheads, headdim)

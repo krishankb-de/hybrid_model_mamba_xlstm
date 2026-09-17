@@ -340,7 +340,7 @@ def main(cfg: DictConfig):
     # ---------------------------------------------------------------------------
     # Student model
     # ---------------------------------------------------------------------------
-    # MAMBA3_PLAN.md M2-F: every dataclass field present in the yaml is carried
+    # MAMBA3_PLAN_V2.md M2-F: every dataclass field present in the yaml is carried
     # through automatically. Do not go back to listing fields by hand -- that is
     # how norm_topology (Phase 9) and scan_impl (job 2513007) were silently lost.
     model_config = HybridConfig.from_hydra(cfg.model)

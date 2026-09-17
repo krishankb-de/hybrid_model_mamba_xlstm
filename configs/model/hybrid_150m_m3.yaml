@@ -1,4 +1,4 @@
-# 150M Mamba-3 — the A2 arm of MAMBA3_PLAN.md.
+# 150M Mamba-3 — the A2 arm of MAMBA3_PLAN_V2.md.
 #
 # Identical to hybrid_150m_v2 in every respect except that its 9 `mamba` layers are `mamba3`.
 # The mLSTM count and placement, dims, LR schedule and norm topology are all held fixed, so the
@@ -30,6 +30,13 @@ conv_size: 4
 expand_factor: 2
 dt_rank: null
 use_fast_path: true
+
+# Operator selection (MAMBA3_PLAN_V2.md V1-E). Declared explicitly in every model yaml so no
+# config inherits the dataclass default silently: "legacy" reproduces every checkpoint trained
+# before 2026-09 byte-for-byte (including the divide-and-clamp defect, analysis/scan_error_bound.md);
+# "exact" is the division-free fix (M1-E / M1-H). The M7 screen and every published number ran legacy.
+scan_impl: "legacy"
+tfla_impl: "legacy"
 
 # Mamba-3 parameters. Every flag here is the Mamba-2 reduction; the ablation arms override them.
 mamba3_d_state: 128        # 8x the Mamba-1 setting, +1.4% params (B/C shared across heads)

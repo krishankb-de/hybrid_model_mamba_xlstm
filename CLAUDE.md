@@ -120,8 +120,9 @@ python scripts/train.py model=hybrid_70m dataset=c4 trainer=a100_single_gpu \
 
 The model is built from three composable layer types interleaved via `layer_pattern`:
 
-- **Mamba block** (`layers/mamba_block.py`): Selective SSM with input-dependent gating, 1D causal convolution, SiLU activation. Uses the **chunk-parallel PyTorch** selective scan (`kernels/selective_scan/scan_interface.py::selective_scan_parallel`), run in fp32 for numerical stability. ⚠️ **Correction (verified 2026-09-07, Phase 14C-5):** `scan_interface.selective_scan()` calls the PyTorch path *unconditionally*; `scan_triton.selective_scan_triton` is imported and **never invoked**. Earlier revisions of this file claimed a Triton kernel is used for Mamba — that is false for the live path, and it also affects how efficiency curves must be described. ⚠️ **Known defect:** the chunk-parallel form divides by the cumulative decay with `A_cum.clamp(min=1e-8)`, which annihilates a token's own state contribution where `A_cum` underflows (rel-max-err ≈0.358 at the model's actual Δ). Being bounded and tested in Phase 14C; the repair is owned by `MAMBA3_INTEGRATION_PLAN.md`.
-- **mLSTM block** (`layers/mlstm_block.py`): Matrix LSTM with exponential gating, matrix-valued cell state (D×D). Uses Tiled Flash Linear Attention (TFLA) Triton kernel for chunk-parallel (~32 steps for seq_len=2048 vs 2048 sequential).
+- **Mamba block** (`layers/mamba_block.py`): Selective SSM with input-dependent gating, 1D causal convolution, SiLU activation. Uses the **chunk-parallel PyTorch** selective scan (`kernels/selective_scan/scan_interface.py::selective_scan_parallel`), run in fp32 for numerical stability. ⚠️ **Correction (verified 2026-09-07, Phase 14C-5):** `scan_interface.selective_scan()` calls the PyTorch path *unconditionally*; `scan_triton.selective_scan_triton` is imported and **never invoked**. Earlier revisions of this file claimed a Triton kernel is used for Mamba — that is false for the live path, and it also affects how efficiency curves must be described. ⚠️ **Known defect:** the chunk-parallel form divides by the cumulative decay with `A_cum.clamp(min=1e-8)`, which annihilates a token's own state contribution where `A_cum` underflows (rel-max-err ≈0.358 at the model's actual Δ). Bounded and regression-tested in Phase 14C (`tests/test_scan_correctness.py`); the repair shipped behind `scan_impl` (`MAMBA3_PLAN_V2.md` M1-E) — **`legacy` stays pinned in every published yaml**, `exact` is the division-free scan.
+- **mLSTM block** (`layers/mlstm_block.py`): Matrix LSTM with exponential gating, matrix-valued cell state (D×D). Uses the **pure-PyTorch** chunk-parallel TFLA interface (`kernels/tfla/tfla_interface.py`; `tfla_triton.py` is never dispatched). ⚠️ Its `legacy` intra-chunk term carries the same clamp defect (rel-max-err 0.882 at the shipped forget-gate init, M1-C); `tfla_impl: exact` is the fix (M1-H) and is what the `A2x` arm screens.
+- **Mamba-3 block** (`layers/mamba3_block.py`, `MAMBA3_PLAN_V2.md` M2–M6): Mamba-2 SSD (`kernels/ssd/`, scalar-`A`-per-head, log-space segsum, no division anywhere) with `d_state=128`, optional exponential-trapezoidal rule, complex state via data-dependent RoPE (`layers/rotary.py`), B/C biases, and an O(1) recurrent `step()` for decoding. Every flag defaults to the exact Mamba-2 reduction; `hybrid_150m_m3.yaml` is parameter-matched to `hybrid_150m_v2` at +0.26% (184,192,200). Fifth layer type next to `attention` (Phase 14A).
 - **sLSTM block** (`layers/slstm_block.py`): Parallel scan via cumulative forget-gate products in log-space.
 
 **Model sizes and patterns:**
@@ -134,6 +135,8 @@ The model is built from three composable layer types interleaved via `layer_patt
 
 The 70M model uses `max_position_embeddings=1024` (not 2048) and `num_heads=8`.
 
+The 150M campaign configs: `hybrid_150m_v2` (9 mamba + 3 mlstm, 183,721,824), `transformer_150m_baseline` (15 × attention, 183,386,880), **`hybrid_150m_m3` (9 mamba3 + 3 mlstm, 184,192,200)** and their `_rrg` report-generation twins, which differ from the base yaml by exactly the image-prefix/decoder-LR/aux-key delta (parity-tested).
+
 **Data flow:**
 ```
 input_ids → Embedding → N × HybridBlock [Pre-norm → Mixer → Residual → MLP → Residual] → RMSNorm → LM Head (logits)
@@ -143,8 +146,13 @@ input_ids → Embedding → N × HybridBlock [Pre-norm → Mixer → Residual �
 - `hybrid_xmamba/models/hybrid_lm.py` — `HybridLanguageModel`: top-level model with embeddings and LM head
 - `hybrid_xmamba/models/configuration_hybrid.py` — `HybridConfig` dataclass (all architecture params)
 - `hybrid_xmamba/layers/hybrid_block.py` — `HybridBlock`: factory that dispatches to Mamba/mLSTM/sLSTM
-- `hybrid_xmamba/kernels/selective_scan/scan_triton.py` — Triton kernel for Mamba's selective scan
-- `hybrid_xmamba/kernels/tfla/tfla_triton.py` — Triton kernel for mLSTM's TFLA
+- `hybrid_xmamba/kernels/selective_scan/scan_interface.py` — the live Mamba-1 scans (`legacy` chunked, `exact` division-free, fp64 `HYBRID_EXACT_SCAN=1` reference); pure PyTorch
+- `hybrid_xmamba/kernels/tfla/tfla_interface.py` — the live mLSTM TFLA (`legacy` / `exact`); pure PyTorch
+- `hybrid_xmamba/kernels/ssd/` — Mamba-2/3 SSD chunked scan + fp64 oracle + `ssd_step` (decode)
+- `hybrid_xmamba/layers/mamba3_block.py`, `layers/rotary.py` — `Mamba3Block` and its data-dependent RoPE
+- `hybrid_xmamba/utils/checkpoint_arch.py` — checkpoint → architecture sniffer used by the retrieval/STS loaders
+- `scripts/mamba3_arms.py`, `scripts/screen_arms_h100.sh`, `scripts/submit_v3_chain.sh`, `scripts/mamba3_state.py` — the arm ladder, the screen array, the V3 pipeline chain, the plan/state helper
+- `hybrid_xmamba/kernels/selective_scan/scan_triton.py`, `kernels/tfla/tfla_triton.py` — **dead**, never dispatched (deleted at V4-C)
 - `hybrid_xmamba/training/lightning_module.py` — PyTorch Lightning training/validation loop
 
 ### Configuration System (Hydra)

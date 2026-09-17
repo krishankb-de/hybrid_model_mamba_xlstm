@@ -1,4 +1,4 @@
-# 150M arm A1 of MAMBA3_PLAN.md — Mamba-1 with the operator defects repaired, nothing else.
+# 150M arm A1 of MAMBA3_PLAN_V2.md — Mamba-1 with the operator defects repaired, nothing else.
 #
 # This is the control that makes a Mamba-3 result interpretable. Arm A2 differs from A0 in three
 # things at once: the Delta regime, the operator, and the scan's correctness. Without A1 a win
@@ -17,7 +17,7 @@
 #                             forget_gate_bias_init=0.0 at chunk 64 gives rel-max-err 0.882.
 #
 # Architecture, dims, layer pattern, LR schedule and parameter count are identical to
-# hybrid_150m_v2. Screen-only: A1 never enters the full pipeline (MAMBA3_PLAN.md M8 cut list).
+# hybrid_150m_v2. Screen-only: A1 never enters the full pipeline (MAMBA3_PLAN_V2.md M8 cut list).
 
 model_type: "hybrid_lm"
 
@@ -34,7 +34,7 @@ expand_factor: 2
 dt_rank: null          # Auto: 768 / 16 = 48
 use_fast_path: true
 
-# --- the A1 repairs (MAMBA3_PLAN.md M1) ---
+# --- the A1 repairs (MAMBA3_PLAN_V2.md M1) ---
 scan_impl: "exact"
 tfla_impl: "exact"
 dt_init_strategy: "mamba"

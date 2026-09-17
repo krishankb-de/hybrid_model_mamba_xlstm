@@ -16,6 +16,13 @@ expand_factor: 2
 dt_rank: null  # Auto-computed
 use_fast_path: true
 
+# Operator selection (MAMBA3_PLAN_V2.md V1-E). Declared explicitly in every model yaml so no
+# config inherits the dataclass default silently: "legacy" reproduces every checkpoint trained
+# before 2026-09 byte-for-byte (including the divide-and-clamp defect, analysis/scan_error_bound.md);
+# "exact" is the division-free fix (M1-E / M1-H). The M7 screen and every published number ran legacy.
+scan_impl: "legacy"
+tfla_impl: "legacy"
+
 # mLSTM parameters
 head_dim: 128
 num_heads: 32  # 4096 / 128 = 32

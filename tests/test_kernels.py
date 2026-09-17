@@ -7,7 +7,7 @@ import torch.nn.functional as F
 # Most kernel tests require CUDA — gate at class level so CPU-only tests
 # (e.g. doc-boundary wrapper tests added in Phase 6F) can still run on Willi.
 #
-# MAMBA3_PLAN.md M1-A: the `cuda` marker used to be declared in pytest.ini but never applied to
+# MAMBA3_PLAN_V2.md M1-A: the `cuda` marker used to be declared in pytest.ini but never applied to
 # anything, so `-m "not cuda"` deselected nothing and these tests merely skipped. That made the
 # marker a lie and hid how little CPU coverage the kernels actually had. The marker is now
 # applied alongside the skipif: `-m "not cuda"` deselects, a bare run still skips cleanly.

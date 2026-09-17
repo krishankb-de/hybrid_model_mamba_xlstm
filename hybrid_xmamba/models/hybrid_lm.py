@@ -100,7 +100,7 @@ class HybridLanguageModel(nn.Module):
         
         # Create hybrid blocks based on layer pattern.
         #
-        # MAMBA3_PLAN.md M2-F: this used to be ~20 hand-written `name=config.name` lines. Every
+        # MAMBA3_PLAN_V2.md M2-F: this used to be ~20 hand-written `name=config.name` lines. Every
         # new config field then had to be added here *and* to the per-type kwarg whitelist in
         # `hybrid_block.py`, and forgetting either silently fell back to the default -- the exact
         # failure that cost this project a run in Phase 9 (`norm_topology` was dropped when
@@ -139,7 +139,7 @@ class HybridLanguageModel(nn.Module):
         # Initialize weights
         self.apply(self._init_weights)
 
-        # MAMBA3_PLAN.md M1-F: `_init_weights` zeroes every nn.Linear bias, which erases any
+        # MAMBA3_PLAN_V2.md M1-F: `_init_weights` zeroes every nn.Linear bias, which erases any
         # per-mixer init done in the block's own __init__ -- the Mamba dt bias is exactly that.
         # Mixers needing to re-assert an init expose `post_model_init`; it is a no-op unless the
         # corresponding strategy flag is on, so the default path is unchanged.
@@ -151,7 +151,7 @@ class HybridLanguageModel(nn.Module):
         logger.info(self.architecture_fingerprint())
     
     def architecture_fingerprint(self) -> str:
-        """One-line summary of what was actually built (MAMBA3_PLAN.md M2-I).
+        """One-line summary of what was actually built (MAMBA3_PLAN_V2.md M2-I).
 
         The expensive failure mode in this project is not a crash, it is training the wrong thing
         for three days: `hybrid_block` filters mixer kwargs against a per-type whitelist and drops

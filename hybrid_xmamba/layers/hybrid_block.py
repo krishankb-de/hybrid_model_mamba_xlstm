@@ -75,7 +75,7 @@ class HybridBlock(nn.Module):
         # for blocks >= 1. First block stays pure pre-norm to avoid early-training instability.
         self.norm_topology = norm_topology
         self.is_first_block = is_first_block
-        # MAMBA3_PLAN.md M1-F: "hybrid_bc" is "hybrid" minus the Delta norm -- B/C norms only,
+        # MAMBA3_PLAN_V2.md M1-F: "hybrid_bc" is "hybrid" minus the Delta norm -- B/C norms only,
         # matching Mamba-3 Sec 3.4. Everything else (FFN post-norm placement, mLSTM projection
         # norms) is identical, so the two topologies differ in exactly one variable. "hybrid"
         # itself is untouched, so every existing checkpoint keeps loading.
@@ -91,7 +91,7 @@ class HybridBlock(nn.Module):
         else:
             self.norm1 = nn.LayerNorm(dim)
         
-        # MAMBA3_PLAN.md M2-F: a kwarg that names a specific mixer family but matches nothing is
+        # MAMBA3_PLAN_V2.md M2-F: a kwarg that names a specific mixer family but matches nothing is
         # always a mistake -- a typo, or a field added to HybridConfig and never wired through.
         # Silently dropping it is how a lever "does nothing" for three days. Unprefixed kwargs are
         # still dropped quietly, because the flat bag deliberately carries every type's fields.
@@ -174,7 +174,7 @@ class HybridBlock(nn.Module):
         else:
             raise ValueError(f"Unknown layer type: {layer_type}")
 
-        # MAMBA3_PLAN.md M2-E. This used to be `if layer_type in ("mamba", "mlstm")`, which is how
+        # MAMBA3_PLAN_V2.md M2-E. This used to be `if layer_type in ("mamba", "mlstm")`, which is how
         # sLSTM blocks silently leaked recurrent state across packed documents: sLSTM fell to the
         # else branch and never received cu_seqlens. Dispatch on a capability the mixer declares,
         # so a new layer type cannot inherit that bug by omission. A parity test cross-checks the

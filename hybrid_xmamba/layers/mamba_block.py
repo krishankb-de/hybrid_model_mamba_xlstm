@@ -32,7 +32,7 @@ class MambaBlock(nn.Module):
         use_fast_path: Whether to use optimized kernel path
     """
 
-    # MAMBA3_PLAN.md M2-E: declared capability, read by `HybridBlock`. `_forward_segmented` re-runs the block per document segment.
+    # MAMBA3_PLAN_V2.md M2-E: declared capability, read by `HybridBlock`. `_forward_segmented` re-runs the block per document segment.
     supports_cu_seqlens = True
     
     def __init__(
@@ -55,12 +55,12 @@ class MambaBlock(nn.Module):
         self.state_size = state_size
         self.conv_size = conv_size
         self.expand_factor = expand_factor
-        # MAMBA3_PLAN.md M1-E: "legacy" keeps the pre-2026-09 numerics bit-reproducible;
+        # MAMBA3_PLAN_V2.md M1-E: "legacy" keeps the pre-2026-09 numerics bit-reproducible;
         # "exact" selects the division-free scan. Default flips at M9-A.
         if scan_impl not in ("legacy", "exact"):
             raise ValueError(f"scan_impl must be 'legacy' or 'exact', got {scan_impl!r}")
         self.scan_impl = scan_impl
-        # MAMBA3_PLAN.md M1-F. Reference Mamba draws Delta ~ logU[dt_min, dt_max] via an
+        # MAMBA3_PLAN_V2.md M1-F. Reference Mamba draws Delta ~ logU[dt_min, dt_max] via an
         # inverse-softplus bias on dt_proj. This repo has never had that init, and Delta sits at
         # ~0.70 (pre_rms) / ~0.81 (hybrid) instead of ~0.02. Two things must both be true for a
         # fix to take effect, which is why they are one phase:
@@ -231,7 +231,7 @@ class MambaBlock(nn.Module):
         """Non-fast-path selective scan.
 
         This used to carry its own copy of the chunk-parallel scan, including an identical copy
-        of the divide-and-clamp defect (MAMBA3_PLAN.md M1). That mattered more than it looks:
+        of the divide-and-clamp defect (MAMBA3_PLAN_V2.md M1). That mattered more than it looks:
         `scripts/validate_for_willi.sh` builds its Gate 6 model with `use_fast_path=False`, so
         the pre-push harness only ever exercised the buggy duplicate. Both paths now share one
         implementation, so a fix cannot land on one and miss the other.

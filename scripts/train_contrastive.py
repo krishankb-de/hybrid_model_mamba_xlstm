@@ -678,7 +678,7 @@ def main(cfg: DictConfig):
     tokenizer.model_max_length = cfg.model.max_position_embeddings
 
     # Model config
-    # MAMBA3_PLAN.md M2-F: every dataclass field present in the yaml is carried
+    # MAMBA3_PLAN_V2.md M2-F: every dataclass field present in the yaml is carried
     # through automatically. Do not go back to listing fields by hand -- that is
     # how norm_topology (Phase 9) and scan_impl (job 2513007) were silently lost.
     model_config = HybridConfig.from_hydra(cfg.model,
@@ -703,6 +703,21 @@ def main(cfg: DictConfig):
         state = {(k[3:] if k.startswith("lm.") else k): v for k, v in state.items()}
         missing, unexpected = text_encoder.lm.load_state_dict(state, strict=False)
         print(f"  Loaded. Missing keys: {len(missing)}, Unexpected: {len(unexpected)}")
+        # MAMBA3_PLAN_V2.md V1-D: the same >50% guard the decoder init and the report-gen eval
+        # carry. This was the one load in the chain without one: a Stage-0 checkpoint of the
+        # wrong architecture matches almost nothing under strict=False and the tower trains
+        # from random init while printing a key count nobody reads.
+        n_lm_keys = len(text_encoder.lm.state_dict())
+        missing_frac = len(missing) / max(n_lm_keys, 1)
+        if missing_frac > 0.5:
+            raise RuntimeError(
+                f"lm_checkpoint matched only {n_lm_keys - len(missing)}/{n_lm_keys} backbone "
+                f"tensors ({missing_frac:.0%} missing) -- wrong architecture for "
+                f"model={cfg.model.get('_name_', '?')} / layer_pattern={list(model_config.layer_pattern)}. "
+                f"First missing: {missing[:5]}")
+        if missing_frac > 0.05:
+            print(f"  WARNING: {missing_frac:.1%} of backbone keys missing from lm_checkpoint "
+                  f"(first 5: {missing[:5]}) -- check MODEL_CONFIG against the checkpoint.")
 
     num_params = sum(p.numel() for p in text_encoder.parameters() if p.requires_grad)
     print(f"Trainable parameters: {num_params:,} ({num_params/1e6:.1f}M)")

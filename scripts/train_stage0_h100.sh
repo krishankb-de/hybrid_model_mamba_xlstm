@@ -40,13 +40,13 @@ set -euo pipefail
 SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 MODEL_CONFIG="${MODEL_CONFIG:-hybrid_70m_v2}"
-# MAMBA3_PLAN.md M7: the screen needs a seed override (the A0/A0-seed pair measures the noise
+# MAMBA3_PLAN_V2.md M7: the screen needs a seed override (the A0/A0-seed pair measures the noise
 # floor, and every arm must otherwise share a seed for a paired comparison) and a checkpoint
 # budget override -- save_top_k=3 at 2.4 GB per 150M checkpoint fills the quota fast when eight
 # arms run at once, and a screen only ever reads the final val loss.
 SEED="${SEED:-42}"
 SAVE_TOP_K="${SAVE_TOP_K:-3}"
-# Extra Hydra overrides, space separated. This is how the MAMBA3_PLAN.md screen arms flip their
+# Extra Hydra overrides, space separated. This is how the MAMBA3_PLAN_V2.md screen arms flip their
 # levers -- A3..A6 are hybrid_150m_m3.yaml plus `model.mamba3_*=...`, not five separate yamls.
 # Do not hand-write these: `eval "$(python scripts/mamba3_arms.py env A5)"` sets this variable
 # from the one definition of the ladder that the pre-flight also checks.

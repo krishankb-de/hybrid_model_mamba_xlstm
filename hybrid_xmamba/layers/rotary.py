@@ -1,4 +1,4 @@
-"""Data-dependent rotary embeddings for the complex-valued SSM (MAMBA3_PLAN.md M4).
+"""Data-dependent rotary embeddings for the complex-valued SSM (MAMBA3_PLAN_V2.md M4).
 
 Mamba-3 Sec 3.2 makes the state transition complex. Proposition 2 shows a complex SSM of state
 size N/2 is equivalent to a real one of size N whose transition is a scalar decay times a

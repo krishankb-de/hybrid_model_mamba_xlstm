@@ -73,7 +73,7 @@ fi
 # The ONLY lever that changes between the hybrid and the baseline is this variable.
 #   MODEL_CONFIG=transformer_150m_baseline EXPERIMENT=h100_stage0_transformer_150m \
 #     sbatch scripts/train_stage0_150m_h100.sh
-# Overridable so the MAMBA3_PLAN.md screen arms can reuse this wrapper's 150M-tuned SBATCH
+# Overridable so the MAMBA3_PLAN_V2.md screen arms can reuse this wrapper's 150M-tuned SBATCH
 # header and stability settings (LR 4e-4, warmup 2000, grad-clip 0.5 -- all load-bearing; see
 # the collapse notes above) while swapping only the architecture.
 export MODEL_CONFIG="${MODEL_CONFIG:-hybrid_150m_v2}"

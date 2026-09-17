@@ -48,6 +48,7 @@ from transformers import AutoTokenizer
 
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
+from hybrid_xmamba.utils.checkpoint_arch import infer_architecture
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -103,17 +104,11 @@ def load_text_encoder(
     # Auto-detect architecture from the checkpoint so v1 AND v2 load exact-match.
     # (Hardcoding [mamba,mamba,mlstm]+pre_rms silently mismapped the v2 backbone:
     #  wrong layer pattern + dropped HybridNorm weights → wrong retrieval numbers.)
-    #   - per-layer type: mamba blocks carry a mixer.A_log; mLSTM blocks do not.
-    #   - norm topology: HybridNorm adds dt_norm/B_norm/C_norm (mamba) + v_norm (mlstm).
-    layer_pattern = []
-    for i in range(num_layers):
-        mixer_keys = [k for k in text_state if f"lm.layers.{i}.mixer." in k]
-        is_mamba = any("A_log" in k or "conv1d" in k for k in mixer_keys)
-        layer_pattern.append("mamba" if is_mamba else "mlstm")
-    norm_topology = "hybrid" if any(
-        (".dt_norm." in k or ".v_norm." in k or ".B_norm." in k or ".C_norm." in k)
-        for k in text_state
-    ) else "pre_rms"
+    # MAMBA3_PLAN_V2.md V1-D: one fingerprint per mixer family, ambiguity refused. The old
+    # `A_log or conv1d` test labelled a Mamba-3 block (it has both) as Mamba-1 and an
+    # attention block as mLSTM. Sizes come from tensor shapes, not from hard-coded defaults.
+    arch = infer_architecture(text_state, prefix="lm.layers.")
+    layer_pattern, norm_topology = arch.layer_pattern, arch.norm_topology
     # Contrastive embed_dim is the CLIP joint-space size (512), NOT the model hidden
     # dim. These coincided for the 70M (dim=512), which hid this bug; the 150M has
     # dim=768 and building a 768-d head fails to load the checkpoint's 768->512 one.
@@ -135,11 +130,19 @@ def load_text_encoder(
         max_position_embeddings=1024,
         pooling_strategy="attention",
         bidirectional_encode=bidirectional_encode,
+        **arch.size_kwargs(),
     )
     model = HybridTextEncoder(cfg, embed_dim=embed_dim)
     missing, unexpected = model.load_state_dict(text_state, strict=False)
+    # MAMBA3_PLAN_V2.md V1-D: match evaluate_sts.py -- a mis-built backbone must FAIL here, not
+    # print a key count and score anyway.
+    critical = [k for k in missing if k.startswith("lm.") or k.startswith("projection_head.")]
+    if critical:
+        raise RuntimeError(f"Critical keys missing after load: {critical[:5]} "
+                           f"({len(critical)} total) -- the checkpoint does not match the "
+                           f"architecture inferred from it: {arch.config_kwargs()}")
     if missing:
-        print(f"  [text encoder] {len(missing)} missing keys (first 5): {missing[:5]}")
+        print(f"  [text encoder] {len(missing)} non-critical missing keys (first 5): {missing[:5]}")
     if unexpected:
         print(f"  [text encoder] {len(unexpected)} unexpected keys (first 5): {unexpected[:5]}")
     return model.to(device).eval()

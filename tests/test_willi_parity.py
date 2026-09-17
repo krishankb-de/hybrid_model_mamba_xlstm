@@ -1490,7 +1490,7 @@ def test_norm_topology_threaded_to_hybridconfig():
       ``norm_topology``, so a v2 yaml's ``norm_topology: hybrid`` was ignored and HybridNorm
       weights loaded into a pre_rms model. This test was written then, asserting the literal
       ``norm_topology=`` kwarg was present.
-    * 2026-09-06 (MAMBA3_PLAN.md FM5) -- the same hand-written list dropped ``scan_impl``,
+    * 2026-09-06 (MAMBA3_PLAN_V2.md FM5) -- the same hand-written list dropped ``scan_impl``,
       ``tfla_impl`` and ``dt_init_strategy``. Job 2513007 trained the A1 arm with every defect
       still in place; only the ARCH fingerprint caught it. Guarding one field name could never
       have caught that, because the bug is the mechanism, not the field.
@@ -4642,8 +4642,12 @@ def test_no_plan_command_invokes_a_bare_python_script_on_the_cluster():
     """
     plan = (REPO_ROOT / "H100_SCALING_PLAN.md").read_text()
     phase14 = plan.split("### Phase 14 —")[1].split("\n## Verification")[0]
+    # MAMBA3_PLAN_V2.md V1-F: the Mamba-3 plan is scanned WHOLE. Its predecessor's own log has
+    # three login-node incidents (job 2513581 among them); local-only commands are written as
+    # `venv/bin/python ...` so they cannot be mistaken for cluster commands.
+    scanned = phase14 + "\n" + (REPO_ROOT / "MAMBA3_PLAN_V2.md").read_text()
     offenders = [
-        line.strip() for line in phase14.splitlines()
+        line.strip() for line in scanned.splitlines()
         if line.strip().startswith(("python scripts/", "python3 scripts/"))
     ]
     assert not offenders, (
@@ -5337,14 +5341,14 @@ def test_rrg_model_configs_declare_aux_keys():
     the same trap that cost a smoke run in 13A (job 2478622). Both report-gen
     arms must declare them, or the matched Transformer baseline cannot run the
     same recipe."""
-    for name in ("hybrid_150m_v2_rrg", "transformer_150m_baseline_rrg"):
+    for name in ("hybrid_150m_v2_rrg", "transformer_150m_baseline_rrg", "hybrid_150m_m3_rrg"):
         text = (REPO_ROOT / "configs" / "model" / f"{name}.yaml").read_text()
         assert "aux_lambda: 0.0" in text, name
         assert "aux_pos_weight_cap: 10.0" in text, name
 
 @pytest.mark.willi_parity
 def test_screen_arms_job_array_reads_the_shared_arm_ladder():
-    """MAMBA3_PLAN.md M7-B0: the screen is one job array, and it hand-writes no lever.
+    """MAMBA3_PLAN_V2.md M7-B0: the screen is one job array, and it hand-writes no lever.
 
     Two invariants, both load-bearing:
 
@@ -5467,3 +5471,160 @@ def test_stage0_validation_cadence_is_tunable():
     assert 'VAL_EVERY="${VAL_EVERY:-2000}"' in sh, "screens keep the 2000-step default"
     assert "trainer.val_check_interval=${VAL_EVERY}" in sh
     assert "trainer.val_check_interval=2000" not in sh, "no hard-coded cadence left"
+
+
+# ---------------------------------------------------------------------------
+# MAMBA3_PLAN_V2.md V1 -- re-baseline and harden the seams
+# ---------------------------------------------------------------------------
+
+def _model_yaml(name):
+    import yaml
+    return yaml.safe_load((REPO_ROOT / "configs" / "model" / f"{name}.yaml").read_text())
+
+
+@pytest.mark.willi_parity
+def test_m3_rrg_config_is_m3_plus_exactly_the_rrg_delta():
+    """V1-B: the Mamba-3 report-gen config mirrors the hybrid_150m_v2 -> _rrg delta EXACTLY,
+    the way transformer_150m_baseline_rrg does. Anything else is a second lever in the
+    decoder comparison."""
+    v2, v2_rrg = _model_yaml("hybrid_150m_v2"), _model_yaml("hybrid_150m_v2_rrg")
+    m3, m3_rrg = _model_yaml("hybrid_150m_m3"), _model_yaml("hybrid_150m_m3_rrg")
+    dropped = {k for k in v2 if k not in v2_rrg}
+    changed = {k for k in v2_rrg if k not in v2 or v2_rrg[k] != v2[k]}
+    expected = {k: (v2_rrg[k] if k in changed else m3[k]) for k in (set(m3) - dropped) | changed}
+    assert m3_rrg == expected, {
+        "missing": sorted(set(expected) - set(m3_rrg)),
+        "extra": sorted(set(m3_rrg) - set(expected)),
+        "differ": sorted(k for k in set(expected) & set(m3_rrg) if expected[k] != m3_rrg[k]),
+    }
+    assert m3_rrg["layer_pattern"].count("mamba3") == 9 and m3_rrg["layer_pattern"].count("mlstm") == 3
+
+
+@pytest.mark.willi_parity
+def test_every_recurrent_model_yaml_pins_the_operator_explicitly():
+    """V1-E: no yaml inherits scan_impl / tfla_impl from the dataclass default. The published
+    configs pin `legacy` (byte-for-byte reproduction of every checkpoint, and the 14A operator
+    freeze); the corrected arms pin `exact`. Flipping a global default can never silently move
+    a published number again."""
+    for f in sorted((REPO_ROOT / "configs" / "model").glob("*.yaml")):
+        raw = _model_yaml(f.stem)
+        pattern = raw.get("layer_pattern") or []
+        if not any(t in ("mamba", "mamba3", "mlstm") for t in pattern):
+            continue
+        assert raw.get("scan_impl") in ("legacy", "exact"), f"{f.name}: scan_impl not pinned"
+        assert raw.get("tfla_impl") in ("legacy", "exact"), f"{f.name}: tfla_impl not pinned"
+    for name in ("hybrid_70m_v2", "hybrid_150m_v2", "hybrid_150m_v2_rrg", "hybrid_150m_m3"):
+        raw = _model_yaml(name)
+        assert (raw["scan_impl"], raw["tfla_impl"]) == ("legacy", "legacy"), name
+    a1 = _model_yaml("hybrid_150m_a1")
+    assert (a1["scan_impl"], a1["tfla_impl"]) == ("exact", "exact")
+
+
+@pytest.mark.willi_parity
+def test_checkpoint_architecture_sniffer_names_every_layer_type():
+    """V1-D: the eval loaders used to decide `mamba` vs `mlstm` from `A_log`/`conv1d` alone,
+    which labels a Mamba-3 block (it has both) as Mamba-1 and an attention block as mLSTM.
+    The shared sniffer keys on one parameter unique to each mixer and refuses ambiguity."""
+    import torch
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+    from hybrid_xmamba.utils.checkpoint_arch import infer_architecture
+
+    pattern = ["mamba", "mamba3", "mlstm", "slstm", "attention"]
+
+    def build(norm_topology, pattern=pattern):
+        cfg = HybridConfig(vocab_size=64, dim=64, num_layers=len(pattern), layer_pattern=pattern,
+                           state_size=8, mamba3_d_state=16, mamba3_head_dim=32,
+                           use_fast_path=False, use_tfla=False, max_position_embeddings=32,
+                           norm_topology=norm_topology)
+        model = HybridLanguageModel(cfg)
+        return {"lm." + k: v for k, v in model.state_dict().items()}
+
+    arch = infer_architecture(build("hybrid"), prefix="lm.layers.")
+    assert arch.layer_pattern == pattern
+    assert arch.norm_topology == "hybrid"
+    assert arch.state_size == 8 and arch.mamba3_d_state == 16 and arch.mamba3_head_dim == 32
+    kw = arch.config_kwargs()
+    assert kw["layer_pattern"] == pattern and kw["state_size"] == 8 and kw["mamba3_d_state"] == 16
+
+    assert infer_architecture(build("pre_rms"), prefix="lm.layers.").norm_topology == "pre_rms"
+    assert infer_architecture(build("hybrid_bc", ["mamba", "mamba", "mlstm"]),
+                              prefix="lm.layers.").norm_topology == "hybrid_bc"
+
+    t = torch.zeros(2, 2)
+    with pytest.raises(ValueError, match="ambiguous"):
+        infer_architecture({"lm.layers.0.mixer.dt_proj.weight": t,
+                            "lm.layers.0.mixer.i_gate_proj.weight": t}, prefix="lm.layers.")
+    with pytest.raises(ValueError, match="no fingerprint"):
+        infer_architecture({"lm.layers.0.mixer.mystery.weight": t}, prefix="lm.layers.")
+
+
+@pytest.mark.willi_parity
+def test_retrieval_and_sts_loaders_share_the_sniffer_and_raise_on_critical_misses():
+    """V1-D: one sniffer, two loaders, and both FAIL on a mis-built backbone. evaluate_cxr_retrieval
+    used to print the missing keys and score anyway (a wrong architecture silently mis-scored);
+    evaluate_sts already raised. They now match."""
+    for rel in ("scripts/evaluate_cxr_retrieval.py", "scripts/evaluate_sts.py"):
+        src = (REPO_ROOT / rel).read_text()
+        assert "infer_architecture(" in src, rel
+        assert '"A_log" in k or "conv1d" in k' not in src, f"{rel}: binary predicate still live"
+        assert "Critical keys missing after load" in src and "raise RuntimeError" in src, rel
+
+
+@pytest.mark.willi_parity
+def test_contrastive_backbone_load_guards_against_wrong_architecture():
+    """V1-D: the tower stage was the one load in the chain with no guard -- a wrong-architecture
+    Stage-0 checkpoint loaded with strict=False, matched almost nothing, and trained from random
+    init while printing a key count nobody read. Same >50% rule as the decoder and the eval."""
+    src = (REPO_ROOT / "scripts" / "train_contrastive.py").read_text()
+    i = src.index("text_encoder.lm.load_state_dict(state, strict=False)")
+    window = src[i:i + 1600]
+    assert "missing_frac" in window and "raise RuntimeError" in window, "no wrong-architecture guard"
+    assert "0.5" in window and "0.05" in window
+
+
+@pytest.mark.willi_parity
+def test_v3_chain_script_is_source_safe_and_only_submits_existing_wrappers():
+    """V1-F: the full pipeline is one dependency chain, SOURCED on the login node (which executes
+    no scripts and no python). So: no `set -e` (it would kill the login shell), nothing but sbatch
+    and shell, every wrapper it names exists and excludes the ARM node."""
+    import re
+    path = REPO_ROOT / "scripts" / "submit_v3_chain.sh"
+    assert path.exists(), "scripts/submit_v3_chain.sh missing"
+    src = path.read_text()
+    assert "set -e" not in src and "set -euo" not in src
+    assert "--dependency=afterok" in src
+    code = [l.strip() for l in src.splitlines() if l.strip() and not l.strip().startswith("#")]
+    assert not any(l.startswith(("python ", "python3 ", "bash scripts/", "sh scripts/")) for l in code), (
+        "the chain must not run scripts on the login node"
+    )
+    submits = "\n".join(l for l in code if not l.startswith("echo"))   # sbatch targets only, not the closing hint
+    wrappers = set(re.findall(r"(scripts/[A-Za-z0-9_]+\.sh)", submits)) - {"scripts/submit_v3_chain.sh"}
+    assert wrappers == {
+        "scripts/train_stage0_150m_h100.sh", "scripts/train_report_generation_h100.sh",
+        "scripts/inspect_report_generation_h100.sh", "scripts/score_chexbert_h100.sh",
+        "scripts/bootstrap_compare_h100.sh",
+    }, wrappers
+    for w in wrappers:
+        wsrc = (REPO_ROOT / w).read_text()
+        assert (REPO_ROOT / w).exists() and "#SBATCH --exclude=ga03" in wsrc, w
+    # the levers the plan's recipe depends on are all threaded
+    for lever in ("ARM=", "SEEDS", "SAVE_TOP_K=0", "NUM_GPUS=4", "MAX_STEPS=12000", "PREFIX_K",
+                  "DECODE=beam", "BEAM_SIZE=3", "PER_LABEL=true", "IMAGE_ENCODER_CKPT", "DRY_RUN"):
+        assert lever in src, lever
+
+
+@pytest.mark.willi_parity
+def test_state_helper_points_at_the_v2_plan_and_accepts_v_phase_ids():
+    """V1-A: the helper is the only thing allowed to tick a checkbox; it must read the V2 files
+    and recognise both the carried M-ids and the new V-ids."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("m3state", REPO_ROOT / "scripts" / "mamba3_state.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    assert mod.PLAN.name == "MAMBA3_PLAN_V2.md" and mod.STATE.name == "mamba3_v2_state.json"
+    assert mod.CHECKBOX_RE.match("- [ ] **V0-A** Merge").group(4) == "V0-A"
+    assert mod.CHECKBOX_RE.match("- [x] **M7-B** Screen").group(4) == "M7-B"
+    assert mod.PHASE_RE.match("### V3 — Full pipeline").group(1) == "V3"
+    src = (REPO_ROOT / "scripts" / "screen_arms_h100.sh").read_text()
+    assert "export ARM STEPS WARMUP_STEPS VAL_EVERY" in src, "V1-C: VAL_EVERY must reach the wrapper"
+

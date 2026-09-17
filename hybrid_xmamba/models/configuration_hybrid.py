@@ -59,14 +59,14 @@ class HybridConfig:
     expand_factor: int = 2
     dt_rank: Optional[int] = None  # Auto if None
     use_fast_path: bool = True
-    # MAMBA3_PLAN.md M1: all four default to today's behaviour, so adding them changes nothing.
+    # MAMBA3_PLAN_V2.md M1: all four default to today's behaviour, so adding them changes nothing.
     scan_impl: str = "legacy"          # "legacy" | "exact"  (default flips to "exact" at M9-A)
     dt_init_strategy: str = "none"     # "none" | "mamba"    (reference logU[dt_min, dt_max] init)
     dt_min: float = 1e-3
     dt_max: float = 1e-1
     tfla_impl: str = "legacy"          # "legacy" | "exact"  (the mLSTM counterpart, M1-H)
 
-    # --- Mamba-3 (MAMBA3_PLAN.md M2). Every flag defaults to the Mamba-2 reduction, so a
+    # --- Mamba-3 (MAMBA3_PLAN_V2.md M2). Every flag defaults to the Mamba-2 reduction, so a
     # `mamba3` layer built from defaults is exactly Mamba-2 SSD and each arm moves one variable.
     mamba3_d_state: int = 128          # 8x the Mamba-1 setting for +1.4% params (B/C are shared)
     mamba3_head_dim: int = 64
@@ -193,7 +193,7 @@ class HybridConfig:
                     f"Must be one of {valid_types}"
                 )
 
-        # MAMBA3_PLAN.md M1-F. norm_topology was previously unvalidated, so a typo silently
+        # MAMBA3_PLAN_V2.md M1-F. norm_topology was previously unvalidated, so a typo silently
         # behaved as "pre_rms" -- the same silent-drop class that cost this project a run in
         # Phase 9 (see tests/test_willi_parity.py::test_norm_topology_threaded_to_hybridconfig).
         if self.norm_topology not in ("pre_rms", "hybrid", "hybrid_bc"):
@@ -287,7 +287,7 @@ class HybridConfig:
     def from_hydra(cls, model_cfg, **overrides) -> "HybridConfig":
         """Build a config from a Hydra `cfg.model` node, keeping every field the dataclass has.
 
-        MAMBA3_PLAN.md M2-F / FM5. Every training entry point used to spell out ~25
+        MAMBA3_PLAN_V2.md M2-F / FM5. Every training entry point used to spell out ~25
         `field=cfg.model.field` lines by hand, so a new config field silently fell back to its
         default unless someone remembered to edit all twelve of them. That is not hypothetical:
         Phase 9 lost a run because `norm_topology` was dropped this way, and it happened again on

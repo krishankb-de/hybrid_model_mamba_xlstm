@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# MAMBA3_PLAN.md M7-A2 — pre-flight for the screen arms. CPU only, ~2 minutes.
+# MAMBA3_PLAN_V2.md M7-A2 — pre-flight for the screen arms. CPU only, ~2 minutes.
 #
 # Answers one question before any GPU time is spent: does this branch's code build the
 # architectures it claims to, in *this* venv on *this* cluster? It checks three things that have
@@ -33,7 +33,7 @@ SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 RUN_TESTS="${RUN_TESTS:-true}"
 
-echo "=== MAMBA3_PLAN.md M7-A2 pre-flight ==="
+echo "=== MAMBA3_PLAN_V2.md M7-A2 pre-flight ==="
 date; hostname
 mkdir -p logs
 

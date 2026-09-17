@@ -210,7 +210,7 @@ def selective_scan_exact(
     D: torch.Tensor,
     chunk_size: Optional[int] = None,
 ) -> torch.Tensor:
-    """Exact chunked selective scan — no division, no clamp (MAMBA3_PLAN.md M1-E).
+    """Exact chunked selective scan — no division, no clamp (MAMBA3_PLAN_V2.md M1-E).
 
     `selective_scan_parallel` computes the intra-chunk term as
     ``A_cum * cumsum(Bx / A_cum.clamp(min=1e-8))``. Wherever ``A_cum[s]`` falls below the clamp
@@ -322,7 +322,7 @@ def selective_scan(
         scan_impl: "legacy" (default) reproduces every number published before 2026-09 —
             including its divide-and-clamp defect, so existing checkpoints and the A0 control
             arm stay bit-reproducible. "exact" selects the division-free scan.
-            MAMBA3_PLAN.md M1-E. The default stays "legacy" (MAMBA3_PLAN_V2.md V1-E):
+            MAMBA3_PLAN_V2.md M1-E. The default stays "legacy" (MAMBA3_PLAN_V2.md V1-E):
             every model yaml pins the value explicitly instead of inheriting it.
             HYBRID_EXACT_SCAN=1 (env) overrides both with the float64 sequential reference.
 

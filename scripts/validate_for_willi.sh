@@ -304,7 +304,7 @@ import torch
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
 
-# Tiny model, CPU-safe dimensions. MAMBA3_PLAN.md M2-H: this used to be ["mamba","mamba","mlstm"],
+# Tiny model, CPU-safe dimensions. MAMBA3_PLAN_V2.md M2-H: this used to be ["mamba","mamba","mlstm"],
 # which meant the "every parameter receives a gradient" assertion below never saw a mamba3 or an
 # sLSTM block. All four layer types are exercised now, so a mixer with a dangling parameter fails
 # here rather than three days into a Stage-0 run. use_fast_path=False is deliberate: it is the

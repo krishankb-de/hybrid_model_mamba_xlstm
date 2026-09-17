@@ -379,7 +379,7 @@ def run_sweep(model_names, seq_lengths, batch_sizes, num_iterations, device,
 
 def profile_decode(config, prompt_len=256, new_tokens=64, batch_size=1,
                    device="cpu", dtype=torch.float32, beam_size=1):
-    """MAMBA3_PLAN.md M6-E: prefill, TTFT and per-token decode, cached vs full recompute.
+    """MAMBA3_PLAN_V2.md M6-E: prefill, TTFT and per-token decode, cached vs full recompute.
 
     This repo had no decode benchmark at all before M6 -- `evaluate_lm.py` and the sweep above
     both time full-sequence forwards, which is the one thing autoregressive generation never
@@ -490,7 +490,7 @@ def main():
                         help="Write efficiency_curves.csv/.json here (--sweep)")
     parser.add_argument("--decode", action="store_true",
                         help="Profile autoregressive decode: prefill/TTFT and per-token "
-                             "latency, cached vs full recompute (MAMBA3_PLAN.md M6-E)")
+                             "latency, cached vs full recompute (MAMBA3_PLAN_V2.md M6-E)")
     parser.add_argument("--prompt-len", type=int, default=256,
                         help="Prompt length for --decode")
     parser.add_argument("--new-tokens", type=int, default=64,

@@ -1,15 +1,94 @@
-# Mamba-3 Backbone Upgrade — Plan of Record
+# Mamba-3 Backbone Upgrade — Plan of Record, version 2
 
-> **ACTIVE plan-of-record. Read this + `mamba3_state.json` at session start** (pointed to from `CLAUDE.md`).
-> Branch: **`h100_scaling_mamba3`**, cut from `h100_scaling` @ `20a1d27`. **No merge without an explicit
-> instruction from the user** — the approved 13D results stay reachable and reproducible on `h100_scaling`.
-> Resume at `mamba3_state.json["current_phase"]`; the checkboxes below are ground truth.
-> Supersedes `MAMBA3_INTEGRATION_PLAN.md` + `mamba3_integration_state.json` (`PLANNED — no code written`;
-> framing stale — it targets the retrieval era and declines RoPE/MIMO).
-> `H100_SCALING_PLAN.md` is `current_phase: plan_closed` and stays closed. Its results are the baseline.
+> **ACTIVE plan-of-record. Read this + `mamba3_v2_state.json` at session start** (pointed to from `CLAUDE.md`).
+> Branch: **`h100_mamba3_v2`**, cut from `h100_scaling` @ `8137221` (Phase 15 closed), with the Mamba-3 branch
+> `h100_scaling_mamba3` (24 commits, M0–M7 complete) **merged in at `b191178`**. **No merge into `h100_scaling`
+> without an explicit instruction from the user** — the Phase 14/15 results stay reachable and reproducible there.
+> Resume at `mamba3_v2_state.json["current_phase"]`; the checkboxes below are ground truth.
+> Supersedes `MAMBA3_PLAN.md` + `mamba3_state.json` (renamed to these files; the M0–M7 record is carried below
+> verbatim) and, before that, `MAMBA3_INTEGRATION_PLAN.md` + `mamba3_integration_state.json` (retired at M0-E).
+> `H100_SCALING_PLAN.md` + `h100_scaling_state.json` are the **closed baseline record** (Phases 1–15).
 > Source: Mamba-3, arXiv:2603.15569 + reference impl `state-spaces/mamba` `mamba_ssm/modules/mamba3.py`.
+> Tick with `venv/bin/python scripts/mamba3_state.py tick V1-G --note "..." --evidence k=v` (local; on the
+> cluster nothing scripted runs outside `sbatch`/`srun`/`source`).
 
 ---
+
+## What changed between version 1 and version 2
+
+`MAMBA3_PLAN.md` was cut from `h100_scaling @ 20a1d27` on 2026-09-06. It finished M0–M7 (the defect pinned and
+fixed behind flags, `Mamba3Block` as a new layer type, the O(1) decode cache, an 8-arm screen with a winner)
+but never started M8. Meanwhile `h100_scaling` ran Phases 14 and 15 (37 commits), which changed what "the
+baseline" means. Version 2 ports the finished work onto that branch and re-anchors every gate:
+
+| Version 1 assumed | True on `h100_mamba3_v2` |
+|---|---|
+| Incumbent = 13D at one seed (ROUGE-L 0.1899 / CheXbert-14-micro 0.4736) | **3-seed bands** (15B-4): hybrid ROUGE-L 0.1949±0.0047, 14-micro 0.4480±0.0223, 14-macro 0.2660±0.0122; 13D is the high CheXbert draw |
+| No Transformer baseline | **Parameter-matched Transformer** (`attention` layer type, 15 layers, 183.39M): Stage-0 PPL **11.222** vs hybrid 13.18; report-gen **indistinguishable on 8 of 10 metrics across seeds** |
+| No seed lever | `SEED`, `SAVE_TOP_K` on the report-gen wrapper; paired bootstrap CIs and per-label CIs (`bootstrap_compare.py --per-label`) |
+| No auxiliary loss | 15C aux CheXpert loss (`AUX_LAMBDA`, default 0.0): **negative, closed**; must stay 0 in every arm |
+| Defect pinned on this branch only | Phase 14C-1 pinned it independently (`tests/test_scan_correctness.py`, `HYBRID_EXACT_SCAN=1` fp64 reference); 14C-2/3/4 never ran |
+| Old M8-B retrains a contrastive tower | **13D's image tower is reused unchanged** (14A-4 protocol; user decision 2026-09-17) |
+| Old M8 runs A2 as screened (`tfla_impl=legacy`) | **A2x = A2 + `tfla_impl=exact` is screened first** (V2), so the mLSTM layers are corrected too and the decode cache can serve the checkpoint (user decision 2026-09-17) |
+| Decision 7: flip `scan_impl`/`tfla_impl` defaults at M9 | **Superseded.** Defaults stay `legacy`; every model yaml pins both explicitly (V1-E, parity-tested). A global flip could silently move a published number — the 15B-4 byte-identical re-decode is a property worth keeping |
+
+**Hard constraints.** Cluster account expires **2026-09-29** (extension judged likely by the user; the pipeline
+is chained immediately anyway). 200 GiB home quota (`SAVE_TOP_K=0/1` mandatory — 15B lost 3 of 4 arms to it).
+The login node executes nothing scripted. Cluster invariants and the login-node rule are in *Verification*.
+
+## Locked decisions (version 2)
+
+| # | Decision |
+|---|---|
+| 1 | **Isolation**: all work on **`h100_mamba3_v2`**. ⚠ **No merge into `h100_scaling`, ever, until the user explicitly instructs one.** |
+| 2 | **Scope**: as v1 — `Mamba3Block` (Mamba-2 SSD + trapezoid + RoPE + B/C biases + conv-drop, every flag reducing exactly to Mamba-2) + the O(1) decode cache. All shipped (M2–M6). |
+| 3 | **MIMO**: plumbing only, never run (+3.2% params). |
+| 4 | **Gate**: staged — the 12K screen decides the arm (done: A2; A2x re-screen pending), the full pipeline decides the claim on the official n=2663 test split **with 3 decoder seeds**, paired to the incumbents' seeds. |
+| 5 | **Retrain**: Stage-0 for the winner only; **tower reused from 13D**; decoder × 3 seeds. |
+| 6 | `d_state=128`, `headdim=64`, `ngroups=1`, `expand=2` (parameter-matched, +0.26%). |
+| 7 | **`scan_impl` / `tfla_impl` defaults stay `legacy` for reproduction. Every yaml with a recurrent layer pins both explicitly** (`test_every_recurrent_model_yaml_pins_the_operator_explicitly`); `hybrid_150m_m3*` pins whatever V2-D decides. |
+| 8 | `layer_pattern` stays 9 mamba3 + 3 mlstm through V3; the ratio is re-opened only as gated phase V5-C. |
+| 9 | py3.9/willi retirement is **deferred to V4-B** (after V3 is submitted) — the harness is the gate mid-campaign and it passes under a real 3.9.23. |
+| 10 | **Claim rule for V3** (mirrors 15C-4 as re-anchored): a Mamba-3 win over an incumbent on a metric is claimed only if the paired-by-seed mean exceeds **one baseline seed SD** (15B-4 table) **and** the sign holds at ≥2/3 seeds. Per-seed bootstrap CIs are reported alongside, never substituted. "Indistinguishable across 3 seeds" is the expected and reportable outcome. |
+| 11 | **Eval path**: V3's headline numbers come from the incumbents' exact uncached `beam_search_decode`. The M6 cached path is token-identical by test and is used for latency curves only. |
+
+## Baselines every arm is measured against
+
+| Metric (official test split n=2663, beam=3, `prefix_k=32`, `last.ckpt`) | hybrid `hybrid_150m_v2` (seeds 42/43/44) | Transformer `transformer_150m_baseline` (42/43/44) | retrieval-NN floor |
+|---|---|---|---|
+| ROUGE-L | .1899 / .1991 / .1957 → **0.1949 ± 0.0047** | .1936 / .1976 / .1945 → 0.1952 ± 0.0021 | 0.1636 |
+| BLEU-1 | 0.2508 ± 0.0034 | 0.2478 ± 0.0022 | 0.2372 |
+| BLEU-4 | 0.0578 ± 0.0032 | 0.0575 ± 0.0016 | 0.0330 |
+| CheXbert-14-micro | .4736 / .4380 / .4324 → **0.4480 ± 0.0223** | .4590 / .4455 / .4285 → 0.4443 ± 0.0153 | 0.4296 |
+| CheXbert-14-macro | **0.2660 ± 0.0122** | 0.2692 ± 0.0106 | **0.3014** |
+| CheXbert-5-micro | 0.5086 ± 0.0382 | 0.5032 ± 0.0227 | 0.4856 |
+| CheXbert-5-macro | 0.4193 ± 0.0274 | 0.4170 ± 0.0165 | 0.4284 |
+| exact-match-14 / -5 | 0.0380 ± 0.0058 / 0.2163 ± 0.0019 | 0.0455 ± 0.0027 / 0.2244 ± 0.0057 | — / 0.1735 |
+| example-F1 | 0.3790 ± 0.0214 | 0.3817 ± 0.0144 | 0.3691 |
+| **Stage-0 val PPL** (PubMed, 120K steps, same recipe) | **13.18** | **11.222** | — |
+| Stage-0 val PPL at 12K (the screen) | A0 19.387 / 18.933 (s42 / s1234) | — | — |
+
+Per-seed source: `H100_SCALING_PLAN.md` 15B-4 table; incumbents' per-seed dumps live under `results/` on the
+cluster (seed 42: `results/report_gen_tower13d_test_split`, `results/report_gen_transformer_test_split`; 43/44:
+the 15B-3 dump dirs — resolve with `ls results/` and record here before V3-D). Pre-registered tiers unchanged:
+ROUGE-L Floor 0.15 / Target 0.22 / Stretch 0.26; CheXbert-14-micro 0.25 / 0.40 / 0.50.
+
+## The screen result the pipeline builds on (M7, carried; full record below)
+
+| Arm | val PPL @12K | fit | note |
+|---|---|---|---|
+| A0 / A0-seed (Mamba-1 as shipped) | 19.387 / 18.933 | 2:36:50 | noise floor 0.454 PPL → bar **0.642** |
+| **A1** (Mamba-1 + exact scan + dt init + no Δ-norm) | **16.294** | 4:11:13 | **−16.0%**: the defect fix alone |
+| **A2** (Mamba3Block = Mamba-2 SSD, `d_state` 128) | **16.708** / 16.376 (s1234) | **1:20:55** | −13.8%, **1.94× faster**; A1−A2 not significant |
+| A3 (+ trapezoid) | 16.719 | 1:28:00 | null (+0.011) |
+| A4-hi (+ RoPE, `theta_max` 0.2) / s1234 | 16.199 / 18.912 | 1:31:23 | high-variance; rejected by the pre-registered rule |
+
+**Winner A2. The headline is the defect, not the architecture; what SSD buys is the cost of being correct.**
+A2 was screened with `tfla_impl=legacy`; V2 screens A2x.
+
+---
+
+## Carried from version 1 — Context (written 2026-09-06; every number measured then)
 
 ## Context
 
@@ -118,36 +197,6 @@ subject-disjoint test split; and a publishable finding either way — "the corre
 as reportable as "it did."
 
 ---
-
-## Locked decisions
-
-| # | Decision |
-|---|---|
-| 1 | **Isolation**: all work on new branch **`h100_scaling_mamba3`**, cut from **`h100_scaling`**. The approved 13D results and every existing checkpoint stay reachable and reproducible on `h100_scaling`. ⚠ **No merge, ever, until the user explicitly instructs one** — not on plan completion, not on a passing gate. The branch stays parallel by default. |
-| 2 | **Scope**: new `Mamba3Block` = Mamba-2 SSD base + exponential-trapezoidal + complex/RoPE + B/C biases + optional conv-drop, every feature behind a flag reducing **exactly** to Mamba-2. Plus an O(1) recurrent decode cache. |
-| 3 | **MIMO**: plumbing shipped (`mimo_rank`, default 1), **never run**. It breaks parameter matching by +3.2% (189.6M) and needs its own screen *and* full pipeline (+96 GPU-h). Documented as future work. |
-| 4 | **Gate**: staged — short-run Stage-0 PPL screens arms; the winner gets the full pipeline and report-gen on the official n=2663 test split. Retrieval R@10 is a **non-regression guard only**. |
-| 5 | **Retrain**: full pipeline for the winner — Stage-0 → contrastive tower → report-gen decoder. |
-| 6 | **`d_state = 128`**, `headdim=64`, `ngroups=1`, `expand=2`. Parameter-matched to +0.24%. |
-| 7 | **`scan_impl`**: default `legacy` through M7 so the A0 control stays bit-reproducible against published numbers; **flip the default to `exact` at M9**, keeping `legacy` behind the flag solely to reproduce pre-2026-09 results. No silent change mid-campaign. |
-| 8 | **`layer_pattern`** stays **9 mamba3 + 3 mlstm**, fixed, for the whole M1-M9 campaign — it is the control, and one variable at a time. **If Mamba-3 wins M8, the ratio IS re-opened** as its own gated phase M10 with its own screen. |
-| 9 | **willi/A100 retired.** py3.9 guards dropped, target py3.11 (the aisc `.venv`). Dead code deleted and documented, not left ambiguous. |
-
----
-
-## Baselines any arm must be measured against
-
-| Metric | Incumbent (13D) | Retrieval-NN floor | Source |
-|---|---|---|---|
-| Report-gen ROUGE-L (test, n=2663, beam=3) | **0.1899** | 0.1636 | `analysis/h100_scaling_results.md:124` |
-| BLEU-4 | 0.0542 | 0.0330 | " |
-| CheXbert-14 micro / macro | 0.4736 / 0.2800 | 0.4296 / **0.3014** | " |
-| CheXbert-5 micro / macro | 0.5522 / 0.4487 | 0.4856 / 0.4284 | " |
-| Stage-0 val PPL (PubMed) | **13.18** | — | Phase 5 |
-| MIMIC i2t R@10 (clean protocol) | 0.1459 (SE 0.57pp) | — | Phase 6G-5 |
-
-Pre-registered tiers unchanged: ROUGE-L Floor 0.15 / Target 0.22 / Stretch 0.26; CheXbert-14-micro
-0.25 / 0.40 / 0.50.
 
 ---
 
@@ -296,6 +345,9 @@ headline is "the Δ init was broken" — still a real, publishable finding.
 
 **Pre-registered:** `ngroups>1`, `d_state≥256` and `mimo_rank≥4` exit the parameter-matched regime and may
 only be reported as *scaled* arms, never as the headline comparison.
+
+---
+
 
 ---
 
@@ -680,68 +732,86 @@ training**. Now `VAL_EVERY`, default 2000 for screens and 10000 for M8-A. The va
 - [x] **M7-F** If A2 wins, note it as a **bundle** (SSD parameterization + 8× state), not "SSD is better",
       unless a `d_state=16` arm is run.
 
-### M8 — Full pipeline on the winner — H100
-Control is the **existing** 13D result — do not rebuild it.
-**Submit the whole chain at once** with `--dependency=afterok:<jobid>`: Stage-0 → tower → decoder → eval →
-CheXbert, each firing automatically when its predecessor succeeds. One submission, no babysitting between
-stages, and no idle days waiting for a human to notice a job finished. The eval and CheXbert steps (~8.5 h
-combined) share a single allocation so their queue time is paid once. `scripts/submit_m8_chain.sh` owns this.
-- [ ] **M8-A** Stage-0 150M, 120K steps. Measured **2.22 s/step → 74 h**; budget **1.5× for retries** (the
-      150M Stage-0 needed five attempts historically). **Gate: PPL ≤ 13.18.**
-      Harvest `GRAD_CKPT=false` here only (1.3-1.5×, numerically equivalent with `use_reentrant=False`) —
-      verify the first 2000 steps match before committing.
-- [ ] **M8-B** Contrastive tower, canonical recipe (`vit_unfreeze=12`, `vit_lr=3e-6`, `bs=64`, `head_lr=4.24e-4`),
-      full data. **Guard: MIMIC i2t R@10 ≥ 0.1459 clean protocol.** A null is *expected* and is not a failure;
-      only a regression blocks. Never quote a positive without ±0.57pp.
-- [ ] **M8-C** Report-gen decoder, `NUM_GPUS=4 MAX_STEPS=12000`, tower from M8-B.
-- [ ] **M8-D** Official test split n=2663, `DECODE=beam BEAM_SIZE=3`, then CheXbert as a second job in
-      `.venv_chexbert`. **Primary gate: ROUGE-L > 0.1899 and CheXbert-14-micro > 0.4736**, both also vs the
-      retrieval-NN floor (0.1636 / 0.4296). Fix beam, `max_new_tokens` and the split up front — evaluate once.
-- [ ] **M8-E** Re-measure the boilerplate/template-duplication rate — an open item on the incumbent and the
-      obvious confound on any ROUGE-L movement.
 
-### M9 — Cleanup, writeup, reintegration
-- [ ] **M9-A** Flip `scan_impl` default to `exact`; keep `legacy` documented as reproduction-only.
-- [ ] **M9-B** Retire py3.9: drop harness gates 1-3 (AST/PEP-604/PEP-585), target py3.11, delete the willi CI
-      workflow, rename to `scripts/validate.sh` with a back-compat shim. Keep gates 4-6 (Hydra invariants,
-      pytest, fwd/bwd smoke).
-- [ ] **M9-C** Delete dead code — `mamba_block_v2.py`, `mlstm_block_v2.py`, `hybrid_layer.py`,
-      `scan_triton.py`, `tfla_triton.py`, and the root-level `test_hybrid_implementations.py` (their only
-      consumer). Correct `CLAUDE.md`'s false "uses chunk-parallel selective scan Triton kernel" claim and
-      state plainly that the kernels are pure PyTorch, with a Triton SSD kernel recorded as future work.
-- [ ] **M9-D** `analysis/mamba3_results.md`: the audit table, the OFAT ladder, the "not the specified
-      recurrence" framing, decode-latency curves, the parity/state-tracking result, and every null recorded honestly.
-- [ ] **M9-E** Update `mamba3_state.json` verdict; append a note to `h100_scaling_state.json` — Phase 5's PPL
-      and the 13D headline are superseded either way. ⚠ **Do not merge.** `h100_scaling_mamba3` stays a
-      parallel branch indefinitely; a merge happens only on an explicit instruction from the user.
+---
 
-### M10 — Re-open the mamba/mLSTM ratio (**gated: only if M8-D clears its primary gate**)
-Held fixed at 9 mamba3 + 3 mlstm for all of M1-M9 so every earlier arm is single-variable. Once the Mamba
-side is measurably stronger, the 25%-mLSTM split — inherited from the v2 refactor and never re-derived
-against a Mamba-3 mixer — is no longer justified by evidence.
-- [ ] **M10-A** Screen ratio arms at 12K steps, holding the winning M8 operator and every other lever fixed:
-      `12/0` (pure mamba3), `10/2`, **`9/3` (control)**, `8/4`, and one interleaving-position variant
-      (mLSTM centred vs distributed). Parameter counts differ across arms — report them, and use the
-      structural-equality test to show only the mixer composition changed.
-- [ ] **M10-B** Same pre-registered decision rule as M7-D: advance only if Δ > 2× seed SD, else keep `9/3`.
-      **The efficiency trade is part of the decision, not a footnote** — `analysis/h100_scaling_results.md:213-236`
-      records xLSTM as ~3× faster and ~6× lighter than Mamba at L=16384, so dropping mLSTM layers costs real
-      throughput. Report PPL *and* the M6-E decode curves together.
-- [ ] **M10-C** Full pipeline only if M10-A produces a winner that also clears the M7-D bar. Otherwise record
-      the null and keep `9/3`.
+## Phases, version 2
+
+Every phase ends with the validation harness exiting 0 and a commit on `h100_mamba3_v2`.
+
+### V0 — Port the Mamba-3 branch onto the Phase-14/15 baseline (local, no GPU) ✅ COMPLETE 2026-09-17
+
+`git merge h100_scaling_mamba3` (one merge commit, history and the M0–M7 evidence attached). Seven conflicts, all
+mechanical; the semantic reconciliation is listed under V0-A/B. Merge commit **`b191178`**.
+
+- [x] **V0-A** Merge and resolve: `configuration_hybrid.py` (`Literal`/`valid_types` = five types; `get_layer_config` now **raises** on an unknown type instead of falling through with `base_config`); `hybrid_block.py` (mamba3's capability dispatch `_mixer_takes_cu_seqlens` kept, hard-coded tuple dropped; `AttentionBlock` declares `supports_cu_seqlens = True`); `scan_interface.py` (**both** the `HYBRID_EXACT_SCAN=1` fp64 reference from 14C and the `scan_impl` legacy/exact dispatch, env hook first; module docstring names the three operators and the never-dispatched Triton import); `train_stage0_150m_h100.sh` (ARM resolver + `EXTRA_OVERRIDES` + v2's `MODEL_CONFIG` comment); `tests/test_willi_parity.py` (EOF blocks concatenated); `.gitignore` (union); `CLAUDE.md` (bootstrap rewritten for this branch).
+- [x] **V0-B** Semantic checks: `train_report_generation.py` carries both `HybridConfig.from_hydra` and the intact 15C aux block; `train_contrastive.py` both `from_hydra` and the CheXpert label plumbing; the fingerprint prints `attentionx15` for the Transformer; `MAMBA3_INTEGRATION_PLAN.md` + state deleted by the merge (historical references in `H100_SCALING_PLAN.md` 14C / `analysis/scan_error_bound.md` left as written).
+- [x] **V0-C** Gate 6 (`validate_for_willi.sh`) and the CI inline smoke build `["mamba","mamba3","mlstm","slstm","attention"]` — every parameter of every mixer receives a gradient.
+- [x] **V0-D** **Pre/post-merge equivalence, measured:** `hybrid_150m_v2`, `hybrid_150m_v2_rrg`, `transformer_150m_baseline` built at `8137221` (worktree) and at the merged tree, seed 0: state-dict keys/shapes equal, **same-seed init identical, forward logits (packed docs, `cu_seqlens`) identical, pre-merge weights loaded into the post-merge model forward max|diff| = 0.000e+00** on all three. Every published number re-decodes byte-for-byte after the port.
+- [x] **V0-E** Verification: `pytest -m "not cuda and not slow"` **416 passed / 1 skipped / 21 xfailed**; `validate_for_willi.sh` **9/9 under a real Python 3.9.23**; `evaluate_report_generation.py --smoke-test` OK; `mamba3_arms.py verify --full` 13 arms OK. **Finding, fixed:** `smoke_arch_refactor.py` failed its `max pre-clip grad-norm < 50` gate (73.7). Root cause measured: the fast path is bit-identical, but the slow path's shared scan multiplies `(dt·B)·x` where the deleted private copy did `(dt·x)·B` — a 3e-7 change on the logits that the 100-step tiny-model loop amplifies chaotically; **the unchanged pre-merge code scores 10.2 / 52.3 / 34.6 / 83.4 on data seeds 1–4**, i.e. fails its own gate on two of four. The gate now asserts what an explosion actually changes: loss halves, median pre-clip grad-norm < the clip value (measured 1.8–3.2), ≤ 5 spikes above 50 (measured 0–1). Passes on both paths, all seeds.
+- [x] **V0-F** Commit `b191178`. Nothing pushed to `h100_scaling`.
+
+### V1 — Re-baseline the plan and harden the seams (local)
+
+- [x] **V1-A** `git mv MAMBA3_PLAN.md MAMBA3_PLAN_V2.md`, `git mv mamba3_state.json mamba3_v2_state.json`; this document; `scripts/mamba3_state.py` reads the V2 files and accepts `M*`/`V*` ids; `CLAUDE.md` bootstrap + Key files + kernel claims corrected (pure PyTorch; `ssd/`; dead Triton files named as dead); every code citation of `MAMBA3_PLAN.md` repointed (the M-sections are carried verbatim so the citations stay valid).
+- [x] **V1-B** `configs/model/hybrid_150m_m3_rrg.yaml` — was missing. Built as `hybrid_150m_m3` + **exactly** the `hybrid_150m_v2 → _rrg` delta; `test_m3_rrg_config_is_m3_plus_exactly_the_rrg_delta` pins it and `test_rrg_model_configs_declare_aux_keys` covers it.
+- [x] **V1-C** Arms `A2x` (`tfla_impl=exact`, seed 42) and `A2x-s2` (seed 1234) in `scripts/mamba3_arms.py`, expected fingerprint token `tfla_impl=exact`; `hybrid_150m_m3.yaml` now declares `scan_impl`/`tfla_impl` (it did not — the override would have been rejected by Hydra strict-struct, the `theta_max` incident again); `screen_arms_h100.sh` exports `VAL_EVERY`; ladder + paired-comparison tests extended.
+- [x] **V1-D** `hybrid_xmamba/utils/checkpoint_arch.py::infer_architecture` — one owned parameter per mixer family (`dt_bias|B_bias`→mamba3, `dt_proj`→mamba, `i_gate_proj`→mlstm, `gate_proj`→slstm, `qkv_proj`→attention), ambiguity refused, sizes from shapes (`state_size`, `conv_size`, `expand_factor`, `dt_rank`, `mamba3_d_state`, `mamba3_head_dim`), topology aware that Mamba-3's BCNorm is unconditional. Wired into `evaluate_cxr_retrieval.py` (which now **raises** on critical missing keys, matching `evaluate_sts.py`) and `evaluate_sts.py` (no more hard-coded `state_size=16`); `train_contrastive.py` gained the >50%-missing guard the decoder and eval already had; `mamba3_watch.sh` parses `stage0_kd-step*.ckpt`.
+- [x] **V1-E** Explicit operator pins: `scan_impl`/`tfla_impl` declared in all 15 yamls with recurrent layers (`legacy` everywhere except `hybrid_150m_a1` = `exact`); `test_every_recurrent_model_yaml_pins_the_operator_explicitly`. Dataclass defaults untouched.
+- [x] **V1-F** `scripts/submit_v3_chain.sh` — the V3 chain, **`source`d** (no errexit, no python, only `sbatch --parsable` with `--dependency=afterok`), identical under bash and zsh, `DRY_RUN=1` prints the 16 submissions; per-seed incumbent dumps via `HYBRID_DUMP_<seed>` / `TRANSFORMER_DUMP_<seed>` (seed 42 defaulted; a missing one **skips that comparison loudly**, never silently unpairs). Parity test pins its wrappers and levers. `test_no_plan_command_invokes_a_bare_python_script_on_the_cluster` now scans this whole file — local commands are written `venv/bin/python …`.
+- [x] **V1-G** Harness green (`validate_for_willi.sh`, full pytest, smokes), `venv/bin/python scripts/mamba3_state.py readme`, commit.
+
+### V2 — Re-validate on the H100 and screen A2x (~3 h wall + queue)
+
+- [ ] **V2-A** `sbatch scripts/preflight_mamba3_h100.sh` (CPU, ~2 min) on the merged code, which has never run on the cluster: fingerprints for A0/A1/A2/A2x at 150M, the parameter band, Δ at init, the CPU suite.
+- [ ] **V2-B** 300-step GPU probe: `ARM=A2x STEPS=300 EXPERIMENT=m3v2_probe_A2x sbatch --time=00:30:00 scripts/train_stage0_150m_h100.sh`. Log must show `mamba3x9 … tfla_impl=exact`, finite descending loss, no NaN; throughput vs A2's 2.18 steps/s (exact TFLA measured 1.03× on CPU — confirm on GPU).
+- [ ] **V2-C** Paired screen: `ARMS="A2x A2x-s2" VAL_EVERY=12000 SAVE_TOP_K_SCREEN=0 sbatch --array=0-1 scripts/screen_arms_h100.sh` — 12,000 steps, warmup 500, seeds 42/1234, the M7 val set unchanged (pairs with A2 16.708 / A2-s2 16.376), one validation pass at the end (~2.5 h each, parallel).
+- [ ] **V2-D** **Pre-registered rule, written before the numbers exist:** A2x advances to V3 **unless** (i) its 2-seed mean val PPL exceeds A2's 2-seed mean **16.542** by more than the M7 bar **0.642 PPL**, or (ii) it spikes/NaNs. Otherwise A2 advances and exact TFLA is reported as a screen-level null with the mLSTM defect left in the trained system (decode cache demonstrated on random weights only). Pin the chosen `tfla_impl` into `hybrid_150m_m3.yaml` + `_rrg` (V1-E test) **before** V3-A launches; record both PPLs in the arms table of the state file.
+
+### V3 — Full pipeline on the winner, matched to the 14A/15B protocol (~5–6 days wall)
+
+`source scripts/submit_v3_chain.sh` the moment V2-D decides (`DRY_RUN=1` first). One Stage-0 at seed 42 (as both
+incumbents have); decoder seeds 42/43/44 paired with 15B-3; 13D tower reused.
+
+- [ ] **V3-A** Stage-0 150M, 120K steps (`ARM=<A2x|A2> STEPS=120000 WARMUP_STEPS=2000 VAL_EVERY=10000 SAVE_TOP_K=1 EXPERIMENT=h100_stage0_150m_m3`), recipe otherwise identical to Phase 5 / 14A-3 (bs 16×3, LR 4e-4, clip 0.5, `GRAD_CKPT=true` — no harvesting under the deadline). Expect ~24 h wall (13.5 h fit at A2's rate + 12 validation passes on the unchanged 15,724-chunk val set, kept so PPL stays comparable). **Gate: val PPL reported against 13.18 (hybrid) and 11.222 (Transformer)**; there is no Stage-0 seed band for any of the three — say so; the 12K-screen spread (0.33–0.45 PPL) is the only noise estimate. If preempted, resume from `last.ckpt` via `train_stage0_distill_resume.py` rather than restarting (FM9).
+- [ ] **V3-B** Tower: reuse `outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt` unchanged (14A-4 caveat: co-trained with the legacy hybrid text encoder; recorded, not fixed). No run.
+- [ ] **V3-C** Decoder × 3 (chain stage 2): `MODEL_CONFIG=hybrid_150m_m3_rrg`, `DECODER_CKPT=<V3-A last.ckpt>`, `NUM_GPUS=4 MAX_STEPS=12000 SEED=<s> SAVE_TOP_K=0 AUX_LAMBDA=0.0 PREFIX_K=32`, 13D tower. Read each log: `Missing keys: 0`, `prefix_k = 32`, `Training seed: <s>`, `Aux CheXpert loss: OFF`.
+- [ ] **V3-D** Eval × 3 → CheXbert × 3 → bootstraps × 9 (chain stages 3–5): official test split n=2663, `DECODE=beam BEAM_SIZE=3`, the incumbents' uncached path; `PER_LABEL=true` bootstraps per seed vs hybrid (same seed), vs Transformer (same seed), vs the floor → `analysis/bootstrap_m3_vs_{hybrid,transformer,floor}_seed{42,43,44}.md`. Apply decision 10; report mean ± SD per metric, never one seed. **Before submitting:** resolve the 15B-3 dump dirs for seeds 43/44 on the cluster and pass them as `HYBRID_DUMP_43=… TRANSFORMER_DUMP_43=…` etc.
+- [ ] **V3-E** Diversity re-measure on the seed-42 dump (`analyze_diversity_h100.sh`, controls = references + floor) — the boilerplate confound on any ROUGE-L movement.
+- [ ] **V3-F** Efficiency + decode: `MODELS="hybrid_150m_v2 hybrid_150m_m3 transformer_150m_baseline" OUTPUT_DIR=analysis/efficiency_150m_m3 sbatch scripts/profile_efficiency_h100.sh` (the 14A-7 protocol, random weights) plus `performance_profile.py --decode` for the O(L²)→O(L) curve (`tfla_impl=exact`, random weights suffice). Pre-registered: SSD is matmul-shaped so the 14A-7 gap should narrow; report exponents and crossover whichever way it lands.
+- [ ] **V3-G** Tick/notes/evidence after every job; never re-run a checkpoint-producing step without reading its log first.
+
+### V4 — Writeup + cleanup (after V3)
+
+- [ ] **V4-A** `analysis/mamba3_results.md`: audit table, the OFAT ladder, "the headline is the defect" (A1 −16.0% vs A2 −13.8%, not significantly apart), the A2x screen, Stage-0 vs both incumbents, the 3-seed report-gen table with decision 10 applied, efficiency/decode curves, the M4-D parity capability and its Δ caveat, every null stated plainly. Cross-link from `analysis/PHASE14_SUPERVISOR_REVIEW.md` (limitation #2) and `analysis/h100_scaling_results.md`.
+- [ ] **V4-B** Retire py3.9 (old M9-B): drop gates 1–3, target py3.11, `scripts/validate.sh` + a `validate_for_willi.sh` shim, delete the willi CI workflow; keep gates 4–6. Only after V3 is submitted.
+- [ ] **V4-C** Dead code (old M9-C): delete `mamba_block_v2.py`, `mlstm_block_v2.py`, `hybrid_layer.py`, `scan_triton.py`, `tfla_triton.py`, root `test_hybrid_implementations.py`; keep `debug_checkpoint_keys.py` / `check_checkpoint_compatibility.py` (documented tools).
+- [ ] **V4-D** One note in `h100_scaling_state.json` (the Phase-5 PPL and the 13D/15B headline are *compared against*, not superseded); `mamba3_v2_state.json` verdict; `readme`. **Do not merge into `h100_scaling`.**
+- [ ] **V4-E** Archive: V3 checkpoints/dumps are DUA-covered and HOME is deleted 6 months after expiry — add them to the Phase-15 archive manifest.
+
+### V5 — Gated / optional (only with confirmed cluster access)
+
+- [ ] **V5-A** 14C-2/14C-3 closure on **13D** (the supervisor's open limitation #2): `HYBRID_EXACT_SCAN=1` teacher-forced PPL on n=2663, exact vs default, then beam+CheXbert on a 300–500 subsample. Answers "does the bug affect the reported numbers" by measurement.
+- [ ] **V5-B** M7-E mechanism diagnostics (MQAR / late-position PPL slice).
+- [ ] **V5-C** Ratio screen (`12/0`, `10/2`, `9/3`, `8/4`) **only if V3-D claims a win** under decision 10; same rule; efficiency trade reported alongside.
 
 ---
 
 ## Verification (every phase)
 
-1. Validation harness exits 0 — Hydra invariants, `pytest -m "not cuda and not slow"`, CPU fwd/bwd smoke with
-   **no missing gradients**, now over a 4-type layer pattern.
-2. The phase's new test passes and its `xfail` flips.
+1. `bash scripts/validate_for_willi.sh` exits 0 — Hydra invariants, `pytest -m "not cuda and not slow"`, CPU fwd/bwd
+   smoke with **no missing gradients over the five-type pattern** `["mamba","mamba3","mlstm","slstm","attention"]`.
+   Report any conda degradation explicitly (it happened once, 2026-09-09).
+2. `tests/test_mamba3_numerics.py` fully green; `tests/test_scan_correctness.py` still green (the default path is
+   unchanged — that test is the machine-enforced operator freeze).
 3. Every new flag asserted **bit-identical in its default state** (documented exceptions: `bc_bias=one_init`,
    `use_conv`, BCNorm).
-4. `python scripts/evaluate_report_generation.py --smoke-test` (seconds, CPU) — the image→LM conditioning path.
-5. `python scripts/smoke_arch_refactor.py` (~2 min, CPU) — 100-step train loop, loss decreases, grad-norm < 50.
-6. Reconcile in-training vs authoritative eval numbers before citing any figure.
+4. `venv/bin/python scripts/evaluate_report_generation.py --smoke-test` — the image→LM conditioning path.
+5. `venv/bin/python scripts/smoke_arch_refactor.py` — 100-step CPU loop: loss halves, median pre-clip grad-norm
+   below the clip, ≤ 5 spikes (the trajectory-robust gate from V0-E).
+6. `venv/bin/python scripts/mamba3_arms.py verify --full` — every arm builds the operator it claims at 150M.
+7. On the cluster: every training log shows the expected `ARCH …` fingerprint, `Missing keys: 0`, `prefix_k = 32`,
+   `Training seed: N`; reconcile in-training vs authoritative eval numbers before citing any figure.
 
 **Cluster invariants**: `--partition=aisc-batch --account=aisc --gpus=N` (**never `--gres` for GPUs** —
 rejected live), `--exclude=ga03,gx17v1,gx13v1`, `--requeue` (preemptible), `--open-mode=append` (a requeue
@@ -749,34 +819,27 @@ otherwise truncates the log and the restart-from-step-0 leaves no trace), `torch
 touching custom kernels, `HF_HUB_OFFLINE=1`.
 
 ⚠ **The login node executes nothing.** Not `python`, and not `bash script.sh` either — the guard fires
-before the script's first line, and its refusal text word-splits into `command not found` noise that reads
-like an unrelated error. This has now cost three separate mistakes in this campaign: the first pre-flight
-instruction, the `eval "$(python scripts/mamba3_arms.py env A2)"` launch that silently became a second A0 at
-120,000 steps (job 2513581), and `bash scripts/mamba3_watch.sh`. **The rule is not "avoid python on lx01" —
-it is that anything scripted runs through `sbatch`/`srun`, or is designed to be `source`d.** Individual
+before the script's first line, and its refusal text word-splits into `command not found` noise. Three
+incidents in the M7 campaign (the pre-flight instruction; the `eval "$(python …)"` launch that silently became a
+second A0 at 120,000 steps, job 2513581; `bash scripts/mamba3_watch.sh`). **Anything scripted runs through
+`sbatch`/`srun`, or is designed to be `source`d** (`submit_v3_chain.sh`, `mamba3_watch.sh`). Individual
 commands (`squeue`, `sacct`, `grep`, `cat`, `ls`) remain fine interactively.
 
 ---
 
-## Compute budget (measured: 2.22 s/step at 150M, from `hpi_results_logs/h100_stage0_150m_2341991.log:303`)
+## Compute budget (measured rates: A2 1:20:55 per 12K steps incl. validation; decoder 2h15 on 4×H100)
 
 | Item | GPU-h | Wall |
 |---|---|---|
-| M7-A probes (2 seeds + teacher on/off) | ~8 | 1 d |
-| M7-B screen, 8 arms × 12K steps × 7.4 h | 59 | 2-3 d |
-| 150M confirmation of top 2 (if screened at 70M) | 15 | 1 d |
-| M8 full pipeline, **1 winner**, Stage-0 ×1.5 retry | 133 | 4-6 d |
-| M9 writeup / re-evals | ~15 | 2 d |
-| **Total** | **≈ 230 GPU-h** | **10-13 d** |
+| V2 probe + A2x screen (2 seeds, parallel) | ~6 | ~3 h + queue |
+| V3-A Stage-0 (A2 rate, ×1.5 retry) | ~36 | ~1–1.5 d |
+| V3-C decoder ×3 (4 GPU, ~2 h each, parallel) | ~24 | ~2 h |
+| V3-D eval + CheXbert ×3 + bootstraps ×9 | ~20 | ~8 h |
+| V3-E/F | ~1 | minutes |
+| **Total V2–V3** | **~90** | **~5–6 d** → lands ≈ 2026-09-25 if V1 closes 2026-09-18 |
 
-**Cut order if the budget bites:** (1) MIMO — already cut; (2) a second full-pipeline winner (+133 GPU-h) —
-use the existing 13D result as the control; (3) a full pipeline for A1 — it belongs in the screen only;
-(4) screen length beyond 12K (20K costs 98 GPU-h for the same set — if underpowered, fix the *metric*, not
-the steps); (5) repeated report-gen evals at 7 GPU-h each.
-
-**The single highest-ROI measurement** is M7-A's teacher probe: if BioMedLM is >50% of per-step time,
-screening at 70M with the teacher off drops the 8-arm screen from 59 GPU-h to under 10 — enough to afford a
-2-seed replicate on every arm.
+**Cut order if the budget bites:** V5 entirely; V3-F's forward+backward sweep (keep inference + decode); a third
+decoder seed (report 2 and say so); never the Stage-0 validation set (comparability with 13.18).
 
 ---
 
@@ -784,46 +847,41 @@ screening at 70M with the teacher off drops the 8-arm screen from 59 GPU-h to un
 
 | # | Risk | Early warning | Mitigation |
 |---|---|---|---|
-| **FM1** | **Δ-init confound** — A2 differs from A0 in Δ regime *and* operator *and* scan correctness at once, so a win is uninterpretable | log per-layer `Δ.mean/max`, `\|Δ·A\|.max` at steps 0/100/1000 for every arm | the A1 control arm (~7 h of screen compute) |
-| **FM2** | **Spike collapse at 150M.** History: 5 attempts, collapses at 3k/24k/28k; step 24749 was one grad-norm 1.59 vs a 0.23 baseline. Mamba-3 opens **two new surfaces**: Δ is no longer normalized (`dt_norm` was an accidental stabilizer) and unbounded above; `A` clamped at `A_floor` gives a dead unit *and* `exp(ΔA)≈1` (no forgetting) | alarm on `Δ.max()>10`, `\|A\|.min()` pinned at `A_floor` for >5% of heads, or grad-norm > 3× the trailing 500-step median | keep `gradient_clip_val=0.5` (load-bearing); `dt_limit=(0,1)`; **skip-step-on-spike callback** next to `signal_callbacks.py` — that alone would have saved the 24749 run |
-| **FM3** | **bf16 in the scan.** The fp32 force-cast is documented as motivated by the division — which SSD removes. Tempting to flip | rel-err vs the fp64 oracle | **Do not flip.** SSD still exponentiates a cumsum spanning `exp(0)` to underflow within one chunk; bf16 has 8 mantissa bits. Keep fp32 for `dt`, `A`, `Θ`, segsum/decay; gate bf16 for the two big matmuls behind a flag defaulting **off**. `Mamba3Block` must replicate the cast explicitly or silently inherit bf16 from autocast. Memory is not the reason to want it — SSD already cuts scan activations ~37× |
-| **FM4** | **RoPE angle accumulation.** At Δ≈0.7, `Θ_512 ≈ 358 rad` (57 turns); naive fp32 cumsum error ~1.1e-2 rad | log `Θ.abs().max()`, alarm > 1e3 rad | fp64 accumulation (~2 MB), per-segment reset, `remainder(·,2π)`, `θ_max·tanh` with near-zero init |
-| **FM5** | **Silent config drop — you train Mamba-2 for three days believing it is Mamba-3.** Highest expected cost. It already happened once here (`test_willi_parity.py:1483-1514` exists because `norm_topology` was silently dropped). 25 `HybridConfig(...)` sites across 18 files; `hybrid_block.py:71-100` silently drops unknown kwargs; Hydra strict-struct rejects undeclared CLI overrides | the M2-I arch fingerprint at step 0 of every log | fingerprint + `dataclasses.fields` pass-through (M2-F) + whitelist **raises** on prefixed unknowns + 4-type Gate 6 |
-| **FM6** | **The screen may be underpowered by construction.** PubMed abstracts ≈250 tokens with doc resets; trapezoid/RoPE target long-range behaviour. The effect may sit under seed noise | M7-A's 2-seed control | measure the noise floor first; paired Δ log-loss; MQAR + late-position PPL slice; pre-registered decision rule |
-| **FM7** | **Recipe drift across arms** — SSD makes `GRAD_CKPT=false` viable (1.3-1.5×), and WSD never enters decay if `max_steps` isn't set to the screen length | arm wall-clocks differing without explanation | hold `GRAD_CKPT=true` across the screen; harvest only for the winner; set `trainer.max_steps` = screen length |
+| **FM1** | Δ-init confound — A2 differs from A0 in Δ regime *and* operator at once | per-layer `Δ.mean/max` at steps 0/100/1000 | **measured**: A1 isolates the fix (−16.0%); A1−A2 not significant |
+| **FM2** | Spike collapse at 150M (history: 5 attempts; step 24749 was one 1.59 grad-norm). Mamba-3 opens two surfaces: Δ unnormalised, `A` clamped at `A_floor` | `Δ.max()>10`, `\|A\|.min()` pinned for >5% of heads, grad-norm > 3× trailing median | `gradient_clip_val=0.5`, `dt_limit=(0,1)`, first validation at 10K as the tripwire |
+| **FM3** | bf16 in the scan | rel-err vs the fp64 oracle | keep fp32 for `dt`, `A`, `Θ`, decay; bf16 only behind a flag defaulting off |
+| **FM4** | RoPE angle accumulation | `Θ.abs().max()` > 1e3 rad | fp64 accumulation, per-segment reset, `remainder(·,2π)` — moot for A2/A2x (rope off) |
+| **FM5** | **Silent config drop** — highest expected cost, happened twice (`norm_topology`; `theta_max`) | the `ARCH` fingerprint at step 0 of every log | `from_hydra` everywhere; derived mamba3 whitelist; prefixed-unknown kwargs raise; five-type Gate 6; explicit yaml pins; the chain passes `PREFIX_K=32` so a `run_metadata.json` mismatch is a hard error |
+| **FM6** | The screen is underpowered by construction | seed twins | measured: bar 0.642; per-lever deltas paired; V2-D judged on 2 seeds |
+| **FM7** | Recipe drift across arms | wall-clocks differing without explanation | `GRAD_CKPT=true` throughout; `max_steps` = screen length; one chain script |
+| **FM8** | **Home quota (200 GiB)** killed 3 of 4 arms in 15B | `du` before every submission | `SAVE_TOP_K=0` for decoders, `1` for Stage-0; delete probe outputs |
+| **FM9** | **Preemption restarts Stage-0 from step 0** (`--requeue` passes no `ckpt_path`) | `sacct` shows REQUEUED; log has two `ARCH` lines | resume via `train_stage0_distill_resume.py` from `last.ckpt`; `--open-mode=append` keeps the evidence |
+| **FM10** | **Account expiry 2026-09-29** | calendar | chain everything at once; extension ticket; archive DUA-covered outputs off-cluster |
 
 ---
 
-## State-tracking contract (`mamba3_state.json`)
+## State-tracking contract (`mamba3_v2_state.json`)
 
-1. Session start: read `MAMBA3_PLAN.md` + `mamba3_state.json` (pointed to from `CLAUDE.md`).
-2. Resume at `current_phase`; the checkboxes in `MAMBA3_PLAN.md` are ground truth.
-3. After **every** meaningful change (test written, phase gated, job submitted, job finished, eval scored):
-   tick the checkbox, update `last_updated` (ISO 8601), append a one-line `notes` entry, and record the
-   evidence (job id, log path, metric) under `phases[<id>].evidence`. Use the helper rather than editing
-   two files by hand — that is how a plan and its state drift apart:
+1. Session start: read `MAMBA3_PLAN_V2.md` + `mamba3_v2_state.json` (pointed to from `CLAUDE.md`).
+2. Resume at `current_phase`; the checkboxes here are ground truth.
+3. After **every** meaningful change: tick the checkbox, update `last_updated`, append a `notes` line, record the
+   evidence under `phases[<id>].evidence` — through the helper, never by hand in two files:
 
    ```bash
-   python scripts/mamba3_state.py tick M3-A M3-B --note "..." --evidence key=value
-   python scripts/mamba3_state.py phase M4_complex_state --status "..."
-   python scripts/mamba3_state.py readme      # refresh README's status line + progress table
-   python scripts/mamba3_state.py show [M3]   # progress at a glance
+   venv/bin/python scripts/mamba3_state.py tick V2-C --note "..." --evidence job=...
+   venv/bin/python scripts/mamba3_state.py phase V3_full_pipeline --status "..."
+   venv/bin/python scripts/mamba3_state.py readme      # refresh README's status line + progress table
+   venv/bin/python scripts/mamba3_state.py show [V2]   # progress at a glance
    ```
 
-   Run `readme` at the end of every phase. The repo already carries one README that went stale enough to
-   assert the Mamba path used a Triton kernel it has never called; regenerating the table is what stops
-   this one going the same way.
-4. Never re-run a checkpoint-producing phase (M7-B, M8-A/B/C) without first reading its log and logging a verdict.
-5. If `mamba3_state.json` is lost, regenerate it from the checkboxes.
+   Run `readme` at the end of every phase.
+4. Never re-run a checkpoint-producing phase (V2-C, V3-A/C) without first reading its log and logging a verdict.
+5. If `mamba3_v2_state.json` is lost, `venv/bin/python scripts/mamba3_state.py sync` regenerates the phase tree.
 
 ---
 
 ## Unresolved questions
 
-None. All resolved:
-- Merge — **never without an explicit instruction from the user** (decision 1).
-- mamba/mLSTM ratio — **re-opened as gated phase M10** if M8 clears (decision 8).
-- `d_state` 128, `scan_impl` legacy→exact at M9, py3.9 dropped, dead code deleted (decisions 6, 7, 9).
-
-Budget note: M10 adds ~5 screen arms ≈ 37 GPU-h, plus an optional full pipeline (~133 GPU-h). It is gated on
-M8 succeeding, so it is not in the ≈230 GPU-h baseline above.
+- Extension: confirmed or not? If not, V3 must be submitted by 2026-09-20 to land before the 29th with any retry margin.
+- V5-A (14C-3 on 13D, ~4 GPU-h): run inside V3's window or defer?
+- Seed-43/44 incumbent dump dirs on the cluster (`ls results/`) — record them in the Baselines section before V3-D.

@@ -1,4 +1,4 @@
-"""Mamba-3 mixer (MAMBA3_PLAN.md M2-C).
+"""Mamba-3 mixer (MAMBA3_PLAN_V2.md M2-C).
 
 A new layer type rather than a rewrite of `MambaBlock`. `MambaBlock` stays byte-identical so
 every existing checkpoint keeps loading and the A0 control arm stays reproducible; this block is
@@ -60,7 +60,7 @@ class Mamba3Block(nn.Module):
         dim: model dimension.
         d_state: SSM state size N. 128 is the reference default and this project's choice --
             8x this repo's Mamba-1 setting for +0.24% parameters, because B/C are shared across
-            heads (see MAMBA3_PLAN.md Context 3).
+            heads (see MAMBA3_PLAN_V2.md Context 3).
         head_dim: SSM head dimension P; `nheads = dim * expand_factor / head_dim`.
         expand_factor: inner-dimension expansion.
         ngroups: number of B/C groups. 1 means every head shares one B and C (Mamba's
@@ -76,7 +76,7 @@ class Mamba3Block(nn.Module):
     """
 
     # Declares that this mixer honours packed-document resets, so `HybridBlock` can dispatch on a
-    # capability rather than on a hard-coded tuple of layer names (MAMBA3_PLAN.md M2-E).
+    # capability rather than on a hard-coded tuple of layer names (MAMBA3_PLAN_V2.md M2-E).
     supports_cu_seqlens = True
 
     def __init__(
@@ -116,7 +116,7 @@ class Mamba3Block(nn.Module):
             raise ValueError(f"rope_fraction must be 0.5 or 1.0, got {rope_fraction!r}")
         if mimo_rank != 1:
             raise NotImplementedError(
-                "MIMO is plumbed but deliberately not implemented (MAMBA3_PLAN.md decision 3): "
+                "MIMO is plumbed but deliberately not implemented (MAMBA3_PLAN_V2.md decision 3): "
                 "rank 4 costs +3.2% parameters, leaving the parameter-matched regime, and its "
                 "payoff is decode arithmetic intensity that this project cannot measure yet."
             )
@@ -219,7 +219,7 @@ class Mamba3Block(nn.Module):
         `HybridLanguageModel.__init__` ends with `self.apply(self._init_weights)`, which zeroes
         every `nn.Linear` bias and re-normal-inits every weight. `dt_bias` and `A_log` are bare
         Parameters so they survive that, but this hook is called explicitly afterwards anyway --
-        the Mamba-1 block lost its dt init to exactly this ordering (MAMBA3_PLAN.md M1-F), and
+        the Mamba-1 block lost its dt init to exactly this ordering (MAMBA3_PLAN_V2.md M1-F), and
         relying on "Parameters happen not to be touched" is how that recurs.
         """
         with torch.no_grad():
