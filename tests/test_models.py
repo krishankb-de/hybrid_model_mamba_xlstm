@@ -110,15 +110,15 @@ class TestHybridLanguageModel:
         config = HybridConfig(
             vocab_size=1000,
             dim=256,
-            num_layers=6,
-            layer_pattern=["mamba", "mlstm", "slstm"],
+            num_layers=8,
+            layer_pattern=["mamba", "mamba3", "mlstm", "slstm"],
         )
         
         model = HybridLanguageModel(config)
         layer_types = model.get_layer_types()
         
-        assert len(layer_types) == 6
-        assert layer_types == ["mamba", "mlstm", "slstm"] * 2
+        assert len(layer_types) == 8
+        assert layer_types == ["mamba", "mamba3", "mlstm", "slstm"] * 2
 
 
 class TestVisionHybridModel:

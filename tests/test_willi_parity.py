@@ -1482,36 +1482,70 @@ def test_wsd_scheduler_absolute_warmup_override():
 
 
 def test_norm_topology_threaded_to_hybridconfig():
-    """Phase 9F: training entry scripts must thread ``norm_topology`` from yaml
-    into ``HybridConfig``. Regression-guards against the Phase 9 silent-drop bug
-    (HybridConfig was built from an explicit cfg.model.* list that omitted
-    ``norm_topology`` → v2 yaml ``norm_topology: hybrid`` was ignored).
+    """Training entry points must carry every yaml config field into ``HybridConfig``.
 
-    Strategy: read the two training entry-point source files and assert the
-    explicit ``norm_topology=`` kwarg is present in the HybridConfig(...) call.
-    Direct source-text assert is more robust than a full Hydra eval here, and
-    cheaper.
+    History, because this has now happened twice and the guard should reflect both:
+
+    * Phase 9F -- ``HybridConfig`` was built from an explicit ``cfg.model.*`` list that omitted
+      ``norm_topology``, so a v2 yaml's ``norm_topology: hybrid`` was ignored and HybridNorm
+      weights loaded into a pre_rms model. This test was written then, asserting the literal
+      ``norm_topology=`` kwarg was present.
+    * 2026-09-06 (MAMBA3_PLAN.md FM5) -- the same hand-written list dropped ``scan_impl``,
+      ``tfla_impl`` and ``dt_init_strategy``. Job 2513007 trained the A1 arm with every defect
+      still in place; only the ARCH fingerprint caught it. Guarding one field name could never
+      have caught that, because the bug is the mechanism, not the field.
+
+    So the assertion moved up a level: entry points must build through
+    ``HybridConfig.from_hydra``, which filters against ``dataclasses.fields`` and therefore
+    carries fields that do not exist yet. Source text plus a runtime round-trip, because the
+    failure is invisible at runtime otherwise -- the model builds and trains perfectly well, it
+    is simply not the architecture that was asked for.
     """
+    import dataclasses
     import pathlib
+
+    import yaml
+
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 
     repo_root = pathlib.Path(__file__).resolve().parent.parent
     for rel in (
         "scripts/train.py",
         "scripts/train_stage0_distill.py",
-        "scripts/train_contrastive.py",  # Phase 10: same bug would corrupt the backbone
+        "scripts/train_stage0_distill_resume.py",
+        "scripts/train_contrastive.py",
+        "scripts/train_report_generation.py",
     ):
         src = (repo_root / rel).read_text()
-        assert "HybridConfig(" in src, f"{rel}: no HybridConfig call found"
-        # Look for the threading line within the HybridConfig argument block.
-        # Tolerant of either explicit `cfg.model.norm_topology` or
-        # `cfg.model.get('norm_topology', ...)`.
-        has_explicit = "norm_topology=cfg.model.norm_topology" in src
-        has_getter = "norm_topology=cfg.model.get(" in src and 'norm_topology' in src
-        assert has_explicit or has_getter, (
-            f"{rel}: HybridConfig(...) call does not pass norm_topology — "
-            f"Phase 9 regression hazard. Add "
-            f"norm_topology=cfg.model.get('norm_topology', 'pre_rms')."
+        assert "HybridConfig.from_hydra(" in src, (
+            f"{rel}: must build HybridConfig via from_hydra(); a hand-written kwarg list "
+            "silently drops any field nobody remembered to add"
         )
+        assert "HybridConfig(\n" not in src, (
+            f"{rel}: still constructs HybridConfig from an explicit kwarg list"
+        )
+
+    # Runtime half: whatever a yaml sets must arrive on the dataclass.
+    fields = {f.name for f in dataclasses.fields(HybridConfig)}
+    for name in ("hybrid_70m_v2", "hybrid_150m_v2", "hybrid_150m_a1", "hybrid_150m_m3"):
+        path = repo_root / "configs" / "model" / f"{name}.yaml"
+        if not path.exists():
+            continue
+        raw = yaml.safe_load(path.read_text())
+        cfg = HybridConfig.from_hydra(raw)
+        for key, value in raw.items():
+            # `null` in a yaml means "derive it" -- __post_init__ fills dt_rank, num_heads and
+            # slstm_hidden_dim -- so a None never round-trips unchanged and is not a drop.
+            if (
+                key in fields
+                and key != "model_type"
+                and value is not None
+                and not isinstance(value, (dict, list))
+            ):
+                assert getattr(cfg, key) == value, (
+                    f"{name}.yaml sets {key}={value!r} but the config has "
+                    f"{getattr(cfg, key)!r} -- the field was dropped in transit"
+                )
 
 
 def test_resume_from_checkpoint_wired_to_trainer_fit():
@@ -5307,3 +5341,129 @@ def test_rrg_model_configs_declare_aux_keys():
         text = (REPO_ROOT / "configs" / "model" / f"{name}.yaml").read_text()
         assert "aux_lambda: 0.0" in text, name
         assert "aux_pos_weight_cap: 10.0" in text, name
+
+@pytest.mark.willi_parity
+def test_screen_arms_job_array_reads_the_shared_arm_ladder():
+    """MAMBA3_PLAN.md M7-B0: the screen is one job array, and it hand-writes no lever.
+
+    Two invariants, both load-bearing:
+
+    1. The arm table is *not* in this script. It is read from `scripts/mamba3_arms.py`,
+       which is also what the pre-flight verifies -- so no arm can be screened with a
+       configuration the pre-flight never checked. A pre-flight carrying its own private
+       copy of the arm list is exactly how job 2513007 came to train A1 as plain A0.
+    2. aisc rejects `--gres` for GPUs; the request must be `--gpus=N`. Every other H100
+       wrapper in this repo is pinned the same way because that mistake was made live.
+
+    A0/A0-seed/A1 are deliberately absent from the default set -- they were early-started
+    under M7-A2, and re-running them would burn ~22 GPU-h to produce a second control.
+    """
+    sh = (REPO_ROOT / "scripts" / "screen_arms_h100.sh").read_text()
+
+    assert "#SBATCH --gpus=1" in sh
+    assert "--gres" not in sh, "aisc rejects --gres for GPUs -- use --gpus=N"
+    assert "#SBATCH --partition=aisc-batch" in sh and "#SBATCH --account=aisc" in sh
+    assert "#SBATCH --requeue" in sh, "aisc-batch is preemptible"
+    assert "#SBATCH --open-mode=append" in sh, (
+        "without append, a requeue TRUNCATES the log -- an arm silently restarts from step 0 "
+        "(nothing passes ckpt_path) and the evidence that it did is overwritten"
+    )
+    assert "%A_%a" in sh, "array tasks must not all write to the same log file"
+
+    assert 'ARMS="${ARMS:-A2 A3 A4 A5 A6}"' in sh, "default set must skip the early-started arms"
+    assert "export ARM" in sh, "the arm is handed to the wrapper, which resolves it on the node"
+    assert "unset EXPERIMENT" in sh, (
+        "SLURM propagates the submitting environment and the wrapper lets a caller-supplied "
+        "EXPERIMENT win, so a stray one would funnel all five arms into one output directory"
+    )
+    assert sh.index("unset EXPERIMENT") < sh.index("bash scripts/train_stage0_150m_h100.sh")
+    code = "\n".join(ln for ln in sh.splitlines() if not ln.lstrip().startswith("#"))
+    assert "model.mamba3_" not in code, (
+        "levers must come from mamba3_arms.py, not be hand-written here"
+    )
+    assert "SLURM_ARRAY_TASK_ID" in sh
+    assert "bash scripts/train_stage0_150m_h100.sh" in sh, (
+        "the 150M stability recipe (LR 4e-4, grad-clip 0.5, 80GB-safe bs/accum) is inherited, "
+        "not restated -- it took five attempts to find"
+    )
+
+
+@pytest.mark.willi_parity
+def test_stage0_h100_passes_extra_hydra_overrides_through():
+    """M5: arms A3..A6 are `model.mamba3_*=...` overrides, not yamls of their own.
+
+    Before this existed the wrapper had no way to pass an extra Hydra argument, so half the
+    screen ladder was unsubmittable. The expansion must stay unquoted -- the overrides are
+    separate arguments, not one string -- and defaulted, because the script runs under
+    `set -u`.
+    """
+    sh = (REPO_ROOT / "scripts" / "train_stage0_h100.sh").read_text()
+    assert 'EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"' in sh
+    assert "\n  ${EXTRA_OVERRIDES}\n" in sh, "must be word-split into separate Hydra arguments"
+    wrapper = (REPO_ROOT / "scripts" / "train_stage0_150m_h100.sh").read_text()
+    assert 'export EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"' in wrapper
+
+
+@pytest.mark.willi_parity
+def test_150m_wrapper_resolves_the_arm_on_the_compute_node():
+    """The aisc login node refuses to execute python, so an arm can only be resolved inside
+    the job.
+
+    Regression pin for job 2513581 (2026-09-06). The documented launch was
+    `eval "$(python scripts/mamba3_arms.py env A2)" && sbatch ...`. On lx01 that python call
+    printed "This command is not allowed on the login node!"; the shell word-split the
+    sentence into `This: command not found`, `Please: command not found`, `HINT:: command not
+    found`; the eval exported NOTHING; and sbatch ran the wrapper's own defaults --
+    hybrid_150m_v2, 120,000 steps, save_top_k=3. A silent second A0 at ten times the intended
+    length, wearing the experiment name of the arm it was supposed to be.
+
+    Resolving on the compute node removes the class rather than the instance: there is no
+    pre-submit step left to fail, and a bad arm name exits non-zero instead of falling back to
+    a default that happens to be a valid architecture.
+    """
+    sh = (REPO_ROOT / "scripts" / "train_stage0_150m_h100.sh").read_text()
+    assert 'if [ -n "${ARM:-}" ]; then' in sh
+    assert 'python scripts/mamba3_arms.py env "${ARM}"' in sh, "one definition of the ladder"
+    assert "FATAL: could not resolve arm" in sh and "exit 1" in sh, (
+        "an unknown arm must fail the job, not silently train the wrapper's default"
+    )
+    # Resolution must precede the ${VAR:-default} exports, or the defaults win and the arm is
+    # silently ignored -- the same failure in a new costume.
+    assert sh.index('if [ -n "${ARM:-}" ]; then') < sh.index('export MODEL_CONFIG=')
+    # A caller-supplied EXPERIMENT must survive the arm's own naming, or a short probe writes
+    # into the screen run's output directory. Job 2513598 (a 300-step A2 probe) did exactly
+    # that: it landed in outputs/m3_screen_A2_s42 and left a last.ckpt behind.
+    assert 'ARM_EXPERIMENT="${EXPERIMENT:-}"' in sh
+    assert sh.index('ARM_EXPERIMENT="${EXPERIMENT:-}"') < sh.index('eval "${ARM_ENV}"')
+    assert 'export EXPERIMENT="${ARM_EXPERIMENT}"' in sh
+
+
+@pytest.mark.willi_parity
+def test_stage0_checkpoint_filename_has_no_slash_metric():
+    """A metric containing "/" in a ModelCheckpoint filename becomes a path separator.
+
+    `filename="stage0_kd-{step:06d}-{val/loss:.4f}"` made Lightning create a DIRECTORY
+    `stage0_kd-step=NNNNNN-val/` with `loss=N.NNNN.ckpt` inside it, for every save. Nothing
+    globbing `checkpoints/*.ckpt` could find a best checkpoint -- only `last.ckpt` was ever
+    visible, which is why every M7 arm reported zero checkpoints while sitting on 2.1 GB.
+    `monitor="val/loss"` still drives top-k selection; the loss belongs in TensorBoard.
+    """
+    src = (REPO_ROOT / "scripts" / "train_stage0_distill.py").read_text()
+    assert 'filename="stage0_kd-step{step:06d}"' in src
+    assert "{val/loss" not in src, "a slashed metric in a filename becomes a directory"
+    assert 'monitor="val/loss"' in src, "top-k selection still needs the metric"
+
+
+@pytest.mark.willi_parity
+def test_stage0_validation_cadence_is_tunable():
+    """M8-A runs 120,000 steps; at the screen's val_check_interval=2000 that is 60 passes.
+
+    A0 measured ~5.4 h for six passes -- the val set is 15,724 chunks and each pass runs the
+    2.6B teacher alongside the student -- so 60 would cost ~54 h against ~13.5 h of training.
+    The interval must be tunable. The val SET must not be: it stays 15,724 chunks so the number
+    remains comparable to the 13.18 Phase-5 baseline.
+    """
+    sh = (REPO_ROOT / "scripts" / "train_stage0_h100.sh").read_text()
+    assert 'VAL_EVERY="${VAL_EVERY:-2000}"' in sh, "screens keep the 2000-step default"
+    assert "trainer.val_check_interval=${VAL_EVERY}" in sh
+    assert "trainer.val_check_interval=2000" not in sh, "no hard-coded cadence left"

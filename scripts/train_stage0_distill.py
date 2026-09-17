@@ -377,33 +377,10 @@ def main(cfg: DictConfig):
     # ---------------------------------------------------------------------------
     # Student model
     # ---------------------------------------------------------------------------
-    model_config = HybridConfig(
-        vocab_size=cfg.model.vocab_size,
-        dim=cfg.model.dim,
-        num_layers=cfg.model.num_layers,
-        layer_pattern=cfg.model.layer_pattern,
-        state_size=cfg.model.state_size,
-        conv_size=cfg.model.conv_size,
-        expand_factor=cfg.model.expand_factor,
-        dt_rank=cfg.model.dt_rank,
-        use_fast_path=cfg.model.use_fast_path,
-        head_dim=cfg.model.head_dim,
-        num_heads=cfg.model.num_heads,
-        use_tfla=cfg.model.use_tfla,
-        proj_factor=cfg.model.proj_factor,
-        slstm_hidden_dim=cfg.model.slstm_hidden_dim,
-        slstm_num_heads=cfg.model.slstm_num_heads,
-        use_exponential_gate=cfg.model.use_exponential_gate,
-        norm_type=cfg.model.norm_type,
-        norm_topology=cfg.model.get("norm_topology", "pre_rms"),
-        use_mlp=cfg.model.use_mlp,
-        mlp_ratio=cfg.model.mlp_ratio,
-        max_position_embeddings=cfg.model.max_position_embeddings,
-        dropout=cfg.model.dropout,
-        initializer_range=cfg.model.initializer_range,
-        use_cache=cfg.model.use_cache,
-        tie_word_embeddings=cfg.model.tie_word_embeddings,
-    )
+    # MAMBA3_PLAN.md M2-F: every dataclass field present in the yaml is carried
+    # through automatically. Do not go back to listing fields by hand -- that is
+    # how norm_topology (Phase 9) and scan_impl (job 2513007) were silently lost.
+    model_config = HybridConfig.from_hydra(cfg.model)
     student = HybridLanguageModel(model_config)
 
     # Optionally warm-start from existing Stage 0 checkpoint
@@ -504,10 +481,21 @@ def main(cfg: DictConfig):
             dirpath=cfg.checkpoint_dir,
             monitor="val/loss",
             mode="min",
-            save_top_k=3,
+            # Read from the config instead of hard-coding 3. A 150M checkpoint is ~2.1 GB, so
+            # top-3 plus `last` is 8.4 GB per run -- 67 GB across an 8-arm screen, which does not
+            # fit the 200 GB home quota. A screen only ever reads the final val loss, so
+            # SAVE_TOP_K=0 is the right setting there; `save_last` stays on regardless because
+            # aisc-batch is preemptible and `--requeue` needs `last.ckpt` to resume.
+            save_top_k=cfg.callbacks.checkpoint.get("save_top_k", 3),
             save_last=True,
             every_n_train_steps=cfg.callbacks.checkpoint.get("every_n_train_steps", 2000),
-            filename="stage0_kd-{step:06d}-{val/loss:.4f}",
+            # No metric in the filename. "val/loss" contains a slash, and Lightning treats it
+            # as a path separator: every save created a DIRECTORY `stage0_kd-step=NNNNNN-val/`
+            # with `loss=N.NNNN.ckpt` inside it. Nothing globbing `checkpoints/*.ckpt` could
+            # see a best checkpoint -- only `last.ckpt` was ever visible, which is why the M7
+            # arms all reported zero checkpoints. `monitor="val/loss"` still selects top-k; the
+            # loss itself belongs in TensorBoard, not in a path.
+            filename="stage0_kd-step{step:06d}",
         ),
         LearningRateMonitor(logging_interval="step"),
         SignalCheckpointCallback(checkpoint_dir=cfg.checkpoint_dir),

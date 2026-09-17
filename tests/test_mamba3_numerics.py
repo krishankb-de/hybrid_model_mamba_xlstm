@@ -1,0 +1,1832 @@
+"""Numerical-correctness tests for the recurrent operators (MAMBA3_PLAN.md, phase M1).
+
+These pin a defect, they are not regression tests for working code. `tests/test_kernels.py`
+asserts only shape / no-NaN / no-Inf on the selective scan, and gates the whole class behind
+`torch.cuda.is_available()`, so it never runs in CI -- which is exactly how the defect below
+survived. Everything here is CPU-collected and unconditionally run.
+
+The defect (MAMBA3_PLAN.md, Context 1). Both chunked scans compute
+
+    h_intra[t] = A_cum[t] * cumsum(Bx / A_cum.clamp(min=1e-8))[t]
+
+Where `A_cum[s]` falls under 1e-8 the clamp pins the denominator, so the ratio
+`A_cum[t] / max(A_cum[s], 1e-8)` collapses to ~0 even when the true ratio is O(1) for `s` near
+`t`. The token's own contribution to the state is annihilated, not merely perturbed.
+"""
+
+import pathlib
+from typing import List
+
+import pytest
+import torch
+
+from hybrid_xmamba.kernels.selective_scan.scan_interface import (
+    selective_scan,
+    selective_scan_exact,
+    selective_scan_parallel,
+)
+from hybrid_xmamba.layers.mamba_block import MambaBlock
+
+# Deltas span the reference Mamba init range logU[1e-3, 1e-1] and the range this repo actually
+# operates in: Delta ~ 0.70 (pre_rms) / 0.82 (hybrid, canonical), measured in MAMBA3_PLAN.md.
+DELTAS: List[float] = [1e-3, 1e-2, 1e-1, 0.3, 0.705, 1.0]
+CHUNKS: List[int] = [8, 64]
+TOL = 1e-6
+
+_FLIPS = "strict=True, so it fails loudly the moment it starts passing (MAMBA3_PLAN.md M1-I)."
+_DEFECT_SCAN = f"MAMBA3_PLAN.md M1: divide-and-clamp in the selective scan. Fixed by M1-E/M1-G. {_FLIPS}"
+_DEFECT_TFLA = f"MAMBA3_PLAN.md M1: divide-and-clamp in the TFLA intra-chunk term. Fixed by M1-H. {_FLIPS}"
+_DEFECT_DELTA = f"MAMBA3_PLAN.md M1: no Mamba dt init, and dt_norm would erase one. Fixed by M1-F. {_FLIPS}"
+
+
+def _xfail_if(condition: bool, reason: str = _DEFECT_SCAN):
+    """Mark a parametrized case as a known defect. Empty list == expected to pass today."""
+    return [pytest.mark.xfail(strict=True, reason=reason)] if condition else []
+
+
+# "legacy" reproduces the pre-2026-09 numerics on purpose (MAMBA3_PLAN.md decision 7), so its
+# failures are permanent xfails, not a TODO. "exact" must pass everywhere -- those are the cases
+# that make M1 a fix rather than a description.
+SCAN_IMPLS = ("legacy", "exact")
+
+
+def _scan_cases():
+    """Measured on HEAD: chunk=8 rescues delta=0.1 but nothing rescues delta>=0.3."""
+    for impl in SCAN_IMPLS:
+        for delta in DELTAS:
+            for chunk in CHUNKS:
+                broken = impl == "legacy" and (delta >= 0.3 or (delta >= 0.1 and chunk >= 64))
+                yield pytest.param(impl, delta, chunk, marks=_xfail_if(broken))
+
+
+def _delta_cases():
+    for impl in SCAN_IMPLS:
+        for delta in DELTAS:
+            yield pytest.param(impl, delta, marks=_xfail_if(impl == "legacy" and delta >= 0.1))
+
+
+def sequential_selective_scan_fp64(
+    x: torch.Tensor,
+    dt: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    D: torch.Tensor,
+) -> torch.Tensor:
+    """float64 sequential ground truth for the Mamba-1 (S6) recurrence.
+
+    h_t = exp(dt_t * A) . h_{t-1} + (dt_t * B_t) x_t        h: (batch, dim, state)
+    y_t = <C_t, h_t> + D * x_t
+
+    Deliberately a naive Python loop: it is the oracle, so it must be obviously correct
+    rather than fast.
+    """
+    x64, dt64 = x.double(), dt.double()
+    A64, B64, C64, D64 = A.double(), B.double(), C.double(), D.double()
+    batch, seq_len, dim = x64.shape
+    state = A64.shape[1]
+
+    h = torch.zeros(batch, dim, state, dtype=torch.float64)
+    ys = []
+    for t in range(seq_len):
+        decay = torch.exp(dt64[:, t].unsqueeze(-1) * A64)              # (batch, dim, state)
+        inp = (dt64[:, t].unsqueeze(-1) * B64[:, t].unsqueeze(1)) * x64[:, t].unsqueeze(-1)
+        h = decay * h + inp
+        ys.append(torch.einsum("bdn,bn->bd", h, C64[:, t]) + D64 * x64[:, t])
+    return torch.stack(ys, dim=1)
+
+
+def rel_max_err(got: torch.Tensor, want: torch.Tensor) -> float:
+    return (got.double() - want).abs().max().item() / want.abs().max().item()
+
+
+def _fixture(delta: float, seq_len: int = 128, dim: int = 8, state: int = 16):
+    """Inputs matching the shipped init: A = -[1..N] repeated per channel (mamba_block.py:82)."""
+    torch.manual_seed(0)
+    A = -torch.arange(1.0, state + 1).repeat(dim, 1)
+    return (
+        torch.randn(1, seq_len, dim),                    # x
+        torch.full((1, seq_len, dim), delta),            # dt
+        A,
+        torch.randn(1, seq_len, state),                  # B
+        torch.randn(1, seq_len, state),                  # C
+        torch.ones(dim),                                 # D
+    )
+
+
+@pytest.mark.parametrize("scan_impl,delta,chunk_size", list(_scan_cases()))
+def test_selective_scan_parallel_matches_sequential_reference(scan_impl, delta, chunk_size):
+    """M1-A/M1-E: the chunked scan must equal the sequential recurrence it claims to compute."""
+    x, dt, A, B, C, D = _fixture(delta)
+    want = sequential_selective_scan_fp64(x, dt, A, B, C, D)
+    impl = selective_scan_parallel if scan_impl == "legacy" else selective_scan_exact
+    err = rel_max_err(impl(x, dt, A, B, C, D, chunk_size=chunk_size), want)
+    assert err <= TOL, (
+        f"scan_impl={scan_impl} delta={delta} chunk={chunk_size}: "
+        f"rel-max-err {err:.3e} > {TOL:.0e}"
+    )
+
+
+@pytest.mark.parametrize("scan_impl,delta", list(_delta_cases()))
+def test_selective_scan_public_api_matches_sequential_reference(scan_impl, delta):
+    """M1-A/M1-E: same claim for the public entry point, at whatever chunk size it picks."""
+    x, dt, A, B, C, D = _fixture(delta)
+    want = sequential_selective_scan_fp64(x, dt, A, B, C, D)
+    err = rel_max_err(selective_scan(x, dt, A, B, C, D, scan_impl=scan_impl), want)
+    assert err <= TOL, f"scan_impl={scan_impl} delta={delta}: rel-max-err {err:.3e} > {TOL:.0e}"
+
+
+@pytest.mark.parametrize("scan_impl,delta", list(_delta_cases()))
+def test_mamba_block_slow_forward_matches_sequential_reference(scan_impl, delta):
+    """M1-A: `use_fast_path=False` carries an identical copy of the defect.
+
+    This path is not a curiosity -- `scripts/validate_for_willi.sh` builds its Gate 6 model with
+    `use_fast_path=False`, so the pre-push harness exercises the buggy branch, not the fast one.
+    """
+    dim, state = 8, 16
+    x, dt, A, B, C, D = _fixture(delta, dim=dim, state=state)
+    block = MambaBlock(dim=dim, state_size=state, expand_factor=1, scan_impl=scan_impl).eval()
+    with torch.no_grad():
+        block.D.copy_(D)
+        got = block._slow_forward(x, dt, A, B, C)
+    err = rel_max_err(got, sequential_selective_scan_fp64(x, dt, A, B, C, D))
+    assert err <= TOL, f"scan_impl={scan_impl} delta={delta}: rel-max-err {err:.3e} > {TOL:.0e}"
+
+
+# ---------------------------------------------------------------------------
+# M1-B: Delta at initialization
+# ---------------------------------------------------------------------------
+# Reference Mamba draws Delta ~ logU[1e-3, 1e-1] via an inverse-softplus bias init. This repo
+# has no such init at all, and `HybridLanguageModel._init_weights` (hybrid_lm.py:138-145) zeroes
+# every bias -- including `dt_proj.bias`. Worse, `norm_topology="hybrid"` (the canonical setting)
+# RMSNorms Delta before the softplus, rescaling it to unit RMS and discarding any bias offset, so
+# adding the reference init without also removing that norm would be a no-op. Both facts are
+# pinned here so neither can regress silently.
+
+DELTA_INIT_RANGE = (1e-3, 1.5e-1)
+
+
+def _delta_at_init(model, seq_len: int = 128, batch: int = 4) -> torch.Tensor:
+    """Reproduce a mamba mixer's Delta on realistic input, mirroring mamba_block.forward:117-141."""
+    torch.manual_seed(0)
+    block = next(layer for layer in model.layers if layer.layer_type == "mamba")
+    mixer = block.mixer
+    input_ids = torch.randint(0, model.config.vocab_size, (batch, seq_len))
+    with torch.no_grad():
+        x = block.norm1(model.embeddings(input_ids))
+        x_inner, _ = mixer.in_proj(x).chunk(2, dim=-1)
+        x_conv = mixer.activation(
+            mixer.conv1d(x_inner.transpose(1, 2))[..., :seq_len].transpose(1, 2)
+        )
+        dt = mixer.x_proj(x_conv)[..., : mixer.dt_rank]
+        dt = mixer.dt_proj(dt)
+        if mixer.dt_norm is not None:
+            dt = mixer.dt_norm(dt)
+        return torch.nn.functional.softplus(dt)
+
+
+seq_cap = 128
+
+
+def _tiny_model(norm_topology: str, dt_init_strategy: str = "none"):
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    torch.manual_seed(0)
+    return HybridLanguageModel(
+        HybridConfig(
+            vocab_size=512, dim=128, num_layers=2, layer_pattern=["mamba", "mlstm"],
+            state_size=16, head_dim=32, num_heads=4, max_position_embeddings=seq_cap,
+            norm_topology=norm_topology, dt_init_strategy=dt_init_strategy,
+        )
+    )
+
+
+# The full 3x2 grid. Only two cells land in range, and *which* two is the whole finding: the
+# init alone is not enough, because dt_norm rescales Delta to unit RMS and throws the bias away.
+#
+#   norm_topology  dt_init  Delta mean   in range
+#   pre_rms        none     0.6932       no
+#   pre_rms        mamba    0.0211       YES
+#   hybrid         none     0.7987       no
+#   hybrid         mamba    0.3320       no    <-- dt_norm erases the fix
+#   hybrid_bc      none     0.6932       no
+#   hybrid_bc      mamba    0.0211       YES
+_DELTA_GRID = [
+    ("pre_rms", "none", True),
+    ("pre_rms", "mamba", False),
+    ("hybrid", "none", True),
+    ("hybrid", "mamba", True),      # Finding 2: pinned as still-broken, deliberately
+    ("hybrid_bc", "none", True),
+    ("hybrid_bc", "mamba", False),
+]
+
+
+@pytest.mark.parametrize(
+    "norm_topology,dt_init_strategy",
+    [
+        pytest.param(tp, di, marks=_xfail_if(broken, _DEFECT_DELTA))
+        for tp, di, broken in _DELTA_GRID
+    ],
+)
+def test_delta_at_init_is_in_mamba_range(norm_topology, dt_init_strategy):
+    """M1-B/M1-F: Delta at init must sit in the reference range logU[1e-3, 1e-1].
+
+    The `hybrid` + `mamba` cell is xfailed *on purpose* and must stay that way. It is the pin on
+    Finding 2: applying the reference dt init while dt_norm is still active is a no-op (Delta
+    lands at 0.33, not 0.02), so a future refactor that "helpfully" enables the init under
+    `hybrid` would be silently ineffective. If that cell ever starts passing, strict=True turns
+    it into a failure and someone has to explain why.
+    """
+    lo, hi = DELTA_INIT_RANGE
+    delta = _delta_at_init(_tiny_model(norm_topology, dt_init_strategy))
+    mean = delta.mean().item()
+    assert lo <= mean <= hi, (
+        f"norm_topology={norm_topology} dt_init={dt_init_strategy}: Delta mean {mean:.4f} "
+        f"outside [{lo}, {hi}]; max {delta.max().item():.4f}."
+    )
+
+
+def test_dt_norm_erases_the_dt_init():
+    """M1-F: state Finding 2 as a direct, positive claim rather than only as an xfail."""
+    with_norm = _delta_at_init(_tiny_model("hybrid", "mamba")).mean().item()
+    without_norm = _delta_at_init(_tiny_model("hybrid_bc", "mamba")).mean().item()
+    assert without_norm < 0.05 < with_norm, (
+        f"expected dt_norm to inflate Delta (got {with_norm:.4f} with, {without_norm:.4f} "
+        "without). If this flips, the hybrid_bc topology is no longer doing its job."
+    )
+    assert with_norm / without_norm > 5.0, "dt_norm's effect on Delta has shrunk unexpectedly"
+
+
+def test_dt_proj_bias_is_zeroed_by_model_init():
+    """M1-B: pins the *mechanism* -- `_init_weights` zeroes the bias the Mamba init would set.
+
+    Not xfailed: this documents current behaviour. When M1-F adds `dt_init_strategy="mamba"` this
+    test keeps guarding the default (`"none"`), so the audit finding cannot silently disappear.
+    """
+    mixer = next(l for l in _tiny_model("hybrid").layers if l.layer_type == "mamba").mixer
+    assert torch.equal(mixer.dt_proj.bias, torch.zeros_like(mixer.dt_proj.bias)), (
+        "dt_proj.bias is no longer zeroed at init -- if a dt init was added, update M1-B/M1-F."
+    )
+
+
+# ---------------------------------------------------------------------------
+# M1-C: the same defect class in the mLSTM (TFLA) intra-chunk term
+# ---------------------------------------------------------------------------
+# `tfla_interface.py:93-95` computes `k_weighted = k * i / f_cum.clamp(min=1e-6)`. The
+# inter-chunk half (`:149`) already uses the log-space difference form and is correct, so only
+# the intra-chunk half is affected -- but the canonical 150M model has 3 mLSTM layers, so
+# together with the Mamba defect all 12 layers run a recurrence that is not the specified one.
+
+FORGET_BIASES: List[float] = [0.0, 1.0, 2.0, 3.0]  # 0.0 is the shipped forget_gate_bias_init
+
+
+def sequential_mlstm_fp64(q, k, v, i_gate, f_gate) -> torch.Tensor:
+    """float64 sequential ground truth for the recurrence tfla_forward_parallel approximates.
+
+    Convention read off tfla_interface.py:65-175 -- per-dimension multiplicative gates, matrix
+    memory C, normalizer n, and a joint denominator clamped at 1.0 (not abs-clamped):
+
+        C_t[d,e] = f_t[d] C_{t-1}[d,e] + i_t[d] k_t[d] v_t[e]
+        n_t[d]   = f_t[d] n_{t-1}[d]   + i_t[d] k_t[d]
+        y_t[e]   = (sum_d q_t[d] C_t[d,e]) / max(sum_d q_t[d] n_t[d], 1)
+
+    `f` is clamped at 1e-6 exactly as the chunked path does (`:74`), so the comparison isolates
+    the intra-chunk division and not that clamp.
+    """
+    q, k, v, i_gate = (t.double() for t in (q, k, v, i_gate))
+    f = f_gate.double().clamp(min=1e-6)
+    batch, heads, seq_len, dim = q.shape
+
+    C = torch.zeros(batch, heads, dim, dim, dtype=torch.float64)
+    n = torch.zeros(batch, heads, dim, dtype=torch.float64)
+    ys = []
+    for t in range(seq_len):
+        ki = k[:, :, t] * i_gate[:, :, t]
+        C = f[:, :, t].unsqueeze(-1) * C + torch.einsum("bhd,bhe->bhde", ki, v[:, :, t])
+        n = f[:, :, t] * n + ki
+        num = torch.einsum("bhd,bhde->bhe", q[:, :, t], C)
+        den = torch.einsum("bhd,bhd->bh", q[:, :, t], n).unsqueeze(-1).clamp(min=1.0)
+        ys.append(num / den)
+    return torch.stack(ys, dim=2)
+
+
+def _tfla_fixture(forget_bias: float, seq_len: int = 128, heads: int = 2, dim: int = 8):
+    torch.manual_seed(0)
+    shape = (1, heads, seq_len, dim)
+    return (
+        torch.randn(shape),                                            # q
+        torch.randn(shape) / dim ** 0.5,                               # k
+        torch.randn(shape),                                            # v
+        torch.sigmoid(torch.randn(shape) - 10.0),                      # i_gate (shipped bias -10)
+        torch.sigmoid(torch.randn(shape) * 0.5 + forget_bias),         # f_gate
+    )
+
+
+@pytest.mark.parametrize(
+    "tfla_impl,forget_bias,chunk_size",
+    [
+        pytest.param(
+            impl, fb, cs,
+            marks=_xfail_if(impl == "legacy" and fb <= 1.0 and cs >= 64, _DEFECT_TFLA),
+        )
+        for impl in ("legacy", "exact")
+        for fb in FORGET_BIASES
+        for cs in CHUNKS
+    ],
+)
+def test_tfla_intra_chunk_matches_sequential_reference(tfla_impl, forget_bias, chunk_size):
+    """M1-C: the error is governed entirely by whether f_cum underflows the 1e-6 clamp.
+
+    Measured rel-max-err against the fp64 oracle (chunk_size=64 is the shipped default):
+
+        forget_bias   chunk=8    chunk=32   chunk=64   chunk=128
+        0.0 (shipped) 1.1e-07    5.0e-01    8.8e-01    8.8e-01
+        1.0           1.2e-07    1.7e-07    5.7e-01    9.6e-01
+        2.0           6.5e-08    1.4e-07    1.8e-07    4.8e-01
+        3.0           9.1e-08    9.1e-08    1.3e-07    1.4e-07
+
+    Every entry above 1e-6 is one where min(f_cum) fell below the clamp, and every entry below
+    it is one where it did not. So the shipped configuration -- forget_gate_bias_init=0.0 at
+    chunk_size=64 -- runs at rel-max-err 0.88. The small-chunk and high-bias cases are the
+    control: they show it is the clamp that breaks, not the chunking.
+    """
+    from hybrid_xmamba.kernels.tfla.tfla_interface import tfla_forward_parallel
+
+    q, k, v, i_gate, f_gate = _tfla_fixture(forget_bias)
+    want = sequential_mlstm_fp64(q, k, v, i_gate, f_gate)
+    got = tfla_forward_parallel(
+        q, k, v, i_gate, f_gate, chunk_size=chunk_size, tfla_impl=tfla_impl
+    )
+    err = rel_max_err(got, want)
+    assert err <= TOL, (
+        f"tfla_impl={tfla_impl} forget_bias={forget_bias} chunk={chunk_size}: "
+        f"rel-max-err {err:.3e} > {TOL:.0e}"
+    )
+
+
+@pytest.mark.parametrize("forget_bias", FORGET_BIASES)
+def test_tfla_clamp_hit_rate_is_documented(forget_bias):
+    """M1-C: pins *why* the test above fails, so a fix cannot be mistaken for a chunking change."""
+    torch.manual_seed(0)
+    f = torch.sigmoid(torch.randn(200_000) * 0.5 + forget_bias)
+    f_cum = torch.log(f.clamp(min=1e-6)).view(-1, 64).cumsum(-1).exp()
+    hit_rate = (f_cum < 1e-6).double().mean().item()
+    expected = {0.0: 0.70, 1.0: 0.36, 2.0: 0.0, 3.0: 0.0}[forget_bias]
+    assert abs(hit_rate - expected) < 0.05, (
+        f"forget_bias={forget_bias}: clamp hit-rate {hit_rate:.3f}, expected ~{expected}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M1-E / M1-H: guards on the fixed paths themselves
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("forget_bias", [-4.0, -2.0])
+@pytest.mark.parametrize("chunk_size", [64, 128])
+def test_tfla_exact_survives_extreme_decay(forget_bias, chunk_size):
+    """M1-H: the overflow guard. Re-centring alone produced NaN here.
+
+    Re-centring halves the dynamic range but cannot remove it: a chunk whose total log-decay
+    exceeds 2 * _EXP_SAFE still overflows fp32 on one side, and because the causal mask is
+    applied after the product, an inf meets a 0 and yields NaN. `chunk_size=128` with a
+    forget-gate bias near -2 reaches that regime. The guarded fallback scans within the chunk
+    instead of factorizing across it, which forms no large exponential at all.
+    """
+    from hybrid_xmamba.kernels.tfla.tfla_interface import tfla_forward_parallel
+
+    q, k, v, i_gate, f_gate = _tfla_fixture(forget_bias)
+    got = tfla_forward_parallel(q, k, v, i_gate, f_gate, chunk_size=chunk_size, tfla_impl="exact")
+    assert torch.isfinite(got).all(), "exact TFLA produced NaN/Inf under extreme decay"
+    err = rel_max_err(got, sequential_mlstm_fp64(q, k, v, i_gate, f_gate))
+    assert err <= TOL, f"forget_bias={forget_bias} chunk={chunk_size}: rel-max-err {err:.3e}"
+
+
+def test_legacy_scan_path_is_unchanged():
+    """M1-I: `scan_impl="legacy"` must still be the original operator, bit for bit.
+
+    Decision 7 in MAMBA3_PLAN.md keeps `legacy` as the default through the screen precisely so
+    the A0 control arm and every number published before 2026-09 stay reproducible. If this ever
+    drifts, that comparison is void -- so it is asserted, not assumed.
+    """
+    x, dt, A, B, C, D = _fixture(0.705, seq_len=256)
+    # selective_scan picks chunk 64 for 128 < L <= 512; mirror that exactly.
+    direct = selective_scan_parallel(
+        x.float(), dt.float(), A.float(), B.float(), C.float(), D.float(), chunk_size=64
+    )
+    assert torch.equal(selective_scan(x, dt, A, B, C, D, scan_impl="legacy"), direct)
+
+
+@pytest.mark.parametrize("scan_impl", ["legacy", "exact"])
+def test_scan_impl_is_threaded_from_config_to_block(scan_impl):
+    """M1-E: a lever that silently fails to arrive is the failure mode this project already hit.
+
+    `hybrid_block.py` filters mixer kwargs against a per-type whitelist and silently drops
+    anything unrecognized, so a new config field can reach `HybridConfig` and never reach the
+    mixer. Assert it actually lands.
+    """
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    model = HybridLanguageModel(
+        HybridConfig(
+            vocab_size=256, dim=64, num_layers=2, layer_pattern=["mamba", "mlstm"],
+            state_size=16, head_dim=32, num_heads=2, max_position_embeddings=64,
+            scan_impl=scan_impl, tfla_impl=scan_impl,
+        )
+    )
+    mamba = next(l.mixer for l in model.layers if l.layer_type == "mamba")
+    mlstm = next(l.mixer for l in model.layers if l.layer_type == "mlstm")
+    assert mamba.scan_impl == scan_impl, "scan_impl did not reach MambaBlock"
+    assert mlstm.tfla_impl == scan_impl, "tfla_impl did not reach mLSTMBlock"
+
+
+def test_hybrid_bc_keeps_bc_norms_but_drops_dt_norm():
+    """M1-F: `hybrid_bc` differs from `hybrid` in exactly one thing -- the Delta norm."""
+    hybrid = next(l.mixer for l in _tiny_model("hybrid").layers if l.layer_type == "mamba")
+    hybrid_bc = next(l.mixer for l in _tiny_model("hybrid_bc").layers if l.layer_type == "mamba")
+    assert hybrid.dt_norm is not None and hybrid.B_norm is not None
+    assert hybrid_bc.dt_norm is None, "hybrid_bc must not build a Delta norm"
+    assert hybrid_bc.B_norm is not None and hybrid_bc.C_norm is not None, (
+        "hybrid_bc must keep the B/C norms -- that is the half of HybridNorm Mamba-3 Sec 3.4 keeps"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M2-A/M2-B: the SSD scan
+# ---------------------------------------------------------------------------
+# The point of SSD here is not the paper's quality numbers, it is that correctness becomes
+# affordable. Mamba-1's A is (d_inner, dstate), so an exact pairwise decay mask is
+# (chunk, chunk, d_inner, dstate) = 19.3 GB at chunk 64 / batch 48. Mamba-2/3's scalar-per-head A
+# makes the same mask (chunk, chunk) per head: 19 MB, and shaped as a matmul.
+
+SSD_SHAPES = [
+    # (batch, seqlen, nheads, headdim, ngroups, dstate)
+    (2, 128, 4, 16, 1, 32),    # ngroups=1: B/C fully shared (Mamba's MVA default)
+    (2, 128, 8, 16, 2, 64),
+    (1, 100, 4, 8, 4, 16),     # seqlen not a multiple of any chunk size
+    (3, 64, 6, 32, 6, 16),     # ngroups == nheads: no sharing at all
+]
+
+
+def _ssd_fixture(shape, seed: int = 0):
+    batch, seqlen, nheads, headdim, ngroups, dstate = shape
+    torch.manual_seed(seed)
+    f64 = torch.float64
+    return dict(
+        x=torch.randn(batch, seqlen, nheads, headdim, dtype=f64),
+        dt=torch.rand(batch, seqlen, nheads, dtype=f64) * 0.1 + 1e-3,
+        A=-torch.rand(nheads, dtype=f64) * 8 - 0.1,
+        B=torch.randn(batch, seqlen, ngroups, dstate, dtype=f64),
+        C=torch.randn(batch, seqlen, ngroups, dstate, dtype=f64),
+        D=torch.ones(nheads, dtype=f64),
+    )
+
+
+@pytest.mark.parametrize("chunk_size", [16, 32, 64])
+@pytest.mark.parametrize("shape", SSD_SHAPES, ids=lambda s: "x".join(str(v) for v in s))
+def test_ssd_chunked_matches_sequential_reference(shape, chunk_size):
+    """M2-B: the chunked scan must equal the sequential SSD recurrence exactly."""
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan, ssd_sequential_reference
+
+    kw = _ssd_fixture(shape)
+    want = ssd_sequential_reference(**kw)
+    err = rel_max_err(ssd_chunked_scan(chunk_size=chunk_size, **kw), want)
+    assert err <= 1e-12, f"shape={shape} chunk={chunk_size}: rel-max-err {err:.3e}"
+
+
+@pytest.mark.parametrize("boundaries", [(37,), (32,), (20, 55, 80)],
+                         ids=["mid-chunk", "on-chunk-edge", "multi-doc"])
+@pytest.mark.parametrize("chunk_size", [16, 32, 64])
+def test_ssd_document_boundaries_match_reference(boundaries, chunk_size):
+    """M2-B/M2-E: state resets at document boundaries, handled inside the mask.
+
+    `mamba_block._forward_segmented` implements this as a Python loop over (row, segment) that
+    re-runs the whole block per piece -- dozens of tiny kernel launches per layer per step, and
+    the reason `torch.compile` is disabled on that path. SSD needs no loop: three boolean masks
+    over the segment ids express every reset, batched.
+
+    The `on-chunk-edge` case matters on its own: a boundary that lands exactly on a chunk start
+    is the one an off-by-one in the carry logic would silently pass everything else.
+    """
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan, ssd_sequential_reference
+
+    kw = _ssd_fixture((2, 96, 4, 16, 2, 32))
+    ids = torch.zeros(2, 96, dtype=torch.long)
+    for k, start in enumerate(boundaries):
+        ids[:, start:] = k + 1
+    want = ssd_sequential_reference(cu_seqlens=ids, **kw)
+    got = ssd_chunked_scan(chunk_size=chunk_size, cu_seqlens=ids, **kw)
+    assert rel_max_err(got, want) <= 1e-12
+
+
+@pytest.mark.parametrize("chunk_size", [16, 64])
+def test_ssd_document_isolation_is_bit_exact(chunk_size):
+    """M2-E: perturbing document A must leave document B bit-identical, not merely close."""
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan
+
+    kw = _ssd_fixture((2, 96, 4, 16, 2, 32))
+    boundary = 37
+    ids = torch.zeros(2, 96, dtype=torch.long)
+    ids[:, boundary:] = 1
+    ref = ssd_chunked_scan(chunk_size=chunk_size, cu_seqlens=ids, **kw)
+
+    perturbed = dict(kw)
+    perturbed["x"] = kw["x"].clone()
+    perturbed["x"][:, :boundary] += torch.randn_like(perturbed["x"][:, :boundary]) * 5.0
+    out = ssd_chunked_scan(chunk_size=chunk_size, cu_seqlens=ids, **perturbed)
+
+    assert torch.equal(ref[:, boundary:], out[:, boundary:]), "doc B leaked from doc A"
+    assert not torch.allclose(ref[:, :boundary], out[:, :boundary]), "doc A should have changed"
+
+
+def test_ssd_extra_terms_are_linear():
+    """M2-B: the `extra_terms` hook the trapezoidal rule (M3) will use.
+
+    The recurrence is linear in its state-input, so splitting one term into two halves must
+    reproduce the original bit-for-bit-ish. Verifying that now means M3 adds a coefficient, not
+    a new scan.
+    """
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan, ssd_sequential_reference
+
+    kw = _ssd_fixture((2, 96, 4, 16, 2, 32))
+    want = ssd_sequential_reference(**kw)
+    half = kw["dt"] * 0.5
+    got = ssd_chunked_scan(
+        chunk_size=32, coeff=half, extra_terms=[(half, kw["B"], kw["x"])],
+        **{k: v for k, v in kw.items() if k != "coeff"},
+    )
+    assert rel_max_err(got, want) <= 1e-12
+
+
+def test_ssd_step_matches_the_chunked_scan():
+    """M2-A: the decode step and the training scan are the same recurrence.
+
+    `ssd_step` is what M6's O(1) decode cache will call. Pinning it against the chunked scan now
+    means a divergence shows up as a test failure rather than as a silent inference-only bug.
+    """
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan, ssd_step
+
+    kw = _ssd_fixture((2, 48, 4, 16, 2, 32))
+    batch, seqlen, nheads, headdim = kw["x"].shape
+    state = torch.zeros(batch, nheads, headdim, kw["B"].shape[-1], dtype=torch.float64)
+    ys = []
+    for t in range(seqlen):
+        y_t, state = ssd_step(
+            kw["x"][:, t], kw["dt"][:, t], kw["A"], kw["B"][:, t], kw["C"][:, t], state, kw["D"]
+        )
+        ys.append(y_t)
+    assert rel_max_err(torch.stack(ys, dim=1), ssd_chunked_scan(chunk_size=16, **kw)) <= 1e-12
+
+
+# ---------------------------------------------------------------------------
+# M2-C..H: Mamba3Block as a registered layer type
+# ---------------------------------------------------------------------------
+
+
+def _m3_block(**kw):
+    from hybrid_xmamba.layers.mamba3_block import Mamba3Block
+
+    torch.manual_seed(0)
+    defaults = dict(dim=128, d_state=64, head_dim=32)
+    defaults.update(kw)
+    return Mamba3Block(**defaults)
+
+
+def _load_yaml_config(name: str, **overrides):
+    """Build a HybridConfig from an arm yaml, optionally with the CLI overrides an arm applies.
+
+    Arms A3..A6 are not separate yaml files -- they are `hybrid_150m_m3.yaml` plus
+    `model.mamba3_*=...` on the command line, which is why every flag is declared in that file
+    (Hydra's strict struct mode rejects an override for a key the config never named). `overrides`
+    here stands in for those CLI arguments.
+    """
+    import dataclasses
+    import yaml
+
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+
+    raw = yaml.safe_load(open(f"configs/model/{name}.yaml"))
+    fields = {f.name for f in dataclasses.fields(HybridConfig)}
+    cfg = {k: v for k, v in raw.items() if k in fields}
+    unknown = set(overrides) - fields
+    assert not unknown, f"override names no HybridConfig field: {sorted(unknown)}"
+    cfg.update(overrides)
+    return HybridConfig(**cfg)
+
+
+def test_mamba3_reduces_to_mamba2_by_default():
+    """M2-C: every Mamba-3 feature is off unless asked for, so A2 is a clean Mamba-2 arm."""
+    block = _m3_block()
+    assert block.use_trapezoid is False
+    assert block.use_rope is False
+    assert block.bc_bias == "none"
+    assert block.a_mode == "static"
+    assert block.mimo_rank == 1
+    assert block.use_conv is True, "Mamba-2 has the short conv; M5 drops it as an arm"
+    assert block.out_norm is None
+
+
+def test_mamba3_forward_backward_is_finite_and_fully_connected():
+    """M2-C/M2-H: the harness's Gate 6 requires every parameter to receive a gradient.
+
+    Worth asserting here too rather than only in the shell harness: `in_proj` is sized for flags
+    that are off, so a plausible refactor that split it into per-feature projections would leave
+    dangling parameters and fail the pre-push gate at the least convenient moment.
+    """
+    block = _m3_block()
+    out = block(torch.randn(2, 48, 128))
+    out.sum().backward()
+    assert out.shape == (2, 48, 128)
+    assert torch.isfinite(out).all()
+    missing = [n for n, p in block.named_parameters() if p.grad is None]
+    assert not missing, f"parameters received no gradient: {missing}"
+
+
+@pytest.mark.parametrize("use_conv", [True, False])
+def test_mamba3_document_reset_matches_running_the_document_alone(use_conv):
+    """M2-E: the strong form of the boundary property.
+
+    Isolation (document B unchanged when A is perturbed) is necessary but not sufficient -- a
+    block that simply zeroed everything would pass it. This also asserts document B's output
+    equals what you get by running document B on its own, which is the property that actually
+    says the reset is correct. With the convolution on, the two paths differ only by fp32
+    rounding because the boundary positions are recomputed with a masked window.
+    """
+    block = _m3_block(use_conv=use_conv).eval()
+    batch, seqlen, boundary = 2, 64, 29
+    ids = torch.zeros(batch, seqlen, dtype=torch.long)
+    ids[:, boundary:] = 1
+    x = torch.randn(batch, seqlen, 128)
+    with torch.no_grad():
+        ref = block(x, cu_seqlens=ids)
+        perturbed = x.clone()
+        perturbed[:, :boundary] += torch.randn(batch, boundary, 128) * 5.0
+        out = block(perturbed, cu_seqlens=ids)
+        standalone = block(x[:, boundary:])
+    assert torch.equal(ref[:, boundary:], out[:, boundary:]), "doc B leaked from doc A"
+    assert torch.allclose(ref[:, boundary:], standalone, atol=1e-5), (
+        "doc B differs from running it standalone -- the reset is isolating but not correct"
+    )
+
+
+def test_supports_cu_seqlens_matches_the_forward_signature():
+    """M2-E: the capability attribute and the real signature must not drift apart.
+
+    `HybridBlock` used to dispatch cu_seqlens on a hard-coded `("mamba", "mlstm")` tuple, which
+    is how sLSTM silently leaked recurrent state across packed documents. The fix is a declared
+    capability; this is the guard that stops the declaration from lying.
+    """
+    import inspect
+
+    from hybrid_xmamba.layers.mamba3_block import Mamba3Block
+    from hybrid_xmamba.layers.mamba_block import MambaBlock
+    from hybrid_xmamba.layers.mlstm_block import mLSTMBlock
+    from hybrid_xmamba.layers.slstm_block import sLSTMBlock
+
+    for cls in (MambaBlock, Mamba3Block, mLSTMBlock, sLSTMBlock):
+        declared = getattr(cls, "supports_cu_seqlens", None)
+        assert declared is not None, f"{cls.__name__} must declare supports_cu_seqlens"
+        accepts = "cu_seqlens" in inspect.signature(cls.forward).parameters
+        assert declared == accepts, (
+            f"{cls.__name__}.supports_cu_seqlens={declared} but forward() "
+            f"{'accepts' if accepts else 'does not accept'} cu_seqlens"
+        )
+
+
+def test_every_layer_type_declares_the_capability():
+    """M2-E: a fifth layer type must fail here rather than silently lose document resets."""
+    import typing
+
+    from hybrid_xmamba.layers.hybrid_block import HybridBlock, LayerType
+
+    for layer_type in typing.get_args(LayerType):
+        block = HybridBlock(
+            dim=64, layer_type=layer_type, state_size=8, head_dim=32, num_heads=2,
+            hidden_dim=64, slstm_num_heads=2, mamba3_d_state=16, mamba3_head_dim=32,
+        )
+        assert hasattr(block.mixer, "supports_cu_seqlens"), (
+            f"{layer_type} mixer does not declare supports_cu_seqlens"
+        )
+        assert block._mixer_takes_cu_seqlens == block.mixer.supports_cu_seqlens
+
+
+def test_hybrid_150m_m3_is_parameter_matched_to_the_control():
+    """M2-G: structural equality, which is a far stronger claim than a parameter band.
+
+    A band says "close enough". This says *only the nine mamba mixers changed*: embeddings, the
+    LM head, every MLP, every mLSTM mixer and every norm are identical in size, and the whole
+    model's delta is exactly nine times the per-mixer delta. That is what makes a quality
+    difference attributable to the operator rather than to capacity.
+    """
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    torch.manual_seed(0)
+    ctrl = HybridLanguageModel(_load_yaml_config("hybrid_150m_v2"))
+    torch.manual_seed(0)
+    m3 = HybridLanguageModel(_load_yaml_config("hybrid_150m_m3"))
+
+    assert ctrl.get_layer_types().count("mlstm") == m3.get_layer_types().count("mlstm") == 3
+    assert m3.get_layer_types().count("mamba3") == ctrl.get_layer_types().count("mamba") == 9
+
+    def n(module):
+        return sum(p.numel() for p in module.parameters())
+
+    assert n(ctrl.embeddings) == n(m3.embeddings)
+    assert n(ctrl.lm_head) == n(m3.lm_head)
+    for a, b in zip(ctrl.layers, m3.layers):
+        assert n(a.mlp) == n(b.mlp), "MLP width moved -- arms are no longer capacity-matched"
+        if a.layer_type == "mlstm":
+            assert n(a.mixer) == n(b.mixer)
+
+    per_mixer = n(m3.layers[0].mixer) - n(ctrl.layers[0].mixer)
+    assert n(m3) - n(ctrl) == 9 * per_mixer, "something outside the mamba mixers changed"
+    assert 181e6 < n(m3) < 186e6, f"{n(m3)/1e6:.2f}M leaves the control's drift band"
+    assert abs(n(m3) - n(ctrl)) / n(ctrl) < 0.02, "parameter matching worse than 2%"
+
+
+def test_mamba3_config_flags_reach_the_block():
+    """M2-F: `hybrid_block` filters kwargs per type and silently drops the rest.
+
+    A `mamba3_*` field can therefore reach HybridConfig and never reach the mixer -- the same
+    silent-drop that cost this project a run in Phase 9. Assert the levers actually land.
+    """
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    model = HybridLanguageModel(
+        HybridConfig(
+            vocab_size=256, dim=128, num_layers=2, layer_pattern=["mamba3", "mlstm"],
+            head_dim=32, num_heads=4, max_position_embeddings=64,
+            mamba3_d_state=32, mamba3_head_dim=16, mamba3_chunk_size=8,
+            mamba3_use_conv=False, mamba3_a_mode="data_dependent", mamba3_dt_limit=0.5,
+        )
+    )
+    mixer = model.layers[0].mixer
+    assert (mixer.d_state, mixer.head_dim, mixer.chunk_size) == (32, 16, 8)
+    assert mixer.use_conv is False and mixer.conv1d is None
+    assert mixer.a_mode == "data_dependent" and mixer.dt_limit == 0.5
+
+
+def test_mimo_is_plumbed_but_refuses_to_run():
+    """Decision 3: MIMO ships as an interface and is never trained. Make that explicit."""
+    with pytest.raises(NotImplementedError, match="MIMO"):
+        _m3_block(mimo_rank=4)
+
+
+@pytest.mark.parametrize(
+    "bad_kwarg", ["mamba3_use_ropee", "mamba3_dstate", "mlstm_gate_softcap", "slstm_hidden_size"]
+)
+def test_typo_in_a_prefixed_mixer_option_raises(bad_kwarg):
+    """M2-F: a lever that names a mixer family but matches nothing must not be dropped silently.
+
+    `HybridBlock` filters kwargs against a per-type whitelist, so `mamba3_use_ropee=True` used to
+    vanish without a word and the arm would quietly run without RoPE. Unprefixed kwargs are still
+    dropped quietly on purpose -- the flat bag carries every type's fields to every block.
+    """
+    from hybrid_xmamba.layers.hybrid_block import HybridBlock
+
+    with pytest.raises(ValueError, match="unknown mixer option"):
+        HybridBlock(
+            dim=64, layer_type="mamba3", mamba3_d_state=16, mamba3_head_dim=32,
+            **{bad_kwarg: True},
+        )
+
+
+def test_architecture_fingerprint_names_the_operator_and_its_flags():
+    """M2-I: the line that answers "is this really Mamba-3?" from a log, at step 0."""
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    fp = HybridLanguageModel(_load_yaml_config("hybrid_150m_m3")).architecture_fingerprint()
+    assert fp.startswith("ARCH ")
+    for token in ("mamba3x9", "mlstmx3", "d_state=128", "trapezoid=False", "rope=False",
+                  "scan_impl=legacy", "params="):
+        assert token in fp, f"fingerprint is missing {token!r}: {fp}"
+
+    ctrl = HybridLanguageModel(_load_yaml_config("hybrid_150m_v2")).architecture_fingerprint()
+    assert "mamba3" not in ctrl and "mambax9" in ctrl
+
+
+# ---------------------------------------------------------------------------
+# M3: exponential-trapezoidal discretization (paper Sec 3.1, Prop. 1)
+# ---------------------------------------------------------------------------
+#     h_t = alpha_t h_{t-1} + beta_t B_{t-1} x_{t-1} + gamma_t B_t x_t
+#     alpha_t = exp(dt_t A),  beta_t = (1-lambda_t) dt_t alpha_t,  gamma_t = lambda_t dt_t
+# lambda = 1 is Euler (Mamba-2), lambda = 1/2 the classical trapezoidal rule.
+
+
+def _trapezoid_terms(x, dt, A, B, lam, cu_seqlens=None):
+    """Reference construction of (gamma, [(beta, shift(B), shift(x))]), mirroring the block."""
+    alpha = torch.exp(dt * A)
+    gamma = lam * dt
+    beta = (1.0 - lam) * dt * alpha
+    if cu_seqlens is not None:
+        starts = torch.zeros_like(cu_seqlens, dtype=torch.bool)
+        starts[:, 1:] = cu_seqlens[:, 1:] != cu_seqlens[:, :-1]
+        starts[:, 0] = True
+        beta = beta.masked_fill(starts.unsqueeze(-1), 0.0)
+    else:
+        beta = beta.clone()
+        beta[:, 0] = 0.0
+
+    def shift(v):
+        return torch.cat([torch.zeros_like(v[:, :1]), v[:, :-1]], dim=1)
+
+    return gamma, [(beta, shift(B), shift(x))]
+
+
+@pytest.mark.parametrize("chunk_size", [16, 32, 64])
+@pytest.mark.parametrize(
+    "lam_mode", ["half", "one", "zero", "random"],
+    ids=["lambda=0.5 classical", "lambda=1 Euler", "lambda=0 all-left", "lambda data-dependent"],
+)
+def test_trapezoid_matches_three_term_reference(lam_mode, chunk_size):
+    """M3-C: the two-pass form must equal the literal 3-term recurrence.
+
+    Because the recurrence is linear in its state-input, the beta term is one more pass over the
+    *same* decay mask rather than a second scan. This is the test that says so.
+    """
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan, ssd_sequential_reference
+
+    kw = _ssd_fixture((2, 96, 4, 16, 2, 32))
+    shape = kw["dt"].shape
+    lam = {
+        "half": torch.full(shape, 0.5, dtype=torch.float64),
+        "one": torch.ones(shape, dtype=torch.float64),
+        "zero": torch.zeros(shape, dtype=torch.float64),
+        "random": torch.rand(shape, dtype=torch.float64),
+    }[lam_mode]
+    gamma, extra = _trapezoid_terms(kw["x"], kw["dt"], kw["A"], kw["B"], lam)
+    want = ssd_sequential_reference(coeff=gamma, extra_terms=extra, **kw)
+    got = ssd_chunked_scan(chunk_size=chunk_size, coeff=gamma, extra_terms=extra, **kw)
+    assert rel_max_err(got, want) <= 1e-12
+
+
+def test_trapezoid_respects_document_boundaries():
+    """M3-A: beta reaches one token back, so at a document start it would pull in the previous
+    document's last token -- a leak the decay mask alone does not prevent."""
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan, ssd_sequential_reference
+
+    kw = _ssd_fixture((2, 96, 4, 16, 2, 32))
+    ids = torch.zeros(2, 96, dtype=torch.long)
+    ids[:, 20:], ids[:, 55:] = 1, 2
+    lam = torch.rand(kw["dt"].shape, dtype=torch.float64)
+    gamma, extra = _trapezoid_terms(kw["x"], kw["dt"], kw["A"], kw["B"], lam, cu_seqlens=ids)
+    want = ssd_sequential_reference(cu_seqlens=ids, coeff=gamma, extra_terms=extra, **kw)
+    got = ssd_chunked_scan(chunk_size=32, cu_seqlens=ids, coeff=gamma, extra_terms=extra, **kw)
+    assert rel_max_err(got, want) <= 1e-12
+
+
+def _drive_lambda_to_one(block):
+    """Zero the trap slice of in_proj and raise trap_bias so lambda is exactly 1.0 in fp32."""
+    s = block._split
+    offset = sum(s[:6])
+    with torch.no_grad():
+        block.in_proj.weight[offset:offset + s[6]].zero_()
+        if block.trap_bias is not None:
+            block.trap_bias.fill_(20.0)
+
+
+@pytest.mark.parametrize("with_documents", [False, True])
+def test_lambda_one_is_bit_identical_to_trapezoid_off(with_documents):
+    """M3-B: the control that makes the M3 arm interpretable.
+
+    `lambda = 1` gives `beta = 0` and `gamma = dt`, which is exactly Mamba-2's Euler rule -- so
+    the trapezoid path must reproduce the trapezoid-off path *bitwise*, not approximately. If it
+    only matched to 1e-6, a measured PPL difference could be the discretization or could be
+    accumulated arithmetic noise, and the arm would say nothing.
+
+    `sigmoid(20) == 1.0` exactly in fp32 (the true value differs by 2e-9, far below the 1.2e-7
+    spacing at 1.0), and `a + 0.0 == a` in IEEE754, so the equality is exact rather than lucky.
+    """
+    torch.manual_seed(0)
+    on = _m3_block(use_trapezoid=True).eval()
+    torch.manual_seed(0)
+    off = _m3_block(use_trapezoid=False).eval()
+    off.load_state_dict({k: v for k, v in on.state_dict().items() if k != "trap_bias"})
+    _drive_lambda_to_one(on)
+    _drive_lambda_to_one(off)
+
+    x = torch.randn(2, 96, 128)
+    kw = {}
+    if with_documents:
+        ids = torch.zeros(2, 96, dtype=torch.long)
+        ids[:, 41:] = 1
+        kw["cu_seqlens"] = ids
+    with torch.no_grad():
+        assert torch.equal(on(x, **kw), off(x, **kw)), "lambda=1 is not bit-identical to Euler"
+
+
+def test_trapezoid_actually_changes_the_output_at_its_default():
+    """M3-B: the other half of the control -- the flag must not be a no-op at lambda=0.5."""
+    torch.manual_seed(0)
+    trap = _m3_block(use_trapezoid=True).eval()
+    torch.manual_seed(0)
+    euler = _m3_block(use_trapezoid=False).eval()
+    euler.load_state_dict({k: v for k, v in trap.state_dict().items() if k != "trap_bias"})
+    x = torch.randn(2, 96, 128)
+    with torch.no_grad():
+        assert (trap(x) - euler(x)).abs().max() > 1e-3, (
+            "lambda=0.5 produced the same output as Euler -- the trapezoid term is not wired in"
+        )
+
+
+@pytest.mark.parametrize("use_trapezoid", [False, True])
+@pytest.mark.parametrize("a_mode", ["static", "data_dependent"])
+def test_no_parameter_is_left_dangling_by_a_disabled_flag(use_trapezoid, a_mode):
+    """M2-H/M3-A: the pre-push harness requires every parameter to receive a gradient.
+
+    `trap_bias` and `A_log` are each owned by one setting, so registering them unconditionally
+    would leave a dangling Parameter whenever that setting is off. They are conditional instead;
+    the in_proj slices stay allocated either way, so arms remain parameter-matched.
+    """
+    block = _m3_block(use_trapezoid=use_trapezoid, a_mode=a_mode)
+    block(torch.randn(2, 32, 128)).sum().backward()
+    missing = [n for n, p in block.named_parameters() if p.grad is None]
+    assert not missing, f"parameters received no gradient: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# FM5: config fields must survive the trip from yaml to model
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "script",
+    ["train_stage0_distill.py", "train_stage0_distill_resume.py", "train.py",
+     "train_contrastive.py", "train_report_generation.py"],
+)
+def test_training_entry_points_use_the_shared_config_builder(script):
+    """Every trainer must build HybridConfig via `from_hydra`, not by listing fields by hand.
+
+    A source-text assertion, mirroring `test_norm_topology_threaded_to_hybridconfig`, because the
+    failure is invisible at runtime: the model builds fine, trains fine, and is simply not the
+    architecture you asked for. It has now happened twice -- `norm_topology` in Phase 9, and
+    `scan_impl`/`tfla_impl`/`dt_init_strategy` on 2026-09-06, where job 2513007 ran the A1 arm
+    with every defect still in place and only the ARCH fingerprint revealed it.
+    """
+    src = (pathlib.Path(__file__).resolve().parent.parent / "scripts" / script).read_text()
+    assert "HybridConfig.from_hydra(" in src, (
+        f"{script} does not use HybridConfig.from_hydra; a new config field will be silently "
+        "dropped there"
+    )
+    assert "HybridConfig(\n" not in src, (
+        f"{script} still constructs HybridConfig with a hand-written kwarg list"
+    )
+
+
+@pytest.mark.parametrize(
+    "config_name,expected",
+    [
+        ("hybrid_150m_v2", {"scan_impl": "legacy", "tfla_impl": "legacy",
+                            "dt_init_strategy": "none", "norm_topology": "hybrid"}),
+        ("hybrid_150m_a1", {"scan_impl": "exact", "tfla_impl": "exact",
+                            "dt_init_strategy": "mamba", "norm_topology": "hybrid_bc"}),
+    ],
+)
+def test_arm_configs_survive_the_hydra_round_trip(config_name, expected):
+    """The runtime half of the guard above: what the yaml says is what the model gets."""
+    import yaml
+
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+
+    raw = yaml.safe_load(open(f"configs/model/{config_name}.yaml"))
+    cfg = HybridConfig.from_hydra(raw)
+    for key, want in expected.items():
+        assert getattr(cfg, key) == want, (
+            f"{config_name}: {key} is {getattr(cfg, key)!r}, expected {want!r}"
+        )
+    mixer = next(
+        l.mixer for l in __import__(
+            "hybrid_xmamba.models.hybrid_lm", fromlist=["HybridLanguageModel"]
+        ).HybridLanguageModel(cfg).layers if l.layer_type == "mamba"
+    )
+    assert mixer.scan_impl == expected["scan_impl"], "scan_impl reached the config but not the mixer"
+    assert mixer.dt_init_strategy == expected["dt_init_strategy"]
+
+
+def test_stage0_checkpoint_retention_is_configurable():
+    """A hard-coded save_top_k is a quota bug, not a style issue.
+
+    At ~2.1 GB per 150M checkpoint, top-3 plus `last` is 8.4 GB per run and 67 GB across an
+    8-arm screen -- more than the 200 GB home quota can absorb alongside the existing outputs.
+    The SLURM wrapper exposes SAVE_TOP_K for exactly this reason, so the trainer has to read it.
+    """
+    src = (pathlib.Path(__file__).resolve().parent.parent
+           / "scripts" / "train_stage0_distill.py").read_text()
+    assert "save_top_k=3," not in src, "save_top_k is hard-coded; SAVE_TOP_K cannot take effect"
+    assert 'save_top_k=cfg.callbacks.checkpoint.get("save_top_k"' in src
+    assert "save_last=True" in src, (
+        "save_last must stay on: aisc-batch is preemptible and --requeue resumes from last.ckpt"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M4: complex-valued state via the RoPE trick (paper Sec 3.2, Prop. 2-4)
+# ---------------------------------------------------------------------------
+# A real, non-negative transition cannot express rotational state dynamics, which is the formal
+# reason Mamba-2 cannot compute parity. Making the transition complex fixes that, and Prop. 3
+# shows the complex system equals a real one with a data-dependent rotation applied to B and C --
+# so the rotation lives outside the scan and the SSD kernel is untouched.
+
+
+def _rope_offset(block):
+    """Byte offset of the rotation-angle slice inside in_proj's output."""
+    return sum(block._split[:7])
+
+
+def _zero_rope_slice(block):
+    with torch.no_grad():
+        o, n = _rope_offset(block), block._split[7]
+        block.in_proj.weight[o:o + n].zero_()
+
+
+@pytest.mark.parametrize("with_documents", [False, True])
+def test_zero_angle_rope_is_bit_identical_to_rope_off(with_documents):
+    """M4-B: the control. cos(0)==1.0 and sin(0)==0.0 exactly, so this is an equality, not a
+    tolerance -- which is what lets a measured PPL difference be attributed to the rotation."""
+    torch.manual_seed(0)
+    on = _m3_block(use_rope=True).eval()
+    torch.manual_seed(0)
+    off = _m3_block(use_rope=False).eval()
+    off.load_state_dict(on.state_dict())
+    _zero_rope_slice(on)
+    _zero_rope_slice(off)
+
+    x = torch.randn(2, 96, 128)
+    kw = {}
+    if with_documents:
+        ids = torch.zeros(2, 96, dtype=torch.long)
+        ids[:, 41:] = 1
+        kw["cu_seqlens"] = ids
+    with torch.no_grad():
+        assert torch.equal(on(x, **kw), off(x, **kw))
+
+
+def test_rope_changes_the_output_when_the_angles_are_not_zero():
+    """M4-B: the other half -- the flag must not be a no-op once angles are real."""
+    torch.manual_seed(0)
+    on = _m3_block(use_rope=True).eval()
+    torch.manual_seed(0)
+    off = _m3_block(use_rope=False).eval()
+    off.load_state_dict(on.state_dict())
+    _zero_rope_slice(off)
+    with torch.no_grad():
+        o, n = _rope_offset(on), on._split[7]
+        on.in_proj.weight[o:o + n].normal_(0, 0.5)
+        x = torch.randn(2, 96, 128)
+        assert (on(x) - off(x)).abs().max() > 1e-5, "rotation had no effect on the output"
+
+
+def test_rotate_then_shift_is_not_the_same_as_shift_then_rotate():
+    """M4-C: Prop. 4's ordering constraint, which is easy to get backwards.
+
+    Under the trapezoidal rule the beta term carries `B_{t-1}`, and that must be rotated by
+    `Theta_{t-1}` -- its own angle -- not by `Theta_t`. Shifting an already-rotated stream gives
+    the former; rotating an already-shifted stream gives the latter. They differ by ~0.2 here, so
+    the wrong order is a real bug rather than a rounding difference.
+    """
+    from hybrid_xmamba.layers.rotary import apply_rotary, cumulative_angles
+
+    torch.manual_seed(0)
+    dt = torch.rand(1, 8, 1) * 0.1 + 0.05
+    theta = torch.randn(1, 8, 2)
+    angles = cumulative_angles(dt, theta)
+    B = torch.randn(1, 8, 1, 8)
+
+    def shift(v):
+        return torch.cat([torch.zeros_like(v[:, :1]), v[:, :-1]], dim=1)
+
+    assert not torch.allclose(shift(apply_rotary(B, angles)), apply_rotary(shift(B), angles))
+
+
+@pytest.mark.parametrize("seq_len", [512, 4096])
+def test_angle_accumulation_stays_accurate_at_length(seq_len):
+    """M4-E: Theta accumulates, and at this repo's Delta it gets large.
+
+    With Delta ~ 0.7 and theta of order 1, Theta passes 50 rad by position 512 and ~90 by 4096.
+    A naive fp32 cumsum drifts with length; accumulating in float64 and wrapping into [0, 2pi)
+    before the fp32 sin/cos costs ~2 MB and keeps the error flat at the fp32 output floor.
+    """
+    from hybrid_xmamba.layers.rotary import TWO_PI, cumulative_angles
+
+    torch.manual_seed(0)
+    dt = torch.rand(1, seq_len, 1) * 0.9 + 0.1
+    theta = torch.randn(1, seq_len, 16)
+    exact = torch.remainder((dt.double() * theta.double()).cumsum(1), TWO_PI)
+    ours = cumulative_angles(dt, theta).double()
+    naive = torch.remainder((dt * theta).cumsum(1), TWO_PI).double()
+
+    assert (ours - exact).abs().max() < 1e-6
+    assert (ours - exact).abs().max() < (naive - exact).abs().max(), (
+        "the fp64 accumulator is no better than a naive fp32 cumsum -- check the dtype path"
+    )
+    assert 0.0 <= ours.min() and ours.max() < TWO_PI, "angles are not wrapped into [0, 2pi)"
+
+
+def test_rope_angles_reset_per_document():
+    """M4-A: a packed document must not inherit the previous document's accumulated phase."""
+    from hybrid_xmamba.layers.rotary import cumulative_angles
+
+    torch.manual_seed(0)
+    dt = torch.rand(2, 64, 1) * 0.1 + 1e-3
+    theta = torch.randn(2, 64, 8)
+    ids = torch.zeros(2, 64, dtype=torch.long)
+    ids[:, 20:], ids[:, 40:] = 1, 2
+    segmented = cumulative_angles(dt, theta, cu_seqlens=ids)
+    standalone = cumulative_angles(dt[:, 20:40], theta[:, 20:40])
+    assert torch.allclose(segmented[:, 20:40], standalone, atol=1e-9)
+
+
+def _train_parity(use_rope, seed=0, steps=300, seq_len=16, batch=32, dim=32):
+    """Train a one-mixer model on running XOR and return final accuracy.
+
+    Parity is the canonical separator: a real, non-negative transition provably cannot represent
+    the rotational dynamics it needs (Grazzi et al. 2025, Thm. 1), so Mamba-2 sits near chance
+    while a complex/rotational transition solves it outright. Paper Table 5b.
+    """
+    import torch.nn as nn
+
+    from hybrid_xmamba.layers.mamba3_block import Mamba3Block
+
+    class ParityNet(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.emb = nn.Embedding(2, dim)
+            self.norm = nn.LayerNorm(dim)
+            # Delta in [0.5, 1.0] is load-bearing -- see the test below for why.
+            self.mixer = Mamba3Block(
+                dim=dim, d_state=16, head_dim=16, chunk_size=8, use_rope=use_rope,
+                a_mode="data_dependent", theta_max=3.2, dt_limit=1.0, dt_min=0.5, dt_max=1.0,
+            )
+            self.head = nn.Linear(dim, 2)
+
+        def forward(self, x):
+            h = self.emb(x)
+            return self.head(self.norm(h + self.mixer(h)))
+
+    torch.manual_seed(seed)
+    model = ParityNet()
+    opt = torch.optim.AdamW(model.parameters(), lr=5e-3)
+    for _ in range(steps):
+        x = torch.randint(0, 2, (batch, seq_len))
+        y = torch.cumsum(x, 1) % 2
+        loss = torch.nn.functional.cross_entropy(model(x).reshape(-1, 2), y.reshape(-1))
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    with torch.no_grad():
+        x = torch.randint(0, 2, (256, seq_len))
+        y = torch.cumsum(x, 1) % 2
+        return (model(x).argmax(-1) == y).float().mean().item()
+
+
+def test_rope_solves_parity_and_the_rotation_is_what_does_it():
+    """M4-D: the paper's headline capability claim, as a controlled experiment.
+
+    Both arms are identical except for `use_rope` -- same Delta range, same data-dependent A,
+    same seed, same steps. Measured over two seeds:
+
+        rope off : 61.6%, 64.3%   (chance is 50%)
+        rope on  : 100.0%, 100.0%
+
+    This is the cleanest standalone contribution in the plan: it is a capability Mamba-2 does not
+    have, demonstrated end-to-end rather than cited.
+    """
+    for seed in (0, 1):
+        without = _train_parity(use_rope=False, seed=seed)
+        with_rope = _train_parity(use_rope=True, seed=seed)
+        assert with_rope > 0.95, f"seed {seed}: rope-on reached only {with_rope:.1%} on parity"
+        assert without < 0.80, f"seed {seed}: rope-off reached {without:.1%}, expected near chance"
+        assert with_rope - without > 0.25
+
+
+def test_parity_needs_delta_large_enough_to_reach_a_half_turn():
+    """M4-D caveat, and it matters well beyond this test.
+
+    The rotation angle is `Delta_t * theta_t`, so a pi rotation per token needs
+    `Delta * theta ~ pi`. Under the reference Mamba dt init, `Delta ~ logU[1e-3, 1e-1]`, and the
+    angle tops out near 0.06 rad -- fifty times too small. Measured: with that init, parity stays
+    at 57-63% for every theta_max in {3.2, 32, 320}, and raising theta_max alone makes it *worse*
+    (320 scored 57%), because a large theta on a tiny Delta is noise rather than a half turn.
+
+    The consequence for the M7 screen is worth stating plainly: on PubMed with the standard dt
+    init, this state-tracking capability is largely dormant unless Delta learns to grow. A null
+    on language modelling would therefore not be evidence that complex transitions do not work --
+    only that the operating point never reached the regime where they can.
+    """
+    acc = _train_parity(use_rope=True, seed=0)
+    assert acc > 0.95, "sanity: the large-Delta configuration should solve parity"
+
+    import torch.nn as nn
+
+    from hybrid_xmamba.layers.mamba3_block import Mamba3Block
+
+    torch.manual_seed(0)
+    small = Mamba3Block(dim=32, d_state=16, head_dim=16, use_rope=True, theta_max=3.2,
+                        dt_min=1e-3, dt_max=1e-1)
+    # softplus(dt_bias) is the Delta the block starts at; the reachable angle is Delta * theta_max.
+    delta0 = nn.functional.softplus(small.dt_bias).mean().item()
+    assert delta0 * small.theta_max < 0.5, (
+        f"reachable angle at the reference dt init is {delta0 * small.theta_max:.3f} rad; if this "
+        "ever exceeds ~pi the caveat above no longer applies and the docs should be updated"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M5: the Sec 3.4 refinements, folded into arm A6 rather than given their own milestone
+#
+# Three flags, and the point of this section is to establish exactly which of them is a real
+# architectural change and which is a no-op in its default state. Only the first kind may be
+# credited with a quality difference at M7.
+#   bc_bias    -- `none` and `zero_init` are the same operator; `one_init` is a genuine arm
+#   use_conv   -- dropping the short conv is a real change, and moves parameters by a known amount
+#   mimo_rank  -- plumbed at rank 1 (bit-identical), never run (MAMBA3_PLAN.md decision 3)
+# ---------------------------------------------------------------------------
+
+
+def _bc_bias_pair(**extra):
+    """A `none` block and a `zero_init` block carrying the same shared weights."""
+    torch.manual_seed(0)
+    none = _m3_block(bc_bias="none", **extra).eval()
+    torch.manual_seed(0)
+    zero = _m3_block(bc_bias="zero_init", **extra).eval()
+    # `B_bias`/`C_bias` exist only on the zero_init twin, so the projection is one-directional.
+    missing, unexpected = zero.load_state_dict(none.state_dict(), strict=False)
+    assert set(missing) == {"B_bias", "C_bias"} and not unexpected
+    assert torch.count_nonzero(zero.B_bias) == 0
+    return none, zero
+
+
+@pytest.mark.parametrize("with_documents", [False, True])
+@pytest.mark.parametrize("features", [{}, {"use_trapezoid": True, "use_rope": True}])
+def test_zero_init_bc_bias_is_bit_identical_to_no_bias(with_documents, features):
+    """M5-A: `bc_bias=zero_init` must reproduce `none` exactly, `a + 0.0 == a` in IEEE754.
+
+    This is not a formality. Turning the bias on also changes the *shape* of B and C: `none`
+    leaves them group-indexed `(b, l, ngroups, n)` and lets the scan broadcast one group over all
+    24 heads, while any bias setting materializes them per head. Two different tensor shapes reach
+    the same einsums, so "adding zero changes nothing" is a claim about the kernel's contraction
+    order as much as about arithmetic. Measured equal on both paths, with and without documents.
+    """
+    none, zero = _bc_bias_pair(**features)
+    x = torch.randn(2, 96, 128)
+    kw = {}
+    if with_documents:
+        ids = torch.zeros(2, 96, dtype=torch.long)
+        ids[:, 41:] = 1
+        kw["cu_seqlens"] = ids
+    with torch.no_grad():
+        assert torch.equal(none(x, **kw), zero(x, **kw))
+
+
+def test_one_init_bc_bias_is_a_real_arm_not_a_relabelling():
+    """M5-A: the other half. `one_init` is the paper's setting and must move the output.
+
+    Recorded here because the plan's bit-identity table lists this one as deliberately *not*
+    achievable -- a constant 1.0 added to every normalized B and C row is a genuine change of
+    operator, so arm A6 owns a capability difference and not just a different parameter count.
+    """
+    _, zero = _bc_bias_pair()
+    torch.manual_seed(0)
+    one = _m3_block(bc_bias="one_init").eval()
+    one.load_state_dict(zero.state_dict())
+    with torch.no_grad():
+        one.B_bias.fill_(1.0)
+        one.C_bias.fill_(1.0)
+        x = torch.randn(2, 96, 128)
+        assert not torch.allclose(one(x), zero(x), atol=1e-5)
+
+
+def test_dropping_the_conv_moves_parameters_by_exactly_the_conv():
+    """M5-B: the conv is depthwise over `x`, `B` and `C` together, so its size is predictable.
+
+    `inner_dim + 2 * bc_dim = 1536 + 256 = 1792` channels x (kernel 4 weights + 1 bias) = 8,960
+    per layer, nine mamba3 layers, 80,640 in total. Asserting the exact number rather than a band
+    is what catches the conv being dropped from the *parameter list* while still running (or the
+    reverse -- a `use_conv=False` arm that quietly keeps the module and its SiLU).
+    """
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    torch.manual_seed(0)
+    with_conv = HybridLanguageModel(_load_yaml_config("hybrid_150m_m3"))
+    torch.manual_seed(0)
+    without = HybridLanguageModel(_load_yaml_config("hybrid_150m_m3", mamba3_use_conv=False))
+
+    n = lambda m: sum(p.numel() for p in m.parameters())
+    assert n(with_conv) - n(without) == 9 * 8_960
+    assert without.layers[0].mixer.conv1d is None
+    assert not any("conv1d" in k for k in without.state_dict())
+
+
+def test_arm_a6_stays_inside_the_parameter_matched_band():
+    """M5: A6 = A5 + `bc_bias=one_init` + conv dropped, reached purely by CLI overrides.
+
+    The two refinements pull in opposite directions -- the biases add `2 * 24 * 128` per layer,
+    the conv removes 8,960 -- and the arm lands 25,128 parameters *below* A2. The whole A2..A6
+    ladder therefore spans 0.014% of the model, well inside the drift the screen can attribute to
+    the operator rather than to capacity.
+    """
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    n = lambda m: sum(p.numel() for p in m.parameters())
+    torch.manual_seed(0)
+    ctrl = n(HybridLanguageModel(_load_yaml_config("hybrid_150m_v2")))
+    torch.manual_seed(0)
+    a2 = n(HybridLanguageModel(_load_yaml_config("hybrid_150m_m3")))
+    torch.manual_seed(0)
+    a6_model = HybridLanguageModel(
+        _load_yaml_config(
+            "hybrid_150m_m3", mamba3_use_conv=False, mamba3_bc_bias="one_init",
+            mamba3_use_trapezoid=True, mamba3_use_rope=True,
+        )
+    )
+    a6 = n(a6_model)
+
+    assert abs(a6 - ctrl) / ctrl < 0.005, "A6 left the parameter-matched regime"
+    assert abs(a6 - a2) / a2 < 0.001, "the A2..A6 ladder is no longer capacity-matched"
+    fp = a6_model.architecture_fingerprint()
+    for token in ("conv=False", "trapezoid=True", "rope=True", "bc_bias=one_init"):
+        assert token in fp, f"A6's fingerprint is missing {token!r}: {fp}"
+
+
+@pytest.mark.parametrize("bc_bias", ["none", "zero_init", "one_init"])
+@pytest.mark.parametrize("use_conv", [True, False])
+def test_no_parameter_is_left_dangling_by_an_m5_flag(bc_bias, use_conv):
+    """M5-A/B: the harness's "every parameter receives a gradient" gate, over the M5 cross.
+
+    `B_bias`/`C_bias` and `conv1d` are each owned by one setting. A bias registered but never
+    added -- or a conv built and then bypassed -- shows up here and nowhere else until a training
+    run silently trains an architecture nobody chose.
+    """
+    block = _m3_block(bc_bias=bc_bias, use_conv=use_conv)
+    block(torch.randn(2, 32, 128)).sum().backward()
+    missing = [n for n, p in block.named_parameters() if p.grad is None]
+    assert not missing, f"parameters received no gradient: {missing}"
+
+
+def test_mimo_rank_one_is_bit_identical_to_leaving_it_alone():
+    """M5-C: rank 1 is the identity, so the plumbing cannot perturb any arm that ships.
+
+    MIMO is carried as an interface and never trained (decision 3): rank 4 costs +3.2%
+    parameters, which leaves the parameter-matched regime, and its payoff is decode arithmetic
+    intensity that nothing in this project can currently measure.
+    """
+    torch.manual_seed(0)
+    default = _m3_block().eval()
+    torch.manual_seed(0)
+    explicit = _m3_block(mimo_rank=1).eval()
+    explicit.load_state_dict(default.state_dict())
+    x = torch.randn(2, 96, 128)
+    with torch.no_grad():
+        assert torch.equal(default(x), explicit(x))
+
+
+def test_m5_flags_reach_the_block_from_the_config():
+    """M5-A/B/C vs FM5: the levers must survive yaml -> HybridConfig -> HybridBlock -> mixer.
+
+    The A6 arm is expressed as CLI overrides on `hybrid_150m_m3.yaml`, so every one of these keys
+    travels the same path that dropped `norm_topology` in Phase 9 and `scan_impl` on the first A1
+    submission. A flag that reaches the config and not the mixer is how you train A2 for three
+    days believing it is A6.
+    """
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    model = HybridLanguageModel(
+        HybridConfig(
+            vocab_size=256, dim=128, num_layers=2, layer_pattern=["mamba3", "mlstm"],
+            head_dim=32, num_heads=4, max_position_embeddings=64,
+            mamba3_d_state=32, mamba3_head_dim=16, mamba3_chunk_size=8,
+            mamba3_bc_bias="one_init", mamba3_use_conv=False, mamba3_mimo_rank=1,
+        )
+    )
+    mixer = model.layers[0].mixer
+    assert mixer.bc_bias == "one_init" and mixer.B_bias is not None
+    assert torch.equal(mixer.B_bias, torch.ones_like(mixer.B_bias))
+    assert mixer.use_conv is False and mixer.conv1d is None
+    assert mixer.mimo_rank == 1
+
+    with pytest.raises(NotImplementedError, match="MIMO"):
+        HybridLanguageModel(
+            HybridConfig(
+                vocab_size=256, dim=128, num_layers=1, layer_pattern=["mamba3"],
+                head_dim=32, num_heads=4, max_position_embeddings=64,
+                mamba3_d_state=32, mamba3_head_dim=16, mamba3_mimo_rank=4,
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# M5/M7-B: the arm ladder has exactly one definition, and it survives Hydra
+# ---------------------------------------------------------------------------
+
+
+def _arms_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("mamba3_arms", "scripts/mamba3_arms.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_arm_ladder_matches_the_plan_state():
+    """One ladder, two files, and they must agree.
+
+    `mamba3_state.json` records what each arm is *for* and whether it has run; `mamba3_arms.py`
+    records how to build and submit it. If the two drift, the screen either skips an arm or runs
+    one nothing will know how to interpret.
+    """
+    import json
+
+    arms = _arms_module().ARMS
+    state = json.load(open("mamba3_state.json"))["arms"]
+    assert set(arms) == set(state), (
+        "ladder mismatch -- arms.py has {}, state has {}".format(
+            sorted(set(arms) - set(state)), sorted(set(state) - set(arms))
+        )
+    )
+    assert {"A0", "A0-seed", "A1", "A2", "A3", "A4", "A5", "A6"} <= set(arms), (
+        "the M7-B ladder must stay intact -- those runs are on record"
+    )
+    assert {"A4-lo", "A4-mid", "A4-hi"} <= set(arms), (
+        "M7-G: the rope re-test. The M7-B rope arms measured theta_max=1.0, the only value "
+        "reachable at the time, not the mechanism"
+    )
+    # Every arm's levers must be real config fields; a typo here silently trains the base arm.
+    import dataclasses
+
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+
+    fields = {f.name for f in dataclasses.fields(HybridConfig)}
+    for name, arm in arms.items():
+        unknown = set(arm.overrides) - fields
+        assert not unknown, "{} overrides unknown fields {}".format(name, sorted(unknown))
+
+
+def test_the_screen_is_a_paired_comparison():
+    """M7-B: same seed, same data order, for every arm except the deliberate noise-floor twin.
+
+    The screen ranks arms on paired delta log-loss, which is only meaningful if the only thing
+    that differs is the operator. A0-seed exists precisely to measure what a *seed* is worth, so
+    it is the one arm allowed to differ.
+    """
+    arms = _arms_module().ARMS
+
+    # Replication arms are the deliberate exception: they hold the operator fixed and vary only
+    # the seed, which is the one thing the screen cannot otherwise measure. A0-seed gave the
+    # noise floor; A2-s2 / A4-hi-s2 are the M7-D tiebreak (A4-hi leads A2 by 0.509 PPL, 79% of
+    # the bar, against 0.335 PPL of measured paired trajectory sensitivity).
+    replicas = {"A0-seed": "A0", "A2-s2": "A2", "A4-hi-s2": "A4-hi"}
+    for replica, base in replicas.items():
+        assert replica in arms and base in arms, "{} has no base arm".format(replica)
+        assert arms[replica].seed != arms[base].seed, (
+            "{} must differ in seed from {} -- that is the whole point".format(replica, base)
+        )
+        assert arms[replica].overrides == arms[base].overrides, (
+            "{} must hold {}'s operator fixed and vary ONLY the seed".format(replica, base)
+        )
+        assert arms[replica].config == arms[base].config
+
+    # Everything else is a paired comparison and must share one seed.
+    seeds = {n: a.seed for n, a in arms.items() if n not in replicas}
+    assert len(set(seeds.values())) == 1, (
+        "arms differ in seed as well as operator, so their deltas are not attributable: "
+        "{}".format(seeds)
+    )
+
+
+@pytest.mark.parametrize("arm_name", ["A2", "A3", "A4", "A5", "A6"])
+def test_arm_overrides_survive_hydra_and_reach_the_mixer(arm_name):
+    """FM5, end to end, on the exact path a submission takes.
+
+    Arms A3..A6 exist only as `model.mamba3_*=...` command-line overrides, so three things must
+    hold at once: Hydra's strict struct mode must accept the key (it rejects any override for a
+    field the yaml never named), `HybridConfig.from_hydra` must carry it, and `HybridBlock` must
+    pass it to the mixer rather than filter it away. Each of those has broken separately in this
+    project; this asserts the composition, which is what a submission actually depends on.
+    """
+    import dataclasses
+    import os
+
+    from hydra import compose, initialize_config_dir
+
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+
+    arms = _arms_module()
+    arm = arms.ARMS[arm_name]
+    with initialize_config_dir(config_dir=os.path.abspath("configs"), version_base=None):
+        cfg = compose(
+            config_name="config",
+            overrides=["model={}".format(arm.config)] + arms.hydra_overrides(arm),
+        )
+    config = HybridConfig.from_hydra(cfg.model)
+    for key, want in arm.overrides.items():
+        assert getattr(config, key) == want, "Hydra dropped {} for {}".format(key, arm_name)
+
+    # ...and now the same levers, through the model, at a scale the CPU suite can afford.
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    shrunk = dataclasses.replace(config, dim=128, num_layers=2, num_heads=4, head_dim=32,
+                                 vocab_size=512, max_position_embeddings=64,
+                                 layer_pattern=["mamba3", "mlstm"])
+    fp = HybridLanguageModel(shrunk).architecture_fingerprint()
+    for token in arm.expect:
+        if token.endswith("x9") or token.endswith("x3"):
+            continue        # layer counts are a property of the 150M pattern, not of the arm
+        assert token in fp, "{}: fingerprint is missing {!r}: {}".format(arm_name, token, fp)
+
+
+# ---------------------------------------------------------------------------
+# FM5 again, and the most expensive instance of it so far: a lever the block
+# accepts, the dispatcher does not forward, and nobody notices until a screen
+# arm collapses. See the M7-B rope result in MAMBA3_PLAN.md.
+# ---------------------------------------------------------------------------
+
+
+def test_every_mamba3_block_parameter_is_reachable_from_the_config():
+    """Every lever `Mamba3Block` accepts must exist as a `mamba3_*` field on HybridConfig.
+
+    `theta_max` did not, so the whole M7-B screen ran the block default of 1.0 and no arm could
+    have been given a different value. With `dt_limit=1.0` that permits 1 rad per token and 512
+    rad over a 512-token sequence -- 81 full turns -- and every rope-on arm (A4, A5, A6)
+    collapsed to ~1166 val PPL while the rope-off arms trained to 16.7.
+
+    Two hand-maintained copies of the forwarding whitelist both omitted it. They are now derived
+    from the block's signature; this test closes the other half, so that adding a parameter to
+    the block without adding the config field fails here rather than in a 5-hour GPU run.
+    """
+    import dataclasses
+    import inspect
+
+    from hybrid_xmamba.layers.mamba3_block import Mamba3Block
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+
+    params = inspect.signature(Mamba3Block.__init__).parameters
+    levers = {
+        name for name, p in params.items()
+        if name not in ("self", "dim") and p.kind is not inspect.Parameter.VAR_KEYWORD
+    }
+    fields = {f.name for f in dataclasses.fields(HybridConfig)}
+    # `expand_factor` and `use_hybrid_norm` are shared, unprefixed config keys.
+    shared = {"expand_factor", "use_hybrid_norm"}
+    missing = sorted(
+        lever for lever in levers - shared if "mamba3_{}".format(lever) not in fields
+    )
+    assert not missing, (
+        "Mamba3Block accepts {} but HybridConfig has no mamba3_ field for them, so no arm can "
+        "ever set them: {}".format(len(missing), missing)
+    )
+
+
+def test_the_dispatcher_whitelist_is_derived_not_listed():
+    """The forwarding set must come from the block, so it cannot go stale again."""
+    import inspect
+
+    from hybrid_xmamba.layers import hybrid_block
+    from hybrid_xmamba.layers.mamba3_block import Mamba3Block
+
+    known = hybrid_block._mamba3_params()
+    params = inspect.signature(Mamba3Block.__init__).parameters
+    expected = {
+        name for name, p in params.items()
+        if name not in ("self", "dim") and p.kind is not inspect.Parameter.VAR_KEYWORD
+    }
+    assert set(known) == expected
+    assert "theta_max" in known, "the lever whose absence cost three screen arms"
+
+
+@pytest.mark.parametrize("lever,value", [("mamba3_theta_max", 0.02), ("mamba3_dt_max", 0.5)])
+def test_the_newly_reachable_levers_land_on_the_mixer(lever, value):
+    """End to end, on the path a submission takes: config field -> block attribute."""
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    model = HybridLanguageModel(
+        HybridConfig(
+            vocab_size=256, dim=128, num_layers=1, layer_pattern=["mamba3"],
+            head_dim=32, num_heads=4, max_position_embeddings=64,
+            mamba3_d_state=32, mamba3_head_dim=16, mamba3_use_rope=True, **{lever: value}
+        )
+    )
+    assert getattr(model.layers[0].mixer, lever[len("mamba3_"):]) == value
+
+
+def test_theta_max_bounds_the_total_rotation_over_a_sequence():
+    """Quantify the failure mode, so the number is on record rather than the argument.
+
+    The rotation angle is `Delta_t * theta_t` with `|theta| <= theta_max` and
+    `Delta <= dt_limit`, so the total turn over L tokens is bounded by
+    `L * dt_limit * theta_max / 2pi`. A relative rotation `R(Theta_s - Theta_t)` encodes
+    position only while it stays inside one turn; past that it aliases, and since theta is
+    data-dependent the aliasing follows the content between s and t rather than the distance.
+    At the screen's setting that bound is 81 turns.
+    """
+    import math
+
+    block = _m3_block(use_rope=True)
+    assert block.theta_max == 1.0, "the block default the M7-B screen was stuck with"
+    turns = 512 * block.dt_limit * block.theta_max / (2 * math.pi)
+    assert turns > 50, "the screen's operating point permitted {:.0f} turns".format(turns)
+
+    calm = _m3_block(use_rope=True, theta_max=0.02)
+    assert 512 * calm.dt_limit * calm.theta_max / (2 * math.pi) < 2, (
+        "a setting where the rotation stays a position code rather than a scrambler"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M6: O(1) recurrent decode cache
+#
+# The point of the cache is that it is an EQUIVALENCE, not an approximation and
+# not an improvement: whatever the chunked forward computes, stepping must
+# reproduce. Every test here is that claim in a different setting.
+# ---------------------------------------------------------------------------
+
+
+def _step_through(block, x, **cache_kw):
+    """Run `block` one token at a time through its cache and stack the outputs."""
+    cache = block.allocate_inference_cache(x.shape[0], **cache_kw)
+    with torch.no_grad():
+        return torch.stack([block.step(x[:, t], cache) for t in range(x.shape[1])], dim=1)
+
+
+@pytest.mark.parametrize("flags", [
+    {},
+    {"use_trapezoid": True},
+    {"use_rope": True, "theta_max": 0.2},
+    {"use_conv": False},
+    {"bc_bias": "one_init"},
+    {"a_mode": "data_dependent"},
+    {"use_trapezoid": True, "use_rope": True, "bc_bias": "one_init", "theta_max": 0.2},
+])
+def test_mamba3_step_reproduces_the_chunked_forward(flags):
+    """M6-A: the decode step must equal the training-time operator, under every flag.
+
+    This is the test that makes the cache trustworthy. `step` re-derives the whole block --
+    projection split, short conv over a rolling window, rotate-then-bias-then-shift ordering,
+    the trapezoid's one-token carry -- and any divergence from `forward` is a silent inference
+    bug that no shape check would catch. The recurrence itself is `ssd_step`, which is also the
+    fp64 oracle's inner loop, so the decode path and the reference cannot drift apart.
+    """
+    torch.manual_seed(0)
+    block = _m3_block(**flags).eval()
+    x = torch.randn(2, 40, 128)
+    with torch.no_grad():
+        full = block(x)
+    assert torch.allclose(full, _step_through(block, x), atol=1e-5), (
+        "max abs {:.3e}".format((full - _step_through(block, x)).abs().max())
+    )
+
+
+def test_mamba3_cache_size_is_independent_of_context():
+    """The whole point: state, not history. Nothing in the cache may scale with L."""
+    block = _m3_block(use_rope=True, use_trapezoid=True)
+    cache_short = block.allocate_inference_cache(1)
+    x = torch.randn(1, 64, 128)
+    cache_long = block.allocate_inference_cache(1)
+    with torch.no_grad():
+        for t in range(64):
+            block.step(x[:, t], cache_long)
+    size = lambda c: sum(v.numel() for v in c.values() if torch.is_tensor(v))
+    assert size(cache_long) == size(cache_short), "cache grew while decoding"
+
+
+def test_mlstm_step_reproduces_the_shipping_tfla_operator():
+    """M6-B: the mLSTM step must match `apply_tfla`, which is what every checkpoint trained on.
+
+    Only against `tfla_impl="exact"`. The legacy kernel divides by a clamped forget-gate
+    cumulative product and does not compute this -- or any -- recurrence, so no O(1) step can
+    reproduce it. That is a property of the M1 defect, not of this cache, and it is a second,
+    functional argument for flipping the default at M9: a model trained on the legacy kernel
+    cannot be decoded with a state cache at all.
+    """
+    from hybrid_xmamba.layers.mlstm_block import mLSTMBlock
+
+    torch.manual_seed(0)
+    block = mLSTMBlock(dim=64, head_dim=16, tfla_impl="exact").eval()
+    x = torch.randn(2, 96, 64)
+    with torch.no_grad():
+        full = block(x)
+    assert torch.allclose(full, _step_through(block, x), atol=1e-5)
+
+    torch.manual_seed(0)
+    legacy = mLSTMBlock(dim=64, head_dim=16, tfla_impl="legacy").eval()
+    legacy.load_state_dict(block.state_dict())
+    with torch.no_grad():
+        gap = (legacy(x) - _step_through(legacy, x)).abs().max().item()
+    assert gap > 1e-5, (
+        "legacy TFLA suddenly agrees with an exact recurrence -- if the M1 defect was fixed, "
+        "this test and the M9 flip both need revisiting"
+    )
+
+
+def test_mlstm_slow_forward_is_a_different_operator_than_tfla():
+    """A finding, pinned so it cannot be forgotten: the two mLSTM paths disagree structurally.
+
+    `_slow_forward` carries the LSE stabilizer `m` into `C`/`n` and divides by `max(|n·q|, 1)`.
+    `apply_tfla` computes an `m_state` and never applies it, and clamps the **signed**
+    denominator. They are different functions, identically so for `tfla_impl` "legacy" and
+    "exact", so this is structural rather than the M1 clamp defect. `sequential_mlstm_fp64`
+    above already documents TFLA's convention as the reference one, and `use_tfla=True` is what
+    every trained checkpoint used -- so the cache matches TFLA and `_slow_forward` is the
+    outlier. Same class as the Mamba-1 `_slow_forward` divergence M1 found. Recorded for M9.
+    """
+    from hybrid_xmamba.layers.mlstm_block import mLSTMBlock
+
+    torch.manual_seed(0)
+    block = mLSTMBlock(dim=64, head_dim=16, tfla_impl="exact").eval()
+    x = torch.randn(2, 24, 64)
+    with torch.no_grad():
+        via_tfla = block(x)
+        block.use_tfla = False
+        via_slow = block(x)
+    assert not torch.allclose(via_tfla, via_slow, atol=1e-3), (
+        "the two mLSTM paths now agree -- if that was deliberate, delete this test and update "
+        "the M9 writeup, which records them as different operators"
+    )
+
+
+def _cached_lm(vocab=97, **cfg_kw):
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    torch.manual_seed(0)
+    kw = dict(vocab_size=vocab, dim=64, num_layers=4, layer_pattern=["mamba3", "mlstm"],
+              head_dim=16, num_heads=4, max_position_embeddings=64, tfla_impl="exact",
+              mamba3_d_state=32, mamba3_head_dim=16, mamba3_chunk_size=8)
+    kw.update(cfg_kw)
+    return HybridLanguageModel(HybridConfig(**kw)).eval()
+
+
+@pytest.mark.parametrize("with_prefix", [False, True])
+def test_cached_decode_matches_full_recompute(with_prefix):
+    """M6-D: the logit stream must be the same whether or not a cache produced it.
+
+    Compared on logits rather than sampled tokens, so the assertion is deterministic and
+    strictly stronger -- two paths can sample identically for a while and still disagree.
+    """
+    model = _cached_lm()
+    assert model.supports_cached_decode()
+    ids = torch.randint(0, 97, (2, 7))
+    prefix = torch.randn(2, 3, 64) if with_prefix else None
+
+    with torch.no_grad():
+        hidden = model.embeddings(ids)
+        if prefix is not None:
+            hidden = torch.cat([prefix, hidden], dim=1)
+        caches = model.allocate_inference_cache(2)
+        cached = model.prefill(hidden, caches)
+        full = model(inputs_embeds=hidden).logits[:, -1]
+        assert torch.allclose(full, cached, atol=1e-5)
+
+        # ...and it stays true as tokens are appended.
+        for _ in range(6):
+            nxt = full.argmax(-1, keepdim=True)
+            hidden = torch.cat([hidden, model.embeddings(nxt)], dim=1)
+            cached = model.step_logits(model.embeddings(nxt)[:, 0], caches)
+            full = model(inputs_embeds=hidden).logits[:, -1]
+            assert torch.allclose(full, cached, atol=1e-5), (
+                "cached decode drifted from full recompute: max abs {:.3e}".format(
+                    (full - cached).abs().max()
+                )
+            )
+
+
+@pytest.mark.parametrize("with_prefix", [False, True])
+def test_cached_beam_search_is_token_identical_to_the_uncached_one(with_prefix):
+    """M6-D: beam=3, the decode setting the report-gen eval actually uses.
+
+    Beams reorder and duplicate every step, so their recurrent state has to be gathered with
+    them -- the failure mode is a beam inheriting another's state, which produces fluent,
+    plausible, wrong text. Token equality against the existing uncached implementation is the
+    only check that catches it.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "erg", "scripts/evaluate_report_generation.py"
+    )
+    erg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(erg)
+
+    model = _cached_lm()
+    ids = torch.randint(0, 97, (1, 6))
+    prefix = torch.randn(1, 3, 64) if with_prefix else None
+    uncached = erg.beam_search_decode(model, ids, prefix_embeds=prefix,
+                                      beam_size=3, max_new_tokens=8)
+    cached = model.beam_search_cached(ids, prefix_embeds=prefix,
+                                      beam_size=3, max_new_tokens=8)
+    assert torch.equal(uncached, cached), (
+        "uncached {} vs cached {}".format(uncached.tolist(), cached.tolist())
+    )
+
+
+def test_cached_decode_refuses_a_stack_it_cannot_serve():
+    """All-or-nothing: one recomputing layer keeps the whole model O(L) per token."""
+    model = _cached_lm(layer_pattern=["mamba3", "slstm"], slstm_hidden_dim=64)
+    assert not model.supports_cached_decode()
+    with pytest.raises(NotImplementedError, match="step"):
+        model.generate_cached(torch.randint(0, 97, (1, 4)), max_new_tokens=2)

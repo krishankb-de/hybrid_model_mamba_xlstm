@@ -10,7 +10,17 @@ multi-doc batches (cu_seqlens packing). Validates:
     doc-A output bit-identical
   - Phase 7 (WSD scheduler + β2): scheduler factor + β2 anneal track expected
     shape across 100 steps
-  - End-to-end: 100-step CPU train loop, loss decreasing, no NaN, grad-norm < 10
+  - End-to-end: 100-step CPU train loop, no NaN, loss at least halves, median pre-clip
+    grad-norm < 10 (the clip value) and at most 5 pre-clip spikes above 50
+
+The E2E gate judges the trajectory's typical behaviour, not its single worst step.
+Measured 2026-09-17 (MAMBA3_PLAN_V2.md V0-E): on the UNCHANGED pre-merge code the
+max pre-clip grad-norm over 100 steps was 10.2 / 52.3 / 34.6 / 83.4 for data seeds
+1-4, so a `max < 50` assertion failed on two of four seeds of the same code. A tiny
+model at lr 3e-3 is chaotic at the ulp level (an associativity change in the slow
+scan path, ~3e-7 on the logits, moved seed 1 from 10.2 to 73.7); the clipped
+optimiser never sees those spikes, and every one of those runs still cut the loss
+by 4-18x. Assert on what a real explosion changes -- the loss and the typical norm.
 
 Tiny dims (dim=64, layers=8) keep CPU wall-clock under ~2 minutes.
 
@@ -256,6 +266,7 @@ def test_100step_train_loop() -> None:
     probe = IGateProbe(model)
     losses: List[float] = []
     max_grad_norm = 0.0
+    gnorms: List[float] = []
     step = 0
     data_iter = iter(dl)
 
@@ -272,6 +283,7 @@ def test_100step_train_loop() -> None:
         optimizer.zero_grad()
         loss.backward()
         gnorm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0))
+        gnorms.append(gnorm)
         if gnorm > max_grad_norm:
             max_grad_norm = gnorm
         optimizer.step()
@@ -287,12 +299,16 @@ def test_100step_train_loop() -> None:
     avg_first = sum(losses[:10]) / 10
     avg_last = sum(losses[-10:]) / 10
     print(f"  loss[:10] avg = {avg_first:.4f} → loss[-10:] avg = {avg_last:.4f}")
-    print(f"  max grad-norm (pre-clip) = {max_grad_norm:.4f}")
+    median_gnorm = sorted(gnorms)[len(gnorms) // 2]
+    n_spikes = sum(1 for g in gnorms if g > 50.0)
+    print(f"  grad-norm (pre-clip): max = {max_grad_norm:.4f}, median = {median_gnorm:.4f}, "
+          f"spikes > 50 = {n_spikes}/{len(gnorms)}")
     print(f"  i_gate raw |max| across run = {probe.max_raw:.4f} (cap=15)")
 
-    assert avg_last < avg_first, (
+    assert avg_last < 0.5 * avg_first, (
         f"loss not decreasing: first={avg_first:.4f} last={avg_last:.4f}")
-    assert max_grad_norm < 50.0, f"grad-norm explosion: {max_grad_norm}"
+    assert median_gnorm < 10.0, f"typical grad-norm above the clip value: median {median_gnorm}"
+    assert n_spikes <= 5, f"sustained grad-norm explosion: {n_spikes} steps above 50"
     assert probe.max_raw < cfg.mlstm_gate_soft_cap, (
         f"i_gate raw {probe.max_raw} ≥ soft_cap {cfg.mlstm_gate_soft_cap}")
     print("  PASS")

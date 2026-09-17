@@ -18,6 +18,43 @@ from typing import Optional
 import math
 
 
+# fp32 overflows at exp(~88). 40 leaves ~20 orders of magnitude of headroom for the q/k
+# magnitudes that multiply these factors before the einsum accumulates them.
+_EXP_SAFE = 40.0
+
+
+def _intra_chunk_sequential(q_c, k_gated, v_c, f_c):
+    """Exact intra-chunk term: sequential over positions, parallel over every chunk at once.
+
+    Used only when re-centring the decay would overflow fp32 (see `tfla_forward_parallel`).
+    Runs the mLSTM recurrence from a zero state inside each chunk -- which is exactly what the
+    intra-chunk term is -- so it forms no exponential of a large number and is exact for any
+    gate values. Depth is `chunk_size` instead of one matmul; memory is the (D, D) matrix memory
+    held for every chunk simultaneously, ~25 MB at the 150M shape.
+
+    Returns (num, den) shaped (B, H, nc, C, D) and (B, H, nc, C, 1).
+    """
+    batch, heads, num_chunks, chunk_size, head_dim = q_c.shape
+    C_state = torch.zeros(
+        batch, heads, num_chunks, head_dim, head_dim, device=q_c.device, dtype=q_c.dtype
+    )
+    n_state = torch.zeros(
+        batch, heads, num_chunks, head_dim, device=q_c.device, dtype=q_c.dtype
+    )
+    nums, dens = [], []
+    for t in range(chunk_size):
+        f_t = f_c[:, :, :, t]                                   # (B, H, nc, D)
+        ki = k_gated[:, :, :, t]                                # (B, H, nc, D)
+        C_state = f_t.unsqueeze(-1) * C_state + torch.einsum(
+            'bhcd, bhce -> bhcde', ki, v_c[:, :, :, t]
+        )
+        n_state = f_t * n_state + ki
+        q_t = q_c[:, :, :, t]
+        nums.append(torch.einsum('bhcd, bhcde -> bhce', q_t, C_state))
+        dens.append(torch.einsum('bhcd, bhcd -> bhc', q_t, n_state))
+    return torch.stack(nums, dim=3), torch.stack(dens, dim=3).unsqueeze(-1)
+
+
 def tfla_forward_parallel(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -25,6 +62,7 @@ def tfla_forward_parallel(
     i_gate: torch.Tensor,
     f_gate: torch.Tensor,
     chunk_size: int = 64,
+    tfla_impl: str = "legacy",
 ) -> torch.Tensor:
     """Chunk-parallel implementation of TFLA using batched matmuls.
     
@@ -42,10 +80,15 @@ def tfla_forward_parallel(
         i_gate: Input gates (B, H, L, D)
         f_gate: Forget gates (B, H, L, D)
         chunk_size: Size of each chunk for parallel processing
-        
+        tfla_impl: "legacy" (default) keeps the pre-2026-09 numerics, defect included, so
+            existing checkpoints stay bit-reproducible. "exact" re-centres the intra-chunk decay
+            instead of dividing by it. MAMBA3_PLAN.md M1-H.
+
     Returns:
         Output tensor (B, H, L, D)
     """
+    if tfla_impl not in ("legacy", "exact"):
+        raise ValueError(f"tfla_impl must be 'legacy' or 'exact', got {tfla_impl!r}")
     batch, num_heads, seq_len, head_dim = q.shape
     device = q.device
     dtype = q.dtype
@@ -90,20 +133,52 @@ def tfla_forward_parallel(
     #             = sum_d((q[i,d]*f_cum[i,d]) * (k_gated[j,d]/f_cum[j,d]))
     # ============================================================
     k_gated_intra = k_c * i_c  # (B, H, nc, C, D) per-dimension input gating
-    f_cum_safe = f_cum.clamp(min=1e-6)
-    q_weighted = q_c * f_cum               # (B, H, nc, C, D) absorb decay into query
-    k_weighted = k_gated_intra / f_cum_safe  # (B, H, nc, C, D) absorb inverse decay into key
+    if tfla_impl == "legacy":
+        # MAMBA3_PLAN.md M1-C: `f_cum` underflows 1e-6 within a chunk for any realistic forget
+        # gate -- 70.9% of (t, d) entries at the shipped forget_gate_bias_init=0.0 -- and the
+        # clamp then pins the denominator, so decay[i, j] collapses to ~0 even for j close to i.
+        # Measured rel-max-err vs an fp64 sequential reference: 0.882 at the shipped settings.
+        f_cum_safe = f_cum.clamp(min=1e-6)
+        q_weighted = q_c * f_cum                 # absorb decay into query
+        k_weighted = k_gated_intra / f_cum_safe  # absorb inverse decay into key
+    else:
+        # Same factorization, no reciprocal. Re-centre both sides on half the chunk's total
+        # log-decay so neither factor has to span the full dynamic range:
+        #   decay[i, j] = exp(log_f_cum[i] - log_f_cum[j])
+        #               = exp(log_f_cum[i] - m) * exp(m - log_f_cum[j])
+        # This is an identity for any m, and m = log_f_cum[-1]/2 splits the range evenly, so a
+        # chunk that decays by exp(-44) puts exp(+/-22) on each side instead of exp(-44) on one
+        # and exp(+44) on the other. Nothing is clamped, so no term is annihilated.
+        m = 0.5 * log_f_cum[:, :, :, -1:, :]     # (B, H, nc, 1, D)
+        half_range = 0.5 * log_f_cum[:, :, :, -1, :].abs().max()
+        if half_range < _EXP_SAFE:
+            q_weighted = q_c * torch.exp(log_f_cum - m)
+            k_weighted = k_gated_intra * torch.exp(m - log_f_cum)
+        else:
+            # Re-centring halves the dynamic range but cannot remove it. A chunk whose total
+            # log-decay exceeds 2 * _EXP_SAFE still overflows fp32 on one side, and the causal
+            # mask is applied *after* the product, so an inf meets a 0 and yields NaN -- silently
+            # wrong in exactly the way this phase exists to eliminate. Reachable in practice:
+            # chunk_size=128 with a forget-gate bias near -2 does it.
+            #
+            # Fall back to scanning within the chunk instead of factorizing across it: sequential
+            # in `chunk_size`, parallel over every chunk at once. No exponential of a large
+            # number is ever formed, so this is exact for any gate values.
+            q_weighted = k_weighted = None
     
-    scores = torch.einsum(
-        'bhcid, bhcjd -> bhcij', q_weighted, k_weighted
-    )  # (B, H, nc, C, C)
-    scores = scores.masked_fill(causal_mask, 0.0)
-    
-    # Unnormalized weighted sum of values (normalize later with inter-chunk)
-    h_intra_num = torch.einsum(
-        'bhcij, bhcjd -> bhcid', scores, v_c
-    )  # (B, H, nc, C, D)
-    h_intra_den = scores.sum(dim=-1, keepdim=True)  # (B, H, nc, C, 1)
+    if q_weighted is None:
+        h_intra_num, h_intra_den = _intra_chunk_sequential(q_c, k_gated_intra, v_c, f_c)
+    else:
+        scores = torch.einsum(
+            'bhcid, bhcjd -> bhcij', q_weighted, k_weighted
+        )  # (B, H, nc, C, C)
+        scores = scores.masked_fill(causal_mask, 0.0)
+
+        # Unnormalized weighted sum of values (normalize later with inter-chunk)
+        h_intra_num = torch.einsum(
+            'bhcij, bhcjd -> bhcid', scores, v_c
+        )  # (B, H, nc, C, D)
+        h_intra_den = scores.sum(dim=-1, keepdim=True)  # (B, H, nc, C, 1)
     
     # ============================================================
     # INTER-CHUNK RECURRENCE (sequential across chunks only)
@@ -190,6 +265,7 @@ def apply_tfla(
     v: torch.Tensor,
     i_gate: torch.Tensor,
     f_gate: torch.Tensor,
+    tfla_impl: str = "legacy",
 ) -> torch.Tensor:
     """Apply Tiled Flash Linear Attention.
     
@@ -204,7 +280,8 @@ def apply_tfla(
         v: Values (B, H, L, D)
         i_gate: Input gates (B, H, L, D)
         f_gate: Forget gates (B, H, L, D)
-        
+        tfla_impl: "legacy" (default) | "exact" -- see `tfla_forward_parallel`.
+
     Returns:
         Output tensor (B, H, L, D)
     """
@@ -220,4 +297,6 @@ def apply_tfla(
     else:
         chunk_size = 128
     
-    return tfla_forward_parallel(q, k, v, i_gate, f_gate, chunk_size=chunk_size)
+    return tfla_forward_parallel(
+        q, k, v, i_gate, f_gate, chunk_size=chunk_size, tfla_impl=tfla_impl
+    )

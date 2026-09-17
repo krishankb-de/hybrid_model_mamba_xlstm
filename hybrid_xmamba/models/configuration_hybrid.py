@@ -4,6 +4,7 @@ Defines the configuration schema for hybrid Mamba-xLSTM architectures,
 compatible with Hugging Face transformers library conventions.
 """
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import List, Optional, Literal
 
@@ -48,7 +49,7 @@ class HybridConfig:
     vocab_size: int = 50257
     dim: int = 768
     num_layers: int = 12
-    layer_pattern: List[Literal["mamba", "mlstm", "slstm", "attention"]] = field(
+    layer_pattern: List[Literal["mamba", "mamba3", "mlstm", "slstm", "attention"]] = field(
         default_factory=lambda: ["mamba", "mamba", "mlstm"]
     )
     
@@ -58,6 +59,44 @@ class HybridConfig:
     expand_factor: int = 2
     dt_rank: Optional[int] = None  # Auto if None
     use_fast_path: bool = True
+    # MAMBA3_PLAN.md M1: all four default to today's behaviour, so adding them changes nothing.
+    scan_impl: str = "legacy"          # "legacy" | "exact"  (default flips to "exact" at M9-A)
+    dt_init_strategy: str = "none"     # "none" | "mamba"    (reference logU[dt_min, dt_max] init)
+    dt_min: float = 1e-3
+    dt_max: float = 1e-1
+    tfla_impl: str = "legacy"          # "legacy" | "exact"  (the mLSTM counterpart, M1-H)
+
+    # --- Mamba-3 (MAMBA3_PLAN.md M2). Every flag defaults to the Mamba-2 reduction, so a
+    # `mamba3` layer built from defaults is exactly Mamba-2 SSD and each arm moves one variable.
+    mamba3_d_state: int = 128          # 8x the Mamba-1 setting for +1.4% params (B/C are shared)
+    mamba3_head_dim: int = 64
+    mamba3_ngroups: int = 1            # >1 leaves the parameter-matched regime -- see the plan
+    mamba3_chunk_size: int = 64
+    mamba3_use_conv: bool = True       # dropped as an arm at M5, not by default
+    mamba3_conv_size: int = 4
+    mamba3_use_trapezoid: bool = False # Sec 3.1 (M3)
+    mamba3_use_rope: bool = False      # Sec 3.2 (M4)
+    mamba3_rope_fraction: float = 0.5
+    # theta_max bounds the per-token angular rate: theta = theta_max * tanh(proj(x)), and the
+    # rotation angle is Delta_t * theta_t. It was MISSING from this dataclass until 2026-09-06,
+    # so the block's default of 1.0 was the only value the campaign could ever run -- and 1.0
+    # with dt_limit=1.0 permits 1 rad/token, 512 rad over a 512-token sequence, EIGHTY-ONE full
+    # turns. A relative rotation R(Theta_s - Theta_t) is a positional signal only while it stays
+    # inside one turn; past that it aliases, and because theta is data-dependent the aliasing
+    # tracks the content between s and t rather than the distance. Arms A4, A5 and A6 -- every
+    # rope-on arm in the M7-B screen -- collapsed to ~1166 val PPL against A2's 16.708.
+    mamba3_theta_max: float = 1.0
+    # Delta's init range. Also previously unreachable; the pair sets where the rotation can
+    # operate at all (M4-D: at logU[1e-3, 1e-1] the reachable angle tops out near 0.06 rad).
+    mamba3_dt_min: float = 1e-3
+    mamba3_dt_max: float = 1e-1
+    mamba3_dt_init_floor: float = 1e-4
+    mamba3_bc_bias: str = "none"       # "none" | "zero_init" | "one_init"  (Sec 3.4, M5)
+    mamba3_mimo_rank: int = 1          # plumbed, never run (decision 3)
+    mamba3_a_mode: str = "static"      # "static" (Mamba-2) | "data_dependent" (Mamba-3)
+    mamba3_a_floor: float = 1e-4
+    mamba3_dt_limit: float = 1.0
+    mamba3_use_outproj_norm: bool = False
     
     # mLSTM parameters
     head_dim: int = 64
@@ -146,13 +185,39 @@ class HybridConfig:
             self.slstm_hidden_dim = self.dim
         
         # Validate layer pattern
-        valid_types = {"mamba", "mlstm", "slstm", "attention"}
+        valid_types = {"mamba", "mamba3", "mlstm", "slstm", "attention"}
         for layer_type in self.layer_pattern:
             if layer_type not in valid_types:
                 raise ValueError(
                     f"Invalid layer type '{layer_type}'. "
                     f"Must be one of {valid_types}"
                 )
+
+        # MAMBA3_PLAN.md M1-F. norm_topology was previously unvalidated, so a typo silently
+        # behaved as "pre_rms" -- the same silent-drop class that cost this project a run in
+        # Phase 9 (see tests/test_willi_parity.py::test_norm_topology_threaded_to_hybridconfig).
+        if self.norm_topology not in ("pre_rms", "hybrid", "hybrid_bc"):
+            raise ValueError(
+                "norm_topology must be 'pre_rms', 'hybrid' or 'hybrid_bc', got "
+                f"{self.norm_topology!r}"
+            )
+        if self.scan_impl not in ("legacy", "exact"):
+            raise ValueError(f"scan_impl must be 'legacy' or 'exact', got {self.scan_impl!r}")
+        if self.tfla_impl not in ("legacy", "exact"):
+            raise ValueError(f"tfla_impl must be 'legacy' or 'exact', got {self.tfla_impl!r}")
+        if self.mamba3_bc_bias not in ("none", "zero_init", "one_init"):
+            raise ValueError(
+                "mamba3_bc_bias must be 'none', 'zero_init' or 'one_init', got "
+                f"{self.mamba3_bc_bias!r}"
+            )
+        if self.mamba3_a_mode not in ("static", "data_dependent"):
+            raise ValueError(
+                f"mamba3_a_mode must be 'static' or 'data_dependent', got {self.mamba3_a_mode!r}"
+            )
+        if self.dt_init_strategy not in ("none", "mamba"):
+            raise ValueError(
+                f"dt_init_strategy must be 'none' or 'mamba', got {self.dt_init_strategy!r}"
+            )
     
     def get_layer_config(self, layer_idx: int) -> dict:
         """Get configuration for a specific layer.
@@ -179,6 +244,11 @@ class HybridConfig:
                 "expand_factor": self.expand_factor,
                 "dt_rank": self.dt_rank,
                 "use_fast_path": self.use_fast_path,
+                "scan_impl": self.scan_impl,
+                "tfla_impl": self.tfla_impl,
+                "dt_init_strategy": self.dt_init_strategy,
+                "dt_min": self.dt_min,
+                "dt_max": self.dt_max,
             })
         elif layer_type == "mlstm":
             base_config.update({
@@ -206,9 +276,42 @@ class HybridConfig:
                 "num_heads": self.slstm_num_heads,
                 "use_exponential_gate": self.use_exponential_gate,
             })
+        else:
+            # No silent fall-through: an unknown type must not leave with base_config only
+            # (the FM5 class in MAMBA3_PLAN_V2.md). __post_init__ rejects it first anyway.
+            raise ValueError(f"Unknown layer type {layer_type!r} at layer {layer_idx}")
         
         return base_config
     
+    @classmethod
+    def from_hydra(cls, model_cfg, **overrides) -> "HybridConfig":
+        """Build a config from a Hydra `cfg.model` node, keeping every field the dataclass has.
+
+        MAMBA3_PLAN.md M2-F / FM5. Every training entry point used to spell out ~25
+        `field=cfg.model.field` lines by hand, so a new config field silently fell back to its
+        default unless someone remembered to edit all twelve of them. That is not hypothetical:
+        Phase 9 lost a run because `norm_topology` was dropped this way, and it happened again on
+        2026-09-06 when `scan_impl`, `tfla_impl` and `dt_init_strategy` reached the yaml but not
+        the model -- job 2513007 trained the A1 arm with the defects still in place, and only the
+        architecture fingerprint caught it.
+
+        Filtering against `dataclasses.fields` removes the class of bug rather than an instance:
+        a field added to the dataclass and set in a yaml arrives here with no further wiring.
+
+        Args:
+            model_cfg: Hydra `cfg.model` node (or any mapping).
+            **overrides: applied after the config, for values a caller computes itself.
+        """
+        valid = {f.name for f in dataclasses.fields(cls)}
+        # `model_type` exists on both sides and means different things: the yaml says
+        # "hybrid_lm" (the Hydra target), the dataclass "hybrid_xmamba". Keep the dataclass's.
+        raw = {k: v for k, v in dict(model_cfg).items() if k in valid and k != "model_type"}
+        raw.update({k: v for k, v in overrides.items() if k in valid})
+        # Hydra hands back ListConfig for sequences; HybridConfig validates against plain str.
+        if "layer_pattern" in raw and raw["layer_pattern"] is not None:
+            raw["layer_pattern"] = [str(x) for x in raw["layer_pattern"]]
+        return cls(**raw)
+
     def to_dict(self) -> dict:
         """Convert config to dictionary."""
         return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}

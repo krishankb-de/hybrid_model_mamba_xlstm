@@ -377,6 +377,88 @@ def run_sweep(model_names, seq_lengths, batch_sizes, num_iterations, device,
     return rows, exponents
 
 
+def profile_decode(config, prompt_len=256, new_tokens=64, batch_size=1,
+                   device="cpu", dtype=torch.float32, beam_size=1):
+    """MAMBA3_PLAN.md M6-E: prefill, TTFT and per-token decode, cached vs full recompute.
+
+    This repo had no decode benchmark at all before M6 -- `evaluate_lm.py` and the sweep above
+    both time full-sequence forwards, which is the one thing autoregressive generation never
+    does. Without a per-token number, "generation is slow" was an impression rather than a
+    measurement, and the O(L^2) cost of re-running the prefix for every token was invisible.
+
+    Reports, for each path:
+        prefill / TTFT  -- seconds to the first sampled token
+        decode          -- seconds per token thereafter, and its growth from the first half of
+                           the run to the second (an O(1) path is flat; a recomputing one is not)
+    """
+    import time
+
+    model = build_model(config, device, dtype).eval()
+    vocab = config.vocab_size
+    ids = torch.randint(0, vocab, (batch_size, prompt_len), device=device)
+
+    def _time(fn):
+        _sync(device)
+        t0 = time.perf_counter()
+        out = fn()
+        _sync(device)
+        return time.perf_counter() - t0, out
+
+    print("\n" + "=" * 70)
+    print("DECODE PROFILE  prompt={}  new_tokens={}  batch={}  beam={}".format(
+        prompt_len, new_tokens, batch_size, beam_size))
+    print("=" * 70)
+
+    rows = {}
+    with torch.no_grad():
+        # ---- full recompute: what generate() does today -------------------------------
+        hidden = model.embeddings(ids)
+        ttft, _ = _time(lambda: model(inputs_embeds=hidden).logits[:, -1])
+        per_token, halves = [], []
+        seq = hidden
+        for i in range(new_tokens):
+            dt, logits = _time(lambda: model(inputs_embeds=seq).logits[:, -1])
+            per_token.append(dt)
+            seq = torch.cat([seq, model.embeddings(logits.argmax(-1, keepdim=True))], dim=1)
+        rows["full recompute"] = (ttft, per_token)
+
+        # ---- cached ------------------------------------------------------------------
+        if model.supports_cached_decode():
+            caches = model.allocate_inference_cache(batch_size, device=device, dtype=dtype)
+            ttft_c, logits = _time(lambda: model.prefill(model.embeddings(ids), caches))
+            per_token_c = []
+            for i in range(new_tokens):
+                nxt = logits.argmax(-1, keepdim=True)
+                dt, logits = _time(
+                    lambda: model.step_logits(model.embeddings(nxt)[:, 0], caches)
+                )
+                per_token_c.append(dt)
+            rows["cached (O(1))"] = (ttft_c, per_token_c)
+
+    print("{:<18} {:>10} {:>12} {:>12} {:>10}".format(
+        "path", "TTFT s", "s/token", "2nd/1st half", "tok/s"))
+    for name, (ttft, per_token) in rows.items():
+        half = len(per_token) // 2
+        first = sum(per_token[:half]) / max(half, 1)
+        second = sum(per_token[half:]) / max(len(per_token) - half, 1)
+        mean = sum(per_token) / len(per_token)
+        print("{:<18} {:>10.4f} {:>12.5f} {:>12.2f}x {:>10.1f}".format(
+            name, ttft, mean, second / first if first else float("nan"), 1.0 / mean))
+
+    if len(rows) == 2:
+        (f_ttft, f_tok), (c_ttft, c_tok) = rows["full recompute"], rows["cached (O(1))"]
+        mean = lambda xs: sum(xs) / len(xs)
+        half = len(c_tok) // 2
+        growth = mean(c_tok[half:]) / mean(c_tok[:half]) if half else float("nan")
+        print("\n  per-token speedup      {:.2f}x".format(mean(f_tok) / mean(c_tok)))
+        print("  TTFT ratio             {:.2f}x  (>1 means the cached prefill is SLOWER: it "
+              "steps".format(c_ttft / f_ttft))
+        print("                              token by token -- see prefill()'s docstring)")
+        print("  cached growth 2nd/1st  {:.2f}x  (1.00 = O(1) in context, which is the "
+              "claim)".format(growth))
+    return rows
+
+
 def main():
     parser = argparse.ArgumentParser(description="Profile hybrid model")
     choices = available_configs()
@@ -406,6 +488,13 @@ def main():
                              "forward-only inference")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Write efficiency_curves.csv/.json here (--sweep)")
+    parser.add_argument("--decode", action="store_true",
+                        help="Profile autoregressive decode: prefill/TTFT and per-token "
+                             "latency, cached vs full recompute (MAMBA3_PLAN.md M6-E)")
+    parser.add_argument("--prompt-len", type=int, default=256,
+                        help="Prompt length for --decode")
+    parser.add_argument("--new-tokens", type=int, default=64,
+                        help="Tokens to generate for --decode")
     parser.add_argument("--device", type=str,
                         default="cuda" if torch.cuda.is_available() else "cpu",
                         help="Device to run on")
@@ -413,7 +502,16 @@ def main():
     args = parser.parse_args()
     dtype = DTYPES[args.dtype]
 
-    if args.sweep:
+    if args.decode:
+        profile_decode(
+            config=load_config(args.model),
+            prompt_len=args.prompt_len,
+            new_tokens=args.new_tokens,
+            batch_size=args.batch_size,
+            device=args.device,
+            dtype=dtype,
+        )
+    elif args.sweep:
         model_names = args.models if args.models else [args.model]
         batch_sizes = args.batch_sizes if args.batch_sizes else [args.batch_size]
         run_sweep(

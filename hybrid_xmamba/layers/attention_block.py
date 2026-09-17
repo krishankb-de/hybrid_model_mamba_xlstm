@@ -143,6 +143,10 @@ class AttentionBlock(nn.Module):
         use_hybrid_norm: Apply RMSNorm to Q and K (the HybridNorm analogue).
     """
 
+    # Capability contract read by HybridBlock (MAMBA3_PLAN_V2.md V0-A): this mixer consumes
+    # cu_seqlens (doc-boundary attention mask, Phase 14A) and takes it in forward's signature.
+    supports_cu_seqlens = True
+
     def __init__(
         self,
         dim: int,

@@ -6,16 +6,36 @@ allowing flexible interleaving and configuration.
 
 import torch
 import torch.nn as nn
+import functools
+import inspect
+
 from typing import List, Optional, Literal
 
 from hybrid_xmamba.layers.attention_block import AttentionBlock
+from hybrid_xmamba.layers.mamba3_block import Mamba3Block
 from hybrid_xmamba.layers.mamba_block import MambaBlock
 from hybrid_xmamba.layers.mlstm_block import mLSTMBlock
 from hybrid_xmamba.layers.slstm_block import sLSTMBlock
 from hybrid_xmamba.layers.normalization import RMSNorm
 
 
-LayerType = Literal["mamba", "mlstm", "slstm", "attention"]
+LayerType = Literal["mamba", "mamba3", "mlstm", "slstm", "attention"]
+
+
+@functools.lru_cache(maxsize=1)
+def _mamba3_params() -> frozenset:
+    """The `mamba3_*` options this dispatcher will forward, read off the block's signature.
+
+    Deriving rather than listing. `dim`, `**unused` and `self` are not levers; everything else
+    Mamba3Block accepts is one, and adding a parameter to the block is now enough to make it
+    reachable from HybridConfig. The two hand-written copies this replaces both omitted
+    `theta_max`, so the M7-B screen ran the block default of 1.0 with no way to change it.
+    """
+    params = inspect.signature(Mamba3Block.__init__).parameters
+    return frozenset(
+        name for name, p in params.items()
+        if name not in ("self", "dim") and p.kind is not inspect.Parameter.VAR_KEYWORD
+    )
 
 
 class HybridBlock(nn.Module):
@@ -55,10 +75,15 @@ class HybridBlock(nn.Module):
         # for blocks >= 1. First block stays pure pre-norm to avoid early-training instability.
         self.norm_topology = norm_topology
         self.is_first_block = is_first_block
-        self._use_hybrid_norm = (norm_topology == "hybrid")
+        # MAMBA3_PLAN.md M1-F: "hybrid_bc" is "hybrid" minus the Delta norm -- B/C norms only,
+        # matching Mamba-3 Sec 3.4. Everything else (FFN post-norm placement, mLSTM projection
+        # norms) is identical, so the two topologies differ in exactly one variable. "hybrid"
+        # itself is untouched, so every existing checkpoint keeps loading.
+        self._use_hybrid_norm = norm_topology in ("hybrid", "hybrid_bc")
         self._ffn_post_norm = self._use_hybrid_norm and not is_first_block
         layer_kwargs = dict(layer_kwargs)
         layer_kwargs["use_hybrid_norm"] = self._use_hybrid_norm
+        layer_kwargs.setdefault("use_dt_norm", norm_topology != "hybrid_bc")
         
         # Pre-normalization for mixer
         if norm_type.lower() == "rms":
@@ -66,17 +91,58 @@ class HybridBlock(nn.Module):
         else:
             self.norm1 = nn.LayerNorm(dim)
         
+        # MAMBA3_PLAN.md M2-F: a kwarg that names a specific mixer family but matches nothing is
+        # always a mistake -- a typo, or a field added to HybridConfig and never wired through.
+        # Silently dropping it is how a lever "does nothing" for three days. Unprefixed kwargs are
+        # still dropped quietly, because the flat bag deliberately carries every type's fields.
+        _PREFIXES = ("mamba3_", "mlstm_", "slstm_")
+        _KNOWN = {
+            # Derived from Mamba3Block's own signature, never hand-listed. Two hand-maintained
+            # copies of this set both went stale on `theta_max`, which is why the M7-B screen
+            # could only ever run theta_max=1.0 -- 1 rad/token, 81 turns over 512 tokens -- and
+            # every rope-on arm collapsed to ~1166 val PPL. A lever the block accepts but the
+            # dispatcher does not know about is invisible: it reaches the config, passes the
+            # yaml round-trip, and is dropped here.
+            "mamba3_": _mamba3_params(),
+            "mlstm_": {"gate_soft_cap", "input_gate_bias_init", "forget_gate_bias_init"},
+            "slstm_": {"hidden_dim", "num_heads"},
+        }
+        for key in layer_kwargs:
+            for prefix in _PREFIXES:
+                if key.startswith(prefix) and key[len(prefix):] not in _KNOWN[prefix]:
+                    raise ValueError(
+                        f"unknown mixer option {key!r}: {key[len(prefix):]!r} is not a "
+                        f"{prefix.rstrip('_')} parameter. Known: "
+                        f"{sorted(_KNOWN[prefix])}"
+                    )
+
         # Filter layer_kwargs based on layer type
         filtered_kwargs = {}
         
         if self.layer_type == "mamba":
             # MambaBlock parameters
-            mamba_params = {"state_size", "conv_size", "expand_factor", "dt_rank", "use_fast_path", "use_hybrid_norm"}
+            mamba_params = {"state_size", "conv_size", "expand_factor", "dt_rank", "use_fast_path",
+                            "use_hybrid_norm", "use_dt_norm", "scan_impl", "dt_init_strategy",
+                            "dt_min", "dt_max"}
             filtered_kwargs = {k: v for k, v in layer_kwargs.items() if k in mamba_params}
             self.mixer = MambaBlock(dim, **filtered_kwargs)
+        elif self.layer_type == "mamba3":
+            # `mamba3_*`-prefixed config keys are stripped here so the block's own signature stays
+            # readable and does not collide with the Mamba-1 names (`state_size` vs `d_state`).
+            mamba3_params = _mamba3_params()
+            renamed = {}
+            for key, value in layer_kwargs.items():
+                stripped = key[len("mamba3_"):] if key.startswith("mamba3_") else key
+                if stripped in mamba3_params:
+                    renamed[stripped] = value
+            # `head_dim` is shared with mLSTM in the flat kwargs bag; the mamba3_ form wins.
+            if "mamba3_head_dim" in layer_kwargs:
+                renamed["head_dim"] = layer_kwargs["mamba3_head_dim"]
+            filtered_kwargs = renamed
+            self.mixer = Mamba3Block(dim, **filtered_kwargs)
         elif self.layer_type == "mlstm":
             # mLSTMBlock parameters
-            mlstm_params = {"head_dim", "num_heads", "use_tfla", "proj_factor",
+            mlstm_params = {"head_dim", "num_heads", "use_tfla", "tfla_impl", "proj_factor",
                             "gate_soft_cap", "input_gate_bias_init", "forget_gate_bias_init",
                             "use_hybrid_norm"}
             filtered_kwargs = {k: v for k, v in layer_kwargs.items() if k in mlstm_params}
@@ -107,6 +173,13 @@ class HybridBlock(nn.Module):
             self.mixer = sLSTMBlock(dim, **filtered_kwargs)
         else:
             raise ValueError(f"Unknown layer type: {layer_type}")
+
+        # MAMBA3_PLAN.md M2-E. This used to be `if layer_type in ("mamba", "mlstm")`, which is how
+        # sLSTM blocks silently leaked recurrent state across packed documents: sLSTM fell to the
+        # else branch and never received cu_seqlens. Dispatch on a capability the mixer declares,
+        # so a new layer type cannot inherit that bug by omission. A parity test cross-checks the
+        # attribute against the real forward signature, so the two cannot drift.
+        self._mixer_takes_cu_seqlens = bool(getattr(self.mixer, "supports_cu_seqlens", False))
         
         # Optional MLP (feed-forward network)
         if use_mlp:
@@ -147,7 +220,7 @@ class HybridBlock(nn.Module):
         # Mixer with residual
         residual = x
         x = self.norm1(x)
-        if self.layer_type in ("mamba", "mlstm", "attention"):
+        if self._mixer_takes_cu_seqlens:
             x = self.mixer(x, cache=cache, cu_seqlens=cu_seqlens)
         else:
             x = self.mixer(x, cache=cache)
@@ -167,6 +240,37 @@ class HybridBlock(nn.Module):
 
         return x
     
+    def allocate_inference_cache(self, batch_size, device=None, dtype=torch.float32):
+        """Per-layer decode state, or None if this mixer has no O(1) step (M6-C)."""
+        allocate = getattr(self.mixer, "allocate_inference_cache", None)
+        if allocate is None:
+            return None
+        return allocate(batch_size, device=device, dtype=dtype)
+
+    def step(self, x_t: torch.Tensor, cache) -> torch.Tensor:
+        """One token through mixer + MLP with residuals, carrying `cache`.
+
+        Mirrors `forward`'s topology exactly, including the HybridNorm post-norm FFN variant --
+        a decode path that quietly used pre-norm where training used post-norm would be a silent
+        quality regression that no shape check would catch.
+        """
+        if not getattr(self.mixer, "supports_step", False):
+            raise NotImplementedError(
+                "{} has no step(); cached decode is unavailable for a model containing "
+                "'{}' layers".format(type(self.mixer).__name__, self.layer_type)
+            )
+        squeeze = x_t.dim() == 3
+        if squeeze:
+            x_t = x_t[:, 0]
+
+        x_t = x_t + self.mixer.step(self.norm1(x_t), cache)
+        if self.use_mlp:
+            if self._ffn_post_norm:
+                x_t = self.norm2(x_t + self.mlp(x_t))
+            else:
+                x_t = x_t + self.mlp(self.norm2(x_t))
+        return x_t.unsqueeze(1) if squeeze else x_t
+
     def get_layer_info(self) -> dict:
         """Get information about this layer.
         

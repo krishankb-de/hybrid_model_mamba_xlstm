@@ -1,0 +1,749 @@
+{
+  "current_phase": "M8_full_pipeline",
+  "last_updated": "2026-09-07T13:54:35+02:00",
+  "status": "M6 complete (O(1) decode cache: 21.5x per token, cached growth flat at 0.99x, beam=3 token-identical). M7 complete, winner A2. M8-A next: Stage-0 120K steps on A2.",
+  "plan_of_record": "MAMBA3_PLAN.md",
+  "branch": {
+    "name": "h100_scaling_mamba3",
+    "cut_from": "h100_scaling",
+    "base_commit": "20a1d27",
+    "merge_policy": "NO MERGE without an explicit instruction from the user. Not on plan completion, not on a passing gate. h100_scaling keeps the approved 13D results reachable and reproducible."
+  },
+  "supersedes": {
+    "plan": "MAMBA3_INTEGRATION_PLAN.md",
+    "state": "mamba3_integration_state.json",
+    "note": "audit folded into MAMBA3_PLAN.md Context; retired at M0-E"
+  },
+  "baseline_plan_closed": {
+    "plan": "H100_SCALING_PLAN.md",
+    "state": "h100_scaling_state.json",
+    "phase": "plan_closed"
+  },
+  "source": "Mamba-3: Improved Sequence Modeling using State Space Principles, arXiv:2603.15569; reference impl state-spaces/mamba mamba_ssm/modules/mamba3.py",
+  "primary_thesis": "The live selective scan does not compute the specified Mamba recurrence (rel-max-err 0.92 at the measured init Delta=0.705). The exact log-space fix costs 19.3 GB in Mamba-1's A=(d_inner,N) form but 19 MB in Mamba-2/3's scalar-A-per-head form, so migrating to SSD is what makes correctness affordable. Mamba-3 SISO on top is parameter-matched to +0.24% while giving 8x the SSM state. Screen by Stage-0 PPL, decide by report generation.",
+  "decisions": {
+    "1_isolation": "branch h100_scaling_mamba3 from h100_scaling; NO MERGE without explicit user instruction",
+    "2_scope": "new Mamba3Block = Mamba-2 SSD + exp-trapezoidal + complex/RoPE + B/C biases + optional conv-drop, all flag-gated to reduce exactly to Mamba-2; plus O(1) recurrent decode cache",
+    "3_mimo": "plumbing only (mimo_rank default 1), NEVER run; breaks parameter matching by +3.2% (189.64M)",
+    "4_gate": "staged: short-run Stage-0 PPL screens arms; winner gets full pipeline + report-gen on official n=2663 test split; retrieval R@10 is a non-regression guard only",
+    "5_retrain": "full pipeline for the winner: Stage-0 -> contrastive tower -> report-gen decoder",
+    "6_d_state": "128, headdim=64, ngroups=1, expand=2 (parameter-matched to +0.24%)",
+    "7_scan_impl": "default legacy through M7 so A0 stays bit-reproducible; flip default to exact at M9-A; legacy retained behind the flag for reproducing pre-2026-09 numbers",
+    "8_layer_pattern": "9 mamba3 + 3 mlstm FIXED for M1-M9 (the control); ratio re-opened as gated phase M10 if M8-D clears",
+    "9_py39": "willi/A100 retired; py3.9 guards dropped at M9-B, target py3.11; dead code deleted and documented at M9-C"
+  },
+  "baselines_to_beat": {
+    "report_gen_official_test_n2663_13D_beam3": {
+      "rouge_l": 0.1899,
+      "bleu_1": 0.2469,
+      "bleu_4": 0.0542,
+      "exact_match_accuracy": 0.2163,
+      "chexbert_14_micro": 0.4736,
+      "chexbert_14_macro": 0.28,
+      "chexbert_5_micro": 0.5522,
+      "chexbert_5_macro": 0.4487
+    },
+    "retrieval_nn_floor_official_test_n2663": {
+      "rouge_l": 0.1636,
+      "bleu_1": 0.2372,
+      "bleu_4": 0.033,
+      "exact_match_accuracy": 0.1735,
+      "chexbert_14_micro": 0.4296,
+      "chexbert_14_macro": 0.3014,
+      "chexbert_5_micro": 0.4856,
+      "chexbert_5_macro": 0.4284
+    },
+    "stage0_val_ppl_pubmed": 13.18,
+    "mimic_i2t_r_at_10_clean_protocol": {
+      "value": 0.1459,
+      "se_pp": 0.57,
+      "role": "non-regression guard only"
+    },
+    "pre_registered_tiers": {
+      "rouge_l": {
+        "floor": 0.15,
+        "target": 0.22,
+        "stretch": 0.26
+      },
+      "chexbert_14_micro": {
+        "floor": 0.25,
+        "target": 0.4,
+        "stretch": 0.5
+      }
+    }
+  },
+  "audit_verified_2026_09_06": {
+    "method": "float64 sequential ground truth, CPU, project venv (torch 2.11.0), this repo at 20a1d27",
+    "F1_selective_scan_rel_max_err_chunk64": {
+      "1e-3": 2.7e-08,
+      "1e-2": 3.2e-08,
+      "1e-1": 0.394,
+      "0.3": 0.775,
+      "0.705": 0.92,
+      "1.0": 0.942
+    },
+    "F2_delta_at_init": {
+      "pre_rms": 0.6957,
+      "hybrid_canonical": 0.8229,
+      "max_dtA_per_step_hybrid": 74.46,
+      "reference": "logU[1e-3, 1e-1]",
+      "blocker": "dt_norm (RMSNorm on Delta before softplus) rescales to unit RMS, so a dt_proj bias init is a NO-OP on every v2 config",
+      "reproduced_in_M1B": {
+        "hybrid_150m_v2_pre_rms": {
+          "mean": 0.6932,
+          "max": 0.7587,
+          "max_dtA": 12.14
+        },
+        "hybrid_150m_v2_hybrid": {
+          "mean": 0.807,
+          "max": 4.813,
+          "max_dtA": 77.01
+        }
+      }
+    },
+    "F3_defect_appears_3x": [
+      "scan_interface.py:118-119 (fast path)",
+      "mamba_block.py:_slow_forward ~:228 (identical division; validate_for_willi.sh:310 builds Gate-6 with use_fast_path=False, so the harness exercises the buggy path)",
+      "tfla_interface.py:93-95 (mLSTM intra-chunk; :149 inter-chunk already log-space)"
+    ],
+    "F4_tfla_clamp_hit_rate_in_64chunk": {
+      "forget_bias_0.0_shipped": 0.709,
+      "forget_bias_1.0": 0.368,
+      "forget_bias_2.0": 0.0,
+      "output_error_magnitude": "QUANTIFIED in M1-C: rel-max-err 0.882 at the shipped forget_gate_bias_init=0.0 + chunk_size=64. Tracks the clamp exactly: ~1e-7 wherever min(f_cum) > 1e-6, 0.48-0.96 wherever below. Table in MAMBA3_PLAN.md Context 1; oracle in tests/test_mamba3_numerics.py::sequential_mlstm_fp64."
+    },
+    "F5_log_space_segsum_is_exact": {
+      "mamba1_form_all_deltas": "~1.7e-16",
+      "ssd_scalar_A_form": "4.3e-16"
+    },
+    "F6_mask_memory_bs48_L1024": {
+      "mamba1_cs64_GB": 19.33,
+      "mamba1_cs8_MB": 302,
+      "ssd_cs64_MB": 19
+    },
+    "F7_prototype_verified_fp64": {
+      "ssd_chunked": 4.4e-16,
+      "plus_rope": 4.5e-16,
+      "plus_trapezoid": 5.3e-16,
+      "trapezoid_and_rope": 5.3e-16,
+      "bit_identity_lambda_eq_1": 0.0
+    },
+    "F8_param_budget_dim768_expand2": {
+      "mamba1_d_state16": 3772448,
+      "mamba3_d_state128": 3821872,
+      "mamba3_d_state64": 3708080,
+      "mamba3_ngroups2": 4043056,
+      "mamba3_d_state256": 4049456,
+      "mamba3_mimo_rank4": 4430128,
+      "model_150m_measured": 183721824,
+      "model_150m_with_mamba3_d128_predicted": 184166640,
+      "band_test": "181e6 < n < 186e6 at tests/test_willi_parity.py:276-280 (guards hybrid_150m_v2; leave byte-identical)"
+    },
+    "F9_decode_is_superlinear": {
+      "s_per_token_16": 0.01346,
+      "s_per_token_32": 0.01281,
+      "s_per_token_64": 0.01527,
+      "s_per_token_128": 0.01731,
+      "note": "confirmed super-linear trending quadratic; no state cache exists (cache accepted and ignored by every mixer except sLSTM)"
+    },
+    "F10_slstm_leaks_across_documents": "hybrid_block.py:140-143 gates cu_seqlens on ('mamba','mlstm'), so sLSTM silently leaks state across packed documents today - a latent live bug, fixed at M2-E"
+  },
+  "arms": {
+    "A0": {
+      "desc": "Mamba-1 as-shipped",
+      "role": "control; must reproduce the Phase-5 curve",
+      "status": "done",
+      "job_id": "job 2513005",
+      "val_ppl": 19.387
+    },
+    "A0-seed": {
+      "desc": "A0, different seed",
+      "role": "THE NOISE FLOOR - run before ranking anything",
+      "status": "done",
+      "job_id": "job 2513006",
+      "val_ppl": 18.933
+    },
+    "A1": {
+      "desc": "Mamba-1 + exact scan + dt init + no Delta-norm",
+      "role": "isolates the defect/Delta fix; screen-only, never enters the full pipeline",
+      "status": "done",
+      "job_id": "2513750 (2513057 TIMED OUT at 12h)",
+      "val_ppl": 16.294
+    },
+    "A2": {
+      "desc": "Mamba3Block, exact Mamba-2 reduction, d_state=128",
+      "role": "SSD + 8x state (report as a BUNDLE)",
+      "status": "done",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A2)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 16.708,
+      "job_id": "array 2513632_0",
+      "verdict": "WINNER. 16.708 (s42) / 16.376 (s1234), mean 16.542, cross-seed spread 0.332."
+    },
+    "A3": {
+      "desc": "A2 + exponential-trapezoidal",
+      "role": "Prop. 1",
+      "status": "done",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A3)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 16.719,
+      "job_id": "array 2513632_1"
+    },
+    "A4": {
+      "desc": "A2 + complex/RoPE",
+      "role": "Sec 3.2",
+      "status": "done",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A4)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 1166.701,
+      "job_id": "array 2513632_2"
+    },
+    "A5": {
+      "desc": "A2 + trapezoid + RoPE",
+      "role": "Mamba-3 SISO",
+      "status": "done",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A5)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 1166.185,
+      "job_id": "array 2513632_3"
+    },
+    "A6": {
+      "desc": "A5 + bc_bias=one_init, conv dropped",
+      "role": "Sec 3.4 refinements",
+      "status": "done",
+      "submit": "eval \"$(python scripts/mamba3_arms.py env A6)\" && sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 1168.531,
+      "job_id": "array 2513632_4"
+    },
+    "A4-lo": {
+      "desc": "A4 with mamba3_theta_max=0.002",
+      "role": "M7-G: re-test Prop. 3/4 at 0.16 turns over 512 tokens. The M7-B rope arms measured theta_max=1.0 (81 turns), the only value reachable at the time.",
+      "status": "done",
+      "submit": "ARM=A4-lo sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 16.431,
+      "job_id": "2514913"
+    },
+    "A4-mid": {
+      "desc": "A4 with mamba3_theta_max=0.02",
+      "role": "M7-G: re-test Prop. 3/4 at 1.63 turns over 512 tokens. The M7-B rope arms measured theta_max=1.0 (81 turns), the only value reachable at the time.",
+      "status": "done",
+      "submit": "ARM=A4-mid sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 16.534,
+      "job_id": "2514914"
+    },
+    "A4-hi": {
+      "desc": "A4 with mamba3_theta_max=0.2",
+      "role": "M7-G: re-test Prop. 3/4 at 16.30 turns over 512 tokens. The M7-B rope arms measured theta_max=1.0 (81 turns), the only value reachable at the time.",
+      "status": "done",
+      "submit": "ARM=A4-hi sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 16.199,
+      "job_id": "2514915",
+      "verdict": "REJECTED. 16.199 (s42) / 18.912 (s1234), mean 17.556, cross-seed spread 2.713 = 8.2x A2's. Its seed-42 lead was a lucky draw; the ordering flipped."
+    },
+    "A2-s2": {
+      "desc": "A2 replicated at seed 1234",
+      "role": "M7-D tiebreak: A4-hi leads A2 by 0.509 PPL = 79% of the bar, and the theta_max sweep showed 0.335 PPL of paired trajectory sensitivity. Replicate before committing 133 GPU-h to M8.",
+      "status": "done",
+      "submit": "ARM=A2-s2 sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 16.376,
+      "job_id": "2515666"
+    },
+    "A4-hi-s2": {
+      "desc": "A4-hi replicated at seed 1234",
+      "role": "M7-D tiebreak: A4-hi leads A2 by 0.509 PPL = 79% of the bar, and the theta_max sweep showed 0.335 PPL of paired trajectory sensitivity. Replicate before committing 133 GPU-h to M8.",
+      "status": "done",
+      "submit": "ARM=A4-hi-s2 sbatch --time=12:00:00 scripts/train_stage0_150m_h100.sh",
+      "val_ppl": 18.912,
+      "job_id": "2515667"
+    }
+  },
+  "pre_registered": {
+    "decision_rule": "advance the arm with lowest val PPL ONLY if Delta > 2x seed SD; otherwise advance the SIMPLEST arm",
+    "stop_rule": "if A2 is worse than A0 at 12K (M7-C), STOP and report - the buggy operator was an unintended regularizer. Do not tune around it.",
+    "scaled_arms": "ngroups>1, d_state>=256, mimo_rank>=4 exit the parameter-matched regime and may only be reported as scaled arms, never as the headline comparison"
+  },
+  "phase_order": [
+    "M0",
+    "M1",
+    "M2",
+    "M3",
+    "M4",
+    "M5",
+    "M6",
+    "M7",
+    "M8",
+    "M9",
+    "M10"
+  ],
+  "phases": {
+    "M0": {
+      "title": "Branch, plan-of-record, bootstrap",
+      "status": "complete",
+      "checkboxes": {
+        "M0-A": {
+          "done": true,
+          "desc": "git checkout -b h100_scaling_mamba3 from h100_scaling. Nothing on h100_scaling changes."
+        },
+        "M0-B": {
+          "done": true,
+          "desc": "Write MAMBA3_PLAN.md (this document) and mamba3_state.json at repo root."
+        },
+        "M0-C": {
+          "done": true,
+          "desc": ".gitignore: allowlist both (mirror the !h100_scaling_state.json pattern)."
+        },
+        "M0-D": {
+          "done": true,
+          "desc": "CLAUDE.md Session Bootstrap → read MAMBA3_PLAN.md + mamba3_state.json first;"
+        },
+        "M0-E": {
+          "done": true,
+          "desc": "Retire MAMBA3_INTEGRATION_PLAN.md + mamba3_integration_state.json (its audit is folded in here)."
+        },
+        "M0-F": {
+          "done": true,
+          "desc": "Commit."
+        }
+      },
+      "evidence": {
+        "baseline_tests": "164 passed, 6 skipped (pytest -m 'not cuda and not slow', 61s)",
+        "base_commit": "20a1d27",
+        "helper": "scripts/mamba3_state.py"
+      },
+      "verdict": null
+    },
+    "M1": {
+      "title": "Pin the defect, then fix it on the legacy path (produces arm A1)",
+      "status": "complete",
+      "checkboxes": {
+        "M1-A": {
+          "done": true,
+          "desc": "test_selective_scan_matches_sequential_reference — float64 oracle, Δ ∈ {1e-3, 1e-2, 1e-1,"
+        },
+        "M1-B": {
+          "done": true,
+          "desc": "test_delta_at_init_is_in_mamba_range — Δ mean ∈ [1e-3, 1.5e-1] for pre_rms and hybrid."
+        },
+        "M1-C": {
+          "done": true,
+          "desc": "TFLA intra-chunk test; quantify the mLSTM output error (open from Context §1)."
+        },
+        "M1-D": {
+          "done": true,
+          "desc": "Mark all three xfail(strict=True) citing this plan, so CI is green on HEAD and flips loudly."
+        },
+        "M1-E": {
+          "done": true,
+          "desc": "scan_impl: {\"legacy\",\"exact\"}, default legacy. For the Mamba-1 form do not use the 4-D"
+        },
+        "M1-F": {
+          "done": true,
+          "desc": "dt_init_strategy: {none, mamba} (default none) + norm_topology: hybrid_bc (B/C norm"
+        },
+        "M1-G": {
+          "done": true,
+          "desc": "Fix _slow_forward too, or collapse both into one function."
+        },
+        "M1-H": {
+          "done": true,
+          "desc": "TFLA intra-chunk log-space fix (tfla_interface.py:93-95 only; do not touch :149)."
+        },
+        "M1-I": {
+          "done": true,
+          "desc": "Flip all three xfails. Gate: rel-err ≤ 1e-6 at every Δ, and legacy bit-identical to today."
+        }
+      },
+      "evidence": {
+        "test_file": "tests/test_mamba3_numerics.py",
+        "m1a_scan_xfails": "15 (selective_scan_parallel 7, public API 4, _slow_forward 4)",
+        "m1b_delta_150m_v2": "pre_rms mean 0.6932/max 0.7587; hybrid mean 0.8070/max 4.8130/max|dtA| 77.01",
+        "m1c_tfla_rel_max_err_shipped": "0.882 (forget_bias=0.0, chunk=64)",
+        "m1d_marker_gap": "pytest.mark.cuda now applied to 3 classes in test_kernels.py; 5 tests deselect instead of silently skipping",
+        "m1e_exact_scan": "rel-max-err ~1e-7 (fp32 floor) at delta in {1e-3..5.0}, all chunk sizes; legacy unchanged at 0.92 @ delta=0.705",
+        "m1e_algorithm": "flip the parallel axis: sequential within chunk (all chunks in parallel) + carry across chunks. depth cs+L/cs, no mask, no division. Avoids the 19.3GB (cs,cs,d_inner,N) segsum mask.",
+        "m1f_delta_grid": "pre_rms/none 0.6932 | pre_rms/mamba 0.0211 OK | hybrid/none 0.7987 | hybrid/mamba 0.3320 (dt_norm erases the fix) | hybrid_bc/none 0.6932 | hybrid_bc/mamba 0.0211 OK",
+        "m1g_slow_forward": "collapsed into the shared interface; ulp-level change only (rel 9.8e-08) from Bx multiplication order",
+        "m1h_tfla_exact": "re-centre on half the chunk log-decay + guarded sequential fallback when the half-range exceeds 40 (fp32 exp limit). worst error 8.5e-07 across forget_bias -4..3 x chunk 8/64/128; legacy is 1.00 at bias -4",
+        "m1i_perf_cpu": "exact scan is 2-3x FASTER than legacy on CPU (0.35x/0.47x wall at L=128/512) -- legacy's 5-D cumsum+divide dominates. exact TFLA 1.03x. GPU unmeasured."
+      },
+      "verdict": null
+    },
+    "M2": {
+      "title": "Mamba3Block = exactly Mamba-2 SSD (+ the sequential oracle)",
+      "status": "complete",
+      "checkboxes": {
+        "M2-A": {
+          "done": true,
+          "desc": "ssd_reference.py: float64 sequential oracle and step(x_t, state) → y_t, state."
+        },
+        "M2-B": {
+          "done": true,
+          "desc": "ssd_interface.ssd_chunked_scan() — chunked, scalar-A/head, log-space mask, matmul-shaped,"
+        },
+        "M2-C": {
+          "done": true,
+          "desc": "Mamba3Block: in_proj → [z, x, B, C, dt, A, trap, angles], BCNorm, optional conv, SSD scan,"
+        },
+        "M2-D": {
+          "done": true,
+          "desc": "Register the type: configuration_hybrid.py:51-53 Literal + :145-151 valid_types;"
+        },
+        "M2-E": {
+          "done": true,
+          "desc": "supports_cu_seqlens contract + signature drift guard + sLSTM leak warning."
+        },
+        "M2-F": {
+          "done": true,
+          "desc": "New HybridConfig fields, all defaulting to Mamba-2 behaviour. Replace the 18-named-kwargs"
+        },
+        "M2-G": {
+          "done": true,
+          "desc": "Tests: \"mamba3\" in test_layers.py:129; update test_models.py:114; structural equality"
+        },
+        "M2-H": {
+          "done": true,
+          "desc": "Extend Gate 6 to the 4-type pattern [\"mamba\",\"mamba3\",\"mlstm\",\"slstm\"] at dim=64"
+        },
+        "M2-I": {
+          "done": true,
+          "desc": "Arch fingerprint logged at HybridLanguageModel.__init__ (layer_pattern, mixer classes,"
+        },
+        "M2-J": {
+          "done": true,
+          "desc": "20-sample beam-decode timing probe. Tripwire: if > 1.5× the mamba1 time, promote M6 to M3."
+        }
+      },
+      "evidence": {
+        "files": "hybrid_xmamba/kernels/ssd/{__init__,ssd_reference,ssd_interface}.py",
+        "accuracy": "rel-max-err <=1e-12 (measured ~4e-16) vs the fp64 sequential oracle, all shapes/chunks/boundary layouts",
+        "boundary_handling": "three boolean masks over segment ids (same / carry_ok / end_ok); no Python loop over segments",
+        "bug_found_1": "the -1e30 log-decay sentinel destroys the finite part of a cumsum (fp64 loses <1e14 next to 1e30), so A_cum[end]-A_cum[t] came back exactly 0 and killed within-document decay too. Replaced with boolean masks.",
+        "bug_found_2": "repeat_interleave gives head-indexed B but the einsum labelled it 'g', silently summing over heads",
+        "m2c_block": "hybrid_xmamba/layers/mamba3_block.py; in_proj sized for every flag so params are constant across arms A2..A6",
+        "m2g_param_match": "hybrid_150m_m3 = 184,192,200 vs control 183,721,824 (+0.256%); structural-equality test asserts only the 9 mamba mixers changed",
+        "m2e_slstm_leak": "fixed: cu_seqlens dispatched on a declared capability, not a hard-coded ('mamba','mlstm') tuple. sLSTM had been silently leaking state across packed documents.",
+        "m2h_gate6": "widened to ['mamba','mamba3','mlstm','slstm'] with use_fast_path=False",
+        "m2i_fingerprint": "ARCH layers=[mamba3x9, mlstmx3] | ... | mamba3(d_state=128, ..., trapezoid=False, rope=False) | params=184,192,200",
+        "m2j_decode_probe": "mamba3 vs mamba1: decode 1.04x, prefill 0.79x. Tripwire (>1.5x) NOT tripped -- M6 stays after M3-M5.",
+        "job": "2513598",
+        "fingerprint": "mamba3x9 d_state=128 params=184,192,200",
+        "wall": "7m14s (1m53s in the training loop)"
+      },
+      "verdict": null
+    },
+    "M3": {
+      "title": "Exponential-trapezoidal",
+      "status": "complete",
+      "checkboxes": {
+        "M3-A": {
+          "done": true,
+          "desc": "trap head, λ = sigmoid(trap), two SSD passes sharing one mask, 1-step (B,x) chunk carry,"
+        },
+        "M3-B": {
+          "done": true,
+          "desc": "Bit-identity: λ ≡ 1 reproduces M2 exactly (torch.equal) via the zeroed-slice /"
+        },
+        "M3-C": {
+          "done": true,
+          "desc": "vs the fp64 3-term oracle, rel-err ≤ 1e-6."
+        }
+      },
+      "evidence": {
+        "m3a": "trapezoid via the extra_terms hook: coeff=gamma=lambda*dt, extra=(beta=(1-lambda)*dt*alpha, shift(B), shift(x)); beta zeroed at document starts",
+        "m3b_bit_identity": "lambda==1 vs trapezoid-off: torch.equal=True, max|diff|=0.000e+00, with and without cu_seqlens. lambda=0.5 differs by 1.1e-1, so the flag is not a no-op.",
+        "m3c_accuracy": "rel-max-err ~3e-16 vs the fp64 3-term oracle across lambda in {0, 0.5, 1, random} x chunk {16,32,64}, plus multi-document",
+        "fm5_bug": "job 2513007 logged 'scan_impl=legacy | tfla_impl=legacy | dt_init=none' for the A1 arm. Fixed by HybridConfig.from_hydra + upgraded parity guard + preflight now uses the trainer's own builder.",
+        "arm_param_match": "A2 184,192,200 | A3 184,192,416 | A5 184,192,416 | A6 184,167,072 -- spread 0.014%"
+      },
+      "verdict": null
+    },
+    "M4": {
+      "title": "Complex-valued state (RoPE trick)",
+      "status": "complete",
+      "checkboxes": {
+        "M4-A": {
+          "done": true,
+          "desc": "rotary.py: Θ = cumsum(Δ·θ) in float64 (~2 MB, negligible), remainder(·, 2π) before"
+        },
+        "M4-B": {
+          "done": true,
+          "desc": "Bit-identity: rope off reproduces M3 exactly."
+        },
+        "M4-C": {
+          "done": true,
+          "desc": "Rotate-then-shift ordering test (Prop. 4)."
+        },
+        "M4-D": {
+          "done": true,
+          "desc": "Capability test — the paper's headline claim. ✅ Reproduced. Controlled parity"
+        },
+        "M4-E": {
+          "done": true,
+          "desc": "Angle-drift test: fp32 path vs fp64 sequential rotation < 1e-6 at L=1024;"
+        }
+      },
+      "evidence": {
+        "m4a": "hybrid_xmamba/layers/rotary.py: Theta=cumsum(dt*theta) in fp64, wrapped to [0,2pi), per-document reset; theta=theta_max*tanh(proj) for a near-identity warm start",
+        "m4b_bit_identity": "zero-angle rope vs rope-off: torch.equal=True with and without cu_seqlens; non-zero angles change the output",
+        "m4c_ordering": "rotate-then-shift vs shift-then-rotate differ by 2.07e-01, so Prop. 4's ordering is a real constraint, not a nicety",
+        "m4e_drift": "max|Theta| reaches 87.5 rad at L=4096; fp64 path holds 2.38e-07 (the fp32 output floor) while a naive fp32 cumsum drifts to 6.51e-06 and grows with length",
+        "m4d_controlled": "rope off 61.6% / 64.3% | rope on 100.0% / 100.0% (seeds 0,1; chance 50%)",
+        "m4d_negative_result": "at the reference dt init, parity stays 57-63% for theta_max in {3.2, 32, 320}; theta_max=320 was WORSE (57%) than 32 (63%)",
+        "m4d_mechanism": "angle = Delta*theta; pi per token needs Delta*theta ~ pi; Delta~0.02 at init caps the angle near 0.06 rad"
+      },
+      "verdict": null
+    },
+    "M5": {
+      "title": "Flags folded into arm definitions (no milestone of its own)",
+      "status": "complete",
+      "checkboxes": {
+        "M5-A": {
+          "done": true,
+          "desc": "bc_bias ∈ {none, zero_init, one_init}; assert none ≡ zero_init bitwise."
+        },
+        "M5-B": {
+          "done": true,
+          "desc": "use_conv=False path; n_params moves by exactly 9 × 8,960."
+        },
+        "M5-C": {
+          "done": true,
+          "desc": "mimo_rank plumbing, default 1, asserted bit-identical. Never run."
+        }
+      },
+      "evidence": {
+        "tests": "tests/test_mamba3_numerics.py::M5",
+        "harness": "9/9 gates, 327 passed, 21 xfailed"
+      },
+      "verdict": null
+    },
+    "M6": {
+      "title": "O(1) recurrent decode cache",
+      "status": "complete",
+      "checkboxes": {
+        "M6-A": {
+          "done": true,
+          "desc": "Mamba3Block.step() + allocate_inference_cache() (reuse M2-A's oracle). State:"
+        },
+        "M6-B": {
+          "done": true,
+          "desc": "mLSTMBlock.step() + cache (C, n, m)."
+        },
+        "M6-C": {
+          "done": true,
+          "desc": "Cache plumbing through HybridBlock.forward, generate(), beam_search_decode — including"
+        },
+        "M6-D": {
+          "done": true,
+          "desc": "Equivalence: cached decode == full recompute, atol ≤ 1e-5, greedy and beam=3, with and"
+        },
+        "M6-E": {
+          "done": true,
+          "desc": "Add prefill / per-token decode / TTFT to performance_profile.py — the repo has no"
+        }
+      },
+      "evidence": {
+        "tests": "tests/test_mamba3_numerics.py::M6 (16 tests)",
+        "speedup": "21.5x per token",
+        "growth": "cached 0.99x vs recompute 1.19x"
+      },
+      "verdict": null
+    },
+    "M7": {
+      "title": "Timing probe + short-run screen  — H100",
+      "status": "in_progress",
+      "checkboxes": {
+        "M7-A": {
+          "done": true,
+          "desc": "⚠ Do this before anything else costs money. (i) Run A0 twice with different seeds at"
+        },
+        "M7-A2": {
+          "done": true,
+          "desc": "Early-start the Mamba-1 arms. A0, A0-seed and A1 need only M1's flags, so they can"
+        },
+        "M7-B0": {
+          "done": true,
+          "desc": "scripts/screen_arms_h100.sh as a SLURM job array (--array=0-7), arm selected by"
+        },
+        "M7-B": {
+          "done": true,
+          "desc": "Screen A0, A0-seed, A1, A2, A3, A4, A5, A6 — 12,000 steps, 150M, aisc-batch,"
+        },
+        "M7-C": {
+          "done": true,
+          "desc": "Gate: A2 ≤ A0 at 12K. If the corrected operator is *worse*, stop and report — the buggy"
+        },
+        "M7-D": {
+          "done": true,
+          "desc": "Per-lever deltas. Pre-registered decision rule (written before the numbers exist): advance"
+        },
+        "M7-G": {
+          "done": true,
+          "desc": "⚠ Re-test Prop. 3/4 at a rotation rate that is a position code. The M7-B rope"
+        },
+        "M7-E": {
+          "done": false,
+          "desc": "Mechanism-sensitive diagnostics (nearly free, and they test the actual claim): synthetic"
+        },
+        "M7-F": {
+          "done": true,
+          "desc": "If A2 wins, note it as a bundle (SSD parameterization + 8× state), not \"SSD is better\","
+        }
+      },
+      "evidence": {
+        "script": "scripts/screen_arms_h100.sh",
+        "tests": "test_willi_parity.py::test_screen_arms_job_array_reads_the_shared_arm_ladder",
+        "A0_s42": "jobs/2513005",
+        "A0_s1234": "jobs/2513006",
+        "ppl": "19.387 / 18.933",
+        "noise_floor": "0.454 PPL (2.37%)",
+        "bar": "0.642 PPL (3.35%)",
+        "array": "2513632",
+        "A2": "16.708",
+        "A3": "16.719",
+        "A4": "1166.701",
+        "A5": "1166.185",
+        "A6": "1168.531",
+        "gate": "A2 <= A0, passed by 4.2x the bar",
+        "A4_lo": "16.431 (job 2514913)",
+        "A4_mid": "16.534 (job 2514914)",
+        "A4_hi": "16.199 (job 2514915)",
+        "A2_s1234": "16.376 (job 2515666)",
+        "A4hi_s1234": "18.912 (job 2515667)"
+      },
+      "verdict": null
+    },
+    "M8": {
+      "title": "Full pipeline on the winner — H100",
+      "status": "pending",
+      "checkboxes": {
+        "M8-A": {
+          "done": false,
+          "desc": "Stage-0 150M, 120K steps. Measured 2.22 s/step → 74 h; budget 1.5× for retries (the"
+        },
+        "M8-B": {
+          "done": false,
+          "desc": "Contrastive tower, canonical recipe (vit_unfreeze=12, vit_lr=3e-6, bs=64, head_lr=4.24e-4),"
+        },
+        "M8-C": {
+          "done": false,
+          "desc": "Report-gen decoder, NUM_GPUS=4 MAX_STEPS=12000, tower from M8-B."
+        },
+        "M8-D": {
+          "done": false,
+          "desc": "Official test split n=2663, DECODE=beam BEAM_SIZE=3, then CheXbert as a second job in"
+        },
+        "M8-E": {
+          "done": false,
+          "desc": "Re-measure the boilerplate/template-duplication rate — an open item on the incumbent and the"
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "M9": {
+      "title": "Cleanup, writeup, reintegration",
+      "status": "pending",
+      "checkboxes": {
+        "M9-A": {
+          "done": false,
+          "desc": "Flip scan_impl default to exact; keep legacy documented as reproduction-only."
+        },
+        "M9-B": {
+          "done": false,
+          "desc": "Retire py3.9: drop harness gates 1-3 (AST/PEP-604/PEP-585), target py3.11, delete the willi CI"
+        },
+        "M9-C": {
+          "done": false,
+          "desc": "Delete dead code — mamba_block_v2.py, mlstm_block_v2.py, hybrid_layer.py,"
+        },
+        "M9-D": {
+          "done": false,
+          "desc": "analysis/mamba3_results.md: the audit table, the OFAT ladder, the \"not the specified"
+        },
+        "M9-E": {
+          "done": false,
+          "desc": "Update mamba3_state.json verdict; append a note to h100_scaling_state.json — Phase 5's PPL"
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "M10": {
+      "title": "Re-open the mamba/mLSTM ratio",
+      "status": "pending",
+      "checkboxes": {
+        "M10-A": {
+          "done": false,
+          "desc": "Screen ratio arms at 12K steps, holding the winning M8 operator and every other lever fixed:"
+        },
+        "M10-B": {
+          "done": false,
+          "desc": "Same pre-registered decision rule as M7-D: advance only if Δ > 2× seed SD, else keep 9/3."
+        },
+        "M10-C": {
+          "done": false,
+          "desc": "Full pipeline only if M10-A produces a winner that also clears the M7-D bar. Otherwise record"
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    }
+  },
+  "notes": [
+    "2026-09-06: Branch h100_scaling_mamba3 cut from h100_scaling @ 20a1d27 (clean tree). M0-A done.",
+    "2026-09-06: Audit reproduced independently in the project venv; every number under audit_verified_2026_09_06 was measured this session, not inherited from the retired MAMBA3_INTEGRATION_PLAN.md.",
+    "2026-09-06: Full M2+M3+M4 math prototyped in fp64 and verified exact before any code was written (F7). Implementation phases are engineering, not research.",
+    "2026-09-06: M0 complete. Branch h100_scaling_mamba3 @ 20a1d27; MAMBA3_PLAN.md + mamba3_state.json shipped; .gitignore allowlisted; CLAUDE.md repointed (incl. corrections to the false Triton claim and the stale 'forward takes only input_ids' claim); MAMBA3_INTEGRATION_PLAN.md + mamba3_integration_state.json retired. Baseline test suite green: 164 passed, 6 skipped.",
+    "2026-09-06: current_phase -> M1_pin_the_defect",
+    "2026-09-06: M1-A/B/C/D done. tests/test_mamba3_numerics.py pins all three defects with strict xfails: 20 passed, 19 xfailed, 0 failed. Suite 184 passed / 1 skipped / 5 deselected / 19 xfailed. mLSTM error QUANTIFIED (0.882 at shipped config), closing the last open measurement.",
+    "2026-09-06: M1 complete. scan_impl and tfla_impl flags added (both default 'legacy'); exact paths verified against fp64 oracles; dt_init_strategy='mamba' + norm_topology='hybrid_bc' put Delta in range. Suite 227 passed / 1 skipped / 5 deselected / 21 xfailed. py3.9 static gates green.",
+    "2026-09-06: current_phase -> M2_mamba3_block",
+    "2026-09-06: Batching decided: M7-B uses a SLURM job array (--array=0-7, one submission for 8 arms); M8 uses --dependency=afterok chaining for Stage-0 -> tower -> decoder -> eval -> CheXbert; eval+CheXbert share one allocation. A0/A0-seed/A1 can start on the cluster before M2-M6 land (M7-A2).",
+    "2026-09-06: M2-A/B done. hybrid_xmamba/kernels/ssd/ -- fp64 sequential oracle + ssd_step (the M6 decode path) and the chunked SSD scan. Exact (~4e-16) across 4 shapes x 3 chunk sizes, with document boundaries mid-chunk / on chunk edge / multi-doc, and the extra_terms hook M3 needs. 88 passed, 21 xfailed.",
+    "2026-09-06: M2 complete. Mamba3Block registered as a fourth layer type; flags all-off is exactly Mamba-2 SSD. 150M m3 config lands at 184,192,200 params (+0.256%), delta exactly 9x the per-mixer delta. All 9 willi gates green under py3.9.23.",
+    "2026-09-06: current_phase -> M3_exponential_trapezoidal",
+    "2026-09-06: unticked M7-A2",
+    "2026-09-06: M7-A2 prep landed: configs/model/hybrid_150m_a1.yaml (Delta 0.0224 vs control 0.8070, params 183,708,000 = -13,824 for the 9 dropped dt_norms); SEED + SAVE_TOP_K env overrides in train_stage0_h100.sh; MODEL_CONFIG overridable in the 150M wrapper. Arms A0/A0-seed/A1 are now submittable.",
+    "2026-09-06: README.md updated with a branch section (defect table, SSD memory argument, parameter matching, landed work, run commands, baselines, auto-generated progress table). scripts/mamba3_state.py gained a 'readme' subcommand so the status cannot go stale; contract updated in MAMBA3_PLAN.md + CLAUDE.md to require it at the end of every phase.",
+    "2026-09-06: Added scripts/preflight_mamba3_h100.sh: the aisc login node refuses to execute python, so the M7-A2 pre-flight is an sbatch job (CPU, ~2 min) that checks all three arm fingerprints, the [181,186]M param band, Delta at init, and the CPU suite. README run instructions corrected -- they had wrongly told the user to run python on lx01.",
+    "2026-09-06: M3 complete (exponential-trapezoidal). ALSO fixed a live FM5 bug found by the ARCH fingerprint on aisc job 2513007: every training entry point built HybridConfig from a hand-written kwarg list, so scan_impl/tfla_impl/dt_init_strategy reached the yaml but not the model and the A1 arm trained with its defects intact. Replaced with HybridConfig.from_hydra() everywhere.",
+    "2026-09-06: current_phase -> M4_complex_state",
+    "2026-09-06: Storage: found save_top_k hard-coded at 3 in train_stage0_distill.py:484, so the SAVE_TOP_K env override never took effect -- 8.4 GB per 150M arm, 67 GB across an 8-arm screen against a 200 GB quota. Now read from config; screen arms should use SAVE_TOP_K=0 (last.ckpt only, preserving --requeue).",
+    "2026-09-06: M4-A/B/C/E done (complex state via the RoPE trick). M4-D (parity capability) still running.",
+    "2026-09-06: M4-D reproduced the paper's parity claim under control -- rope-off 61.6%/64.3% vs rope-on 100.0%/100.0% over two seeds, identical but for use_rope. Caveat found: the angle is Delta*theta, so under the reference dt init (Delta ~ logU[1e-3,1e-1]) the reachable angle is ~0.06 rad and parity is NOT solved at any theta_max; it needs Delta free to reach ~1. State tracking is therefore largely dormant at the standard operating point -- a null on LM would not disprove complex transitions.",
+    "2026-09-06: current_phase -> M5_flags_and_arms",
+    "M5: bc_bias none==zero_init bitwise (both paths, with and without documents); one_init verified a real arm; conv drop moves params by exactly 9x8,960 = 80,640; mimo rank 1 bit-identical and rank>1 refuses.",
+    "2026-09-06: M5 also closed the submission gap the ladder had: arms A3-A6 exist only as model.mamba3_* CLI overrides, and train_stage0_h100.sh had no way to pass them. scripts/mamba3_arms.py is now the single definition of all 8 arms (config + overrides + seed + expected ARCH tokens); the pre-flight verifies it at full 150M scale and submission reads it via 'eval $(python scripts/mamba3_arms.py env A5)'.",
+    "2026-09-06: Full ladder parameter counts, measured: A0/A0-seed 183,721,824 | A1 183,708,000 | A2 184,192,200 | A3 184,192,416 | A4 184,192,200 | A5 184,192,416 | A6 184,167,072. A2..A6 spread 0.014%; whole ladder 0.26% of the control.",
+    "2026-09-06: current_phase -> M6_decode_cache",
+    "M7-B0: scripts/screen_arms_h100.sh is a SLURM job array over the shared ladder (ARMS default A2..A6; A0/A0-seed/A1 excluded, early-started under M7-A2). Levers are read from mamba3_arms.py, never hand-written; recipe delegated to the 150M wrapper so FM7 recipe drift is impossible.",
+    "2026-09-06: M7-A(ii) teacher on/off probe is now informational only: A0/A0-seed/A1 are already training WITH the BioMedLM teacher, so screening A2-A6 without it would break the paired comparison. The early start (M7-A2) foreclosed that saving for this screen; it would only apply to a future 70M screen.",
+    "M7-A(i) NOISE FLOOR MEASURED. A0 s42 val PPL 19.387 (loss 2.887); A0 s1234 val PPL 18.933 (loss 2.864). |dPPL| = 0.454 = 2.37%; d log-loss 0.023 nats. SD estimate 0.321 PPL (n=2), so the pre-registered '2x seed SD' bar is 0.642 PPL = 3.35%. The plan's expected architecture effect was 1-3% -- FM6 has materialised: the unpaired screen cannot rank arms that differ by less than ~3.4%.",
+    "2026-09-06: Per-arm wall clock measured: A0 ran 03:25 -> 11:24 = ~8.0 h for 12,000 steps, of which the progress bar attributes only 2:37 to the training loop (1.36 it/s over 36,000 micro-batches = 2.2 s/optimiser step, matching the 2.22 s/step estimate). The other ~5.4 h is validation (983 batches x 6 checks, teacher resident) plus packing and checkpoint writes. Budget 8 h/arm wall, not 7.4.",
+    "2026-09-06: INCIDENT job 2513581: the documented single-arm launch ran python on lx01, which the login node refuses. The refusal text word-split into 'command not found' lines, the eval exported nothing, and sbatch ran the wrapper defaults -- hybrid_150m_v2, 120,000 steps, save_top_k=3 -- under the experiment name m3_probe_A2. A silent second A0 at 10x length. Fixed by resolving ARM= on the compute node; the pre-submit eval no longer exists.",
+    "A2 GPU PROBE PASSED (job 2513598, 300 steps, 7m14s wall). Fingerprint exactly A2: mamba3x9 d_state=128 conv=True trapezoid=False rope=False bc_bias=none, params=184,192,200. Loss finite and descending (ce 4.517, ppl 91.6 at step 300); no NaN, no spike; bf16 autocast + gradient checkpointing + SSD all fine on H100. Mamba3Block had never run on a GPU before this.",
+    "2026-09-06: SPEED, measured: A2 2.18 optimiser-steps/s vs A0 1.36 -- 1.60x on the reported rate, ~1.76x once A0's six interleaved validation passes are subtracted. Direction is unambiguous (SSD is matmul-shaped and drops the 4-D pairwise-decay tensor), magnitude is provisional: A2 ran 300 steps with no validation and pays start-up over fewer steps. Confirm on equal footing from the screen, where all arms share one validation schedule. Note the 2.6B teacher is a fixed cost in both, so the student-side speedup is larger than the end-to-end figure.",
+    "2026-09-06: Probe collision fixed: ARM= took EXPERIMENT from mamba3_arms.py and ignored the caller, so the 300-step probe wrote into outputs/m3_screen_A2_s42 and left a last.ckpt for the real A2 run. A caller-supplied EXPERIMENT now wins.",
+    "2026-09-06: M7-B SCREEN LAUNCHED: array 2513632 (tasks 0-4 = A2,A3,A4,A5,A6), all five started immediately on gx07/gx08x2/gx14x2, no queue wait; A1 (2513057) still running alongside at 11h. Every task's [arm] line confirms the right levers, and each writes to its own outputs/m3_screen_<arm>_s42 -- the unset EXPERIMENT guard held.",
+    "2026-09-06: Added scripts/mamba3_watch.sh (login-node safe, no python) for squeue + sacct preemption state + per-arm progress + disk, and --open-mode=append to the three H100 sbatch headers: aisc-batch is preemptible and nothing passes ckpt_path, so a requeued arm restarts from step 0 -- previously the requeue also truncated the log, erasing the only evidence.",
+    "2026-09-06: Third login-node refusal: 'bash scripts/mamba3_watch.sh' was blocked before its first echo, so the guard intercepts running a SCRIPT, not just python. Rule corrected everywhere: anything scripted goes through sbatch/srun or is designed to be sourced; individual commands stay fine interactively. mamba3_watch.sh now carries SBATCH headers, works under source (BASH_SOURCE), and skips the du pass unless it is running as a job.",
+    "2026-09-06: A1 (job 2513057) TIMED OUT at 12:00:03 without finishing 12,000 steps -- my --time=12:00:00 was too short. A0 needed 7:59 wall; A1's exact Mamba-1 scan cannot use the cheap log-segsum (that form costs 19.3 GB) and flips the parallel axis instead, which the plan accepted as 3-5x slower because A1 is screen-only. 3-5x of A0's 2:37 training loop is 8-13 h on top of ~5 h of validation. A1's walltime is now recorded as 24:00:00 in mamba3_arms.py. No PREEMPTED anywhere -- the array is clean.",
+    "2026-09-06: COST STRUCTURE, inferred from A0: wall 7:59 but Lightning's train progress bar reports 2:36:50, and Lightning times its validation on a separate bar. val_max_samples=2000 caps ARTICLES, not chunks -- 2000 full PubMed articles pack into 15,724 chunks = 8M tokens, x6 val passes, each running the 2.6B teacher as well as the student. Validation therefore looks like roughly TWICE the cost of training in this screen. Do not change it mid-screen (A0/A0-seed already ran); size it down for M8 and any future screen.",
+    "M7-B SCREEN COMPLETE (array 2513632). A0 s42 19.387 / s1234 18.933 | A2 16.708 | A3 16.719 | A4 1166.701 | A5 1166.185 | A6 1168.531. M7-C GATE PASSED: A2 beats A0 by 2.679 PPL paired (-13.8%), 4.2x the 0.642 bar. Trapezoid is a NULL: A3-A2 = +0.011 PPL, 1.7% of the bar, in the well-powered paired comparison. EVERY rope-on arm COLLAPSED to unigram (~7.05 nats vs ln(50257)=10.82 uniform).",
+    "2026-09-06: ROOT CAUSE FOUND for the rope collapse, and it is mine, not the paper's: mamba3_theta_max was NEVER a HybridConfig field. The block default 1.0 was the only value the campaign could run. With dt_limit=1.0 that permits 1 rad/token and 512 rad over a 512-token sequence -- 81 full turns. A relative rotation R(Theta_s - Theta_t) is a position code only inside one turn; past that it aliases, and theta is data-dependent so the aliasing follows content, not distance. Two hand-maintained copies of the forwarding whitelist in hybrid_block.py both omitted theta_max, so the config round-trip test and the ARCH fingerprint both looked clean.",
+    "2026-09-06: Fixed the CLASS: the mamba3 forwarding whitelist is now derived from inspect.signature(Mamba3Block.__init__) instead of hand-listed twice, and a test asserts every block lever has a matching mamba3_ config field. That test immediately found a second unreachable lever, dt_init_floor. mamba3_theta_max / dt_min / dt_max / dt_init_floor are now declared in HybridConfig and hybrid_150m_m3.yaml.",
+    "2026-09-06: Speed confirmed on equal footing (identical validation schedules): A0 fit 2:36:50 vs A2 1:20:55 = 1.94x. The earlier 1.76x probe estimate was conservative.",
+    "2026-09-06: All five array tasks show sacct State=FAILED ExitCode 2:0 despite completing 12,000 steps and saving checkpoints; the log ends with 'error reading input file: Stale file handle' from bash itself on the vast NFS home. Training results are valid -- Trainer.fit reported max_steps reached and the final metrics are present. The exit code is not trustworthy on this filesystem.",
+    "M7-G RESULT: the rope collapse WAS theta_max. theta_max=1.0 (81 turns) -> 1166 PPL; 0.2 -> 16.199; 0.02 -> 16.534; 0.002 -> 16.431. My pre-registered SHAPE was wrong though: I predicted lo/mid recover and hi degrades. All three recovered and hi was the BEST arm in the whole screen. Harm therefore sets in somewhere between 16 and 81 turns, not gradually from one turn.",
+    "2026-09-07: A1 IS THE HEADLINE. A1 = 16.294 (job 2513750, 4:11:13). A0 -> A1 = -3.093 PPL (-16.0%) from fixing the defect on the EXISTING Mamba-1 architecture. A0 -> A2 = -2.679 (-13.8%). A1 - A2 = +0.414 = 64% of the bar, NOT significant: both routes to a correct operator land in the same place. The entire measurable gain is the correctness fix, not the architecture. What SSD buys is cost: A2 runs 3.10x faster than A1 and 1.94x faster than A0. That is exactly the argument the plan made from memory arithmetic before any GPU time was spent -- correctness is affordable in Mamba-2/3's scalar-A form and not in Mamba-1's -- now measured end to end.",
+    "2026-09-07: PAIRED SENSITIVITY FLOOR measured for free: A4-lo/mid/hi share seed, data order and in_proj shape and differ only in theta_max over a 100x range, yet span 0.335 PPL NON-MONOTONICALLY. That is trajectory sensitivity, not a mechanism, and it sets the resolution of any paired comparison in this screen. The A4-hi vs A2 gap (0.509) sits barely above it.",
+    "2026-09-07: M7-D applied: lowest arm is A4-hi 16.199; A4-hi - A2 = 0.509 = 79% of the 0.642 bar, so the pre-registered rule says advance the SIMPLEST arm, A2. Before spending 133 GPU-h on M8, replicate both at seed 1234 (~10 GPU-h): arms A2-s2 and A4-hi-s2 added.",
+    "2026-09-07: current_phase -> M7_screen_tiebreak",
+    "M7-D TIEBREAK COMPLETE, ORDERING FLIPPED. Seed 1234: A2 16.376, A4-hi 18.912 -- A2 wins by 2.536 PPL, having LOST to A4-hi by 0.509 at seed 42. Two-seed means: A2 16.542, A4-hi 17.556. Cross-seed spread: A2 0.332, A0 0.454, A4-hi 2.713 = 8.2x A2's. The rope arm is not merely equal, it is HIGH-VARIANCE. Its seed-42 lead was a lucky draw. WINNER = A2.",
+    "2026-09-07: The pre-registered decision rule earned its keep. M7-D said advance the lowest arm only if the gap exceeds 2x seed SD, else advance the simplest. A4-hi led by 0.509 < 0.642, so the rule said A2 -- and the replication then showed A4-hi losing by 2.536 at another seed. Taking the lowest number would have put a high-variance arm into a 133 GPU-h pipeline.",
+    "2026-09-07: Two M8 blockers found in the tiebreak logs and fixed. (1) ModelCheckpoint filename was 'stage0_kd-{step:06d}-{val/loss:.4f}'; the slash in val/loss is a PATH SEPARATOR, so every save made a directory stage0_kd-step=NNNNNN-val/ with loss=N.NNNN.ckpt inside. Only last.ckpt was ever visible to a *.ckpt glob -- that is why every arm reported zero checkpoints while holding 2.1 GB. Now filename='stage0_kd-step{step:06d}', monitor unchanged. (2) val_check_interval was hard-coded at 2000; at M8-A's 120,000 steps that is 60 validation passes, ~54 h against ~13.5 h of training. Now VAL_EVERY, default 2000 for screens, 10000 for M8-A. The val SET stays 15,724 chunks so the number remains comparable to the 13.18 baseline.",
+    "2026-09-07: current_phase -> M8_full_pipeline",
+    "M6 COMPLETE. Mamba3Block.step/allocate_inference_cache reproduce the chunked forward to <=5e-7 under every flag cross (trapezoid, rope, bc_bias, conv-drop, data-dependent A). mLSTMBlock.step matches apply_tfla at tfla_impl=exact to 1.2e-10. Cached beam=3 is TOKEN-IDENTICAL to the existing uncached beam_search_decode, with and without an image prefix. Measured on a tiny CPU model: 21.5x per-token speedup, and the growth signature is the claim -- full recompute 1.19x from first to second half, cached 0.99x (flat).",
+    "2026-09-07: M6 FINDING 1: the cache cannot be exact against tfla_impl=legacy, because legacy TFLA computes no recurrence at all -- it divides by a clamped forget-gate cumulative product (M1's 0.882 rel-max-err). Measured: step vs legacy apply_tfla is rel 1.01, i.e. the legacy output is noise relative to the correct one. A2 trained with legacy TFLA, so an A2 checkpoint CANNOT be decoded with a state cache. This is a second, functional argument for the M9-A flip -- cacheable decode, not just correctness.",
+    "2026-09-07: M6 FINDING 2: mLSTMBlock._slow_forward and apply_tfla compute DIFFERENT FUNCTIONS. _slow_forward carries the LSE stabilizer m into C/n and divides by max(|n.q|,1); apply_tfla computes an m_state and never applies it, and clamps the SIGNED denominator. Gap 0.42 max abs at L=24, identical for legacy and exact, so structural not the clamp defect. The M1 fp64 oracle already documents TFLA's convention as the reference one, and use_tfla=True is what every checkpoint trained on -- so the cache matches TFLA and _slow_forward is the outlier. Same class as the Mamba-1 _slow_forward divergence M1 found. For M9.",
+    "2026-09-07: M6 LIMITATION, deliberate and documented: prefill steps token by token, so TTFT is 1.7-8.6x SLOWER than the uncached path depending on prompt length, while every token after it is ~21x faster. ssd_chunked_scan already computes the carried state in its inter-chunk loop but does not return it, and padding is masked out of that state, so exposing it correctly is its own change. Recorded as M6 follow-up rather than bolted on.",
+    "2026-09-07: current_phase -> M8_full_pipeline"
+  ],
+  "open_questions": []
+}

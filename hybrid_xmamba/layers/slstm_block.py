@@ -26,6 +26,9 @@ class sLSTMBlock(nn.Module):
         num_heads: Number of LSTM heads for parallel processing
         use_exponential_gate: Whether to use exponential gating
     """
+
+    # MAMBA3_PLAN.md M2-E: declared capability, read by `HybridBlock`. no segment handling: `forward` does not even accept cu_seqlens. Declaring this False is what stops the silent cross-document state leak described in MAMBA3_PLAN.md M2-E.
+    supports_cu_seqlens = False
     
     def __init__(
         self,
