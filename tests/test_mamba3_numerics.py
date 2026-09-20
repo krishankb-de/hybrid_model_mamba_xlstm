@@ -17,6 +17,8 @@ Where `A_cum[s]` falls under 1e-8 the clamp pins the denominator, so the ratio
 import pathlib
 from typing import List
 
+import copy
+
 import pytest
 import torch
 
@@ -807,6 +809,54 @@ def test_architecture_fingerprint_names_the_operator_and_its_flags():
     ctrl = HybridLanguageModel(_load_yaml_config("hybrid_150m_v2")).architecture_fingerprint()
     assert "mamba3" not in ctrl and "mambax9" in ctrl
 
+
+
+@pytest.mark.parametrize("pattern", [["mamba3"], ["mamba3", "mlstm"]])
+def test_ssd_runs_in_a_pure_bf16_model_without_autocast(pattern):
+    """V3-F (job 2560261): the efficiency profiler casts the whole model with `.to(bfloat16)` and
+    runs it WITHOUT autocast, and `ssd_chunked_scan` died with `expected scalar type Float but
+    found BFloat16`. The scan builds its decay factors in fp32 by policy (FM3) while x/B/C stay in
+    the model dtype; under autocast the two are unified for us, so training never saw it. einsum
+    does not promote, so the operands must agree at the call site.
+    """
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    cfg = HybridConfig(vocab_size=128, dim=64, num_layers=len(pattern), layer_pattern=pattern,
+                       max_position_embeddings=64, mamba3_d_state=16, mamba3_head_dim=32,
+                       use_fast_path=False, use_tfla=False)
+    torch.manual_seed(0)
+    ref = HybridLanguageModel(cfg).eval()
+    ids = torch.randint(0, 128, (2, 48))
+    with torch.no_grad():
+        out32 = ref(ids).logits
+    bf = copy.deepcopy(ref).to(dtype=torch.bfloat16).eval()
+    with torch.no_grad():
+        out16 = bf(ids).logits
+    assert out16.dtype is torch.bfloat16
+    assert torch.isfinite(out16).all()
+    rel = (out16.float() - out32).abs().max() / out32.abs().max()
+    assert rel < 0.05, "bf16 forward disagrees with fp32 by {:.3f}".format(rel)
+
+
+def test_ssd_document_masking_survives_bf16():
+    """The doc-boundary masks are boolean and the decay is fp32; the bf16 fix must not drop the
+    reset. Perturbing document B must leave document A bit-identical, in bf16 as in fp32."""
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    cfg = HybridConfig(vocab_size=128, dim=64, num_layers=1, layer_pattern=["mamba3"],
+                       max_position_embeddings=64, mamba3_d_state=16, mamba3_head_dim=32,
+                       use_fast_path=False, use_tfla=False)
+    torch.manual_seed(0)
+    model = HybridLanguageModel(cfg).to(dtype=torch.bfloat16).eval()
+    ids = torch.randint(0, 128, (1, 32))
+    cu = torch.zeros(1, 32, dtype=torch.long); cu[:, 16:] = 1
+    other = ids.clone(); other[:, 16:] = torch.randint(0, 128, (1, 16))
+    with torch.no_grad():
+        a = model(ids, cu_seqlens=cu).logits[:, :16]
+        b = model(other, cu_seqlens=cu).logits[:, :16]
+    assert torch.equal(a, b), "document A changed when document B was edited -- reset lost in bf16"
 
 # ---------------------------------------------------------------------------
 # M3: exponential-trapezoidal discretization (paper Sec 3.1, Prop. 1)

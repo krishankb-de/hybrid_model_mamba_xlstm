@@ -815,8 +815,76 @@ incumbents have); decoder seeds 42/43/44 paired with 15B-3; 13D tower reused.
 - [x] **V3-A** Stage-0 150M, 120K steps (`ARM=<A2x|A2> STEPS=120000 WARMUP_STEPS=2000 VAL_EVERY=10000 SAVE_TOP_K=1 EXPERIMENT=h100_stage0_150m_m3`), recipe otherwise identical to Phase 5 / 14A-3 (bs 16×3, LR 4e-4, clip 0.5, `GRAD_CKPT=true` — kept for recipe parity with Phase 5 / 14A-3, not for time). Expect **~58 h wall** at A2x's measured 1.73 s/step all-in (V2-C), inside the wrapper's 4-day limit; the unchanged 15,724-chunk val set is kept so PPL stays comparable. A single preemption restarts from step 0 (FM9) — check `sacct` daily. **Gate: val PPL reported against 13.18 (hybrid) and 11.222 (Transformer)**; there is no Stage-0 seed band for any of the three — say so; the 12K-screen spread (0.33–0.45 PPL) is the only noise estimate. If preempted, resume from `last.ckpt` via `train_stage0_distill_resume.py` rather than restarting (FM9).
 - [x] **V3-B** Tower: reuse `outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt` unchanged (14A-4 caveat: co-trained with the legacy hybrid text encoder; recorded, not fixed). No run.
 - [x] **V3-C** Decoder × 3 (chain stage 2): `MODEL_CONFIG=hybrid_150m_m3_rrg`, `DECODER_CKPT=<V3-A last.ckpt>`, `NUM_GPUS=4 MAX_STEPS=12000 SEED=<s> SAVE_TOP_K=0 AUX_LAMBDA=0.0 PREFIX_K=32`, 13D tower. Read each log: `Missing keys: 0`, `prefix_k = 32`, `Training seed: <s>`, `Aux CheXpert loss: OFF`.
-- [ ] **V3-D** Eval × 3 → CheXbert × 3 → bootstraps × 9 (chain stages 3–5): official test split n=2663, `DECODE=beam BEAM_SIZE=3`, the incumbents' uncached path; `PER_LABEL=true` bootstraps per seed vs hybrid (same seed), vs Transformer (same seed), vs the floor → `analysis/bootstrap_m3_vs_{hybrid,transformer,floor}_seed{42,43,44}.md`. Apply decision 10; report mean ± SD per metric, never one seed. All six incumbent dump dirs are defaulted in the chain (resolved 2026-09-17 from `h100_scaling_state.json`). The decode runs with `EVAL_TIME=12:00:00` because this decoder's uncached beam speed is unmeasured.
-- [ ] **V3-E** Diversity re-measure on the seed-42 dump (`analyze_diversity_h100.sh`, controls = references + floor) — the boilerplate confound on any ROUGE-L movement.
+- [x] **V3-D** Eval × 3 → CheXbert × 3 → bootstraps × 9 (chain stages 3–5): official test split n=2663, `DECODE=beam BEAM_SIZE=3`, the incumbents' uncached path; `PER_LABEL=true` bootstraps per seed vs hybrid (same seed), vs Transformer (same seed), vs the floor → `analysis/bootstrap_m3_vs_{hybrid,transformer,floor}_seed{42,43,44}.md`. Apply decision 10; report mean ± SD per metric, never one seed. All six incumbent dump dirs are defaulted in the chain (resolved 2026-09-17 from `h100_scaling_state.json`). The decode runs with `EVAL_TIME=12:00:00` because this decoder's uncached beam speed is unmeasured.
+
+**V3 RESULT (2026-09-20). Stage-0 2553736; decoders 2553737/43/49; evals 2553738/44/50; CheXbert 2553739/45/51;
+bootstraps 2553740-42 / 46-48 / 52-54. Nothing preempted, nothing re-run.**
+
+**1. The backbone gate passed, and it is the campaign's headline.** Stage-0 val PPL at 120K steps, one seed each,
+identical recipe: hybrid **13.18** → Mamba-3 A2x **11.674** → Transformer **11.222**. Correcting both recurrences
+and moving to SSD takes **−1.506 PPL (−11.4%)** off the hybrid and closes **77%** of the gap 14A-3 opened; the
+Transformer keeps a 0.452 lead (4.0% relative). ⚠ No arm has a Stage-0 seed band, and 0.452 is the size of the 12K
+screen's seed spread — "essentially matches the Transformer" is supportable, "beats" is not.
+
+**2. That gain does not reach report generation.** Official test split, n=2663, beam 3, 3 seeds, decision 10 applied
+(paired mean must exceed one baseline seed SD **and** hold sign at ≥2/3 seeds):
+
+| metric | Mamba-3 | hybrid | Transformer | vs hybrid | vs Transformer |
+|---|---|---|---|---|---|
+| ROUGE-L | .1953 ± .0029 | .1949 ± .0047 | .1952 ± .0021 | tie | tie |
+| BLEU-1 | .2484 ± .0005 | .2508 ± .0034 | .2478 ± .0022 | tie | tie |
+| BLEU-4 | .0579 ± .0009 | .0578 ± .0032 | .0575 ± .0016 | tie | tie |
+| CheXbert-14-micro | .4480 ± .0188 | .4480 ± .0223 | .4443 ± .0153 | tie | tie |
+| CheXbert-14-macro | .2715 ± .0121 | .2660 ± .0122 | .2692 ± .0106 | tie | tie |
+| CheXbert-5-micro | .5044 ± .0257 | .5086 ± .0382 | .5032 ± .0226 | tie | tie |
+| CheXbert-5-macro | .4170 ± .0164 | .4193 ± .0274 | .4170 ± .0165 | tie | tie |
+| exact-match-14 | .0452 ± .0028 | .0380 ± .0058 | .0455 ± .0027 | **Mamba-3 +.0071** | tie |
+| exact-match-5 | .2242 ± .0070 | .2163 ± .0019 | .2244 ± .0057 | **Mamba-3 +.0079** | tie |
+| example-F1 | .3858 ± .0174 | .3790 ± .0214 | .3817 ± .0144 | tie | tie |
+
+- **Against the matched Transformer: indistinguishable on all 10 metrics.** Across 27 per-seed interval calls only
+  one excluded zero (BLEU-1 at seed 44). This is the strongest same-protocol equivalence the project has measured.
+- **Against the hybrid: two claims, both exact-match**, and both small. Exact-match-5 is positive at 3/3 seeds,
+  exact-match-14 at 2/3. ⚠ Honest qualifier: the bar is the *hybrid's* seed SD as decision 10 specifies, and for
+  exact-match-5 that SD is unusually tight (.0019) while Mamba-3's own is .0070 — against its own spread the claim
+  is ~1.1 SD, i.e. marginal. Report it as "slightly more often reproduces the exact label set", nothing stronger.
+- **The per-seed calls contradict each other**, exactly as in 15B-4: seed 42 gives Mamba-3 BLEU-4 and exact-match-14
+  while the hybrid takes 5-micro; seed 43 gives Mamba-3 three CheXbert metrics while the hybrid takes BLEU-1;
+  seed 44 gives one each. Any single-seed reading of this table would be wrong.
+- **Against the retrieval floor** the standing pattern is unchanged and now holds for a fourth architecture:
+  text and exact-match win at 3/3 seeds, **CheXbert-14-macro loses at 3/3** (−.0180 / −.0294 / −.0422), 5-macro
+  loses at 2/3. Lung Lesion is 0.000 / 0.022 / 0.000 and Pleural Other 0.033 / 0.017 / 0.000 — the rare-label
+  deficit that survived 13F and 15C survives a corrected operator and a new mixer too.
+
+**3. What this licenses.** *At matched parameters, with both recurrences computing what they are specified to
+compute, the attention-free hybrid is statistically indistinguishable from a parameter-matched Transformer on
+every report-generation metric measured, and essentially indistinguishable from the incumbent hybrid despite a
+much better language-modelling backbone.* The backbone improvement is real and measured; its non-transfer is the
+finding, and it is the eleventh instance of this project's recurring result that text-side gains do not move the
+downstream clinical metrics.
+
+**4. Cost, settled from `sacct` wall clocks (12,000 steps each), closing the plan's open speed question.**
+
+| arm | wall | s/step | note |
+|---|---|---|---|
+| A0, Mamba-1, both operators defective | 7:59:00 | 2.395 | |
+| A2, SSD, legacy TFLA | 4:09:14 | 1.246 | **A0/A2 = 1.92×**, so M7's 1.94× from the progress bar was right after all |
+| A2x, SSD, exact TFLA | 5:45:19 | 1.727 | **1.39× the cost of A2** — the price of the correct mLSTM recurrence |
+
+Corrected Mamba-3 is **1.39× faster** than the shipped hybrid at Stage-0 (57h23m vs the hybrid's ~74h at 2.22
+s/step), and the report-gen decoder trains **1.7× faster** (1:19 vs 2:15–2:30). Generation is **1.75× slower**
+(5:16 vs 13D's 3:01 on the same split), because beam search re-runs the model with no state cache; the M6 cache
+is the shipped answer to that and is unused by this eval path.
+
+- [x] **V3-E** Diversity re-measure on the seed-42 dump (`analyze_diversity_h100.sh`, controls = references + floor) — the boilerplate confound on any ROUGE-L movement.
+**V3-E RESULT (job 2560259).** Seed 42, official test split, same protocol and controls as 14B-2. Duplicate-cluster
+rate **26.0%** against 13D's 29.2% on this split, with references at 0.2% and the retrieval floor at 7.3%.
+Lexical diversity moves the same way and by about as little: distinct-2 0.0350 vs 13D's 0.0299, self-BLEU-4 0.6709
+vs 0.6854, mean length 58.5 vs 58.2 tokens. Pre-registered outcome fires **INTERMEDIATE**, as it did for 13D:
+neither the ≥70% qualifier trigger nor the at-or-below-controls clean positive. So the corrected operator writes
+marginally less templated text and stays in the same regime — it is **not** an explanation for any metric movement,
+which is what this check exists to rule out.
+
 - [ ] **V3-F** Efficiency + decode: `MODELS="hybrid_150m_v2 hybrid_150m_m3 transformer_150m_baseline" OUTPUT_DIR=analysis/efficiency_150m_m3 sbatch scripts/profile_efficiency_h100.sh` (the 14A-7 protocol, random weights) plus `performance_profile.py --decode` for the O(L²)→O(L) curve (`tfla_impl=exact`, random weights suffice). Pre-registered: SSD is matmul-shaped so the 14A-7 gap should narrow; report exponents and crossover whichever way it lands.
 - [ ] **V3-G** Tick/notes/evidence after every job; never re-run a checkpoint-producing step without reading its log first.
 

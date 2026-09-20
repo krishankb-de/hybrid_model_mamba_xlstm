@@ -96,5 +96,31 @@ python scripts/performance_profile.py --sweep --backward \
   --dtype "${DTYPE}" \
   --output-dir "${OUTPUT_DIR}/training"
 
+# --- MAMBA3_PLAN_V2.md V3-F: per-token decode, cached vs full recompute -----------------------
+# The two sweeps above time full-sequence forwards, which is the one thing autoregressive
+# generation never does. This is where the O(L^2) -> O(L) claim is measured. Off by default so the
+# 14A-7 protocol above is reproduced byte-for-byte; the cached path needs `tfla_impl: exact`
+# (M6 finding 1), so profile hybrid_150m_m3_rrg rather than hybrid_150m_m3. A model with no
+# `step()` -- the Transformer -- simply reports the recompute row.
+#   DECODE_CURVE=true MODELS="hybrid_150m_v2 hybrid_150m_m3_rrg transformer_150m_baseline" \
+#     sbatch scripts/profile_efficiency_h100.sh
+DECODE_CURVE="${DECODE_CURVE:-false}"
+PROMPT_LEN="${PROMPT_LEN:-256}"
+NEW_TOKENS="${NEW_TOKENS:-64}"
+if [ "${DECODE_CURVE}" = "true" ]; then
+  echo ""
+  echo "########## DECODE (per token, cached vs full recompute) ##########"
+  for m in ${MODELS}; do
+    echo ""
+    echo "--- ${m} (prompt ${PROMPT_LEN}, ${NEW_TOKENS} new tokens) ---"
+    python scripts/performance_profile.py --decode \
+      --model "${m}" \
+      --prompt-len "${PROMPT_LEN}" \
+      --new-tokens "${NEW_TOKENS}" \
+      --batch_size 1 \
+      --dtype "${DTYPE}"
+  done
+fi
+
 echo "=== END: curves in ${OUTPUT_DIR}/{inference,training}/efficiency_curves.{csv,json} ==="
 date

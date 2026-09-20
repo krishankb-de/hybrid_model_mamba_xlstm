@@ -1,7 +1,7 @@
 {
   "current_phase": "V3_full_pipeline",
-  "last_updated": "2026-09-20T15:00:52+02:00",
-  "status": "V3 RUNNING. Stage-0 (2553736) COMPLETE in 57h23m; all three decoders COMPLETE (~1h19 each, ~1.7x faster than the hybrid's); evals s42/s43 COMPLETE (~5h10 each, ~1.75x slower than the hybrid's decode), s44 in flight; 6 of 9 bootstraps written. OUTSTANDING READOUTS: Stage-0 final val PPL (the V3-A gate), the 9 bootstrap tables, CheXbert for s43/s44. Then apply decision 10 (paired mean > 1 baseline seed SD AND sign at >=2/3 seeds) and write V3-D + V4-A.",
+  "last_updated": "2026-09-20T18:48:53+02:00",
+  "status": "V3 nearly complete. BACKBONE: Stage-0 11.674 vs hybrid 13.18 and Transformer 11.222 (77% of the gap closed). REPORT GEN: indistinguishable from both incumbents across 3 seeds bar two small exact-match gains over the hybrid. V3-E diversity INTERMEDIATE. Remaining: re-run V3-F (bf16 profiler bug fixed locally, needs push + resubmit), then V4-A writeup.",
   "plan_of_record": "MAMBA3_PLAN_V2.md",
   "branch": {
     "name": "h100_mamba3_v2",
@@ -906,11 +906,11 @@
           "desc": "Decoder × 3 (chain stage 2): MODEL_CONFIG=hybrid_150m_m3_rrg, DECODER_CKPT=<V3-A last.ckpt>, NUM_GPUS=4 MAX_STEPS=12000 SEED=<s> SAVE_TOP_K=0 AUX_LAMBDA=0.0 ..."
         },
         "V3-D": {
-          "done": false,
+          "done": true,
           "desc": "Eval × 3 → CheXbert × 3 → bootstraps × 9 (chain stages 3–5): official test split n=2663, DECODE=beam BEAM_SIZE=3, the incumbents' uncached path; PER_LABEL=tr..."
         },
         "V3-E": {
-          "done": false,
+          "done": true,
           "desc": "Diversity re-measure on the seed-42 dump (analyze_diversity_h100.sh, controls = references + floor) — the boilerplate confound on any ROUGE-L movement."
         },
         "V3-F": {
@@ -932,9 +932,15 @@
         "chexbert_s43": "14-micro 0.4494, 14-macro 0.2720, 5-micro 0.5010, 5-macro 0.4103, em5 0.2167, example-F1 0.3893",
         "vs_transformer": "all 9 metrics tie at s42 and s43 (18/18 CIs span zero)",
         "vs_hybrid_partial": "per-seed calls contradict; only exact-match-5 is a candidate claim on the 2-seed paired mean",
-        "vs_floor": "text + exact-match win at both seeds; CheXbert-14-macro loses at both (-0.0180 / -0.0294)"
+        "vs_floor": "text + exact-match win 3/3; CheXbert-14-macro loses 3/3 (-0.0180/-0.0294/-0.0422); 5-macro loses 2/3",
+        "3seed_means_mamba3": "ROUGE-L .1953±.0029, BLEU-1 .2484±.0005, BLEU-4 .0579±.0009, 14-micro .4480±.0188, 14-macro .2715±.0121, 5-micro .5044±.0257, 5-macro .4170±.0164, em14 .0452±.0028, em5 .2242±.0070, example-F1 .3858±.0174",
+        "decision10_vs_hybrid": "claims: exact_match_14 +0.0071 (2/3 seeds), exact_match_5 +0.0079 (3/3); other 8 indistinguishable",
+        "decision10_vs_transformer": "no claims; indistinguishable on all 10",
+        "diversity_v3e": "26.0% duplicate clusters vs 13D 29.2%; controls 0.2% / 7.3%; INTERMEDIATE (job 2560259)",
+        "speed_sacct": "A0 7:59:00, A2 4:09:14, A2x 5:45:19 for 12K steps; A0/A2=1.92x, A2x/A2=1.39x",
+        "v3f_status": "blocked by a bf16 dtype bug in ssd_chunked_scan (job 2560261), fixed and tested; re-run pending"
       },
-      "verdict": null
+      "verdict": "BACKBONE WIN, DOWNSTREAM NULL. Stage-0 13.18 -> 11.674 (77% of the gap to the matched Transformer closed, 1.39x faster than the shipped hybrid). Report generation, 3 seeds, official test split: indistinguishable from the Transformer on all 10 metrics and from the hybrid on 8 of 10; the two exceptions are small exact-match gains. The CheXbert-14-macro deficit vs the retrieval floor survives a fourth architecture."
     },
     "V4": {
       "title": "Writeup + cleanup (after V3)",
@@ -1062,7 +1068,12 @@
     "2026-09-20: V3-A/B/C COMPLETE. Stage-0 job 2553736 (gx10) COMPLETED in 2-09:22:44 = 57h23m, matching the 58 h projection; no preemption, one ARCH line, fingerprint mamba3x9 + tfla_impl=exact + 184,192,200 params; final val PPL still to be read from the log. Tower reused unchanged (V3-B, no run). Decoders 2553737/2553743/2553749 (s42/s43/s44) COMPLETED in 1:18:05 / 1:18:56 / 1:19:03 on 4 GPUs -- about 1.7x faster than the hybrid's 2h15-2h30 on the same recipe; every log shows Missing keys: 0, Unexpected: 1, prefix_k=32, the right seed, aux OFF, and tfla_impl=exact (the V2-D pin reached the decoder).",
     "2026-09-20: 2026-09-20: V3-D IN PROGRESS. Evals 2553738 (s42, 5:16:02) and 2553744 (s43, 5:08:09) COMPLETED, 2553750 (s44) running at last check; hyps.txt = 2663 lines for s42; CheXbert scored for s42/s43; 6 of 9 bootstraps written. Uncached beam decode is ~1.75x slower than the hybrid's (5:16 vs 13D's 3:01:10 re-decode, job 2546521) -- EVAL_TIME=12:00:00 was the right call, the wrapper's 6:30 default would have left little margin. FIRST NUMBERS (s42 CheXbert, single seed, NOT a verdict): 14-micro 0.4661, 14-macro 0.2834, 5-micro 0.5316, 5-macro 0.4357, exact-match-5 0.2306, example-F1 0.4012. Paired vs hybrid s42: -0.0075 / +0.0034 / -0.0206 / -0.0130 / +0.0143 / -0.0017. Vs Transformer s42: +0.0071 / +0.0060 / +0.0067 / +0.0038 / -0.0000 / +0.0061. Vs floor 14-macro still -0.0180. Lung Lesion remains 0.000 and Pleural Other 0.033, the same rare-label shape as every prior arm.",
     "2026-09-20: V3-A GATE RESULT: Stage-0 val PPL 11.674 (job 2553736, 120K steps, one seed, recipe identical to Phase 5 / 14A-3). Hybrid 13.18 -> 11.674 = -1.506 (-11.4%); the matched Transformer's 11.222 stays 0.452 ahead (4.0% relative). The corrected Mamba-3 backbone closes 77% of the hybrid-Transformer LM gap that 14A-3 opened. Caveat: one seed per arm at 120K, no Stage-0 seed band anywhere in the project, and the residual 0.452 is the size of the 12K screen's seed spread (0.33-0.45).",
-    "2026-09-20: V3-D PARTIAL (seeds 42+43; s44 eval still running). vs the MATCHED TRANSFORMER: all 9 metrics tie at BOTH seeds -- 18 of 18 intervals span zero. vs the HYBRID, paired by seed: s42 gives mamba3 bleu_4 + exact-match-14 and hybrid 5-micro (6 ties); s43 gives mamba3 14-micro/14-macro/5-micro and hybrid bleu_1 (5 ties) -- the per-seed calls contradict each other, exactly the 15B-4 pattern. Paired 2-seed means vs the hybrid seed SDs: only exact-match-5 (+0.0083 vs SD 0.0019, positive at both seeds) is a candidate claim under decision 10; exact-match-14 exceeds its SD but flips sign; everything else inside noise, including CheXbert-14-macro (+0.0091 vs SD 0.0122). vs the RETRIEVAL FLOOR: text and exact-match win at both seeds, 14-macro LOSES at both (-0.0180 / -0.0294), the standing deficit of every arm. Rare labels unmoved: Lung Lesion 0.0000 / 0.0222."
+    "2026-09-20: V3-D PARTIAL (seeds 42+43; s44 eval still running). vs the MATCHED TRANSFORMER: all 9 metrics tie at BOTH seeds -- 18 of 18 intervals span zero. vs the HYBRID, paired by seed: s42 gives mamba3 bleu_4 + exact-match-14 and hybrid 5-micro (6 ties); s43 gives mamba3 14-micro/14-macro/5-micro and hybrid bleu_1 (5 ties) -- the per-seed calls contradict each other, exactly the 15B-4 pattern. Paired 2-seed means vs the hybrid seed SDs: only exact-match-5 (+0.0083 vs SD 0.0019, positive at both seeds) is a candidate claim under decision 10; exact-match-14 exceeds its SD but flips sign; everything else inside noise, including CheXbert-14-macro (+0.0091 vs SD 0.0122). vs the RETRIEVAL FLOOR: text and exact-match win at both seeds, 14-macro LOSES at both (-0.0180 / -0.0294), the standing deficit of every arm. Rare labels unmoved: Lung Lesion 0.0000 / 0.0222.",
+    "2026-09-20: ticked V3-D, V3-E",
+    "2026-09-20: V3-D VERDICT (3 seeds, decision 10). vs the MATCHED TRANSFORMER: indistinguishable on all 10 metrics; of 27 per-seed interval calls only BLEU-1 at s44 excluded zero. vs the HYBRID: two claims, both exact-match and both small -- exact-match-5 +0.0079 (positive 3/3 seeds) and exact-match-14 +0.0071 (2/3); everything else indistinguishable, and the per-seed calls contradict each other exactly as in 15B-4. Qualifier: decision 10's bar is the hybrid's seed SD, which for exact-match-5 is unusually tight (0.0019) while Mamba-3's own is 0.0070, so against its own spread that claim is ~1.1 SD -- marginal, report as 'slightly more often reproduces the exact label set'. vs the RETRIEVAL FLOOR: text and exact-match win 3/3, CheXbert-14-macro loses 3/3 (-0.0180/-0.0294/-0.0422), 5-macro 2/3; Lung Lesion 0.000/0.022/0.000. Mamba-3 3-seed means: ROUGE-L 0.1953+/-0.0029, 14-micro 0.4480+/-0.0188, 14-macro 0.2715+/-0.0121, example-F1 0.3858+/-0.0174. HEADLINE: the Stage-0 gain (13.18 -> 11.674) does NOT transfer to report generation -- the eleventh instance of this project's text-side non-transfer, and now the cleanest same-protocol equivalence with the Transformer it has measured.",
+    "2026-09-20: V3-E (job 2560259): duplicate-cluster rate 26.0% on the test split vs 13D's 29.2%, controls 0.2% (references) and 7.3% (floor); distinct-2 0.0350 vs 0.0299, self-BLEU-4 0.6709 vs 0.6854, 58.5 tokens vs 58.2. Pre-registered outcome INTERMEDIATE, same as 13D. Templating is marginally lower and in the same regime, so it does not explain any metric movement.",
+    "2026-09-20: SPEED QUESTION CLOSED (sacct wall clocks, 12,000 steps): A0 7:59:00 (2.395 s/step), A2 4:09:14 (1.246), A2-s2 4:19:30, A2x 5:45:19 (1.727) / 5:57:15. A0/A2 = 1.92x, so M7's 1.94x from the progress-bar column was CORRECT and my 2026-09-17 doubt was unnecessary -- the column and the wall clock agree for that pair. Exact TFLA costs 1.39x over A2. Corrected Mamba-3 is 1.39x faster than the shipped hybrid end to end (Stage-0 57h23m vs ~74h), its decoder trains 1.7x faster, and its uncached beam decode is 1.75x slower.",
+    "2026-09-20: V3-F BLOCKED THEN FIXED: the efficiency profiler (job 2560261) crashed in ssd_chunked_scan with 'expected scalar type Float but found BFloat16'. Cause: the profiler builds the model with .to(bfloat16) and NO autocast, while the scan builds its decay factors in fp32 by policy (FM3); einsum does not promote, and training never saw it because autocast unifies the operands. Fixed by unifying einsum operand dtypes to the mixer's dtype and returning the scan in the input dtype -- the same casts autocast applies, verified BITWISE IDENTICAL on both the fp32 and the bf16-autocast forward, so no trained number moves. Three regression tests added (pure-bf16 forward for mamba3 and mamba3+mlstm, and doc-boundary reset under bf16). V3-F needs a re-run."
   ],
   "open_questions": []
 }

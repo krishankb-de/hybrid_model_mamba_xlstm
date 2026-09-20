@@ -5710,6 +5710,17 @@ def test_mamba3_arms_verify_runs_without_an_installed_package():
 
 
 @pytest.mark.willi_parity
+def test_efficiency_wrapper_can_run_the_decode_curve():
+    """V3-F: the O(L^2) -> O(L) claim needs `performance_profile.py --decode`, which the wrapper
+    could not reach -- and the login node runs nothing directly. Default off so the 14A-7 sweep
+    protocol is unchanged."""
+    src = (REPO_ROOT / "scripts" / "profile_efficiency_h100.sh").read_text()
+    assert 'DECODE_CURVE="${DECODE_CURVE:-false}"' in src
+    assert "--decode" in src and "--prompt-len" in src and "--new-tokens" in src
+    assert "hybrid_150m_m3_rrg" in src, "the cached path needs the exact-TFLA config (M6 finding 1)"
+
+
+@pytest.mark.willi_parity
 def test_state_helper_points_at_the_v2_plan_and_accepts_v_phase_ids():
     """V1-A: the helper is the only thing allowed to tick a checkbox; it must read the V2 files
     and recognise both the carried M-ids and the new V-ids."""

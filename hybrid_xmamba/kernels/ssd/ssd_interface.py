@@ -150,12 +150,21 @@ def ssd_chunked_scan(
     mask = torch.exp(segsum(dA_c.permute(0, 1, 3, 2)))           # (batch, nc, nheads, cs, cs)
     mask = mask * same.unsqueeze(2)
 
+    # The decay factors are built in fp32 by policy (FM3) while x/B/C carry the model's dtype, so
+    # every einsum below has to be handed operands that already agree: einsum does NOT promote.
+    # Under autocast this cast is exactly what autocast itself applies, so training numerics are
+    # unchanged; without autocast (a `.to(bfloat16)` model, as the efficiency profiler builds) it is
+    # the difference between running and `expected scalar type Float but found BFloat16` -- job
+    # 2560261. Elementwise promotions outside the einsums are left alone.
+    cdtype = x.dtype
+
     # --- intra-chunk: y[t] = sum_{s<=t} mask[t,s] <C_t, B_s> coeff_s x_s -----------------------
     y = torch.zeros(batch, nc, chunk_size, nheads, headdim, device=x.device, dtype=x.dtype)
     for co_c, B_c, x_ct in chunked:
         CB = torch.einsum("bctgn,bcsgn->bcgts", C_c, B_c)        # (batch, nc, ngroups, cs, cs)
         CB = CB.repeat_interleave(rep, dim=2)                    # broadcast groups over heads
-        y = y + torch.einsum("bchts,bcsh,bcshp->bcthp", mask * CB, co_c, x_ct)
+        y = y + torch.einsum("bchts,bcsh,bcshp->bcthp",
+                             (mask * CB).to(cdtype), co_c.to(cdtype), x_ct.to(cdtype))
 
     # --- inter-chunk: carry the state across chunks (nc sequential steps) ----------------------
     state = torch.zeros(batch, nheads, headdim, dstate, device=x.device, dtype=x.dtype)
@@ -164,7 +173,8 @@ def ssd_chunked_scan(
     for ci in range(nc):
         A_cum_ci = A_cum[:, ci]                                  # (batch, cs, nheads)
         carry_gate = (torch.exp(A_cum_ci) * carry_ok[:, ci].unsqueeze(-1)).unsqueeze(-1)
-        offsets.append(torch.einsum("bhpn,bthn->bthp", state, C_h[:, ci]) * carry_gate)
+        offsets.append(
+            torch.einsum("bhpn,bthn->bthp", state.to(cdtype), C_h[:, ci].to(cdtype)) * carry_gate)
 
         keep = end_ok[:, ci].unsqueeze(-1)                       # (batch, cs, 1)
         decay_to_end = torch.exp(A_cum_ci[:, -1:] - A_cum_ci) * keep
@@ -174,11 +184,15 @@ def ssd_chunked_scan(
         for co_c, B_c, x_ct in chunked:
             state = state + torch.einsum(
                 "bth,bth,bthp,bthn->bhpn",
-                decay_to_end, co_c[:, ci], x_ct[:, ci],
-                B_c[:, ci].repeat_interleave(rep, dim=2),
+                decay_to_end.to(cdtype), co_c[:, ci].to(cdtype), x_ct[:, ci].to(cdtype),
+                B_c[:, ci].repeat_interleave(rep, dim=2).to(cdtype),
             )
 
     y = (y + torch.stack(offsets, dim=1)).reshape(batch, padded, nheads, headdim)
     if D is not None:
         y = y + D.view(1, 1, -1, 1) * (F.pad(x, (0, 0, 0, 0, 0, pad)) if pad else x)
+    # Return in the dtype we were handed. The fp32 decay factors and the fp32 `D` promote `y` on
+    # the way through, which silently hands an fp32 tensor to a bf16 `out_proj` in a non-autocast
+    # model. Under autocast this is the cast autocast would apply at that Linear anyway.
+    y = y.to(cdtype)
     return y[:, :seqlen] if pad else y
