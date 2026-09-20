@@ -1,7 +1,7 @@
 {
   "current_phase": "V3_full_pipeline",
-  "last_updated": "2026-09-19T11:13:13+02:00",
-  "status": "V2 COMPLETE: A2x advanced (2-seed mean 15.677 vs A2 16.542). hybrid_150m_m3_rrg pinned tfla_impl=exact; chain carries all six incumbent dumps + EVAL_TIME=12h. Next: push, then `DRY_RUN=1 source scripts/submit_v3_chain.sh` and submit on the cluster. Stage-0 at the measured rate is ~58 h.",
+  "last_updated": "2026-09-20T14:55:11+02:00",
+  "status": "V3 RUNNING. Stage-0 (2553736) COMPLETE in 57h23m; all three decoders COMPLETE (~1h19 each, ~1.7x faster than the hybrid's); evals s42/s43 COMPLETE (~5h10 each, ~1.75x slower than the hybrid's decode), s44 in flight; 6 of 9 bootstraps written. OUTSTANDING READOUTS: Stage-0 final val PPL (the V3-A gate), the 9 bootstrap tables, CheXbert for s43/s44. Then apply decision 10 (paired mean > 1 baseline seed SD AND sign at >=2/3 seeds) and write V3-D + V4-A.",
   "plan_of_record": "MAMBA3_PLAN_V2.md",
   "branch": {
     "name": "h100_mamba3_v2",
@@ -888,18 +888,18 @@
     },
     "V3": {
       "title": "Full pipeline on the winner, matched to the 14A/15B protocol (~5–6 days wall)",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "V3-A": {
-          "done": false,
+          "done": true,
           "desc": "Stage-0 150M, 120K steps (ARM=<A2x|A2> STEPS=120000 WARMUP_STEPS=2000 VAL_EVERY=10000 SAVE_TOP_K=1 EXPERIMENT=h100_stage0_150m_m3), recipe otherwise identica..."
         },
         "V3-B": {
-          "done": false,
+          "done": true,
           "desc": "Tower: reuse outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt unchanged (14A-4 caveat: co-trained with the legacy hybrid text encoder; recorded,..."
         },
         "V3-C": {
-          "done": false,
+          "done": true,
           "desc": "Decoder × 3 (chain stage 2): MODEL_CONFIG=hybrid_150m_m3_rrg, DECODER_CKPT=<V3-A last.ckpt>, NUM_GPUS=4 MAX_STEPS=12000 SEED=<s> SAVE_TOP_K=0 AUX_LAMBDA=0.0 ..."
         },
         "V3-D": {
@@ -919,7 +919,12 @@
           "desc": "Tick/notes/evidence after every job; never re-run a checkpoint-producing step without reading its log first."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "stage0_job": "2553736 COMPLETED 2-09:22:44 gx10",
+        "stage0_val_ppl": "PENDING readout",
+        "decoder_jobs": "2553737 1:18:05 / 2553743 1:18:56 / 2553749 1:19:03",
+        "decoder_init": "Missing keys: 0, Unexpected: 1 (all three); tfla_impl=exact confirmed"
+      },
       "verdict": null
     },
     "V4": {
@@ -951,7 +956,7 @@
       "verdict": null
     },
     "V5": {
-      "title": "Gated / optional (only with confirmed cluster access)",
+      "title": "Gated / optional (cluster access confirmed 2026-09-19; the remaining gates are scientific)",
       "status": "pending",
       "checkboxes": {
         "V5-A": {
@@ -1044,7 +1049,9 @@
     "2026-09-17: CORRECTION to the M7 headline ('the gain is the defect, not the architecture'): A1 (Mamba-1, 16.294) had BOTH recurrences corrected (scan_impl=exact, tfla_impl=exact), while A2 (16.708) still ran legacy TFLA -- so A1 vs A2 was not like-for-like. With both corrected, A2x s42 15.566 beats A1 s42 16.294 by 0.728 PPL (1.13x the bar; A1 has one seed). Revised reading: fixing the mLSTM recurrence is worth ~0.87 PPL on its own (A2 -> A2x), and once both operators are correct, SSD + 8x state is ahead of corrected Mamba-1 by ~0.7 PPL -- just above the bar, single-seed on A1's side.",
     "2026-09-17: SPEED, re-read from wall clocks: A2x took 5:45:18 and 5:57:14 for 12,000 steps (~1.73 s/step all-in). The progress bar's '1:52:35' is NOT the training time: 36,000 micro-batches at its own 1.75 it/s is 5.7 h, which matches the wall clock, so V2-C's '~2.5 h per arm' estimate was wrong. M7's '1.94x faster' (A0 2:36:50 vs A2 1:20:55) compared that same column and needs re-checking from wall clocks (sacct Elapsed for 2513005 / 2513632_0 / 2515666). Same-column rates: A0 1.36, A2 2.18 (300-step probe), A2x 1.75 it/s -- exact TFLA costs ~20% throughput vs A2, and A2x is ~1.3x A0. V3-A Stage-0 at 120K steps: ~58 h, not ~24 h.",
     "2026-09-17: current_phase -> V3_full_pipeline",
-    "2026-09-19: CLUSTER ACCOUNT EXTENSION APPROVED (user). The 2026-09-29 expiry no longer constrains anything: FM10 retired, the 'Hard constraints' expiry clause removed, V3-A's GRAD_CKPT rationale restated as recipe parity (was deadline), the dated V3 landing projection dropped, the cut order demoted to a preemption contingency, V5's gate reduced to the scientific one (cluster access is confirmed), and the extension question removed from Unresolved. Same removal applied to CLAUDE.md, H100_SCALING_PLAN.md 15C-4 and analysis/PHASE15C_AUX_LOSS.md. Dated historical notes in h100_scaling_state.json are left intact as record. V4-E off-cluster archiving stays live on DUA grounds, not calendar grounds."
+    "2026-09-19: CLUSTER ACCOUNT EXTENSION APPROVED (user). The 2026-09-29 expiry no longer constrains anything: FM10 retired, the 'Hard constraints' expiry clause removed, V3-A's GRAD_CKPT rationale restated as recipe parity (was deadline), the dated V3 landing projection dropped, the cut order demoted to a preemption contingency, V5's gate reduced to the scientific one (cluster access is confirmed), and the extension question removed from Unresolved. Same removal applied to CLAUDE.md, H100_SCALING_PLAN.md 15C-4 and analysis/PHASE15C_AUX_LOSS.md. Dated historical notes in h100_scaling_state.json are left intact as record. V4-E off-cluster archiving stays live on DUA grounds, not calendar grounds.",
+    "2026-09-20: V3-A/B/C COMPLETE. Stage-0 job 2553736 (gx10) COMPLETED in 2-09:22:44 = 57h23m, matching the 58 h projection; no preemption, one ARCH line, fingerprint mamba3x9 + tfla_impl=exact + 184,192,200 params; final val PPL still to be read from the log. Tower reused unchanged (V3-B, no run). Decoders 2553737/2553743/2553749 (s42/s43/s44) COMPLETED in 1:18:05 / 1:18:56 / 1:19:03 on 4 GPUs -- about 1.7x faster than the hybrid's 2h15-2h30 on the same recipe; every log shows Missing keys: 0, Unexpected: 1, prefix_k=32, the right seed, aux OFF, and tfla_impl=exact (the V2-D pin reached the decoder).",
+    "2026-09-20: 2026-09-20: V3-D IN PROGRESS. Evals 2553738 (s42, 5:16:02) and 2553744 (s43, 5:08:09) COMPLETED, 2553750 (s44) running at last check; hyps.txt = 2663 lines for s42; CheXbert scored for s42/s43; 6 of 9 bootstraps written. Uncached beam decode is ~1.75x slower than the hybrid's (5:16 vs 13D's 3:01:10 re-decode, job 2546521) -- EVAL_TIME=12:00:00 was the right call, the wrapper's 6:30 default would have left little margin. FIRST NUMBERS (s42 CheXbert, single seed, NOT a verdict): 14-micro 0.4661, 14-macro 0.2834, 5-micro 0.5316, 5-macro 0.4357, exact-match-5 0.2306, example-F1 0.4012. Paired vs hybrid s42: -0.0075 / +0.0034 / -0.0206 / -0.0130 / +0.0143 / -0.0017. Vs Transformer s42: +0.0071 / +0.0060 / +0.0067 / +0.0038 / -0.0000 / +0.0061. Vs floor 14-macro still -0.0180. Lung Lesion remains 0.000 and Pleural Other 0.033, the same rare-label shape as every prior arm."
   ],
   "open_questions": []
 }
