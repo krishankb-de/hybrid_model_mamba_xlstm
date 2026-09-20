@@ -346,6 +346,7 @@ def generate_from_patch_grid(
     decode: str = "greedy",
     beam_size: int = 3,
     max_new_tokens: int = 100,
+    cached: bool = False,
 ) -> torch.Tensor:
     """(1, N, patch_dim) ViT patch grid -> (1, max_new_tokens) generated token
     ids. Seeds generation with an EMPTY input_ids (no BOS token) -- matches
@@ -360,6 +361,20 @@ def generate_from_patch_grid(
         return greedy_decode(module.decoder, input_ids, prefix_embeds=prefix_embeds,
                               max_new_tokens=max_new_tokens)
     if decode == "beam":
+        # MAMBA3_PLAN_V2.md V4: the O(1) recurrent cache (M6) decodes 5.19x faster per token and
+        # is token-identical to this uncached path by test. OFF by default so the protocol that
+        # produced every published number is untouched, and because it is only available when
+        # EVERY mixer has a step(): mamba3 + mlstm at tfla_impl=exact qualifies, mamba-1 and
+        # attention do not. Verify identity on a handful of samples before trusting a full sweep.
+        if cached:
+            if not module.decoder.supports_cached_decode():
+                raise RuntimeError(
+                    "--cached-decode was requested but this stack has no O(1) step path "
+                    "(mamba-1 and attention mixers have none, and mLSTM needs tfla_impl=exact). "
+                    "Re-run without it.")
+            return module.decoder.beam_search_cached(
+                input_ids, prefix_embeds=prefix_embeds,
+                beam_size=beam_size, max_new_tokens=max_new_tokens)
         return beam_search_decode(module.decoder, input_ids, prefix_embeds=prefix_embeds,
                                    beam_size=beam_size, max_new_tokens=max_new_tokens)
     raise ValueError(f"Unknown decode mode: {decode!r} (expected 'greedy' or 'beam')")
@@ -411,6 +426,9 @@ def run_checkpoint_inspection(args) -> None:
                     std=[0.26862954, 0.26130258, 0.27577711]),
     ])
 
+    if getattr(args, "cached_decode", False):
+        print("Decode path: O(1) recurrent cache (M6). Token-identical to the uncached path by "
+              "test; the published numbers used the uncached path.")
     df = pd.read_parquet(args.parquet)
     n = min(args.num_samples, len(df))
     print(f"Loaded {len(df)} rows from {args.parquet}; inspecting first {n}\n")
@@ -424,6 +442,7 @@ def run_checkpoint_inspection(args) -> None:
         out_ids = generate_from_patch_grid(
             module, patch_grid, decode=args.decode,
             beam_size=args.beam_size, max_new_tokens=args.max_new_tokens,
+            cached=getattr(args, "cached_decode", False),
         )
         generated = tokenizer.decode(out_ids[0].tolist(), skip_special_tokens=True)
         reference = f"Findings: {row.get('findings', '')} Impression: {row.get('impression', '')}".strip()
@@ -745,6 +764,11 @@ def main():
                         help="Number of samples to generate from (for --checkpoint mode)")
     parser.add_argument("--decode", type=str, default="greedy", choices=["greedy", "beam"],
                         help="Decoding strategy (for --checkpoint mode)")
+    parser.add_argument("--cached-decode", action="store_true",
+                        help="Use the O(1) recurrent cache for beam search (M6). Token-identical "
+                             "to the default path by test and ~5x faster per token, but only "
+                             "available when every mixer has a step(). Off by default: the "
+                             "published numbers came from the uncached path.")
     parser.add_argument("--beam-size", type=int, default=3,
                         help="Beam size when --decode beam (for --checkpoint mode)")
     parser.add_argument("--max-new-tokens", type=int, default=100,

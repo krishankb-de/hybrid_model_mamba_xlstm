@@ -921,9 +921,36 @@ tests; `DECODE_CURVE` added to the wrapper so the decode curve is reachable thro
 ### V4 — Writeup + cleanup (after V3)
 
 - [x] **V4-A** `analysis/mamba3_results.md`: audit table, the OFAT ladder, "the headline is the defect" (A1 −16.0% vs A2 −13.8%, not significantly apart), the A2x screen, Stage-0 vs both incumbents, the 3-seed report-gen table with decision 10 applied, efficiency/decode curves, the M4-D parity capability and its Δ caveat, every null stated plainly. Cross-link from `analysis/PHASE14_SUPERVISOR_REVIEW.md` (limitation #2) and `analysis/h100_scaling_results.md`.
-- [ ] **V4-B** Retire py3.9 (old M9-B): drop gates 1–3, target py3.11, `scripts/validate.sh` + a `validate_for_willi.sh` shim, delete the willi CI workflow; keep gates 4–6. Only after V3 is submitted.
-- [ ] **V4-C** Dead code (old M9-C): delete `mamba_block_v2.py`, `mlstm_block_v2.py`, `hybrid_layer.py`, `scan_triton.py`, `tfla_triton.py`, root `test_hybrid_implementations.py`; keep `debug_checkpoint_keys.py` / `check_checkpoint_compatibility.py` (documented tools).
-- [ ] **V4-D** One note in `h100_scaling_state.json` (the Phase-5 PPL and the 13D/15B headline are *compared against*, not superseded); `mamba3_v2_state.json` verdict; `readme`. **Do not merge into `h100_scaling`.**
+- [x] **V4-B** Retire py3.9 (old M9-B): drop gates 1–3, target py3.11, `scripts/validate.sh` + a `validate_for_willi.sh` shim, delete the willi CI workflow; keep gates 4–6. Only after V3 is submitted.
+- [x] **V4-C** Dead code (old M9-C): delete `mamba_block_v2.py`, `mlstm_block_v2.py`, `hybrid_layer.py`, `scan_triton.py`, `tfla_triton.py`, root `test_hybrid_implementations.py`; keep `debug_checkpoint_keys.py` / `check_checkpoint_compatibility.py` (documented tools).
+**V4-B/V4-C DONE 2026-09-20.** `scripts/validate.sh` replaces `validate_for_willi.sh`: the conda
+bootstrap and the three static gates are gone, the remaining three run on whatever interpreter the
+machine has, and the old name survives as a shim. `.github/workflows/willi_parity.yml` deleted —
+**this repo now has no CI**, so the local harness is the only gate; say so rather than implying one
+exists. The PEP 604 / PEP 585 rules live on as ordinary tests, so the hygiene is kept without a 3.9
+interpreter. Deleted 2,246 lines of dead code: `mamba_block_v2.py`, `mlstm_block_v2.py`,
+`hybrid_layer.py`, `scan_triton.py`, `tfla_triton.py`, the root `test_hybrid_implementations.py`
+and `verify_fix.py`, whose only purpose was to syntax-check one of the deleted files. The dangling
+`selective_scan_triton` import is gone from `scan_interface.py`, so nothing in the tree implies a
+Triton kernel this project never dispatched.
+
+**Also fixed under V4 (the issues audit):**
+- `evaluate_lm.py` and `evaluate_retrieval.py` read the architecture from the checkpoint instead of
+  assuming the v1 `[mamba, mamba, mlstm]` cycle, which silently mis-built every v2, Transformer and
+  Mamba-3 checkpoint. `checkpoint_arch.detect_prefix` handles both key layouts.
+- **A second instance of the V3-F bf16 bug**, found by the new dtype test: `MambaBlock._slow_forward`
+  skipped the fp32 cast `selective_scan()` applies, so a bf16 model met an fp32 `D`. All 19 configs
+  use the fast path, so this is test-only and a no-op in fp32.
+- `use_tfla=False` now warns that `_slow_forward` computes a different function from the shipped
+  TFLA operator (M6 finding 2, measured 1.17 max abs apart through the block's own gating, and
+  identical for both `tfla_impl` values, so structural rather than the clamp defect). Neither path
+  is rewritten: the stabiliser is what keeps the slow path usable and TFLA is what the weights were
+  fitted to. The trap is made loud instead of silent.
+- The report-gen eval can opt into the O(1) decode cache (`--cached-decode`, `CACHED_DECODE=true`),
+  token-identical by test and ~5x faster per token, refusing stacks it cannot serve. Off by default
+  so the published protocol is what runs unless asked otherwise.
+
+- [x] **V4-D** One note in `h100_scaling_state.json` (the Phase-5 PPL and the 13D/15B headline are *compared against*, not superseded); `mamba3_v2_state.json` verdict; `readme`. **Do not merge into `h100_scaling`.**
 - [ ] **V4-E** Archive: V3 checkpoints/dumps are DUA-covered and HOME is deleted 6 months after expiry — add them to the Phase-15 archive manifest.
 
 ### V5 — Gated / optional (cluster access confirmed 2026-09-19; the remaining gates are scientific)
@@ -936,7 +963,7 @@ tests; `DECODE_CURVE` added to the wrapper so the decode curve is reachable thro
 
 ## Verification (every phase)
 
-1. `bash scripts/validate_for_willi.sh` exits 0 — Hydra invariants, `pytest -m "not cuda and not slow"`, CPU fwd/bwd
+1. `bash scripts/validate.sh` exits 0 — Hydra invariants, `pytest -m "not cuda and not slow"`, CPU fwd/bwd
    smoke with **no missing gradients over the five-type pattern** `["mamba","mamba3","mlstm","slstm","attention"]`.
    Report any conda degradation explicitly (it happened once, 2026-09-09).
 2. `tests/test_mamba3_numerics.py` fully green; `tests/test_scan_correctness.py` still green (the default path is

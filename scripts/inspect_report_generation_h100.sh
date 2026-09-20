@@ -44,6 +44,12 @@ MODEL_CONFIG="${MODEL_CONFIG:-hybrid_150m_v2_rrg}"
 # loads into a k=32 module reporting "Missing keys: 0" and then generates from
 # the wrong number of image-prefix tokens.
 PREFIX_K="${PREFIX_K:-}"
+# MAMBA3_PLAN_V2.md V4: opt into the O(1) recurrent cache for beam search. 5.19x faster per token
+# and token-identical to the default path by test, but only available when every mixer has a
+# step() -- mamba3 + mlstm at tfla_impl=exact qualifies, mamba-1 and attention do not, and the
+# script fails loudly rather than silently falling back. OFF by default: every published number
+# came from the uncached path, and a five-hour eval is worth less than a comparable one.
+CACHED_DECODE="${CACHED_DECODE:-false}"
 # Default to VALIDATION images, not train -- generations on train images look
 # artificially good even under genuine overfitting; validation is the honest check.
 PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/validate.parquet}"
@@ -95,6 +101,7 @@ python scripts/evaluate_report_generation.py \
   --checkpoint "${CHECKPOINT}" \
   --model-config "${MODEL_CONFIG}" \
   ${PREFIX_K:+--prefix-k "${PREFIX_K}"} \
+  $([ "${CACHED_DECODE}" = "true" ] && echo "--cached-decode") \
   --parquet "${PARQUET}" \
   --num-samples "${NUM_SAMPLES}" \
   --decode "${DECODE}" \

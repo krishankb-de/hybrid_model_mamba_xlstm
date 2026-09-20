@@ -58,6 +58,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+from hybrid_xmamba.utils.checkpoint_arch import infer_layer_types
 from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
 
 # Enable TF32 for A100
@@ -280,13 +281,22 @@ def infer_config_from_state_dict(state_dict, layer_pattern_override=None):
     if num_layers == 0:
         num_layers = 8  # fallback
 
-    # Build layer pattern
+    # Build layer pattern. MAMBA3_PLAN_V2.md V4: read it off the checkpoint instead of assuming
+    # the v1 [mamba, mamba, mlstm] cycle, which silently mis-builds every v2, Transformer and
+    # Mamba-3 checkpoint. An explicit --layer-pattern still wins; the cycle survives only as the
+    # last resort for a checkpoint with no mixer keys to read.
     if layer_pattern_override:
         layer_pattern = layer_pattern_override
     else:
-        # Default hybrid repeating pattern: mamba, mamba, mlstm
-        base = ["mamba", "mamba", "mlstm"]
-        layer_pattern = [base[i % len(base)] for i in range(num_layers)]
+        try:
+            layer_pattern = infer_layer_types(state_dict)
+            num_layers = len(layer_pattern)
+            print("  [arch] detected layer_pattern={}".format(layer_pattern))
+        except ValueError as exc:
+            base = ["mamba", "mamba", "mlstm"]
+            layer_pattern = [base[i % len(base)] for i in range(num_layers)]
+            print("  WARNING: could not detect the layer pattern ({}); assuming {} -- pass "
+                  "--layer-pattern if this checkpoint is not a v1 hybrid.".format(exc, layer_pattern))
 
     return dim, num_layers, layer_pattern
 

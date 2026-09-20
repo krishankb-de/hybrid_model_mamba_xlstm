@@ -5,6 +5,8 @@ and efficient TFLA (Tiled Flash Linear Attention) kernel.
 Based on "xLSTM: Extended Long Short-Term Memory"
 """
 
+import warnings
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -65,6 +67,24 @@ class mLSTMBlock(nn.Module):
 
         self.inner_dim = self.num_heads * head_dim
         self.use_tfla = use_tfla
+        if not use_tfla:
+            # MAMBA3_PLAN_V2.md V4 / M6 finding 2: `_slow_forward` and `apply_tfla` compute
+            # DIFFERENT functions -- measured 0.42 max abs apart at L=24, for both tfla_impl
+            # values, so it is structural and not the M1 clamp defect. `_slow_forward` carries the
+            # LSE stabiliser into C/n and divides by max(|n.q|, 1); `apply_tfla` computes an
+            # m_state, never applies it, and clamps the signed denominator. Every checkpoint in
+            # this project trained with use_tfla=True, and the fp64 oracle documents TFLA's
+            # convention as the reference one, so the slow path must not be used to evaluate or
+            # validate a TFLA-trained checkpoint. Neither is rewritten to match the other: the
+            # stabiliser is what keeps the slow path usable at length, and TFLA is what the
+            # weights were fitted to. Warn instead of choosing silently.
+            warnings.warn(
+                "mLSTMBlock(use_tfla=False) selects _slow_forward, which computes a different "
+                "function from the shipped TFLA operator every checkpoint was trained with "
+                "(LSE-stabilised vs not). Use it for gradient-flow and shape checks, not for "
+                "evaluating trained weights.",
+                RuntimeWarning, stacklevel=2,
+            )
         # MAMBA3_PLAN_V2.md M1-H: "legacy" keeps the pre-2026-09 numerics (defect included)
         # so existing checkpoints stay bit-reproducible; "exact" removes the reciprocal.
         if tfla_impl not in ("legacy", "exact"):

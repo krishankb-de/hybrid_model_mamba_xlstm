@@ -18,6 +18,7 @@ import pathlib
 from typing import List
 
 import copy
+import warnings
 
 import pytest
 import torch
@@ -142,7 +143,7 @@ def test_selective_scan_public_api_matches_sequential_reference(scan_impl, delta
 def test_mamba_block_slow_forward_matches_sequential_reference(scan_impl, delta):
     """M1-A: `use_fast_path=False` carries an identical copy of the defect.
 
-    This path is not a curiosity -- `scripts/validate_for_willi.sh` builds its Gate 6 model with
+    This path is not a curiosity -- `scripts/validate.sh` builds its smoke-gate model model with
     `use_fast_path=False`, so the pre-push harness exercises the buggy branch, not the fast one.
     """
     dim, state = 8, 16
@@ -857,6 +858,122 @@ def test_ssd_document_masking_survives_bf16():
         a = model(ids, cu_seqlens=cu).logits[:, :16]
         b = model(other, cu_seqlens=cu).logits[:, :16]
     assert torch.equal(a, b), "document A changed when document B was edited -- reset lost in bf16"
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_every_layer_type_runs_in_both_dtypes(dtype):
+    """V4: the bf16 scan bug reached the cluster because nothing built a model outside fp32 and
+    autocast. One parametrised forward over all five mixers closes that gap for good."""
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    pattern = ["mamba", "mamba3", "mlstm", "slstm", "attention"]
+    cfg = HybridConfig(vocab_size=128, dim=64, num_layers=len(pattern), layer_pattern=pattern,
+                       state_size=8, mamba3_d_state=16, mamba3_head_dim=32,
+                       use_fast_path=False, use_tfla=True, max_position_embeddings=64)
+    torch.manual_seed(0)
+    model = HybridLanguageModel(cfg).to(dtype=dtype).eval()
+    ids = torch.randint(0, 128, (2, 32))
+    cu = torch.zeros(2, 32, dtype=torch.long); cu[:, 16:] = 1
+    with torch.no_grad():
+        out = model(ids, cu_seqlens=cu).logits
+    assert out.dtype is dtype and torch.isfinite(out).all()
+
+
+def test_use_tfla_false_warns_that_it_is_a_different_operator():
+    """V4 / M6 finding 2: `_slow_forward` and `apply_tfla` compute different functions. Neither is
+    rewritten -- the stabiliser keeps the slow path usable and TFLA is what the weights were fitted
+    to -- so the trap is made loud instead of silent."""
+    from hybrid_xmamba.layers.mlstm_block import mLSTMBlock
+
+    with pytest.warns(RuntimeWarning, match="different function"):
+        mLSTMBlock(64, num_heads=2, head_dim=32, use_tfla=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")          # the default path must stay silent
+        mLSTMBlock(64, num_heads=2, head_dim=32, use_tfla=True)
+
+
+def test_the_two_mlstm_paths_compute_different_functions():
+    """Pins M6 finding 2 so it cannot drift unnoticed, using the block's OWN gating rather than
+    synthetic gates: with uniform random gates the two paths differ by ~18, which says more about
+    the inputs than about the operators. Driven through the real projections the gap is small but
+    unmistakably structural -- it does not shrink with chunk size and is identical for both
+    `tfla_impl` values, so it is not the M1 clamp defect."""
+    from einops import rearrange
+
+    from hybrid_xmamba.kernels.tfla.tfla_interface import apply_tfla
+    from hybrid_xmamba.layers.mlstm_block import _tanh_soft_cap, exponential_activation, mLSTMBlock
+
+    torch.manual_seed(0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        block = mLSTMBlock(64, num_heads=2, head_dim=32, use_tfla=False)
+    x = torch.randn(1, 24, 64)
+    x_proj = block.in_proj(x)
+    xi = x_proj.chunk(2, dim=-1)[0] if block.proj_factor == 2 else x_proj
+    h = block.num_heads
+    q = rearrange(block.q_proj(xi), "b l (h d) -> b h l d", h=h)
+    k = rearrange(block.k_proj(xi), "b l (h d) -> b h l d", h=h)
+    v = rearrange(block.v_proj(xi), "b l (h d) -> b h l d", h=h)
+    i_gate = rearrange(
+        exponential_activation(_tanh_soft_cap(block.i_gate_proj(xi), block.gate_soft_cap).float()),
+        "b l (h d) -> b h l d", h=h)
+    f_gate = rearrange(
+        torch.sigmoid(_tanh_soft_cap(block.f_gate_proj(xi), block.gate_soft_cap)),
+        "b l (h d) -> b h l d", h=h)
+
+    slow = block._slow_forward(q, k, v, i_gate, f_gate)
+    gaps = {impl: (slow - apply_tfla(q, k, v, i_gate, f_gate, tfla_impl=impl)).abs().max().item()
+            for impl in ("legacy", "exact")}
+    assert min(gaps.values()) > 1e-3, (
+        "the two paths converged ({}); update the plan and drop the use_tfla=False warning".format(gaps))
+    assert abs(gaps["legacy"] - gaps["exact"]) < 0.5 * max(gaps.values()), (
+        "the gap now depends on tfla_impl, so it is the clamp defect rather than the structural "
+        "difference M6 recorded: {}".format(gaps))
+
+
+def test_eval_harness_cached_beam_is_token_identical_and_refuses_what_it_cannot_serve():
+    """V4: the report-gen eval spends ~5 h per seed re-running the model for every token. The M6
+    cache is 5.19x faster per token, so the harness can now opt into it -- but only when every
+    mixer has a step(), and only if it produces the SAME tokens. Both halves are pinned here."""
+    import argparse
+    import importlib.util
+
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+    from hybrid_xmamba.models.prefix_mapper import ImagePrefixMapper
+    from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+
+    spec = importlib.util.spec_from_file_location(
+        "evalrg", pathlib.Path(__file__).resolve().parent.parent / "scripts" / "evaluate_report_generation.py")
+    ev = importlib.util.module_from_spec(spec); spec.loader.exec_module(ev)
+
+    class _Mod:
+        def __init__(self, decoder, mapper):
+            self.decoder, self.prefix_mapper = decoder, mapper
+
+    def build(pattern, tfla_impl):
+        cfg = HybridConfig(vocab_size=64, dim=64, num_layers=len(pattern), layer_pattern=pattern,
+                           state_size=8, mamba3_d_state=16, mamba3_head_dim=32, tfla_impl=tfla_impl,
+                           use_fast_path=False, use_tfla=True, max_position_embeddings=64)
+        torch.manual_seed(0)
+        return _Mod(HybridLanguageModel(cfg).eval(), ImagePrefixMapper(32, 64, k=4).eval())
+
+    torch.manual_seed(1)
+    grid = torch.randn(1, 12, 32)
+
+    cacheable = build(["mamba3", "mlstm"], "exact")
+    assert cacheable.decoder.supports_cached_decode()
+    with torch.no_grad():
+        plain = ev.generate_from_patch_grid(cacheable, grid, decode="beam", beam_size=3,
+                                            max_new_tokens=12, cached=False)
+        fast = ev.generate_from_patch_grid(cacheable, grid, decode="beam", beam_size=3,
+                                           max_new_tokens=12, cached=True)
+    assert torch.equal(plain, fast), "cached beam diverged from the uncached path"
+
+    legacy = build(["mamba", "mlstm"], "legacy")          # mamba-1 has no step()
+    assert not legacy.decoder.supports_cached_decode()
+    with pytest.raises(RuntimeError, match="no O\\(1\\) step path"):
+        ev.generate_from_patch_grid(legacy, grid, decode="beam", cached=True)
 
 # ---------------------------------------------------------------------------
 # M3: exponential-trapezoidal discretization (paper Sec 3.1, Prop. 1)

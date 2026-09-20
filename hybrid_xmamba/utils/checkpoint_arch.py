@@ -59,6 +59,24 @@ class InferredArchitecture:
         return out
 
 
+def detect_prefix(state: Mapping[str, Any]) -> str:
+    """Find the `...layers.` prefix in a state dict, whatever wrapper stripping left behind.
+
+    Loaders disagree: the retrieval and STS encoders keep `lm.layers.0.mixer.*`, while
+    `evaluate_lm.py` strips down to `layers.0.mixer.*`. Rather than make each caller guess, read
+    it off the keys. Raises if the dict has no mixer keys at all, which is itself the answer.
+    """
+    pat = re.compile(r"^(.*?layers\.)\d+\.mixer\.")
+    seen = {m.group(1) for k in state for m in [pat.match(k)] if m}
+    if len(seen) == 1:
+        return seen.pop()
+    if not seen:
+        raise ValueError(
+            "no '<prefix>layers.<i>.mixer.*' keys in this checkpoint; first keys: %s"
+            % list(state)[:5])
+    raise ValueError("ambiguous layer prefixes %s -- strip the wrapper first" % sorted(seen))
+
+
 def _mixer_params(state: Mapping[str, Any], prefix: str) -> Dict[int, Dict[str, Any]]:
     """{layer index: {first-segment name: tensor}} for every ``<prefix><i>.mixer.*`` key."""
     pat = re.compile(r"^" + re.escape(prefix) + r"(\d+)\.mixer\.(.+)$")
@@ -78,7 +96,8 @@ def _first_segments(params: Mapping[str, Any]) -> set:
     return {k.split(".")[0] for k in params}
 
 
-def infer_layer_types(state: Mapping[str, Any], prefix: str = "lm.layers.") -> List[str]:
+def infer_layer_types(state: Mapping[str, Any], prefix: Optional[str] = None) -> List[str]:
+    prefix = detect_prefix(state) if prefix is None else prefix
     layers = _mixer_params(state, prefix)
     if not layers:
         raise ValueError(f"no '{prefix}<i>.mixer.*' keys found; first keys: {list(state)[:5]}")
@@ -96,7 +115,8 @@ def infer_layer_types(state: Mapping[str, Any], prefix: str = "lm.layers.") -> L
     return pattern
 
 
-def infer_architecture(state: Mapping[str, Any], prefix: str = "lm.layers.") -> InferredArchitecture:
+def infer_architecture(state: Mapping[str, Any], prefix: Optional[str] = None) -> InferredArchitecture:
+    prefix = detect_prefix(state) if prefix is None else prefix
     layers = _mixer_params(state, prefix)
     pattern = infer_layer_types(state, prefix)
     names_of = {i: _first_segments(layers.get(i, {})) for i in range(len(pattern))}

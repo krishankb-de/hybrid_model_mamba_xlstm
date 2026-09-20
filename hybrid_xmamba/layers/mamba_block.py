@@ -242,7 +242,14 @@ class MambaBlock(nn.Module):
         """
         chunk_size = min(64, x.shape[1])
         impl = selective_scan_parallel if self.scan_impl == "legacy" else selective_scan_exact
-        return impl(x, dt, A, B, C, self.D.float(), chunk_size=chunk_size)
+        # Same fp32 policy the fast path applies in `selective_scan()` (FM3), and for the same
+        # reason: the scan exponentiates a cumsum spanning exp(0) to underflow inside one chunk.
+        # It was missing here, so a bf16 model met an fp32 `D` and died on dtype -- the mamba-1
+        # twin of the bf16 bug V3-F hit in the SSD scan. A no-op in fp32, where every config runs.
+        in_dtype = x.dtype
+        y = impl(x.float(), dt.float(), A.float(), B.float(), C.float(), self.D.float(),
+                 chunk_size=chunk_size)
+        return y.to(in_dtype)
 
     def _forward_segmented(
         self,

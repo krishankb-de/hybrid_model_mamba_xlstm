@@ -41,6 +41,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+from hybrid_xmamba.utils.checkpoint_arch import infer_architecture
 from hybrid_xmamba.models.hybrid_lm import HybridTextEncoder
 
 
@@ -76,14 +77,19 @@ def load_encoder(checkpoint_path: str, device: str = "cuda") -> HybridTextEncode
     dim = next(
         (int(v.shape[1]) for k, v in state.items() if "token_embedding.weight" in k), 512
     )
-    base = ["mamba", "mamba", "mlstm"]
+    # MAMBA3_PLAN_V2.md V4: architecture from the checkpoint, not from a hard-coded v1 cycle and
+    # hard-coded sizes. The old form mis-built every v2, Transformer and Mamba-3 checkpoint, and
+    # `strict=False` then hid it behind a key count.
+    arch = infer_architecture(state)
+    print("  [arch] detected layer_pattern={}, norm_topology={}".format(
+        arch.layer_pattern, arch.norm_topology))
     cfg = HybridConfig(
-        dim=dim, num_layers=num_layers,
-        layer_pattern=[base[i % len(base)] for i in range(num_layers)],
+        dim=dim, num_layers=arch.num_layers,
+        layer_pattern=arch.layer_pattern, norm_topology=arch.norm_topology,
         vocab_size=50257, max_position_embeddings=1024,
-        state_size=16, conv_size=4, expand_factor=2, head_dim=64,
-        use_tfla=True, proj_factor=2, slstm_hidden_dim=dim, slstm_num_heads=4,
+        head_dim=64, use_tfla=True, proj_factor=2, slstm_hidden_dim=dim, slstm_num_heads=4,
         norm_type="rms", use_mlp=True, mlp_ratio=4.0, dropout=0.0,
+        **arch.size_kwargs(),
     )
     model = HybridTextEncoder(cfg, embed_dim=512)
     missing, _ = model.load_state_dict(state, strict=False)

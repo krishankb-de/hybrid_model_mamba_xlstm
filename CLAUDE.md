@@ -194,50 +194,38 @@ The system will run on A100 GPU with max 40 GB of VRAM on the production system 
 
 ## Pre-Push Validation Protocol (MANDATORY)
 
-Willi server runs **Python 3.9.23** via conda. Bugs that slip through locally (PEP 604 syntax, wrong type hints, config drift) cost hours of SLURM debugging. Follow this protocol after every edit.
-
 ### After ANY edit to `hybrid_xmamba/`, `scripts/`, or `configs/`
 
 ```bash
-bash scripts/validate_for_willi.sh
+bash scripts/validate.sh
 ```
 
-This runs inside the `willi_parity` conda env (Python 3.9.23) and gates:
-1. AST parse of all source files under Python 3.9
-2. PEP 604 guard — no `X | Y` union syntax (use `Optional[X]`)
-3. PEP 585 guard — no bare `dict[...]`/`list[...]` generics (use `typing.Dict`/`typing.List`)
-4. Hydra config invariants for all 70M models (`dim=512`, `num_layers=8`, `max_position_embeddings=1024`)
-5. `pytest tests/ -m "not cuda and not slow"` (CPU, no SLURM required)
-6. Dry-run training smoke (2 steps, CPU, ~2 min)
+Three gates, a few minutes, no env bootstrap:
+1. Hydra config invariants for the 70M models (`dim=512`, `num_layers=8`, `vocab_size`, `max_position_embeddings`, non-empty `layer_pattern`)
+2. `pytest tests/ -m "not cuda and not slow"` (CPU, no SLURM required)
+3. Model import + CPU forward/backward over **all five mixer types** (`mamba`, `mamba3`, `mlstm`, `slstm`, `attention`) with `use_fast_path=False` and `use_tfla=False`, asserting finite loss and that **every parameter receives a gradient**
+
+It picks its interpreter from `$PYTHON`, else `./.venv` (cluster), else `./venv` (laptop), else `python3`.
 
 **Do not claim an edit is complete or commit it until this script exits 0.**
 
-### If Python 3.9.23 is unavailable locally
+### What changed, and why (V4-B, 2026-09-20)
 
-Say so explicitly. Do not claim success without running the harness.
+The harness used to bootstrap a `willi_parity` conda env pinned to **Python 3.9.23** and run three
+extra static gates (AST parse, PEP 604 unions, PEP 585 generics) to mirror the willi/A100 server.
+**willi is retired.** The cluster runs Python 3.11 and this laptop 3.14, so the 3.9 interpreter
+gated nothing anyone deploys to while costing ~7 minutes of env setup per run. `scripts/validate.sh`
+replaces it; `scripts/validate_for_willi.sh` remains as a shim that execs it, because the old name
+is written into older plans and commit messages. `.github/workflows/willi_parity.yml` is deleted —
+**this repo currently has no CI**, so the local harness is the only gate.
 
-### Before pushing to `a100_70m_baseline`
-
-- `bash scripts/validate_for_willi.sh` must be green.
-- Last GitHub Actions run on `a100_70m_baseline` must be green (check Actions tab).
-- Never push with `git push --no-verify` or skip the harness.
+The three syntax rules survive as ordinary tests in `tests/test_willi_parity.py`
+(`test_no_pep604_union_in_runtime_imports` and friends), so the hygiene is kept without requiring a
+3.9 interpreter. Writing `X | Y` or bare `dict[...]` in runtime code still fails the suite.
 
 ### When adding a new module or config key
 
-Add a corresponding assertion to `tests/test_willi_parity.py`. The parity test file is the living spec of willi compatibility — keep it up to date.
+Add a corresponding assertion to `tests/test_willi_parity.py`. That file is the living spec of what
+this project guarantees about its own configuration and wrappers — keep it up to date. It is also
+where the operator pins live: every model yaml must declare `scan_impl` and `tfla_impl` explicitly.
 
-### Common willi-incompatible patterns to avoid
-
-| Wrong (Python ≥ 3.10) | Correct (Python 3.9) |
-|---|---|
-| `x: dict[str, int]` | `x: Dict[str, int]` (import from `typing`) |
-| `def f() -> list[str]` | `def f() -> List[str]` |
-| `Optional[X] \| None` or `X \| Y` | `Optional[X]` or `Union[X, Y]` |
-| `from __future__ import annotations` + bare generics | Explicit `typing` imports |
-
-### GitHub Actions CI
-
-Every push to `a100_70m_baseline` triggers `.github/workflows/willi_parity.yml`:
-- Python 3.9.23, CPU-only, Ubuntu runner
-- Same gates as local harness (static checks + unit tests + parity tests + dry-run)
-- PRs targeting `a100_70m_baseline` are also gated

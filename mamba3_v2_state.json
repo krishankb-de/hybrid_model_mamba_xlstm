@@ -1,6 +1,6 @@
 {
   "current_phase": "V4_writeup_and_cleanup",
-  "last_updated": "2026-09-20T20:08:18+02:00",
+  "last_updated": "2026-09-20T20:58:50+02:00",
   "status": "V3 COMPLETE and written up (analysis/mamba3_results.md). Backbone: Stage-0 11.674 vs hybrid 13.18 and Transformer 11.222, 77% of the gap closed. Task: indistinguishable from the Transformer on all 10 metrics and from the hybrid on 8 of 10 across 3 seeds. Efficiency: memory parity with FlashAttention, 2.6x faster training at L=2048, trains where the incumbent OOMs, O(1) decode 5.19x with flat growth. Remaining: V4-B retire py3.9, V4-C delete dead code, V4-D/E state + archive; V5 optional (14C-3 is the highest-value item).",
   "plan_of_record": "MAMBA3_PLAN_V2.md",
   "branch": {
@@ -955,15 +955,15 @@
           "desc": "analysis/mamba3_results.md: audit table, the OFAT ladder, \"the headline is the defect\" (A1 −16.0% vs A2 −13.8%, not significantly apart), the A2x screen, Sta..."
         },
         "V4-B": {
-          "done": false,
+          "done": true,
           "desc": "Retire py3.9 (old M9-B): drop gates 1–3, target py3.11, scripts/validate.sh + a validate_for_willi.sh shim, delete the willi CI workflow; keep gates 4–6. Onl..."
         },
         "V4-C": {
-          "done": false,
+          "done": true,
           "desc": "Dead code (old M9-C): delete mamba_block_v2.py, mlstm_block_v2.py, hybrid_layer.py, scan_triton.py, tfla_triton.py, root test_hybrid_implementations.py; keep..."
         },
         "V4-D": {
-          "done": false,
+          "done": true,
           "desc": "One note in h100_scaling_state.json (the Phase-5 PPL and the 13D/15B headline are *compared against*, not superseded); mamba3_v2_state.json verdict; readme. ..."
         },
         "V4-E": {
@@ -1079,7 +1079,10 @@
     "2026-09-20: SPEED QUESTION CLOSED (sacct wall clocks, 12,000 steps): A0 7:59:00 (2.395 s/step), A2 4:09:14 (1.246), A2-s2 4:19:30, A2x 5:45:19 (1.727) / 5:57:15. A0/A2 = 1.92x, so M7's 1.94x from the progress-bar column was CORRECT and my 2026-09-17 doubt was unnecessary -- the column and the wall clock agree for that pair. Exact TFLA costs 1.39x over A2. Corrected Mamba-3 is 1.39x faster than the shipped hybrid end to end (Stage-0 57h23m vs ~74h), its decoder trains 1.7x faster, and its uncached beam decode is 1.75x slower.",
     "2026-09-20: V3-F BLOCKED THEN FIXED: the efficiency profiler (job 2560261) crashed in ssd_chunked_scan with 'expected scalar type Float but found BFloat16'. Cause: the profiler builds the model with .to(bfloat16) and NO autocast, while the scan builds its decay factors in fp32 by policy (FM3); einsum does not promote, and training never saw it because autocast unifies the operands. Fixed by unifying einsum operand dtypes to the mixer's dtype and returning the scan in the input dtype -- the same casts autocast applies, verified BITWISE IDENTICAL on both the fp32 and the bf16-autocast forward, so no trained number moves. Three regression tests added (pure-bf16 forward for mamba3 and mamba3+mlstm, and doc-boundary reset under bf16). V3-F needs a re-run.",
     "2026-09-20: V3-F DONE (job 2561023) and V3 CLOSED. Efficiency: memory reaches PARITY with FlashAttention (7.09 vs 7.15 GB at L=16384, exponent 0.643 vs 0.644) where the incumbent needed 42 GB / 0.863; training 2.6x faster and 3.9x less memory at L=2048, and it trains at lengths the incumbent OOMs on (>=4096); attention still wins latency everywhere (4.1x at 16384), fused kernel vs pure-PyTorch scan. Decode: cached 0.00635 s/token vs 0.03293 recompute = 5.19x with growth 1.00x -- the O(L^2)->O(L) claim measured, TTFT 4.0x worse by the documented prefill limitation. EXCLUDED as not credible: the Transformer's 0.337 s/token uncached decode (13x slower than the hybrid in the same loop while 3.5x faster in the sweep) -- flagged unverified.",
-    "V4-A written: analysis/mamba3_results.md carries the audit, the OFAT ladder with both corrections to earlier readings, the Stage-0 gate, the 3-seed report-gen tables with the decision rule applied, the efficiency and decode curves, and an explicit licensed/not-licensed section."
+    "V4-A written: analysis/mamba3_results.md carries the audit, the OFAT ladder with both corrections to earlier readings, the Stage-0 gate, the 3-seed report-gen tables with the decision rule applied, the efficiency and decode curves, and an explicit licensed/not-licensed section.",
+    "2026-09-20: V4-B/V4-C DONE plus the issues audit: scripts/validate.sh replaces validate_for_willi.sh (conda + 3 static gates dropped, shim kept, willi CI workflow deleted -> the repo now has NO CI); 2,246 lines of dead code removed (mamba_block_v2, mlstm_block_v2, hybrid_layer, scan_triton, tfla_triton, test_hybrid_implementations, verify_fix) and the dangling Triton import with them; evaluate_lm.py and evaluate_retrieval.py now sniff the architecture instead of assuming [mamba,mamba,mlstm]; a SECOND bf16 dtype bug found by the new dtype test in MambaBlock._slow_forward (missing fp32 cast, test-only since all 19 configs use the fast path); use_tfla=False now warns that it is a different operator (divergence measured at 1.17 through the block's own gating, identical for legacy and exact, so structural); the report-gen eval can opt into the O(1) cache (--cached-decode / CACHED_DECODE), token-identical by test, off by default.",
+    "2026-09-20: ticked V4-B, V4-C",
+    "V4-D: pointer note appended to h100_scaling_state.json -- the Phase-5 PPL and the 13D/15B-4 headline are compared against, not superseded, and the branch stays unmerged."
   ],
   "open_questions": []
 }

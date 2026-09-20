@@ -10,7 +10,7 @@ Validates that the codebase is compatible with the willi A100 server environment
   - Attention-mask-aware pooling correctness
 
 Run via the local harness:
-    bash scripts/validate_for_willi.sh
+    bash scripts/validate.sh
 
 Or directly (must be inside the willi_parity conda env):
     conda run -n willi_parity pytest tests/test_willi_parity.py -v
@@ -130,7 +130,7 @@ def test_no_pep585_generics_in_annotations():
         try:
             tree = ast.parse(filepath.read_text(encoding="utf-8"))
         except SyntaxError:
-            continue  # Caught by syntax gate in validate_for_willi.sh
+            continue  # a syntax error is caught by the import/pytest gate, not here
         for node in ast.walk(tree):
             check_node(node, filepath)
 
@@ -5718,6 +5718,17 @@ def test_efficiency_wrapper_can_run_the_decode_curve():
     assert 'DECODE_CURVE="${DECODE_CURVE:-false}"' in src
     assert "--decode" in src and "--prompt-len" in src and "--new-tokens" in src
     assert "hybrid_150m_m3_rrg" in src, "the cached path needs the exact-TFLA config (M6 finding 1)"
+
+
+@pytest.mark.willi_parity
+def test_inspect_wrapper_exposes_the_cached_decode_lever():
+    """V4: the O(1) cache has to be reachable through sbatch, and off by default so the protocol
+    behind every published number is what runs unless someone asks otherwise."""
+    src = (REPO_ROOT / "scripts" / "inspect_report_generation_h100.sh").read_text()
+    assert 'CACHED_DECODE="${CACHED_DECODE:-false}"' in src
+    assert "--cached-decode" in src
+    eval_src = (REPO_ROOT / "scripts" / "evaluate_report_generation.py").read_text()
+    assert '"--cached-decode"' in eval_src and "supports_cached_decode()" in eval_src
 
 
 @pytest.mark.willi_parity

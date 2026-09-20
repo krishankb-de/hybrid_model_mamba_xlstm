@@ -12,8 +12,8 @@ Three operators live here (MAMBA3_PLAN_V2.md, Context):
   exact to the fp32 floor (M1-E).
 - ``selective_scan_sequential_reference`` -- ``HYBRID_EXACT_SCAN=1``: O(L) float64 oracle,
   measurement only (Phase 14C-3), never for training.
-The Triton kernel is imported for compatibility but never dispatched; the live path is
-pure PyTorch in fp32 (Phase 14C-5). Backward is autograd through the chunked matmuls.
+There is no Triton path: the live implementation is pure PyTorch in fp32 (Phase 14C-5),
+and backward is autograd through the chunked matmuls.
 """
 
 import os
@@ -22,11 +22,10 @@ import torch
 import torch.nn.functional as F
 from typing import Optional
 
-try:
-    from hybrid_xmamba.kernels.selective_scan.scan_triton import selective_scan_triton
-    TRITON_AVAILABLE = True
-except ImportError:
-    TRITON_AVAILABLE = False
+# No Triton path exists. `scan_triton.py` was imported here and never dispatched for the whole
+# campaign (Phase 14C-5 verified it); it was deleted at MAMBA3_PLAN_V2.md V4-C rather than left to
+# imply a kernel this project does not have. A real Triton SSD kernel is recorded as future work.
+TRITON_AVAILABLE = False
 
 
 def selective_scan_parallel(
