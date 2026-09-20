@@ -885,12 +885,42 @@ neither the ≥70% qualifier trigger nor the at-or-below-controls clean positive
 marginally less templated text and stays in the same regime — it is **not** an explanation for any metric movement,
 which is what this check exists to rule out.
 
-- [ ] **V3-F** Efficiency + decode: `MODELS="hybrid_150m_v2 hybrid_150m_m3 transformer_150m_baseline" OUTPUT_DIR=analysis/efficiency_150m_m3 sbatch scripts/profile_efficiency_h100.sh` (the 14A-7 protocol, random weights) plus `performance_profile.py --decode` for the O(L²)→O(L) curve (`tfla_impl=exact`, random weights suffice). Pre-registered: SSD is matmul-shaped so the 14A-7 gap should narrow; report exponents and crossover whichever way it lands.
-- [ ] **V3-G** Tick/notes/evidence after every job; never re-run a checkpoint-producing step without reading its log first.
+- [x] **V3-F** Efficiency + decode: `MODELS="hybrid_150m_v2 hybrid_150m_m3 transformer_150m_baseline" OUTPUT_DIR=analysis/efficiency_150m_m3 sbatch scripts/profile_efficiency_h100.sh` (the 14A-7 protocol, random weights) plus `performance_profile.py --decode` for the O(L²)→O(L) curve (`tfla_impl=exact`, random weights suffice). Pre-registered: SSD is matmul-shaped so the 14A-7 gap should narrow; report exponents and crossover whichever way it lands.
+**V3-F RESULT (job 2561023, after the bf16 fix).** 14A-7 protocol, bf16, bs=4, H100.
+
+| L | hybrid | Mamba-3 | Transformer |
+|---|---|---|---|
+| inference 256 | 17.6 ms / 1.22 GB | 20.6 ms / **0.51 GB** | 4.9 ms / 0.51 GB |
+| inference 2048 | 120.6 ms / 5.71 GB | 86.2 ms / **1.24 GB** | 16.1 ms / 1.24 GB |
+| inference 16384 | 915.6 ms / 42.00 GB | 678.2 ms / **7.09 GB** | 163.9 ms / 7.15 GB |
+| training 2048 | 1096 ms / 53.96 GB | **416 ms / 13.87 GB** | 52 ms / 7.55 GB |
+| training ceiling | **OOM at L≥4096** | OOM at 16384 | none |
+
+- **Memory reaches parity with FlashAttention** (7.09 vs 7.15 GB at 16384; exponent 0.643 vs 0.644) where the
+  incumbent needed 42 GB and 0.863. The SSD activation argument, measured end to end at 5.9×.
+- **Training is where it pays**: 2.6× faster and 3.9× less memory at L=2048, and it trains at lengths the
+  incumbent OOMs on. Latency exponent 0.886 vs the incumbent's 1.285.
+- **Attention still wins latency** at every length (4.1× at 16384 inference), fused kernel vs pure-PyTorch
+  scan. 14A-7's direction stands; its magnitude shrinks and its memory half now goes the other way.
+- **Decode, the O(1) claim measured**: cached 0.00635 s/token vs 0.03293 recompute = **5.19×**, growth
+  **1.00×** (flat). TTFT is 4.0× worse (token-by-token prefill, the documented M6 limitation). The incumbent
+  has no cache at all — its legacy mLSTM computes no recurrence an O(1) step could reproduce.
+- ⚠ **Excluded as not credible**: the Transformer's uncached decode, 0.337 s/token, 13× slower than the hybrid
+  in the same loop while 3.5× faster in the sweep. Flagged unverified; re-measure before it is ever cited.
+
+⚠ **V3-F was blocked once and the cause is worth recording.** Job 2560261 died in `ssd_chunked_scan` with
+`expected scalar type Float but found BFloat16`: the profiler builds the model with `.to(bfloat16)` and no
+autocast, while the scan builds its decay factors in fp32 by policy (FM3), and `einsum` does not promote.
+Training never saw it because autocast unifies the operands for us. Fixed by unifying einsum operand dtypes to
+the mixer's dtype and returning the scan in the input dtype — the same casts autocast already applied, verified
+**bitwise identical** on the fp32 and bf16-autocast forwards, so no trained number moves. Three regression
+tests; `DECODE_CURVE` added to the wrapper so the decode curve is reachable through `sbatch`.
+
+- [x] **V3-G** Tick/notes/evidence after every job; never re-run a checkpoint-producing step without reading its log first.
 
 ### V4 — Writeup + cleanup (after V3)
 
-- [ ] **V4-A** `analysis/mamba3_results.md`: audit table, the OFAT ladder, "the headline is the defect" (A1 −16.0% vs A2 −13.8%, not significantly apart), the A2x screen, Stage-0 vs both incumbents, the 3-seed report-gen table with decision 10 applied, efficiency/decode curves, the M4-D parity capability and its Δ caveat, every null stated plainly. Cross-link from `analysis/PHASE14_SUPERVISOR_REVIEW.md` (limitation #2) and `analysis/h100_scaling_results.md`.
+- [x] **V4-A** `analysis/mamba3_results.md`: audit table, the OFAT ladder, "the headline is the defect" (A1 −16.0% vs A2 −13.8%, not significantly apart), the A2x screen, Stage-0 vs both incumbents, the 3-seed report-gen table with decision 10 applied, efficiency/decode curves, the M4-D parity capability and its Δ caveat, every null stated plainly. Cross-link from `analysis/PHASE14_SUPERVISOR_REVIEW.md` (limitation #2) and `analysis/h100_scaling_results.md`.
 - [ ] **V4-B** Retire py3.9 (old M9-B): drop gates 1–3, target py3.11, `scripts/validate.sh` + a `validate_for_willi.sh` shim, delete the willi CI workflow; keep gates 4–6. Only after V3 is submitted.
 - [ ] **V4-C** Dead code (old M9-C): delete `mamba_block_v2.py`, `mlstm_block_v2.py`, `hybrid_layer.py`, `scan_triton.py`, `tfla_triton.py`, root `test_hybrid_implementations.py`; keep `debug_checkpoint_keys.py` / `check_checkpoint_compatibility.py` (documented tools).
 - [ ] **V4-D** One note in `h100_scaling_state.json` (the Phase-5 PPL and the 13D/15B headline are *compared against*, not superseded); `mamba3_v2_state.json` verdict; `readme`. **Do not merge into `h100_scaling`.**
