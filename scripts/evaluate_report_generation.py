@@ -273,7 +273,7 @@ def resolve_prefix_k(checkpoint_path, yaml_prefix_k: int, override: Optional[int
     return int(yaml_prefix_k)
 
 
-def load_report_generation_module(checkpoint_path, model_config_name: str = "hybrid_150m_v2_rrg", device: str = "cpu", prefix_k: Optional[int] = None):
+def load_report_generation_module(checkpoint_path, model_config_name: str = "hybrid_150m_v2_rrg", device: str = "cpu", prefix_k: Optional[int] = None, scan_impl: Optional[str] = None, tfla_impl: Optional[str] = None):
     """Load a trained ReportGenerationLightningModule from a Lightning .ckpt
     for inference. Mirrors evaluate_lm.py's checkpoint-loading convention
     (defensive _orig_mod. prefix strip, missing/unexpected key counts printed)."""
@@ -282,6 +282,16 @@ def load_report_generation_module(checkpoint_path, model_config_name: str = "hyb
 
     model_cfg_path = PROJECT_ROOT / "configs" / "model" / f"{model_config_name}.yaml"
     raw = OmegaConf.to_container(OmegaConf.load(model_cfg_path), resolve=True)
+    # MAMBA3_PLAN_V2.md V5-A: evaluate TRAINED weights under a different recurrence than they were
+    # trained with. This is how "does the operator defect affect the reported numbers?" becomes a
+    # measurement: same checkpoint, same split, scan_impl/tfla_impl flipped to "exact". Both flags
+    # are parameter-invisible, so the weights load identically either way -- which is exactly why
+    # an override has to be announced in the log rather than inferred later.
+    for name, override in (("scan_impl", scan_impl), ("tfla_impl", tfla_impl)):
+        if override is not None and override != raw.get(name):
+            print("  [operator] %s: %s -> %s (OVERRIDE; the checkpoint was TRAINED with %s)"
+                  % (name, raw.get(name), override, raw.get(name)))
+            raw[name] = override
     decoder_config = build_decoder_config(raw)
 
     resolved_k = resolve_prefix_k(
@@ -414,6 +424,8 @@ def run_checkpoint_inspection(args) -> None:
     module = load_report_generation_module(
         args.checkpoint, args.model_config, device=device,
         prefix_k=getattr(args, "prefix_k", None),
+        scan_impl=getattr(args, "scan_impl", None),
+        tfla_impl=getattr(args, "tfla_impl", None),
     )
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
@@ -764,6 +776,12 @@ def main():
                         help="Number of samples to generate from (for --checkpoint mode)")
     parser.add_argument("--decode", type=str, default="greedy", choices=["greedy", "beam"],
                         help="Decoding strategy (for --checkpoint mode)")
+    parser.add_argument("--scan-impl", type=str, default=None, choices=["legacy", "exact"],
+                        help="Evaluate the checkpoint under this selective-scan operator instead "
+                             "of the one its config pins. V5-A: measures what the scan defect is "
+                             "worth on the reported metrics. Announced in the log when it differs.")
+    parser.add_argument("--tfla-impl", type=str, default=None, choices=["legacy", "exact"],
+                        help="Same, for the mLSTM recurrence.")
     parser.add_argument("--cached-decode", action="store_true",
                         help="Use the O(1) recurrent cache for beam search (M6). Token-identical "
                              "to the default path by test and ~5x faster per token, but only "

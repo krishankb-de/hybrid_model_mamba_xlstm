@@ -5732,6 +5732,20 @@ def test_inspect_wrapper_exposes_the_cached_decode_lever():
 
 
 @pytest.mark.willi_parity
+def test_eval_can_override_the_operator_a_checkpoint_was_trained_with():
+    """V5-A: `scan_impl`/`tfla_impl` carry no parameters, so the same weights load under either.
+    That is what makes "what is the defect worth on the reported metrics?" answerable by
+    measurement -- and why the override must be announced in the log, not inferred afterwards."""
+    src = (REPO_ROOT / "scripts" / "evaluate_report_generation.py").read_text()
+    for flag in ('"--scan-impl"', '"--tfla-impl"', "scan_impl=getattr(args", "tfla_impl=getattr(args"):
+        assert flag in src, flag
+    assert "OVERRIDE; the checkpoint was TRAINED with" in src, "an override must announce itself"
+    wrapper = (REPO_ROOT / "scripts" / "inspect_report_generation_h100.sh").read_text()
+    assert 'SCAN_IMPL="${SCAN_IMPL:-}"' in wrapper and "--scan-impl" in wrapper
+    assert 'TFLA_IMPL="${TFLA_IMPL:-}"' in wrapper and "--tfla-impl" in wrapper
+
+
+@pytest.mark.willi_parity
 def test_state_helper_points_at_the_v2_plan_and_accepts_v_phase_ids():
     """V1-A: the helper is the only thing allowed to tick a checkbox; it must read the V2 files
     and recognise both the carried M-ids and the new V-ids."""

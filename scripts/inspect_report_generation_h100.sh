@@ -50,6 +50,11 @@ PREFIX_K="${PREFIX_K:-}"
 # script fails loudly rather than silently falling back. OFF by default: every published number
 # came from the uncached path, and a five-hour eval is worth less than a comparable one.
 CACHED_DECODE="${CACHED_DECODE:-false}"
+# V5-A: evaluate a TRAINED checkpoint under a different recurrence than it was trained with, to
+# measure what the operator defect is worth on the reported metrics. Empty = use whatever the
+# model yaml pins, which is what every published number used.
+SCAN_IMPL="${SCAN_IMPL:-}"
+TFLA_IMPL="${TFLA_IMPL:-}"
 # Default to VALIDATION images, not train -- generations on train images look
 # artificially good even under genuine overfitting; validation is the honest check.
 PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/validate.parquet}"
@@ -102,6 +107,8 @@ python scripts/evaluate_report_generation.py \
   --model-config "${MODEL_CONFIG}" \
   ${PREFIX_K:+--prefix-k "${PREFIX_K}"} \
   $([ "${CACHED_DECODE}" = "true" ] && echo "--cached-decode") \
+  ${SCAN_IMPL:+--scan-impl "${SCAN_IMPL}"} \
+  ${TFLA_IMPL:+--tfla-impl "${TFLA_IMPL}"} \
   --parquet "${PARQUET}" \
   --num-samples "${NUM_SAMPLES}" \
   --decode "${DECODE}" \

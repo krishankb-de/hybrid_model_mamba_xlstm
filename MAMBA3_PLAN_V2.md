@@ -951,11 +951,39 @@ Triton kernel this project never dispatched.
   so the published protocol is what runs unless asked otherwise.
 
 - [x] **V4-D** One note in `h100_scaling_state.json` (the Phase-5 PPL and the 13D/15B headline are *compared against*, not superseded); `mamba3_v2_state.json` verdict; `readme`. **Do not merge into `h100_scaling`.**
-- [ ] **V4-E** Archive: V3 checkpoints/dumps are DUA-covered and HOME is deleted 6 months after expiry — add them to the Phase-15 archive manifest.
+- [x] **V4-E** Archive: V3 checkpoints/dumps are DUA-covered and HOME is deleted 6 months after expiry — add them to the Phase-15 archive manifest.
+
+**V4-E DONE 2026-09-20 — `analysis/ARCHIVE_MANIFEST.md`.** Written from a full `du -sh outputs/*`
+rather than from memory. Classifies every artifact three ways: **restricted** (MIMIC-derived,
+including model weights, which are a derived work — stays on approved storage), **open** (the four
+Stage-0 backbones and `analysis/`, trained on PubMed only, safe to archive anywhere), and
+**deletable**. The headline for anyone triaging space later: the four backbones are 211 H100-hours
+between them, carry no patient data, and are what every downstream claim rests on — archive those
+and `analysis/` first. Also records the 2026-09-20 cleanup: 15 screen arms, 75 GB.
 
 ### V5 — Gated / optional (cluster access confirmed 2026-09-19; the remaining gates are scientific)
 
-- [ ] **V5-A** 14C-2/14C-3 closure on **13D** (the supervisor's open limitation #2): `HYBRID_EXACT_SCAN=1` teacher-forced PPL on n=2663, exact vs default, then beam+CheXbert on a 300–500 subsample. Answers "does the bug affect the reported numbers" by measurement.
+- [ ] **V5-A** **Measure what the operator defect is worth on the PUBLISHED numbers** (the supervisor's
+  open limitation #2). ⚠ **Redesigned 2026-09-20: the original `HYBRID_EXACT_SCAN=1` design is not
+  runnable for generation.** That env var selects the float64 *sequential* reference, an O(L) Python
+  loop per forward; beam search issues one forward per generated token, so a single sample costs
+  ~L² Python steps and a 400-sample sweep would run for days. It exists to validate the chunked
+  scans, not to decode with.
+  **Use the fast exact operators instead**: `scan_impl=exact` and `tfla_impl=exact` are division-free
+  chunked scans verified to ~1e-7 against that same float64 oracle, at normal speed. Both flags are
+  parameter-invisible, so the *same trained weights* load under either. The eval now takes
+  `--scan-impl` / `--tfla-impl` (env `SCAN_IMPL` / `TFLA_IMPL` on the wrapper), and announces the
+  override in the log.
+  **Design:** 13D, official test split, beam 3, identical protocol, twice — once as published and
+  once with both operators exact — then CheXbert and a paired bootstrap of the two dumps. ~6 GPU-h
+  on the full split, ~1 h on a 400-sample subsample.
+  **Pre-registered reading, written before it runs.** The weights were fitted *with* the defective
+  operator, so this is a train/inference operator mismatch and the outcomes are not symmetric:
+  (a) **metrics unchanged** ⇒ the defect does not affect the reported numbers, which is the answer
+  the supervisor asked for and the strongest possible resolution; (b) **metrics move** ⇒ that
+  quantifies how sensitive the trained system is to the operator, and it must **not** be reported as
+  "the corrected operator is worse", because a model fitted to one recurrence and evaluated under
+  another is expected to lose. Only a retrained arm could support that claim, and V3 is that arm.
 - [ ] **V5-B** M7-E mechanism diagnostics (MQAR / late-position PPL slice).
 - [ ] **V5-C** Ratio screen (`12/0`, `10/2`, `9/3`, `8/4`) **only if V3-D claims a win** under decision 10; same rule; efficiency trade reported alongside.
 
