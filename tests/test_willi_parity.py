@@ -5795,3 +5795,133 @@ def test_every_analysis_deliverable_can_actually_enter_the_repo():
         f"committed and are not part of the record: {stranded}. "
         "Add `!analysis/<name>.md` to the allowlist block in .gitignore."
     )
+
+
+# ---------------------------------------------------------------------------
+# V5-D — post-hoc repair of generated report dumps
+# ---------------------------------------------------------------------------
+
+def _load_repair_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_repair_generations", REPO_ROOT / "scripts" / "repair_generations.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.willi_parity
+def test_sentence_splitter_survives_radiology_punctuation():
+    """The repair rests entirely on knowing where a sentence ends. Radiology
+    text is adversarial about that: measurements ("4.5 cm"), redaction
+    placeholders ("___."), dictation times ("10:30 a.m."), clinician titles
+    ("Dr.") and numbered impressions ("1.  Interval ...") all put a period
+    somewhere that is not a boundary. A splitter that gets these wrong would
+    truncate real findings away and call it a repair."""
+    m = _load_repair_module()
+
+    assert len(m.split_sentences(
+        "The tip projects 4.5 cm above the carina. Dr. ___ was paged at 10:30 a.m. "
+        "as soon as the findings were recognized.")) == 2
+    assert len(m.split_sentences(
+        "Impression: 1.  Interval extubation.  2.  Low lung volumes.")) == 2
+    assert len(m.split_sentences("Comparison is made with prior study, ___.")) == 1
+    # rejoining is lossless on already-normalised text
+    text = "No acute process. Heart size is normal."
+    assert " ".join(m.split_sentences(text)) == text
+
+
+@pytest.mark.willi_parity
+def test_repair_drops_the_severed_fragment_and_collapses_repeats():
+    """The two artefacts of a decoder with no stop condition, on a real tail
+    from the 2026-09-21 eval logs."""
+    m = _load_repair_module()
+    text = ("Findings: The lungs are clear. There is no pneumothorax. "
+            "Sternal wires are aligned. Sternal wires are aligned. Sternal wires are")
+
+    out, stats = m.repair_report(text)
+    assert out.endswith("Sternal wires are aligned.")
+    assert out.count("Sternal wires are aligned.") == 1
+    assert stats["sentences_truncated"] == 1 and stats["sentences_deduped"] == 1
+
+    # the two edits are independently switchable, so each can be attributed
+    only_dedup, _ = m.repair_report(text, truncate=False)
+    assert only_dedup.endswith("Sternal wires are")
+    only_trunc, _ = m.repair_report(text, dedup="none")
+    assert only_trunc.count("Sternal wires are aligned.") == 2
+
+    # "all" also catches a repeat that is not immediately adjacent
+    spaced = "No pneumothorax. Heart size is normal. No pneumothorax."
+    assert m.repair_report(spaced, dedup="consecutive")[0] == spaced
+    assert m.repair_report(spaced, dedup="all")[0] == "No pneumothorax. Heart size is normal."
+
+
+@pytest.mark.willi_parity
+def test_repair_never_empties_a_hypothesis_or_moves_a_line():
+    """An empty hypothesis is a scoring artefact, not a measurement, and a
+    dropped line silently desyncs every hyp/ref pair after it."""
+    m = _load_repair_module()
+
+    out, stats = m.repair_report("The size of the cardiac")   # no terminator at all
+    assert out == "The size of the cardiac" and stats.get("fallbacks") == 1
+
+    lines = ["The size of the cardiac", "No acute process.", "Clear lungs. Clear lungs. and"]
+    repaired, totals = m.repair_lines(lines)
+    assert len(repaired) == len(lines) and all(r.strip() for r in repaired)
+    assert totals["reports"] == 3
+
+
+@pytest.mark.willi_parity
+def test_repair_cli_preserves_refs_and_refuses_to_overwrite_the_control(tmp_path):
+    """The unrepaired dump is the control arm of the comparison, and the
+    references are not ours to edit."""
+    import subprocess
+
+    src = tmp_path / "dump"
+    src.mkdir()
+    (src / "hyps.txt").write_text("Clear lungs. Clear lungs. and\nNo acute process.\n")
+    (src / "refs.txt").write_text("Lungs are clear.\nNo acute cardiopulmonary process.\n")
+    out = tmp_path / "repaired"
+
+    script = str(REPO_ROOT / "scripts" / "repair_generations.py")
+    done = subprocess.run(
+        [sys.executable, script, "--dump-dir", str(src), "--out-dir", str(out)],
+        capture_output=True, text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    assert (out / "hyps.txt").read_text() == "Clear lungs.\nNo acute process.\n"
+    assert (out / "refs.txt").read_text() == (src / "refs.txt").read_text()
+    assert (src / "hyps.txt").read_text() == "Clear lungs. Clear lungs. and\nNo acute process.\n"
+    assert json.loads((out / "repair_report.json").read_text())["policy"]["dedup"] == "consecutive"
+
+    clash = subprocess.run(
+        [sys.executable, script, "--dump-dir", str(src), "--out-dir", str(src)],
+        capture_output=True, text=True,
+    )
+    assert clash.returncode != 0 and "control arm" in (clash.stdout + clash.stderr)
+
+
+@pytest.mark.willi_parity
+def test_repair_reuses_the_eval_metric_functions_rather_than_reimplementing_them():
+    """A second copy of the tokenisation would drift from the numbers this is
+    being compared against, which is the one thing the comparison cannot
+    survive."""
+    src = (REPO_ROOT / "scripts" / "repair_generations.py").read_text()
+    assert "compute_all_metrics" in src and "evaluate_report_generation.py" in src
+    assert "def rouge_l" not in src and "def corpus_bleu" not in src
+
+
+@pytest.mark.willi_parity
+def test_repair_wrapper_is_cpu_only_and_warns_that_every_arm_must_be_repaired():
+    """A decode-protocol change applied to one arm and cited against another
+    arm's unrepaired numbers manufactures a win. The wrapper has to say so."""
+    src = (REPO_ROOT / "scripts" / "repair_generations_h100.sh").read_text()
+    directives = [ln for ln in src.splitlines() if ln.startswith("#SBATCH")]
+    assert not any("--gpus" in ln or "--gres" in ln for ln in directives), (
+        "repairing cached text needs no GPU; a prose mention of --gpus is fine, "
+        "an actual allocation is not"
+    )
+    assert "--partition=aisc-batch" in src and "--exclude=ga03" in src
+    assert "EVERY system being compared" in src or "EVERY arm" in src
+    assert "score_chexbert_h100.sh" in src and "bootstrap_compare_h100.sh" in src

@@ -1020,6 +1020,51 @@ and `analysis/` first. Also records the 2026-09-20 cleanup: 15 screen arms, 75 G
   checkpoint, one seed, inference-side only. This measures the *published* system's sensitivity to
   the operator, not what the correction is worth — V3 is that arm, and it is null too.
 
+- [ ] **V5-D** **What is the missing stop condition worth?** Found 2026-09-21 while scoping
+  improvements, by reading the decode path rather than the model:
+  **(i)** `beam_search_decode` has no EOS handling and no repetition control. It runs exactly
+  `max_new_tokens=100` iterations for every study, always.
+  **(ii)** The model was never trained to stop. `train_report_generation.py:223` sets
+  `pad_token = eos_token` and `lightning_module.py:1637` masks every pad position to `-100`, so no
+  end-of-report token appears in a single supervised target.
+  **(iii)** `length_penalty` is inert: all beams share a length at every step, so dividing every
+  candidate by the same number cannot reorder them.
+  Consequences, visible throughout the 2026-09-21 logs: finished reports run on into repeated
+  sentences ("Sternal wires are aligned." ×5), and reports that would exceed 100 tokens are cut
+  mid-phrase ("The size of the cardiac"). **Every arm shares this**, so no published comparison
+  between arms is invalidated — but it caps every absolute number this project reports, and it is
+  testable for free because the dumps are already on disk.
+
+  **Tooling (written 2026-09-21):** `scripts/repair_generations.py` (+ `_h100.sh` wrapper) applies
+  two independently switchable edits to the hypothesis text only — drop the severed trailing
+  fragment, collapse repeated sentences — writing a **new** dump directory so the original stays as
+  the control arm. References are copied byte-identically and line alignment is preserved. The
+  sentence splitter is unit-tested against measurements, redaction placeholders, dictation times,
+  clinician titles and numbered impressions, because a splitter that is wrong about those would
+  truncate real findings and call it a repair.
+
+  **Pre-registered prediction, per metric, written before the run.** ⚠ This corrects a looser claim
+  made earlier the same day ("CheXbert micro and ROUGE-L should both improve"), which did not think
+  the mechanism through:
+  - **BLEU-1/BLEU-4 rise.** They are precision-based, and the removed tokens are largely unmatched.
+  - **ROUGE-L rises slightly.** Removing tokens cannot shorten the longest common subsequence, so
+    precision rises while recall is flat, and `beta=1.2` still leaves F above its starting point.
+  - **CheXbert is ambiguous, and may fall.** CheXbert labels a *report*, not a sentence, so
+    repeating a finding is idempotent and de-duplication should do almost nothing to it. Truncation
+    can only remove text, so where a severed fragment carried a genuine finding it removes a true
+    positive. Micro/macro F1 flat-to-down is a real possible outcome.
+  - **exact-match rises slightly**, being the strictest precision measure here.
+
+  **Reading.** If the text metrics rise and CheXbert is flat, the protocol costs presentation but
+  not clinical content, and the honest fix is a trained stop token rather than trimming. If CheXbert
+  *falls*, truncation is removing findings, which means the 100-token budget is costing recall and
+  the next test is a longer budget (`max_new_tokens=200`, one re-decode, ~1 h on 400 samples) rather
+  than any trimming at all. Either way the answer is about the protocol, not the architecture.
+
+  **Fairness constraint, enforced in the wrapper's output.** A decode-protocol change is only a
+  comparison when applied to *every* system compared: the Transformer arm and the retrieval floor
+  included. Repair all of them or cite none of them.
+
 - [ ] **V5-B** M7-E mechanism diagnostics (MQAR / late-position PPL slice).
 - [ ] **V5-C** Ratio screen (`12/0`, `10/2`, `9/3`, `8/4`) **only if V3-D claims a win** under decision 10; same rule; efficiency trade reported alongside.
 
