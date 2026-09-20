@@ -1,7 +1,7 @@
 {
-  "current_phase": "V4_writeup_and_cleanup",
-  "last_updated": "2026-09-20T21:23:47+02:00",
-  "status": "V3 COMPLETE and written up (analysis/mamba3_results.md). Backbone: Stage-0 11.674 vs hybrid 13.18 and Transformer 11.222, 77% of the gap closed. Task: indistinguishable from the Transformer on all 10 metrics and from the hybrid on 8 of 10 across 3 seeds. Efficiency: memory parity with FlashAttention, 2.6x faster training at L=2048, trains where the incumbent OOMs, O(1) decode 5.19x with flat growth. Remaining: V4-B retire py3.9, V4-C delete dead code, V4-D/E state + archive; V5 optional (14C-3 is the highest-value item).",
+  "current_phase": "V5_optional_diagnostics",
+  "last_updated": "2026-09-21T00:54:40+02:00",
+  "status": "V3 COMPLETE and written up (analysis/mamba3_results.md). Backbone: Stage-0 11.674 vs hybrid 13.18 and Transformer 11.222, 77% of the gap closed. Task: indistinguishable from the Transformer on all 10 metrics and from the hybrid on 8 of 10 across 3 seeds. Efficiency: memory parity with FlashAttention, 2.6x faster training at L=2048, trains where the incumbent OOMs, O(1) decode 5.19x with flat growth. V4 COMPLETE. V5-A COMPLETE 2026-09-21: the operator defect does not move the published 13D metrics (8/9 tie on n=400), though it does change the generated text -- the supervisor's open limitation #2 is now answered by measurement. Remaining: V5-B/V5-C optional, thesis writing.",
   "plan_of_record": "MAMBA3_PLAN_V2.md",
   "branch": {
     "name": "h100_mamba3_v2",
@@ -976,10 +976,10 @@
     },
     "V5": {
       "title": "Gated / optional (cluster access confirmed 2026-09-19; the remaining gates are scientific)",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "V5-A": {
-          "done": false,
+          "done": true,
           "desc": "Measure what the operator defect is worth on the PUBLISHED numbers (the supervisor's"
         },
         "V5-B": {
@@ -991,7 +991,20 @@
           "desc": "Ratio screen (12/0, 10/2, 9/3, 8/4) only if V3-D claims a win under decision 10; same rule; efficiency trade reported alongside."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "V5-A": {
+          "jobs": "2561504 (exact ops) / 2561505 (as published) / 2561638+2561639 CheXbert / 2561643 paired bootstrap",
+          "protocol": "13D checkpoint, official test split first 400 of 2663, beam_size=3, scan_impl=exact + tfla_impl=exact vs defaults, 1000 paired bootstrap resamples with per-label CIs",
+          "outcome": "outcome (a) of the pre-registered reading: 8 of 9 metrics tie, including every metric the thesis reports",
+          "rouge_l": "0.1839 exact vs 0.1836 published, diff +0.0003 CI [-0.0022,+0.0031]",
+          "chexbert_14_micro": "0.4523 vs 0.4566, diff -0.0042 CI [-0.0166,+0.0090]",
+          "chexbert_14_macro": "0.2613 vs 0.2589, diff +0.0024 CI [-0.0076,+0.0125]",
+          "only_CI_exclusions": "exact_match_14 +0.0125 CI [+0.0025,+0.0250] (15 vs 10 reports of 400) and per-label Pneumonia F1 .1618 vs .0930; 23 simultaneous 95% tests, ~1.2 spurious exclusions expected -- treat as noise until replicated",
+          "text_changed": "the two dumps are NOT token-identical; many studies decode to different text, some to a different template. The defect reaches generation; the metrics do not detect it.",
+          "limits": "n=400 of 2663 so CIs are ~2.6x wider than the full split, one checkpoint, one seed, inference-side only",
+          "report": "analysis/mamba3_results.md section 5 (the bootstrap markdown lives on the cluster at analysis/bootstrap_13d_exact_vs_default_n400.md; analysis/*.md is gitignored except the allowlist)"
+        }
+      },
       "verdict": null
     }
   },
@@ -1086,7 +1099,9 @@
     "2026-09-20: 2026-09-20 CLEANUP: deleted all 15 outputs/m3_screen_* dirs, 75 GB freed (home ~175 -> ~100 GiB of 200). They were 12K screen intermediates; every number is recorded in the plan, state and analysis/mamba3_results.md, and nothing downstream reads them. The 75 GB was 2.4x my 31 GB estimate because the pre-SAVE_TOP_K arms kept 2-6 checkpoints each (A0 8.4G, A1 13G); only the A2x pair, run with SAVE_TOP_K_SCREEN=0, held a single file. FOUND, NOT DELETED: outputs/m8_stage0_A2_150m (6.3 GB) is a genuine 120K Stage-0 of hybrid_150m_m3 arm A2 (legacy TFLA) started 2026-09-07 on the old branch at 7fecc86, checkpoints to step 118000 plus last.ckpt (2026-09-09 08:15). The old plan recorded M8 as never started, so this run's existence and result were never harvested. If it completed it is a free ablation: A2 vs A2x at 120K isolates the mLSTM correction downstream for the price of a decoder plus an eval, no Stage-0.",
     "2026-09-20: FREE RESULT harvested 2026-09-20: outputs/m8_stage0_A2_150m is a COMPLETE 120K Stage-0 of arm A2 (SSD, legacy TFLA), log logs/h100_stage0_150m_2516626.log, 'Trainer.fit stopped: max_steps=120000 reached', val PPL 12.550. Started 2026-09-07 on the old branch (7fecc86, git_dirty=true), finished 2026-09-09; the old plan recorded M8 as never started, so it was never collected. It decomposes the backbone gain at full scale: hybrid 13.18 -> A2 12.550 (scan fix + SSD + 8x state, -0.630, 42% of the total) -> A2x 11.674 (mLSTM fix, -0.876, 58%). At 12K the same split is 75%/25% the other way, so the two halves SWAP RANK with training length -- a screen-length ablation over-attributes to the SSD bundle. Caveats: one seed, and A2's tree was dirty and ten days older, though the intervening changes are verified numerics-neutral for training. KEEP this directory; it is now cited evidence.",
     "V4-E: analysis/ARCHIVE_MANIFEST.md written from a full du listing. Restricted (MIMIC-derived, weights included) vs open (the four PubMed-only Stage-0 backbones + analysis/, 211 H100-hours, no patient data) vs deletable, with a regret-ordered list if space is ever needed again.",
-    "2026-09-20: V5-A REDESIGNED before running: the original HYBRID_EXACT_SCAN=1 design is not runnable for generation -- that env var selects the fp64 SEQUENTIAL reference, an O(L) Python loop per forward, and beam search issues one forward per token, so a 400-sample sweep would take days. Use scan_impl=exact + tfla_impl=exact instead: division-free chunked scans verified to ~1e-7 against the same oracle, at normal speed, and parameter-invisible so the same trained weights load under either. Eval now takes --scan-impl/--tfla-impl (SCAN_IMPL/TFLA_IMPL on the wrapper) and announces the override. Pre-registered reading: unchanged metrics = the defect does not affect the published numbers; moved metrics quantify sensitivity but must NOT be read as 'the corrected operator is worse', since the weights were fitted to the defective one -- only a retrained arm could support that, and V3 is that arm."
+    "2026-09-20: V5-A REDESIGNED before running: the original HYBRID_EXACT_SCAN=1 design is not runnable for generation -- that env var selects the fp64 SEQUENTIAL reference, an O(L) Python loop per forward, and beam search issues one forward per token, so a 400-sample sweep would take days. Use scan_impl=exact + tfla_impl=exact instead: division-free chunked scans verified to ~1e-7 against the same oracle, at normal speed, and parameter-invisible so the same trained weights load under either. Eval now takes --scan-impl/--tfla-impl (SCAN_IMPL/TFLA_IMPL on the wrapper) and announces the override. Pre-registered reading: unchanged metrics = the defect does not affect the published numbers; moved metrics quantify sensitivity but must NOT be read as 'the corrected operator is worse', since the weights were fitted to the defective one -- only a retrained arm could support that, and V3 is that arm.",
+    "2026-09-21: V5-A COMPLETE (jobs 2561504/2561505/2561638/2561639/2561643). Re-decoded 13D under corrected operators (scan_impl=exact + tfla_impl=exact, parameter-invisible so the same weights load) vs as published, 400 test studies, beam 3, paired bootstrap with per-label CIs. Outcome (a) as pre-registered: 8 of 9 metrics tie -- ROUGE-L +0.0003, CheXbert-14-micro -0.0042, 14-macro +0.0024, all CIs spanning zero. The two exclusions (exact-match-14 +0.0125 = 15 vs 10 reports of 400; per-label Pneumonia F1 .1618 vs .0930) are 2 of 23 simultaneous 95% tests, where ~1.2 are expected by chance -- noise until replicated. IMPORTANT NUANCE: the two dumps are NOT token-identical; a large fraction of studies decode differently, some to a different template. The defect propagates into generation and the metrics do not detect it. Limits: n=400 of 2663, one checkpoint, one seed, inference-side only; it measures the published system's sensitivity to the operator, not the value of the correction (V3 is that arm, and it is null too).",
+    "2026-09-21: PROCESS BUG found and fixed. .gitignore line 84 is a blanket `*.md` with an explicit allowlist below it, so analysis/ARCHIVE_MANIFEST.md (V4-E, written 2026-09-20) was silently untracked: `git add` did nothing, `git status` stayed clean, and the file was reported as committed in cebe01a while existing only on the laptop -- the cluster's pull never received it. Fixed by allowlisting it (plus the already-tracked phase14_results.md) and by correcting the stale `!MAMBA3_PLAN.md` entry to `!MAMBA3_PLAN_V2.md`. test_every_analysis_deliverable_can_actually_enter_the_repo now fails if any analysis/*.md is both gitignored and untracked; verified to fail on the pre-fix .gitignore."
   ],
   "open_questions": []
 }

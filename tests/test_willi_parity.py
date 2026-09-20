@@ -5759,3 +5759,39 @@ def test_state_helper_points_at_the_v2_plan_and_accepts_v_phase_ids():
     src = (REPO_ROOT / "scripts" / "screen_arms_h100.sh").read_text()
     assert "export ARM STEPS WARMUP_STEPS VAL_EVERY" in src, "V1-C: VAL_EVERY must reach the wrapper"
 
+
+
+@pytest.mark.willi_parity
+def test_every_analysis_deliverable_can_actually_enter_the_repo():
+    """.gitignore line 84 is a blanket `*.md`, so a new analysis document is invisible by
+    default: `git add` silently does nothing, `git status` stays clean, and the file is
+    reported as committed while living only on one laptop. That happened to
+    analysis/ARCHIVE_MANIFEST.md on 2026-09-20 (V4-E) and was caught a day later.
+
+    Every markdown file under analysis/ must therefore be either already tracked or
+    explicitly allowlisted. Writing a new one without touching .gitignore fails here."""
+    import subprocess
+
+    docs = sorted((REPO_ROOT / "analysis").glob("*.md"))
+    assert docs, "analysis/ should hold the written record"
+
+    def _git(*args):
+        return subprocess.run(
+            ["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True
+        )
+
+    if _git("rev-parse", "--git-dir").returncode != 0:
+        pytest.skip("not a git checkout")
+
+    tracked = set(_git("ls-files", "analysis").stdout.split())
+    stranded = [
+        d.name
+        for d in docs
+        if f"analysis/{d.name}" not in tracked
+        and _git("check-ignore", "-q", f"analysis/{d.name}").returncode == 0
+    ]
+    assert not stranded, (
+        "these analysis documents are gitignored and untracked, so they cannot be "
+        f"committed and are not part of the record: {stranded}. "
+        "Add `!analysis/<name>.md` to the allowlist block in .gitignore."
+    )

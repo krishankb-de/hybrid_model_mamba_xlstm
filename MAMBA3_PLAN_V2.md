@@ -963,7 +963,7 @@ and `analysis/` first. Also records the 2026-09-20 cleanup: 15 screen arms, 75 G
 
 ### V5 — Gated / optional (cluster access confirmed 2026-09-19; the remaining gates are scientific)
 
-- [ ] **V5-A** **Measure what the operator defect is worth on the PUBLISHED numbers** (the supervisor's
+- [x] **V5-A** **Measure what the operator defect is worth on the PUBLISHED numbers** (the supervisor's
   open limitation #2). ⚠ **Redesigned 2026-09-20: the original `HYBRID_EXACT_SCAN=1` design is not
   runnable for generation.** That env var selects the float64 *sequential* reference, an O(L) Python
   loop per forward; beam search issues one forward per generated token, so a single sample costs
@@ -984,6 +984,43 @@ and `analysis/` first. Also records the 2026-09-20 cleanup: 15 screen arms, 75 G
   quantifies how sensitive the trained system is to the operator, and it must **not** be reported as
   "the corrected operator is worse", because a model fitted to one recurrence and evaluated under
   another is expected to lose. Only a retrained arm could support that claim, and V3 is that arm.
+
+  **V5-A DONE 2026-09-21 — the defect does not move the published metrics.** Jobs 2561504 (exact)
+  and 2561505 (default), 13D, official test split, first 400 studies, beam 3, everything else
+  identical; CheXbert 2561638/2561639; paired bootstrap 2561643, 1000 resamples, with per-label CIs.
+  The exact run's log carries both override lines, so the arm is auditable:
+  `[operator] scan_impl: legacy -> exact (OVERRIDE; the checkpoint was TRAINED with legacy)`.
+
+  | metric | exact operators | as published | diff | 95% CI |
+  |---|---|---|---|---|
+  | ROUGE-L | 0.1839 | 0.1836 | +0.0003 | [-0.0022, +0.0031] |
+  | BLEU-1 | 0.2454 | 0.2444 | +0.0010 | [-0.0024, +0.0047] |
+  | BLEU-4 | 0.0504 | 0.0503 | +0.0001 | [-0.0019, +0.0023] |
+  | CheXbert-14-micro | 0.4523 | 0.4566 | -0.0042 | [-0.0166, +0.0090] |
+  | CheXbert-14-macro | 0.2613 | 0.2589 | +0.0024 | [-0.0076, +0.0125] |
+  | CheXbert-5-micro | 0.5352 | 0.5396 | -0.0044 | [-0.0222, +0.0138] |
+  | CheXbert-5-macro | 0.4286 | 0.4322 | -0.0037 | [-0.0204, +0.0128] |
+  | exact-match-5 | 0.1950 | 0.2025 | -0.0075 | [-0.0275, +0.0125] |
+  | exact-match-14 | 0.0375 | 0.0250 | **+0.0125** | **[+0.0025, +0.0250]** |
+
+  **Reading, per the rule written before the run: outcome (a).** Eight of nine metrics tie, including
+  every metric the thesis reports. The two exceptions are fragile and should be described as noise
+  until replicated: exact-match-14 is 15 reports versus 10 out of 400, a discrete metric at the edge
+  of its resolution, and per-label Pneumonia F1 (0.1618 vs 0.0930, CI [+0.0146, +0.1317]) is one of
+  23 simultaneous 95% comparisons in this table, where ~1.2 exclusions of zero are expected by
+  chance alone. No other label moved; four labels score 0.000 under both operators.
+
+  **What did change is the text.** The two runs are not token-identical — samples 4, 8, 9, 13, 18 and 41
+  among many others decode differently, sometimes to a different report template. The share was read
+  off the two logs by eye, not counted; `paste` the two `hyps.txt` dumps and count unequal lines for
+  the exact figure. The defect therefore does alter what the model says, and leaves the score
+  unchanged. That is the honest form of the answer: the operator error is real, it propagates to
+  generation, and the reported metrics are insensitive to it.
+
+  **Limits.** n=400 of 2663 (the CIs above are ~2.6× wider than the full split would give), one
+  checkpoint, one seed, inference-side only. This measures the *published* system's sensitivity to
+  the operator, not what the correction is worth — V3 is that arm, and it is null too.
+
 - [ ] **V5-B** M7-E mechanism diagnostics (MQAR / late-position PPL slice).
 - [ ] **V5-C** Ratio screen (`12/0`, `10/2`, `9/3`, `8/4`) **only if V3-D claims a win** under decision 10; same rule; efficiency trade reported alongside.
 

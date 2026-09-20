@@ -88,7 +88,7 @@ multirun/
 !BIOMEDCLIP_KD_PLAN.md
 !HYBRID_ARCH_REFACTOR_PLAN.md
 !H100_SCALING_PLAN.md
-!MAMBA3_PLAN.md
+!MAMBA3_PLAN_V2.md
 !CLAUDE.md
 !analysis/baseline_probe_report.md
 !analysis/h100_scaling_results.md
@@ -97,6 +97,8 @@ multirun/
 !analysis/PUBLISHED_BASELINES.md
 !analysis/PHASE15C_AUX_LOSS.md
 !analysis/mamba3_results.md
+!analysis/ARCHIVE_MANIFEST.md
+!analysis/phase14_results.md
 !mamba3_v2_state.json
 
 

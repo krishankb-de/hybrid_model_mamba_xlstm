@@ -10,7 +10,7 @@
 
 ## 1. Summary
 
-Two findings, one positive and one null, both measured against a parameter-matched Transformer and the
+Three findings, one positive and two null, all measured against a parameter-matched Transformer and the
 incumbent hybrid on the identical pipeline and the official MIMIC-CXR test split.
 
 1. **The recurrences this project shipped did not compute the recurrences they specified, and fixing them is
@@ -23,6 +23,10 @@ incumbent hybrid on the identical pipeline and the official MIMIC-CXR test split
    model is **statistically indistinguishable from the matched Transformer on all ten metrics** and from the
    incumbent hybrid on eight of ten. This is the eleventh time this project has measured a text-side
    improvement failing to move the downstream clinical metrics, and it is the best-controlled instance.
+
+3. **The defect changed what the published model says, but not what it scores.** Re-decoding the shipped
+   checkpoint under corrected operators, which its weights permit unchanged, moves no reported metric (§5).
+   Many individual reports come out different; the metrics do not notice.
 
 A third result is architectural rather than about quality: the corrected backbone **matches FlashAttention's
 memory** at every sequence length tested, where the incumbent used 5.9× more at 16,384 tokens, and it trains at
@@ -180,6 +184,34 @@ moves as little: distinct-2 .0350 vs .0299, self-BLEU-4 .6709 vs .6854. The pre-
 **INTERMEDIATE**, as it was for the incumbent. Templating therefore explains none of the movement above, which
 is what this check exists to rule out.
 
+**Does the defect change the numbers the thesis reports?** No. `scan_impl` and `tfla_impl` carry no
+parameters, so 13D's own weights load and decode under the corrected operators without retraining. Decoding the
+first 400 test studies twice under the published protocol (beam 3), once as published and once with both
+operators exact, and comparing with a paired bootstrap (1000 resamples, per-label CIs):
+
+| metric | exact operators | as published | diff | 95% CI |
+|---|---|---|---|---|
+| ROUGE-L | 0.1839 | 0.1836 | +0.0003 | [−0.0022, +0.0031] |
+| BLEU-1 | 0.2454 | 0.2444 | +0.0010 | [−0.0024, +0.0047] |
+| BLEU-4 | 0.0504 | 0.0503 | +0.0001 | [−0.0019, +0.0023] |
+| CheXbert-14-micro | 0.4523 | 0.4566 | −0.0042 | [−0.0166, +0.0090] |
+| CheXbert-14-macro | 0.2613 | 0.2589 | +0.0024 | [−0.0076, +0.0125] |
+| CheXbert-5-micro | 0.5352 | 0.5396 | −0.0044 | [−0.0222, +0.0138] |
+| CheXbert-5-macro | 0.4286 | 0.4322 | −0.0037 | [−0.0204, +0.0128] |
+| exact-match-5 | 0.1950 | 0.2025 | −0.0075 | [−0.0275, +0.0125] |
+| exact-match-14 | 0.0375 | 0.0250 | +0.0125 | [+0.0025, +0.0250] |
+
+Eight of nine tie, including every metric reported elsewhere in this document. Both exceptions are at the
+resolution limit: exact-match-14 is 15 reports against 10 out of 400, and per-label Pneumonia F1 (.1618 vs
+.0930) is one of 23 simultaneous comparisons, where ~1.2 spurious exclusions of zero are expected. Neither
+should be claimed without replication on the full split.
+
+The generations themselves are **not** identical. Comparing the two logs study by study, a substantial share
+of the printed samples decode differently and some switch report template entirely (the exact fraction is a
+one-line `awk` over the two `hyps.txt` dumps and has not been counted). So the defect does propagate into
+generation; the scores simply do not detect it. Read this as the sensitivity of the published system to the operator it was fitted with, not as
+evidence about the correction, which is what §4 and the table above measure.
+
 ---
 
 ## 6. Efficiency
@@ -253,8 +285,8 @@ so its decode path is not optimised here either way.
 **Open limitations:** Stage-0 has one seed per arm; A1 has one seed; the image tower was contrastively
 co-trained with the legacy hybrid text encoder and reused unchanged for all arms (14A-4); the efficiency
 comparison pits a fused attention kernel against a pure-PyTorch scan; the Transformer decode number in §6 is
-unverified; and the end-to-end effect of the original defect on the *published* 13D metrics is still unmeasured
-(the `HYBRID_EXACT_SCAN=1` probe of Phase 14C-3, which this branch makes cheap but has not run).
+unverified; and the operator-sensitivity probe of the published 13D metrics covers 400 of 2663 studies at one
+seed, inference-side only.
 
 ---
 
