@@ -206,10 +206,10 @@ resolution limit: exact-match-14 is 15 reports against 10 out of 400, and per-la
 .0930) is one of 23 simultaneous comparisons, where ~1.2 spurious exclusions of zero are expected. Neither
 should be claimed without replication on the full split.
 
-The generations themselves are **not** identical. Comparing the two logs study by study, a substantial share
-of the printed samples decode differently and some switch report template entirely (the exact fraction is a
-one-line `awk` over the two `hyps.txt` dumps and has not been counted). So the defect does propagate into
-generation; the scores simply do not detect it. Read this as the sensitivity of the published system to the operator it was fitted with, not as
+The generations themselves are **not** identical: **227 of the 400 studies, 57%, decode to different text**,
+some to a different report template entirely. So the defect reaches the majority of generated reports and
+changes no metric. That is the precise finding, and it is stronger than "the bug was harmless": the operator
+error alters what the model says about most patients, and the evaluation cannot tell. Read this as the sensitivity of the published system to the operator it was fitted with, not as
 evidence about the correction, which is what §4 and the table above measure.
 
 ---

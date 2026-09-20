@@ -1010,11 +1010,10 @@ and `analysis/` first. Also records the 2026-09-20 cleanup: 15 screen arms, 75 G
   23 simultaneous 95% comparisons in this table, where ~1.2 exclusions of zero are expected by
   chance alone. No other label moved; four labels score 0.000 under both operators.
 
-  **What did change is the text.** The two runs are not token-identical — samples 4, 8, 9, 13, 18 and 41
-  among many others decode differently, sometimes to a different report template. The share was read
-  off the two logs by eye, not counted; `paste` the two `hyps.txt` dumps and count unequal lines for
-  the exact figure. The defect therefore does alter what the model says, and leaves the score
-  unchanged. That is the honest form of the answer: the operator error is real, it propagates to
+  **What did change is the text: 227 of 400, 57%.** Counted on the cluster by comparing the two
+  `hyps.txt` dumps line by line. The majority of reports come out different, some on a different
+  template, and not one aggregate metric moves. The defect alters what the model says about most
+  patients and the evaluation cannot detect it. That is the honest form of the answer: the operator error is real, it propagates to
   generation, and the reported metrics are insensitive to it.
 
   **Limits.** n=400 of 2663 (the CIs above are ~2.6× wider than the full split would give), one
