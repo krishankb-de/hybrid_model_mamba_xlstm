@@ -1,6 +1,6 @@
 {
   "current_phase": "V3_full_pipeline",
-  "last_updated": "2026-09-17T19:26:55+02:00",
+  "last_updated": "2026-09-19T11:13:13+02:00",
   "status": "V2 COMPLETE: A2x advanced (2-seed mean 15.677 vs A2 16.542). hybrid_150m_m3_rrg pinned tfla_impl=exact; chain carries all six incumbent dumps + EVAL_TIME=12h. Next: push, then `DRY_RUN=1 source scripts/submit_v3_chain.sh` and submit on the cluster. Stage-0 at the measured rate is ~58 h.",
   "plan_of_record": "MAMBA3_PLAN_V2.md",
   "branch": {
@@ -1043,7 +1043,8 @@
     "2026-09-17: V2-C/V2-D. Screen array 2552165 (both tasks gx07, VAL_EVERY=12000): A2x s42 val PPL 15.566, A2x s1234 15.788. Paired vs A2: -1.142 / -0.588; 2-seed mean 15.677 vs 16.542 = -0.865 PPL (-5.2%, 1.35x the 0.642 bar). Rule: A2x advances. Pinned tfla_impl=exact in hybrid_150m_m3_rrg.yaml (hybrid_150m_m3.yaml stays legacy: it defines the M7 arms; Stage-0 gets exact through ARM=A2x) with a parity test that the decoder config runs the Stage-0 arm's operator.",
     "2026-09-17: CORRECTION to the M7 headline ('the gain is the defect, not the architecture'): A1 (Mamba-1, 16.294) had BOTH recurrences corrected (scan_impl=exact, tfla_impl=exact), while A2 (16.708) still ran legacy TFLA -- so A1 vs A2 was not like-for-like. With both corrected, A2x s42 15.566 beats A1 s42 16.294 by 0.728 PPL (1.13x the bar; A1 has one seed). Revised reading: fixing the mLSTM recurrence is worth ~0.87 PPL on its own (A2 -> A2x), and once both operators are correct, SSD + 8x state is ahead of corrected Mamba-1 by ~0.7 PPL -- just above the bar, single-seed on A1's side.",
     "2026-09-17: SPEED, re-read from wall clocks: A2x took 5:45:18 and 5:57:14 for 12,000 steps (~1.73 s/step all-in). The progress bar's '1:52:35' is NOT the training time: 36,000 micro-batches at its own 1.75 it/s is 5.7 h, which matches the wall clock, so V2-C's '~2.5 h per arm' estimate was wrong. M7's '1.94x faster' (A0 2:36:50 vs A2 1:20:55) compared that same column and needs re-checking from wall clocks (sacct Elapsed for 2513005 / 2513632_0 / 2515666). Same-column rates: A0 1.36, A2 2.18 (300-step probe), A2x 1.75 it/s -- exact TFLA costs ~20% throughput vs A2, and A2x is ~1.3x A0. V3-A Stage-0 at 120K steps: ~58 h, not ~24 h.",
-    "2026-09-17: current_phase -> V3_full_pipeline"
+    "2026-09-17: current_phase -> V3_full_pipeline",
+    "2026-09-19: CLUSTER ACCOUNT EXTENSION APPROVED (user). The 2026-09-29 expiry no longer constrains anything: FM10 retired, the 'Hard constraints' expiry clause removed, V3-A's GRAD_CKPT rationale restated as recipe parity (was deadline), the dated V3 landing projection dropped, the cut order demoted to a preemption contingency, V5's gate reduced to the scientific one (cluster access is confirmed), and the extension question removed from Unresolved. Same removal applied to CLAUDE.md, H100_SCALING_PLAN.md 15C-4 and analysis/PHASE15C_AUX_LOSS.md. Dated historical notes in h100_scaling_state.json are left intact as record. V4-E off-cluster archiving stays live on DUA grounds, not calendar grounds."
   ],
   "open_questions": []
 }

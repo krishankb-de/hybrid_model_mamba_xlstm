@@ -58,7 +58,7 @@ which is evidence against the "merely under-dosed" reading — the natural next 
 the one the data argues against.
 
 **15C-4 (three seeds of the winning λ) therefore did not run.** Roughly 7 GPU-hours were returned
-to a budget that ends when the cluster account expires.
+to the budget. The item was stopped by its pre-registered rule, not by compute pressure.
 
 ---
 

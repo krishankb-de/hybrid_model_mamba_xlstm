@@ -32,9 +32,13 @@ baseline" means. Version 2 ports the finished work onto that branch and re-ancho
 | Old M8 runs A2 as screened (`tfla_impl=legacy`) | **A2x = A2 + `tfla_impl=exact` is screened first** (V2), so the mLSTM layers are corrected too and the decode cache can serve the checkpoint (user decision 2026-09-17) |
 | Decision 7: flip `scan_impl`/`tfla_impl` defaults at M9 | **Superseded.** Defaults stay `legacy`; every model yaml pins both explicitly (V1-E, parity-tested). A global flip could silently move a published number — the 15B-4 byte-identical re-decode is a property worth keeping |
 
-**Hard constraints.** Cluster account expires **2026-09-29** (extension judged likely by the user; the pipeline
-is chained immediately anyway). 200 GiB home quota (`SAVE_TOP_K=0/1` mandatory — 15B lost 3 of 4 arms to it).
+**Hard constraints.** 200 GiB home quota (`SAVE_TOP_K=0/1` mandatory — 15B lost 3 of 4 arms to it).
 The login node executes nothing scripted. Cluster invariants and the login-node rule are in *Verification*.
+
+✅ **Cluster account extension APPROVED (user, 2026-09-19).** No account-expiry deadline governs this plan any
+more. Schedule V3–V5 on the science, not the calendar: run the full ladder, take the retry budget, and do not
+cut seeds or arms for time. The DUA archiving obligation in V4-E is unchanged (it follows from the DUA, not
+from the calendar).
 
 ## Locked decisions (version 2)
 
@@ -808,7 +812,7 @@ mechanical; the semantic reconciliation is listed under V0-A/B. Merge commit **`
 `source scripts/submit_v3_chain.sh` the moment V2-D decides (`DRY_RUN=1` first). One Stage-0 at seed 42 (as both
 incumbents have); decoder seeds 42/43/44 paired with 15B-3; 13D tower reused.
 
-- [ ] **V3-A** Stage-0 150M, 120K steps (`ARM=<A2x|A2> STEPS=120000 WARMUP_STEPS=2000 VAL_EVERY=10000 SAVE_TOP_K=1 EXPERIMENT=h100_stage0_150m_m3`), recipe otherwise identical to Phase 5 / 14A-3 (bs 16×3, LR 4e-4, clip 0.5, `GRAD_CKPT=true` — no harvesting under the deadline). Expect **~58 h wall** at A2x's measured 1.73 s/step all-in (V2-C), inside the wrapper's 4-day limit; the unchanged 15,724-chunk val set is kept so PPL stays comparable. A single preemption restarts from step 0 (FM9) — check `sacct` daily. **Gate: val PPL reported against 13.18 (hybrid) and 11.222 (Transformer)**; there is no Stage-0 seed band for any of the three — say so; the 12K-screen spread (0.33–0.45 PPL) is the only noise estimate. If preempted, resume from `last.ckpt` via `train_stage0_distill_resume.py` rather than restarting (FM9).
+- [ ] **V3-A** Stage-0 150M, 120K steps (`ARM=<A2x|A2> STEPS=120000 WARMUP_STEPS=2000 VAL_EVERY=10000 SAVE_TOP_K=1 EXPERIMENT=h100_stage0_150m_m3`), recipe otherwise identical to Phase 5 / 14A-3 (bs 16×3, LR 4e-4, clip 0.5, `GRAD_CKPT=true` — kept for recipe parity with Phase 5 / 14A-3, not for time). Expect **~58 h wall** at A2x's measured 1.73 s/step all-in (V2-C), inside the wrapper's 4-day limit; the unchanged 15,724-chunk val set is kept so PPL stays comparable. A single preemption restarts from step 0 (FM9) — check `sacct` daily. **Gate: val PPL reported against 13.18 (hybrid) and 11.222 (Transformer)**; there is no Stage-0 seed band for any of the three — say so; the 12K-screen spread (0.33–0.45 PPL) is the only noise estimate. If preempted, resume from `last.ckpt` via `train_stage0_distill_resume.py` rather than restarting (FM9).
 - [ ] **V3-B** Tower: reuse `outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt` unchanged (14A-4 caveat: co-trained with the legacy hybrid text encoder; recorded, not fixed). No run.
 - [ ] **V3-C** Decoder × 3 (chain stage 2): `MODEL_CONFIG=hybrid_150m_m3_rrg`, `DECODER_CKPT=<V3-A last.ckpt>`, `NUM_GPUS=4 MAX_STEPS=12000 SEED=<s> SAVE_TOP_K=0 AUX_LAMBDA=0.0 PREFIX_K=32`, 13D tower. Read each log: `Missing keys: 0`, `prefix_k = 32`, `Training seed: <s>`, `Aux CheXpert loss: OFF`.
 - [ ] **V3-D** Eval × 3 → CheXbert × 3 → bootstraps × 9 (chain stages 3–5): official test split n=2663, `DECODE=beam BEAM_SIZE=3`, the incumbents' uncached path; `PER_LABEL=true` bootstraps per seed vs hybrid (same seed), vs Transformer (same seed), vs the floor → `analysis/bootstrap_m3_vs_{hybrid,transformer,floor}_seed{42,43,44}.md`. Apply decision 10; report mean ± SD per metric, never one seed. All six incumbent dump dirs are defaulted in the chain (resolved 2026-09-17 from `h100_scaling_state.json`). The decode runs with `EVAL_TIME=12:00:00` because this decoder's uncached beam speed is unmeasured.
@@ -824,7 +828,7 @@ incumbents have); decoder seeds 42/43/44 paired with 15B-3; 13D tower reused.
 - [ ] **V4-D** One note in `h100_scaling_state.json` (the Phase-5 PPL and the 13D/15B headline are *compared against*, not superseded); `mamba3_v2_state.json` verdict; `readme`. **Do not merge into `h100_scaling`.**
 - [ ] **V4-E** Archive: V3 checkpoints/dumps are DUA-covered and HOME is deleted 6 months after expiry — add them to the Phase-15 archive manifest.
 
-### V5 — Gated / optional (only with confirmed cluster access)
+### V5 — Gated / optional (cluster access confirmed 2026-09-19; the remaining gates are scientific)
 
 - [ ] **V5-A** 14C-2/14C-3 closure on **13D** (the supervisor's open limitation #2): `HYBRID_EXACT_SCAN=1` teacher-forced PPL on n=2663, exact vs default, then beam+CheXbert on a 300–500 subsample. Answers "does the bug affect the reported numbers" by measurement.
 - [ ] **V5-B** M7-E mechanism diagnostics (MQAR / late-position PPL slice).
@@ -871,10 +875,11 @@ commands (`squeue`, `sacct`, `grep`, `cat`, `ls`) remain fine interactively.
 | V3-C decoder ×3 (4 GPU, ~2 h each, parallel) | ~24 | ~2 h |
 | V3-D eval + CheXbert ×3 + bootstraps ×9 | ~20 | ~8 h |
 | V3-E/F | ~1 | minutes |
-| **Total V3** | **~105–135** | **~4–5 d** → lands ≈ 2026-09-22 if submitted 2026-09-17 and not preempted |
+| **Total V3** | **~105–135** | **~4–5 d** wall from submission, absent preemption |
 
 **Cut order if the budget bites:** V5 entirely; V3-F's forward+backward sweep (keep inference + decode); a third
-decoder seed (report 2 and say so); never the Stage-0 validation set (comparability with 13.18).
+decoder seed (report 2 and say so); never the Stage-0 validation set (comparability with 13.18). With the
+extension approved this order is a contingency for queue/preemption trouble only — not a schedule.
 
 ---
 
@@ -891,7 +896,7 @@ decoder seed (report 2 and say so); never the Stage-0 validation set (comparabil
 | **FM7** | Recipe drift across arms | wall-clocks differing without explanation | `GRAD_CKPT=true` throughout; `max_steps` = screen length; one chain script |
 | **FM8** | **Home quota (200 GiB)** killed 3 of 4 arms in 15B | `du` before every submission | `SAVE_TOP_K=0` for decoders, `1` for Stage-0; delete probe outputs |
 | **FM9** | **Preemption restarts Stage-0 from step 0** (`--requeue` passes no `ckpt_path`) | `sacct` shows REQUEUED; log has two `ARCH` lines | resume via `train_stage0_distill_resume.py` from `last.ckpt`; `--open-mode=append` keeps the evidence |
-| **FM10** | **Account expiry 2026-09-29** | calendar | chain everything at once; extension ticket; archive DUA-covered outputs off-cluster |
+| ~~FM10~~ | ~~Account expiry~~ — **RETIRED 2026-09-19, extension approved** | — | Archiving DUA-covered outputs off-cluster stays live as V4-E, on DUA grounds |
 
 ---
 
@@ -917,7 +922,6 @@ decoder seed (report 2 and say so); never the Stage-0 validation set (comparabil
 
 ## Unresolved questions
 
-- Extension: confirmed or not? If not, V3 must be submitted by 2026-09-20 to land before the 29th with any retry margin.
 - V5-A (14C-3 on 13D, ~4 GPU-h): run inside V3's window or defer?
 - Speed: re-derive M7's A0/A2 wall clocks with `sacct` before quoting any speed-up (see the M7 correction).
 - A1 has one seed. If the A2x-vs-A1 gap (−0.728) goes into the writeup as an architecture claim, an `A1-s2` arm (~8 h) is the pre-agreed way to make it two-seed.
