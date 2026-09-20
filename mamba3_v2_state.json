@@ -1,6 +1,6 @@
 {
   "current_phase": "V3_full_pipeline",
-  "last_updated": "2026-09-20T14:55:11+02:00",
+  "last_updated": "2026-09-20T15:00:52+02:00",
   "status": "V3 RUNNING. Stage-0 (2553736) COMPLETE in 57h23m; all three decoders COMPLETE (~1h19 each, ~1.7x faster than the hybrid's); evals s42/s43 COMPLETE (~5h10 each, ~1.75x slower than the hybrid's decode), s44 in flight; 6 of 9 bootstraps written. OUTSTANDING READOUTS: Stage-0 final val PPL (the V3-A gate), the 9 bootstrap tables, CheXbert for s43/s44. Then apply decision 10 (paired mean > 1 baseline seed SD AND sign at >=2/3 seeds) and write V3-D + V4-A.",
   "plan_of_record": "MAMBA3_PLAN_V2.md",
   "branch": {
@@ -61,7 +61,9 @@
     "stage0_val_ppl_pubmed": {
       "hybrid_150m_v2": 13.18,
       "transformer_150m_baseline": 11.222,
-      "note": "120K steps, identical recipe (14A-3 verified single-lever). No seed band exists for Stage-0 for any arm; the 12K screen's seed spread (0.33-0.45 PPL) is the only noise estimate."
+      "note": "120K steps, identical recipe (14A-3 verified single-lever). No seed band exists for Stage-0 for any arm; the 12K screen's seed spread (0.33-0.45 PPL) is the only noise estimate.",
+      "mamba3_a2x_corrected": 11.674,
+      "v3a_result": "V3-A (job 2553736, 120K steps, identical recipe, one seed): 11.674. Beats the hybrid's 13.18 by -1.506 (-11.4%) and leaves the matched Transformer's 11.222 ahead by 0.452 (4.0% relative) -- 77% of the hybrid-Transformer gap closed by correcting the operator and moving to SSD. No arm has a Stage-0 seed band; the 12K screen spread (0.33-0.45 PPL) is the only noise estimate and the residual 0.452 is of that order, so 'essentially matches' is defensible but unreplicated."
     },
     "mimic_i2t_r_at_10_clean_protocol": {
       "value": 0.1459,
@@ -398,7 +400,8 @@
       "job_id": "array 2552165_0 (JobID 2552437), gx07",
       "wall": "5:45:18 (13:18:10 -> 19:03:28)",
       "train_rate": "1.75 it/s",
-      "verdict": "ADVANCED by the V2-D rule. Beats A2 at both seeds: 15.566 vs 16.708 (s42), 15.788 vs 16.376 (s1234); 2-seed mean 15.677 vs 16.542 = -0.865 PPL (-5.2%), 1.35x the 0.642 bar. Cross-seed spread 0.222, the lowest of any replicated arm."
+      "verdict": "ADVANCED by the V2-D rule. Beats A2 at both seeds: 15.566 vs 16.708 (s42), 15.788 vs 16.376 (s1234); 2-seed mean 15.677 vs 16.542 = -0.865 PPL (-5.2%), 1.35x the 0.642 bar. Cross-seed spread 0.222, the lowest of any replicated arm.",
+      "stage0_120k_val_ppl": 11.674
     },
     "A2x-s2": {
       "desc": "A2x replicated at seed 1234",
@@ -921,9 +924,15 @@
       },
       "evidence": {
         "stage0_job": "2553736 COMPLETED 2-09:22:44 gx10",
-        "stage0_val_ppl": "PENDING readout",
+        "stage0_val_ppl": "11.674 (job 2553736) vs hybrid 13.18 and Transformer 11.222; 77% of the gap closed",
         "decoder_jobs": "2553737 1:18:05 / 2553743 1:18:56 / 2553749 1:19:03",
-        "decoder_init": "Missing keys: 0, Unexpected: 1 (all three); tfla_impl=exact confirmed"
+        "decoder_init": "Missing keys: 0, Unexpected: 1 (all three); tfla_impl=exact confirmed",
+        "eval_jobs": "2553738 s42 5:16:02, 2553744 s43 5:08:09, 2553750 s44 running",
+        "chexbert_s42": "14-micro 0.4661, 14-macro 0.2834, 5-micro 0.5316, 5-macro 0.4357, em5 0.2306, example-F1 0.4012",
+        "chexbert_s43": "14-micro 0.4494, 14-macro 0.2720, 5-micro 0.5010, 5-macro 0.4103, em5 0.2167, example-F1 0.3893",
+        "vs_transformer": "all 9 metrics tie at s42 and s43 (18/18 CIs span zero)",
+        "vs_hybrid_partial": "per-seed calls contradict; only exact-match-5 is a candidate claim on the 2-seed paired mean",
+        "vs_floor": "text + exact-match win at both seeds; CheXbert-14-macro loses at both (-0.0180 / -0.0294)"
       },
       "verdict": null
     },
@@ -1051,7 +1060,9 @@
     "2026-09-17: current_phase -> V3_full_pipeline",
     "2026-09-19: CLUSTER ACCOUNT EXTENSION APPROVED (user). The 2026-09-29 expiry no longer constrains anything: FM10 retired, the 'Hard constraints' expiry clause removed, V3-A's GRAD_CKPT rationale restated as recipe parity (was deadline), the dated V3 landing projection dropped, the cut order demoted to a preemption contingency, V5's gate reduced to the scientific one (cluster access is confirmed), and the extension question removed from Unresolved. Same removal applied to CLAUDE.md, H100_SCALING_PLAN.md 15C-4 and analysis/PHASE15C_AUX_LOSS.md. Dated historical notes in h100_scaling_state.json are left intact as record. V4-E off-cluster archiving stays live on DUA grounds, not calendar grounds.",
     "2026-09-20: V3-A/B/C COMPLETE. Stage-0 job 2553736 (gx10) COMPLETED in 2-09:22:44 = 57h23m, matching the 58 h projection; no preemption, one ARCH line, fingerprint mamba3x9 + tfla_impl=exact + 184,192,200 params; final val PPL still to be read from the log. Tower reused unchanged (V3-B, no run). Decoders 2553737/2553743/2553749 (s42/s43/s44) COMPLETED in 1:18:05 / 1:18:56 / 1:19:03 on 4 GPUs -- about 1.7x faster than the hybrid's 2h15-2h30 on the same recipe; every log shows Missing keys: 0, Unexpected: 1, prefix_k=32, the right seed, aux OFF, and tfla_impl=exact (the V2-D pin reached the decoder).",
-    "2026-09-20: 2026-09-20: V3-D IN PROGRESS. Evals 2553738 (s42, 5:16:02) and 2553744 (s43, 5:08:09) COMPLETED, 2553750 (s44) running at last check; hyps.txt = 2663 lines for s42; CheXbert scored for s42/s43; 6 of 9 bootstraps written. Uncached beam decode is ~1.75x slower than the hybrid's (5:16 vs 13D's 3:01:10 re-decode, job 2546521) -- EVAL_TIME=12:00:00 was the right call, the wrapper's 6:30 default would have left little margin. FIRST NUMBERS (s42 CheXbert, single seed, NOT a verdict): 14-micro 0.4661, 14-macro 0.2834, 5-micro 0.5316, 5-macro 0.4357, exact-match-5 0.2306, example-F1 0.4012. Paired vs hybrid s42: -0.0075 / +0.0034 / -0.0206 / -0.0130 / +0.0143 / -0.0017. Vs Transformer s42: +0.0071 / +0.0060 / +0.0067 / +0.0038 / -0.0000 / +0.0061. Vs floor 14-macro still -0.0180. Lung Lesion remains 0.000 and Pleural Other 0.033, the same rare-label shape as every prior arm."
+    "2026-09-20: 2026-09-20: V3-D IN PROGRESS. Evals 2553738 (s42, 5:16:02) and 2553744 (s43, 5:08:09) COMPLETED, 2553750 (s44) running at last check; hyps.txt = 2663 lines for s42; CheXbert scored for s42/s43; 6 of 9 bootstraps written. Uncached beam decode is ~1.75x slower than the hybrid's (5:16 vs 13D's 3:01:10 re-decode, job 2546521) -- EVAL_TIME=12:00:00 was the right call, the wrapper's 6:30 default would have left little margin. FIRST NUMBERS (s42 CheXbert, single seed, NOT a verdict): 14-micro 0.4661, 14-macro 0.2834, 5-micro 0.5316, 5-macro 0.4357, exact-match-5 0.2306, example-F1 0.4012. Paired vs hybrid s42: -0.0075 / +0.0034 / -0.0206 / -0.0130 / +0.0143 / -0.0017. Vs Transformer s42: +0.0071 / +0.0060 / +0.0067 / +0.0038 / -0.0000 / +0.0061. Vs floor 14-macro still -0.0180. Lung Lesion remains 0.000 and Pleural Other 0.033, the same rare-label shape as every prior arm.",
+    "2026-09-20: V3-A GATE RESULT: Stage-0 val PPL 11.674 (job 2553736, 120K steps, one seed, recipe identical to Phase 5 / 14A-3). Hybrid 13.18 -> 11.674 = -1.506 (-11.4%); the matched Transformer's 11.222 stays 0.452 ahead (4.0% relative). The corrected Mamba-3 backbone closes 77% of the hybrid-Transformer LM gap that 14A-3 opened. Caveat: one seed per arm at 120K, no Stage-0 seed band anywhere in the project, and the residual 0.452 is the size of the 12K screen's seed spread (0.33-0.45).",
+    "2026-09-20: V3-D PARTIAL (seeds 42+43; s44 eval still running). vs the MATCHED TRANSFORMER: all 9 metrics tie at BOTH seeds -- 18 of 18 intervals span zero. vs the HYBRID, paired by seed: s42 gives mamba3 bleu_4 + exact-match-14 and hybrid 5-micro (6 ties); s43 gives mamba3 14-micro/14-macro/5-micro and hybrid bleu_1 (5 ties) -- the per-seed calls contradict each other, exactly the 15B-4 pattern. Paired 2-seed means vs the hybrid seed SDs: only exact-match-5 (+0.0083 vs SD 0.0019, positive at both seeds) is a candidate claim under decision 10; exact-match-14 exceeds its SD but flips sign; everything else inside noise, including CheXbert-14-macro (+0.0091 vs SD 0.0122). vs the RETRIEVAL FLOOR: text and exact-match win at both seeds, 14-macro LOSES at both (-0.0180 / -0.0294), the standing deficit of every arm. Rare labels unmoved: Lung Lesion 0.0000 / 0.0222."
   ],
   "open_questions": []
 }
