@@ -93,10 +93,34 @@ clip 0.5, gradient checkpointing, same corpus, same KD teacher). Job 2553736.
 | backbone | val PPL | vs hybrid |
 |---|---|---|
 | `hybrid_150m_v2`, both recurrences defective | 13.180 | — |
+| A2, SSD + 8× state, **mLSTM still defective** | 12.550 | −0.630 (−4.8%) |
 | **`hybrid_150m_m3` (A2x), both corrected** | **11.674** | **−1.506 (−11.4%)** |
 | `transformer_150m_baseline`, matched parameters | 11.222 | −1.958 (−14.9%) |
 
 **77% of the hybrid-Transformer gap closes.** The Transformer keeps a 0.452 lead, 4.0% relative.
+
+**The A2 row decomposes it, and it was free.** That 120,000-step run of the partially-corrected arm
+already existed: it was launched on the superseded branch on 2026-09-07, finished on 2026-09-09,
+and its result was never collected because the plan it belonged to recorded the stage as never
+started. Same wrapper, same recipe, same seed, same corpus; the only lever against A2x is
+`tfla_impl`. It splits the 1.506 into two named halves:
+
+| step | effect | share |
+|---|---|---|
+| repair the selective scan, move to SSD, 8× the state | −0.630 | 42% |
+| repair the mLSTM recurrence | −0.876 | **58%** |
+
+⚠ **The two halves swap rank with training length, which neither the screen nor the full run would
+have shown alone.** At 12,000 steps the same decomposition is −2.618 and −0.865, i.e. 75% / 25% the
+other way. The defective-scan model catches up given ten times the steps, while the mLSTM
+correction's advantage persists and slightly grows. A screen-length ablation therefore
+*over-attributes* to the scan-and-SSD bundle; the writeup should quote both lengths, not one.
+
+⚠ Caveats specific to the A2 row: one seed, as for every Stage-0 number here; and it was trained
+from a dirty working tree at commit `7fecc86`, ten days before A2x's tree. The intervening changes
+are the M6 decode cache and V1 bookkeeping, both verified numerics-neutral for the training path,
+but the dirty flag means the exact tree cannot be reconstructed. Treat the split as a strong
+indication, not a pinned measurement.
 
 ⚠ **No arm has a Stage-0 seed band** — not this one, not the hybrid, not the Transformer, anywhere in this
 project's history. The residual 0.452 is the size of the 12K screen's seed spread (0.33-0.45). "Essentially
