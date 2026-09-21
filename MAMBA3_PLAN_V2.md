@@ -1020,7 +1020,7 @@ and `analysis/` first. Also records the 2026-09-20 cleanup: 15 screen arms, 75 G
   checkpoint, one seed, inference-side only. This measures the *published* system's sensitivity to
   the operator, not what the correction is worth — V3 is that arm, and it is null too.
 
-- [ ] **V5-D** **What is the missing stop condition worth?** Found 2026-09-21 while scoping
+- [x] **V5-D** **What is the missing stop condition worth?** Found 2026-09-21 while scoping
   improvements, by reading the decode path rather than the model:
   **(i)** `beam_search_decode` has no EOS handling and no repetition control. It runs exactly
   `max_new_tokens=100` iterations for every study, always.
@@ -1064,6 +1064,46 @@ and `analysis/` first. Also records the 2026-09-20 cleanup: 15 screen arms, 75 G
   **Fairness constraint, enforced in the wrapper's output.** A decode-protocol change is only a
   comparison when applied to *every* system compared: the Transformer arm and the retrieval floor
   included. Repair all of them or cite none of them.
+
+  **V5-D DONE 2026-09-21 — NEGATIVE, and the pre-registered prediction was wrong in direction.**
+  Jobs 2561740 (repair), 2561890 (CheXbert), 2561893 (paired bootstrap, per-label). 13D as
+  published, n=400, `dedup=consecutive truncate=true`.
+
+  What the repair touched: 321 of 400 reports changed, **301 severed fragments removed against only
+  61 duplicate sentences**, tokens 23,325 → 21,298, mean length 58.3 → 53.2.
+
+  | metric | repaired | as decoded | diff | 95% CI | verdict |
+  |---|---|---|---|---|---|
+  | BLEU-1 | 0.2271 | 0.2444 | −0.0173 | [−0.0196, −0.0149] | **as decoded wins** |
+  | BLEU-4 | 0.0473 | 0.0503 | −0.0031 | [−0.0040, −0.0022] | **as decoded wins** |
+  | ROUGE-L | 0.1834 | 0.1836 | −0.0002 | [−0.0018, +0.0015] | tie |
+  | CheXbert-14-micro | 0.4542 | 0.4566 | −0.0024 | [−0.0099, +0.0049] | tie |
+  | CheXbert-14-macro | 0.2569 | 0.2589 | −0.0020 | [−0.0125, +0.0071] | tie |
+  | CheXbert-5-micro / macro | 0.5411 / 0.4347 | 0.5396 / 0.4322 | +0.0015 / +0.0025 | span 0 | tie |
+
+  **Two things I got wrong, stated plainly.**
+  1. *Direction.* I predicted BLEU and ROUGE-L would rise because the removed text was unmatched.
+     BLEU fell decisively and ROUGE-L did not move. The removed text was **not** unmatched.
+  2. *Which defect mattered.* I described degenerate repetition as a major artefact on the strength
+     of a few dramatic log samples. It is marginal: 61 duplicated sentences across 400 reports,
+     0.15 per report. The pervasive phenomenon is truncation, at **301 of 400 reports**.
+
+  **What the numbers actually say.** ROUGE-L is the clean instrument here, because it has no brevity
+  penalty: removing genuinely unmatched tokens would raise its precision, leave its longest-common-
+  subsequence recall untouched, and lift F. It stayed flat, so the severed fragments were
+  contributing to the LCS. They are wanted content, not overrun. BLEU agrees and adds a caveat: it
+  applies a corpus brevity penalty, so part of its fall may be length rather than quality, and
+  separating the two needs the reference token count (`awk '{n+=NF} END{print n, NR, n/NR}'` over
+  `refs.txt`, free). Per label, the only CheXbert move consistent with the story is **Lung Opacity
+  falling** (−0.0384, CI excludes 0): truncation deleted findings. Pneumonia's +0.0045 is too small
+  to carry weight.
+
+  **Verdict: do not adopt the repair, and do not re-decode any other arm for it.** The published
+  protocol stands. The finding is that the **100-token budget, not the overrun past the end of the
+  report, is the binding constraint** — three quarters of studies are cut off mid-sentence and the
+  text being cut is text the reference rewards. That redirects the next test from trimming to
+  **`max_new_tokens=200`**, one re-decode of ~1 h on 400 samples, which is the first thing in this
+  campaign with a mechanism-backed reason to raise an absolute number.
 
 - [ ] **V5-B** M7-E mechanism diagnostics (MQAR / late-position PPL slice).
 - [ ] **V5-C** Ratio screen (`12/0`, `10/2`, `9/3`, `8/4`) **only if V3-D claims a win** under decision 10; same rule; efficiency trade reported alongside.

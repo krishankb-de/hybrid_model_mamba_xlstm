@@ -212,6 +212,34 @@ changes no metric. That is the precise finding, and it is stronger than "the bug
 error alters what the model says about most patients, and the evaluation cannot tell. Read this as the sensitivity of the published system to the operator it was fitted with, not as
 evidence about the correction, which is what §4 and the table above measure.
 
+**The generation budget, not the architecture, is what currently truncates these reports.** The
+decoding harness has no stop condition: beam search runs a fixed 100 tokens for every study, and the
+model was never trained to emit an end-of-report token, because the trainer sets the pad token to the
+end-of-text token and then masks every pad position out of the loss. On the 400-study dump, **301 of
+400 reports end mid-sentence**, while degenerate repetition, which is the more visible artefact in a
+log, is marginal at 61 duplicated sentences in total.
+
+Repairing that after the fact does not help. Dropping the severed fragment and collapsing repeated
+sentences, then re-scoring against the same references (n=400, paired bootstrap, 1000 resamples):
+
+| metric | repaired | as decoded | diff | 95% CI |
+|---|---|---|---|---|
+| BLEU-1 | 0.2271 | 0.2444 | −0.0173 | [−0.0196, −0.0149] |
+| BLEU-4 | 0.0473 | 0.0503 | −0.0031 | [−0.0040, −0.0022] |
+| ROUGE-L | 0.1834 | 0.1836 | −0.0002 | [−0.0018, +0.0015] |
+| CheXbert-14-micro | 0.4542 | 0.4566 | −0.0024 | [−0.0099, +0.0049] |
+| CheXbert-14-macro | 0.2569 | 0.2589 | −0.0020 | [−0.0125, +0.0071] |
+
+This was pre-registered with the opposite prediction, and the prediction was wrong. ROUGE-L carries
+the interpretation because it has no brevity penalty: had the removed text been unmatched, precision
+would have risen against unchanged subsequence recall and F would have lifted. It did not move, so
+the truncated fragments were contributing matched content. Per label, the one CheXbert move whose
+interval excludes zero is Lung Opacity falling, which is truncation deleting findings. Clinical
+content is otherwise untouched, consistent with CheXbert labelling a report rather than a sentence.
+
+The published decode protocol therefore stands unchanged, and the open lever is the opposite of
+trimming: a longer generation budget.
+
 ---
 
 ## 6. Efficiency
