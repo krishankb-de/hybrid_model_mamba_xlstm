@@ -1088,22 +1088,66 @@ and `analysis/` first. Also records the 2026-09-20 cleanup: 15 screen arms, 75 G
      of a few dramatic log samples. It is marginal: 61 duplicated sentences across 400 reports,
      0.15 per report. The pervasive phenomenon is truncation, at **301 of 400 reports**.
 
-  **What the numbers actually say.** ROUGE-L is the clean instrument here, because it has no brevity
-  penalty: removing genuinely unmatched tokens would raise its precision, leave its longest-common-
-  subsequence recall untouched, and lift F. It stayed flat, so the severed fragments were
-  contributing to the LCS. They are wanted content, not overrun. BLEU agrees and adds a caveat: it
-  applies a corpus brevity penalty, so part of its fall may be length rather than quality, and
-  separating the two needs the reference token count (`awk '{n+=NF} END{print n, NR, n/NR}'` over
-  `refs.txt`, free). Per label, the only CheXbert move consistent with the story is **Lung Opacity
-  falling** (−0.0384, CI excludes 0): truncation deleted findings. Pneumonia's +0.0045 is too small
-  to carry weight.
+  **What the numbers actually say — corrected 2026-09-21 once the reference length was measured.**
+  References total 28,521 tokens over the 400 studies, mean 71.3. BLEU's corpus brevity penalty is
+  therefore active and does most of the work:
+
+  | arm | hyp tokens | brevity penalty | BLEU-1 | implied clipped precision |
+  |---|---|---|---|---|
+  | as decoded | 23,325 | 0.8003 | 0.2444 | 0.3054 |
+  | repaired | 21,298 | 0.7124 | 0.2271 | 0.3188 |
+
+  So the repair **raised** unigram precision by about 4.4% relative and lost on BLEU purely by
+  getting shorter. ROUGE-L stayed flat because `beta=1.2` weights recall above precision, so the
+  subsequence recall it gave up cancelled the precision it gained. **My first reading of this,
+  "the severed fragments are wanted content, not overrun", was too strong**: the fragments are
+  mixed, and removing them trades recall for precision at roughly par. Per label the only CheXbert
+  move is **Lung Opacity falling** (−0.0384, CI excludes 0), which is truncation deleting findings.
+  Pneumonia's +0.0045 is too small to carry weight.
 
   **Verdict: do not adopt the repair, and do not re-decode any other arm for it.** The published
-  protocol stands. The finding is that the **100-token budget, not the overrun past the end of the
-  report, is the binding constraint** — three quarters of studies are cut off mid-sentence and the
-  text being cut is text the reference rewards. That redirects the next test from trimming to
-  **`max_new_tokens=200`**, one re-decode of ~1 h on 400 samples, which is the first thing in this
-  campaign with a mechanism-backed reason to raise an absolute number.
+  protocol stands. Trimming buys precision and pays it straight back in length. The open question
+  it leaves is whether the 100-token budget is itself the constraint, which V5-E answers.
+
+- [x] **V5-E** **Is the 100-token budget the constraint? No — the model simply cannot stop.**
+  Job 2561910, 13D, n=400, beam 3, `MAX_NEW_TOKENS=200`, everything else identical to the published
+  run (`prefix_k = 32`, `Missing keys: 0`, default operators). Doubling the budget makes every text
+  metric **worse**:
+
+  | metric | 100 tokens | 200 tokens | change |
+  |---|---|---|---|
+  | ROUGE-L | 0.1836 | 0.1644 | −10.5% relative |
+  | BLEU-1 | 0.2444 | 0.1983 | −18.9% relative |
+  | BLEU-4 | 0.0503 | 0.0394 | −21.7% relative |
+
+  Measured on the generated text itself (parsed from the job log; the parser reproduces the
+  cluster's own reference count of 28,521 tokens exactly, which is what validates it):
+
+  | | 100 tokens | 200 tokens |
+  |---|---|---|
+  | generated tokens, mean | 58.3 | **114.1** |
+  | reports still cut mid-sentence | ~75% | **71%** |
+  | consecutive duplicate sentences | 61 | **346** |
+  | any repeated sentence | — | 978 of 5,451, **17.9%** |
+
+  **The decisive number is 71%.** Given twice the budget the model uses all of it and is *still*
+  unterminated on seven reports in ten. It is not that reports are slightly longer than 100 tokens;
+  the model has no notion of finishing, exactly as the training signal predicts, and the extra
+  budget is spent on repetition, which rises 5.7×. Because 45,634 generated tokens now exceed the
+  28,521 reference tokens, BLEU's brevity penalty switches off entirely, so BLEU-1 at 200 tokens is
+  raw clipped precision: **0.1983 against 0.3054 at 100 tokens, a 35% collapse.**
+
+  **Verdict: 100 tokens is at or near the metric optimum, and length is not a lever.** Across the
+  three points now measured — 53.2 tokens mean (repaired) 0.1834, 58.3 (published) 0.1836, 114.1
+  (doubled) 0.1644 — ROUGE-L is flat then falls. The published protocol is not leaving value on the
+  table, and **no arm should be re-decoded at a different budget**.
+
+  **What is left.** Trimming after the fact and extending the budget are both patches on a missing
+  training signal, and both are now measured as worthless. The only intervention that addresses the
+  cause is to **train the model to stop**: append an end-of-report token to the targets, leave it
+  unmasked, and terminate decoding on it. One run per arm, ~2.5 h. It is the last mechanism-backed
+  lever in this campaign, and it is optional — the result as it stands is a clean, quantified
+  limitation, which is worth more to the thesis than a marginal metric gain.
 
 - [ ] **V5-B** M7-E mechanism diagnostics (MQAR / late-position PPL slice).
 - [ ] **V5-C** Ratio screen (`12/0`, `10/2`, `9/3`, `8/4`) **only if V3-D claims a win** under decision 10; same rule; efficiency trade reported alongside.

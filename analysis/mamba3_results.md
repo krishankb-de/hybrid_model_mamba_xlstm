@@ -230,15 +230,29 @@ sentences, then re-scoring against the same references (n=400, paired bootstrap,
 | CheXbert-14-micro | 0.4542 | 0.4566 | −0.0024 | [−0.0099, +0.0049] |
 | CheXbert-14-macro | 0.2569 | 0.2589 | −0.0020 | [−0.0125, +0.0071] |
 
-This was pre-registered with the opposite prediction, and the prediction was wrong. ROUGE-L carries
-the interpretation because it has no brevity penalty: had the removed text been unmatched, precision
-would have risen against unchanged subsequence recall and F would have lifted. It did not move, so
-the truncated fragments were contributing matched content. Per label, the one CheXbert move whose
-interval excludes zero is Lung Opacity falling, which is truncation deleting findings. Clinical
+This was pre-registered with the opposite prediction, and the prediction was wrong. The references
+total 28,521 tokens, mean 71.3, so BLEU's corpus brevity penalty is active and explains the fall:
+0.8003 as decoded against 0.7124 repaired. Backing it out, the repair **raised** clipped unigram
+precision from 0.3054 to 0.3188 and simply got shorter. ROUGE-L stayed flat because its `beta=1.2`
+weights recall above precision, so the subsequence recall given up cancelled the precision gained.
+Trimming therefore trades recall for precision at roughly par. Per label the one CheXbert move whose
+interval excludes zero is Lung Opacity falling, which is truncation deleting findings; clinical
 content is otherwise untouched, consistent with CheXbert labelling a report rather than a sentence.
 
-The published decode protocol therefore stands unchanged, and the open lever is the opposite of
-trimming: a longer generation budget.
+**Doubling the budget instead is worse, and shows why.** Re-decoding the same checkpoint at 200
+tokens drops ROUGE-L to 0.1644, BLEU-1 to 0.1983 and BLEU-4 to 0.0394. The generated text explains
+it: mean length rises from 58.3 to 114.1 tokens, consecutive duplicate sentences rise from 61 to
+346, 17.9% of all sentences are repeats, and **71% of reports are still cut off mid-sentence even
+with twice the budget**. The model has no notion of finishing. With 45,634 generated against 28,521
+reference tokens the brevity penalty switches off, so BLEU-1 becomes raw precision, and that
+precision has collapsed 35% from 0.3054 to 0.1983.
+
+Across the three lengths now measured, ROUGE-L is flat from 53 to 58 mean tokens and falls by 114,
+so **the published 100-token protocol sits at or near the metric optimum and length is not a lever**.
+Trimming afterwards and extending the budget are both patches on a missing training signal: the
+report-generation targets contain no end-of-report token, so the decoder cannot be told where to
+stop. That is a concrete, quantified limitation on every absolute number this project reports, and
+it is independent of the architecture question the rest of this document answers.
 
 ---
 
