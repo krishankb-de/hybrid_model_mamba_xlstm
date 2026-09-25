@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Keep MAMBA3_PLAN_V2.md checkboxes and mamba3_v2_state.json in sync.
+"""Keep a plan-of-record's checkboxes and its state file in sync.
+
+Defaults to MAMBA3_PLAN_V2.md + mamba3_v2_state.json; `--plan efficiency` selects
+EFFICIENCY_PLAN.md + efficiency_state.json (see PLAN_SETS).
 
 The plan-of-record contract (MAMBA3_PLAN_V2.md, "State-tracking contract") requires ticking a
 checkbox AND updating the state file after every meaningful change. Doing that by hand twice
@@ -10,6 +13,7 @@ is how a plan and its state drift apart, so this is the single entry point.
     python scripts/mamba3_state.py phase V1_rebaseline [--status "..."]
     python scripts/mamba3_state.py show [V0]
     python scripts/mamba3_state.py sync          # regenerate state phases from plan checkboxes
+    python scripts/mamba3_state.py --plan efficiency tick E0-A --evidence job=2561900
 
 `sync` is the documented recovery path: if mamba3_v2_state.json is lost, the plan's checkboxes are
 ground truth and this rebuilds the phase tree from them.
@@ -23,11 +27,33 @@ import sys
 from typing import Dict, List, Optional, Tuple
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-PLAN = ROOT / "MAMBA3_PLAN_V2.md"
-STATE = ROOT / "mamba3_v2_state.json"
 
-CHECKBOX_RE = re.compile(r"^(- \[)( |x)(\] \*\*)([MV]\d+-[A-Z]\d*)(\*\*\s+)(.*)$")
-PHASE_RE = re.compile(r"^### ([MV]\d+)\s+—\s+(.*)$")
+# Two plans-of-record live in this repo and share this helper. `mamba3` is the default so every
+# command written in MAMBA3_PLAN_V2.md and CLAUDE.md keeps working verbatim; `efficiency` is the
+# inference-speed plan (EFFICIENCY_PLAN.md), which has its own phase ids (E0-A ...) and its own
+# state file. Adding a third is one line here.
+PLAN_SETS = {
+    "mamba3": ("MAMBA3_PLAN_V2.md", "mamba3_v2_state.json"),
+    "efficiency": ("EFFICIENCY_PLAN.md", "efficiency_state.json"),
+}
+DEFAULT_PLAN_SET = "mamba3"
+
+PLAN = ROOT / PLAN_SETS[DEFAULT_PLAN_SET][0]
+STATE = ROOT / PLAN_SETS[DEFAULT_PLAN_SET][1]
+
+# Phase ids are one or two capitals plus a digit: M7-B, V3-D, E0-A. The leading class was `[MV]`
+# until EFFICIENCY_PLAN.md added E-ids; it stays anchored so prose headings ("### 1. The live
+# recurrence ...") cannot be mistaken for phases.
+CHECKBOX_RE = re.compile(r"^(- \[)( |x)(\] \*\*)([A-Z]{1,2}\d+-[A-Z]\d*)(\*\*\s+)(.*)$")
+PHASE_RE = re.compile(r"^### ([A-Z]{1,2}\d+)\s+—\s+(.*)$")
+
+
+def select_plan_set(name: str) -> None:
+    """Point the module at one of PLAN_SETS. Called once from main()."""
+    global PLAN, STATE
+    plan_name, state_name = PLAN_SETS[name]
+    PLAN = ROOT / plan_name
+    STATE = ROOT / state_name
 
 
 def _now() -> str:
@@ -110,6 +136,8 @@ def refresh_phases(state: dict) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--plan", choices=sorted(PLAN_SETS), default=DEFAULT_PLAN_SET,
+                    help="which plan-of-record to operate on (default: %(default)s)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     t = sub.add_parser("tick", help="mark checkbox(es) done in plan + state")
@@ -132,6 +160,11 @@ def main() -> int:
     sub.add_parser("readme", help="refresh the branch status + progress table in README.md")
 
     args = ap.parse_args()
+    select_plan_set(args.plan)
+    if args.cmd == "readme" and args.plan != "mamba3":
+        print("ERROR: `readme` refreshes README.md's Mamba-3 progress table and is only defined "
+              "for --plan mamba3", file=sys.stderr)
+        return 1
     state = load_state()
 
     if args.cmd == "tick":

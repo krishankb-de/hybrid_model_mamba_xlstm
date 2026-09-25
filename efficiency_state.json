@@ -1,0 +1,224 @@
+{
+  "current_phase": "E0_measure_before_optimising",
+  "last_updated": "2026-09-25T10:12:27+02:00",
+  "status": "E0 pending — no job submitted yet. Nothing in this plan changes a published number.",
+  "plan_of_record": "EFFICIENCY_PLAN.md",
+  "branch": "h100_mamba3_v2",
+  "helper": "venv/bin/python scripts/mamba3_state.py --plan efficiency ...",
+  "scope": "Inference-path and kernel-level only. No retraining, no checkpoint change, no metric in analysis/ moves. NO MERGE into h100_scaling without an explicit user instruction.",
+  "origin": {
+    "date": "2026-09-25",
+    "trigger": "Supervisor question: throughput trails FlashAttention transformers; did the Triton work on Mamba pay off?",
+    "verified_answer": "No Triton kernel ever executed. scan_triton.py / tfla_triton.py had one call site in the dead mamba_block_v2.py and were deleted in 37f7964; scan_interface.py:28 sets TRITON_AVAILABLE = False. The misleading artefacts are root test_triton_fix.py, the unused triton>=2.1.0 requirement, and the name TFLA (Tiled Flash Linear Attention)."
+  },
+  "measured_baseline": {
+    "source": "job 2561023, batch 4, bf16, H100, random weights, 14A-7 protocol",
+    "inference_2048": {
+      "mamba3_ms": 86.2,
+      "transformer_ms": 16.1,
+      "mamba3_gb": 1.24,
+      "transformer_gb": 1.24
+    },
+    "inference_16384": {
+      "mamba3_ms": 678.2,
+      "transformer_ms": 163.9,
+      "mamba3_gb": 7.09,
+      "transformer_gb": 7.15
+    },
+    "latency_exponent": {
+      "mamba3": 0.84,
+      "transformer": 0.844
+    },
+    "memory_exponent": {
+      "mamba3": 0.643,
+      "transformer": 0.644
+    },
+    "speed_gap": {
+      "at_2048": 5.35,
+      "at_16384": 4.14,
+      "training_at_2048": 8.0
+    },
+    "decode_cached_speedup_per_token": 5.19,
+    "verdict": "Memory parity achieved (7.09 vs 7.15 GB where the old hybrid needed 42 GB). Wall-clock is 4-5x behind with flat, near-equal exponents: no crossover in the measured range."
+  },
+  "hypothesis": {
+    "primary": "ssd_interface.py:169-190 carries chunk state in a Python `for ci in range(nc)` loop. At mamba3_chunk_size=64 and seqlen 16384, nc=256; with 9 Mamba-3 layers that is 2304 sequential iterations per forward, each launching several small CUDA kernels.",
+    "amdahl_caveat": "3 of 12 layers are mLSTM on pure-PyTorch TFLA and no Mamba kernel touches them. The ceiling on any SSD-only fix is 1/(1 - mamba3_time_fraction) and is UNMEASURED until E0-A.",
+    "status": "UNVERIFIED — E0 exists to test this, not to assume it."
+  },
+  "pre_registered": {
+    "R1": "Equivalence gate: rel-max-err <= 1e-4 vs the current operator in fp32, and agreement with ssd_sequential_reference (fp64) no worse than the current operator. A cu_seqlens boundary mismatch is an automatic fail.",
+    "R2": "Memory outranks speed: any change whose peak memory exceeds the Transformer's at any measured length is rejected as a default, regardless of speedup.",
+    "R3": "Adoption bar: >= 1.25x faster at >= 2 measured sequence lengths and nowhere more than 5% slower, else recorded as a null and reverted.",
+    "R4": "Predict first: each phase records expected direction and magnitude before submission; wrong predictions are recorded beside the number.",
+    "R5": "Honest framing: wall-clock parity is engineering, not a research contribution. If E0-F's bound says parity is unreachable, that bound is the deliverable and E3 is not attempted.",
+    "predictions": {
+      "E0": "Inter-chunk loop > 50% of Mamba-3 layer time at 16384; mLSTM 20-40% of model time; unfused attention slower than our scan at 16384.",
+      "E1": "chunk_size 64->256 gives 1.5-2.5x at 16384 for < 1.5 GB extra; torch.compile < 1.3x and may fail by unrolling the nc loop.",
+      "E2": "2-4x on the Mamba-3 layers at 16384; the binding risk is R2 (memory), not correctness."
+    }
+  },
+  "phase_order": [
+    "E0",
+    "E1",
+    "E2",
+    "E3",
+    "E4",
+    "E5"
+  ],
+  "phases": {
+    "E0": {
+      "title": "Measure before optimising: where does the time actually go?",
+      "status": "pending",
+      "checkboxes": {
+        "E0-A": {
+          "done": false,
+          "desc": "Per-layer-type timing split. Extend scripts/performance_profile.py with"
+        },
+        "E0-B": {
+          "done": false,
+          "desc": "Intra-block split for Mamba3Block: in/out projections, causal conv, the"
+        },
+        "E0-C": {
+          "done": false,
+          "desc": "Launch-overhead probe: for fixed seqlen 16,384, sweep mamba3_chunk_size over"
+        },
+        "E0-D": {
+          "done": false,
+          "desc": "The supervisor's answer, as a measurement. Re-run the 14A-7 inference sweep for"
+        },
+        "E0-E": {
+          "done": false,
+          "desc": "Submit E0-A..D as one job (sbatch scripts/profile_layer_split_h100.sh, new CPU/GPU"
+        },
+        "E0-F": {
+          "done": false,
+          "desc": "Record the Amdahl bound explicitly in this file: *max achievable speedup if the"
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "E1": {
+      "title": "Free levers: no new code path",
+      "status": "pending",
+      "checkboxes": {
+        "E1-A": {
+          "done": false,
+          "desc": "mamba3_chunk_size as an inference-time knob. It is already a config key and needs"
+        },
+        "E1-B": {
+          "done": false,
+          "desc": "torch.compile arm for inference only. Add --compile to performance_profile.py"
+        },
+        "E1-C": {
+          "done": false,
+          "desc": "Report both under R3. Anything that fails the bar is written up as a null and"
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "E2": {
+      "title": "Remove the sequential inter-chunk loop (pure PyTorch, no dependency)",
+      "status": "pending",
+      "checkboxes": {
+        "E2-A": {
+          "done": false,
+          "desc": "Test first (TDD). Extend tests/test_mamba3_numerics.py: the parallel form must"
+        },
+        "E2-B": {
+          "done": false,
+          "desc": "Implement behind ssd_impl: {\"loop\" (default) | \"parallel\"}, threaded like the"
+        },
+        "E2-C": {
+          "done": false,
+          "desc": "Measure. Peak memory is the risk: the batched contrib tensor is"
+        },
+        "E2-D": {
+          "done": false,
+          "desc": "Fallback if R2 bites: two-level blocking — loop over super-blocks of k chunks,"
+        },
+        "E2-E": {
+          "done": false,
+          "desc": "Confirm the O(1) decode path (ssd_step) is untouched, and that"
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "E3": {
+      "title": "Fused external kernel (gated on E0-F, not assumed)",
+      "status": "pending",
+      "checkboxes": {
+        "E3-A": {
+          "done": false,
+          "desc": "Feasibility spike, timeboxed to one day: does mamba-ssm build against the cluster's"
+        },
+        "E3-B": {
+          "done": false,
+          "desc": "Bind mamba_chunk_scan_combined behind scan_impl: \"fused\" for Mamba3Block only,"
+        },
+        "E3-C": {
+          "done": false,
+          "desc": "Re-measure the 14A-7 sweep; report against E0-D's unfused-attention line and the"
+        },
+        "E3-D": {
+          "done": false,
+          "desc": "Record the dependency cost honestly: a fused path that only exists on one cluster's"
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "E4": {
+      "title": "The other three layers: mLSTM TFLA",
+      "status": "pending",
+      "checkboxes": {
+        "E4-A": {
+          "done": false,
+          "desc": "Apply the E0-B treatment to mlstm_block.py / tfla_interface.py: where does its"
+        },
+        "E4-B": {
+          "done": false,
+          "desc": "If it does, apply E2's parallel-carry transformation behind a tfla_impl value, under"
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "E5": {
+      "title": "Writeup, and remove the artefacts that caused the question",
+      "status": "pending",
+      "checkboxes": {
+        "E5-A": {
+          "done": false,
+          "desc": "analysis/EFFICIENCY_NOTE.md — supervisor-facing, matching"
+        },
+        "E5-B": {
+          "done": false,
+          "desc": "Update analysis/mamba3_results.md §6 (Efficiency) with the measured numbers and the"
+        },
+        "E5-C": {
+          "done": false,
+          "desc": "Delete the misleading artefacts: root test_triton_fix.py (stale Colab-era script"
+        },
+        "E5-D": {
+          "done": false,
+          "desc": "venv/bin/python scripts/mamba3_state.py --plan efficiency readme-equivalent"
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    }
+  },
+  "notes": [
+    "2026-09-25: plan created. E0 blocks every other phase: the Amdahl bound is unmeasured, so every speedup estimate above it is a hypothesis."
+  ],
+  "open_questions": [
+    "E0-D: unfused attention as the headline comparison or a footnote to the fused one?",
+    "E2 default: ship ssd_impl=parallel as default if it passes R1-R3, or leave opt-in to keep the published path byte-identical?",
+    "E3 at all: is an external CUDA dependency acceptable in a thesis artefact?",
+    "E1-A: if a non-64 chunk_size wins, re-decode the 13D dump to confirm token identity, or rely on R1 alone?"
+  ]
+}

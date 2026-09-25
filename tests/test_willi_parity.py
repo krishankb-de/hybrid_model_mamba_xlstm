@@ -4645,7 +4645,13 @@ def test_no_plan_command_invokes_a_bare_python_script_on_the_cluster():
     # MAMBA3_PLAN_V2.md V1-F: the Mamba-3 plan is scanned WHOLE. Its predecessor's own log has
     # three login-node incidents (job 2513581 among them); local-only commands are written as
     # `venv/bin/python ...` so they cannot be mistaken for cluster commands.
-    scanned = phase14 + "\n" + (REPO_ROOT / "MAMBA3_PLAN_V2.md").read_text()
+    # EFFICIENCY_PLAN.md is scanned whole for the same reason; its local-only commands
+    # are written `venv/bin/python ...` so they cannot be pasted into lx01 by mistake.
+    scanned = "\n".join([
+        phase14,
+        (REPO_ROOT / "MAMBA3_PLAN_V2.md").read_text(),
+        (REPO_ROOT / "EFFICIENCY_PLAN.md").read_text(),
+    ])
     offenders = [
         line.strip() for line in scanned.splitlines()
         if line.strip().startswith(("python scripts/", "python3 scripts/"))
@@ -5925,3 +5931,111 @@ def test_repair_wrapper_is_cpu_only_and_warns_that_every_arm_must_be_repaired():
     assert "--partition=aisc-batch" in src and "--exclude=ga03" in src
     assert "EVERY system being compared" in src or "EVERY arm" in src
     assert "score_chexbert_h100.sh" in src and "bootstrap_compare_h100.sh" in src
+
+
+# ---------------------------------------------------------------------------
+# EFFICIENCY_PLAN.md — the inference-speed plan-of-record (created 2026-09-25)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.willi_parity
+def test_efficiency_plan_and_its_state_file_can_actually_enter_the_repo():
+    """.gitignore line 84 is a blanket `*.md` and the state files are ignored by
+    default too, so a new plan-of-record is invisible unless it is allowlisted:
+    `git add` silently does nothing and `git status` stays clean. That is exactly
+    how analysis/ARCHIVE_MANIFEST.md was reported as committed while living on one
+    laptop (2026-09-20). EFFICIENCY_PLAN.md FE7 is the same trap, pre-registered.
+
+    analysis/EFFICIENCY_NOTE.md is allowlisted before it exists on purpose — E5-A
+    writes it, and the allowlist must not be a thing anyone has to remember later."""
+    import subprocess
+
+    must_be_visible = [
+        "EFFICIENCY_PLAN.md",
+        "efficiency_state.json",
+        "analysis/EFFICIENCY_NOTE.md",   # written by E5-A; allowlisted ahead of time
+    ]
+    ignored = []
+    for rel in must_be_visible:
+        proc = subprocess.run(
+            ["git", "check-ignore", "-q", rel],
+            cwd=REPO_ROOT, capture_output=True,
+        )
+        if proc.returncode == 0:          # 0 == the path IS ignored
+            ignored.append(rel)
+    assert not ignored, (
+        "these plan deliverables are swallowed by .gitignore and would be silently "
+        "lost; add `!<path>` to the allowlist block: %s" % ignored
+    )
+
+
+@pytest.mark.willi_parity
+def test_state_helper_serves_both_plans_of_record_without_moving_its_default():
+    """One helper, two plans. The default must stay on the Mamba-3 files because
+    every command in MAMBA3_PLAN_V2.md and CLAUDE.md is written without --plan;
+    `--plan efficiency` repoints it at EFFICIENCY_PLAN.md + efficiency_state.json.
+
+    The id regexes were `[MV]\\d+` until the E-ids arrived. Widening them must not
+    start matching prose headings like `### 1. The live recurrence ...`, which is
+    what the anchored capital-letter class protects."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "m3state_multi", REPO_ROOT / "scripts" / "mamba3_state.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+    # Default is unchanged — the existing plan's documented commands keep working.
+    assert mod.PLAN.name == "MAMBA3_PLAN_V2.md" and mod.STATE.name == "mamba3_v2_state.json"
+    assert mod.DEFAULT_PLAN_SET == "mamba3"
+    assert mod.PLAN_SETS["efficiency"] == ("EFFICIENCY_PLAN.md", "efficiency_state.json")
+
+    # Both id families parse.
+    assert mod.CHECKBOX_RE.match("- [ ] **E0-A** Per-layer split").group(4) == "E0-A"
+    assert mod.CHECKBOX_RE.match("- [x] **V3-D** Eval").group(4) == "V3-D"
+    assert mod.CHECKBOX_RE.match("- [x] **M7-B** Screen").group(4) == "M7-B"
+    assert mod.PHASE_RE.match("### E2 — Remove the loop").group(1) == "E2"
+    assert mod.PHASE_RE.match("### V3 — Full pipeline").group(1) == "V3"
+    # ...and prose headings still do not.
+    assert mod.PHASE_RE.match("### 1. The live recurrence is not the specified one") is None
+    assert mod.PHASE_RE.match("### Intended outcome") is None
+
+    # Selecting a plan set repoints both files together.
+    mod.select_plan_set("efficiency")
+    assert mod.PLAN.name == "EFFICIENCY_PLAN.md" and mod.STATE.name == "efficiency_state.json"
+
+
+@pytest.mark.willi_parity
+def test_efficiency_state_file_tracks_exactly_the_plans_checkboxes():
+    """The state-tracking contract is worthless if the two files drift. Every phase
+    and checkbox in EFFICIENCY_PLAN.md must be present in efficiency_state.json;
+    `mamba3_state.py --plan efficiency sync` is the one command that fixes this."""
+    import importlib.util, json
+    spec = importlib.util.spec_from_file_location(
+        "m3state_eff", REPO_ROOT / "scripts" / "mamba3_state.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    mod.select_plan_set("efficiency")
+
+    order, phases = mod.parse_plan()
+    state = json.loads((REPO_ROOT / "efficiency_state.json").read_text())
+
+    assert order, "EFFICIENCY_PLAN.md parsed with no phases — check the `### E<n> — ` headings"
+    assert state["phase_order"] == order, (
+        "efficiency_state.json phase_order is stale; run "
+        "`venv/bin/python scripts/mamba3_state.py --plan efficiency sync`"
+    )
+    for pid in order:
+        assert set(state["phases"][pid]["checkboxes"]) == set(phases[pid]["checkboxes"]), (
+            f"phase {pid} checkboxes drifted between plan and state"
+        )
+    # The blocking gate is the whole point of the phase order: E0 comes first.
+    assert order[0] == "E0", "E0 must be the first phase — it measures the Amdahl bound that gates E2/E3/E4"
+
+
+@pytest.mark.willi_parity
+def test_efficiency_plan_states_it_changes_no_published_number():
+    """Every phase here is inference-path. If this plan ever grows an item that
+    retrains a checkpoint, the scope sentence is the thing that has to change
+    first — and reviewers read the top of the file, not the phase list."""
+    plan = (REPO_ROOT / "EFFICIENCY_PLAN.md").read_text()
+    assert "changes no published number" in plan
+    assert "No merge into `h100_scaling`" in plan or "NO MERGE" in plan
+    # The equivalence gate is what licenses that claim; it must be pre-registered.
+    assert "R1" in plan and "ssd_sequential_reference" in plan

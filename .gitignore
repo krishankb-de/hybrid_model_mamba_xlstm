@@ -89,6 +89,7 @@ multirun/
 !HYBRID_ARCH_REFACTOR_PLAN.md
 !H100_SCALING_PLAN.md
 !MAMBA3_PLAN_V2.md
+!EFFICIENCY_PLAN.md
 !CLAUDE.md
 !analysis/baseline_probe_report.md
 !analysis/h100_scaling_results.md
@@ -99,6 +100,7 @@ multirun/
 !analysis/mamba3_results.md
 !analysis/ARCHIVE_MANIFEST.md
 !analysis/phase14_results.md
+!analysis/EFFICIENCY_NOTE.md
 !mamba3_v2_state.json
 
 
@@ -106,6 +108,7 @@ multirun/
 !biomedclip_kd_state.json
 !hybrid_arch_refactor_state.json
 !h100_scaling_state.json
+!efficiency_state.json
 
 
 
