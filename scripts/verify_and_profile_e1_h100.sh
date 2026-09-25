@@ -65,10 +65,15 @@ cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUB
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export PYTHONUNBUFFERED=1
 export HF_HUB_OFFLINE=1
-# Persist Inductor's compiled artifacts so a requeue or a re-run does not pay the
-# same graph build again. This is the mitigation for the 2579642 timeout.
-export TORCHINDUCTOR_CACHE_DIR="${SCRATCH_ROOT}/inductor_cache"
-mkdir -p "${TORCHINDUCTOR_CACHE_DIR}"
+# ⚠ CORRECTED 2026-09-25 after job 2582482. This wrapper originally gave every arm
+# ONE shared TORCHINDUCTOR_CACHE_DIR, to avoid paying the same graph build twice
+# after the 2579642 timeout. That sharing corrupted its own results: re-measuring
+# the same points with per-arm caches made them 21-30% FASTER at L=4096 (45.21 ->
+# 35.60 ms at cs=64, 45.25 -> 31.79 at cs=128), because the shared cache had
+# handed both arms one slow kernel -- which is why they matched to a microsecond.
+# Caches are per-arm from here on. The numbers job 2580198 produced are superseded
+# by scripts/profile_e1_confirm_h100.sh, which goes further and gives every
+# sequence length its own process.
 
 source "${VENV_ACTIVATE}"
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA unavailable'; print('GPU:', torch.cuda.get_device_name(0), '| torch', torch.__version__)"
@@ -88,8 +93,10 @@ fi
 
 run_arm () {   # name, extra flags...
   local name="$1"; shift
+  export TORCHINDUCTOR_CACHE_DIR="${SCRATCH_ROOT}/inductor_cache_${name}"
+  rm -rf "${TORCHINDUCTOR_CACHE_DIR}"; mkdir -p "${TORCHINDUCTOR_CACHE_DIR}"
   echo ""
-  echo "--- arm: ${name} ---"
+  echo "--- arm: ${name}   (isolated cache) ---"
   python scripts/performance_profile.py --sweep \
     --models "${MODEL}" \
     --batch_size "${BATCH_SIZE}" \

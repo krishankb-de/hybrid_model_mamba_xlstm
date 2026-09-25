@@ -1,6 +1,6 @@
 {
   "current_phase": "E1_complete_followup_pending",
-  "last_updated": "2026-09-25T14:55:51+02:00",
+  "last_updated": "2026-09-25T17:06:56+02:00",
   "status": "E0 and E1 COMPLETE (jobs 2579631/2579642/2580198). R1 PASSED on GPU including torch.compile (logits 3.0e-05 vs 1e-4 tolerance), so both levers are verified to compute the same function. CROSSOVER: at L=16384 compiled+chunk128 runs 122.68 ms vs FlashAttention's 163.86 ms = 1.34x FASTER at memory parity (7.169 vs 7.152 GB); top-of-ladder latency exponent 0.47 ours vs 1.20 attention. chunk_size=128 adopted; torch.compile adopted as an INFERENCE-TIME OPT-IN only (R2: +17 MB over the Transformer, permitted because compile is off by default project-wide). OPEN: compiled cs=64 and cs=128 time identically at 4096/8192 (1 us apart) while uncompiled differ 45% -- shared Inductor cache suspected; profile_e1_followup_h100.sh part A settles it and part B measures the untested training path. RECOMMENDED: drop E2 and E3, go to E5.",
   "plan_of_record": "EFFICIENCY_PLAN.md",
   "branch": "h100_mamba3_v2",
@@ -107,7 +107,7 @@
     },
     "E1": {
       "title": "Free levers: no new code path",
-      "status": "complete",
+      "status": "in_progress",
       "checkboxes": {
         "E1-A": {
           "done": true,
@@ -120,6 +120,10 @@
         "E1-C": {
           "done": true,
           "desc": "Report both under R3. Anything that fails the bar is written up as a null and"
+        },
+        "E1-E": {
+          "done": false,
+          "desc": "Re-measure the headline under a protocol the last two jobs proved is necessary"
         },
         "E1-D": {
           "done": true,
@@ -233,7 +237,8 @@
     "2026-09-25: E0 COMPLETE (jobs 2579631, 2579642). Scan is 67.5% of the forward at L=16384; Amdahl bound 4.50x vs a 4.14x gap. E0-D decisive: unfused attention is 16.8x slower at 8192 and OOMs at 16384, so the deficit is kernel engineering, not algorithm. Two pre-registered predictions WRONG: chunk_size is a U-curve peaking at 128 (1.40x, not monotonic 1.5-2.5x), and torch.compile gave 4.28x at L=2048 (predicted <1.3x), cutting the gap to 1.25x. Neither is adoptable until R1/R2 are checked; 2579642 timed out compiling L=16384 (FE4 as predicted).",
     "2026-09-25: current_phase -> E1_adopt_or_reject",
     "2026-09-25: E1 COMPLETE (job 2580198). R1 PASSED on GPU incl. torch.compile (logits 3.0e-05 vs 1e-4 tol). CROSSOVER FOUND: compiled+chunk128 at L=16384 is 122.68 ms vs FlashAttention's 163.86 ms = 1.34x FASTER at memory parity (7.169 vs 7.152 GB); top-of-ladder latency exponent 0.47 ours vs 1.20 attention. chunk_size=128 adopt (>=1.25x at 5/7 lengths); torch.compile adopt as inference-time opt-in (R2: +17 MB over the Transformer, permitted only because compile is off by default). ANOMALY: compiled cs=64 and cs=128 time identically at 4096/8192 (1 us apart) while uncompiled differ 45% -- shared Inductor cache suspected; follow-up job isolates caches and prints the effective chunk size. RECOMMEND DROPPING E2 and E3: the gap they were justified by is closed.",
-    "2026-09-25: current_phase -> E1_complete_followup_pending"
+    "2026-09-25: current_phase -> E1_complete_followup_pending",
+    "2026-09-25: 2026-09-25: job 2582482 (2h TIMEOUT, partial). Part A RESOLVED the anomaly: chunk_size always reached the operator (both arms printed effective_chunk_size); the 1us match was a SHARED Inductor cache serving both arms one slow kernel at L=4096. Isolated caches made the same points 21-30% faster. Larger finding: within one process, shapes compiled later measure worse (3.04x at L=512 -> 1.02x at L=4096), so EVERY compiled number depends on what else was compiled beside it -- the 1.34x headline at L=16384 is UNCONFIRMED and must be re-measured. Part B: first training numbers ever taken (chunk128 ~1.45x at +6.5% memory; compile 3.04x at 512 collapsing to 1.02x at 4096) but the Transformer reference row never ran, so no training claim is available. Both wrappers now isolate caches; new profile_e1_confirm_h100.sh runs one shape per process."
   ],
   "open_questions": [
     "E0-D: unfused attention as the headline comparison or a footnote to the fused one?",

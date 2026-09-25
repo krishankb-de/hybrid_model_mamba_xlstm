@@ -234,6 +234,10 @@ ceiling as the result.
   compile time as well as steady-state latency; a 10-minute compile for a 1.1× gain is a null.
 - [x] **E1-C** Report both under R3. Anything that fails the bar is written up as a null and
   reverted.
+- [ ] **E1-E** **Re-measure the headline under a protocol the last two jobs proved is necessary**
+  (`scripts/profile_e1_confirm_h100.sh`). One sequence length per *process*, each with its own
+  Inductor cache, Transformer arms first. Also finishes the training reference job 2582482 never
+  reached. See the E1 follow-up results below for why this is not optional.
 - [x] **E1-D** **The gate, added 2026-09-25 after E0 produced two candidate wins.**
   `scripts/check_operator_equivalence.py` implements R1 at two levels: the operator against the
   fp64 oracle (including a `cu_seqlens` boundary that falls inside a chunk) and the model's logits
@@ -299,6 +303,49 @@ after job 2579642's timeout. **Recommendation: do not run E2 or E3.** An externa
 (E3) buys nothing once we are ahead of FlashAttention at the length that matters, and it would add a
 reproducibility liability to a thesis artefact. The remaining honest work is E1's follow-up, the
 untested training path, and E5.
+
+**FOLLOW-UP RESULTS — job 2582482 on gx10, 2026-09-25. It resolved the anomaly and, in doing so,
+invalidated the protocol that produced the headline.**
+
+*Part A — the anomaly was a compiler-cache artifact, not a plumbing bug.* Both arms printed their
+own `effective chunk_size` off the built module, so the override always reached the operator. But
+with a **per-arm** Inductor cache the same points came out 21–30% faster:
+
+| point | shared cache (2580198) | isolated cache (2582482) | |
+|---|---|---|---|
+| L=4,096, cs=64 | 45.21 ms | **35.60 ms** | 21% faster |
+| L=4,096, cs=128 | 45.25 ms | **31.79 ms** | 30% faster |
+| L=8,192, cs=64 | 88.80 ms | 87.42 ms | 1.6% |
+| L=8,192, cs=128 | 88.80 ms | 88.21 ms | 0.7% |
+
+A shared cache had handed both arms one slow kernel at L=4,096 — which is exactly why they matched
+to a microsecond. At L=8,192 the two agree inside 2%, so the plateau *there* is real.
+
+*And a second, larger effect: within one process, shapes compiled later measure worse.* The compiled
+training arm ran 3.04× at L=512 and 1.02× by L=4,096; in 2580198, L=4,096 was the fifth shape
+compiled and was the slowest. **Every compiled number this project holds is a function of what else
+was compiled beside it.** The 1.34×-vs-FlashAttention result at L=16,384 came from a shared-cache
+run and is therefore *unconfirmed*. It is likely to improve rather than regress — isolation made
+every re-measured point faster — but it must not be written into the thesis until E1-E lands. Both
+wrappers now isolate caches per arm; E1-E goes further and gives every length its own process.
+
+*Part B — the training path, measured for the first time, and incomplete.* The job hit its 2 h limit
+inside the compiled arm at L=8,192, so `train_compiled_chunk128` and **the Transformer reference row
+never ran** — which is the row that makes the rest mean anything.
+
+| L | baseline | cs=128 | compiled | cs=128 speedup | compile speedup | cs=128 memory |
+|---|---|---|---|---|---|---|
+| 512 | 101.43 ms | 77.02 | 33.42 | 1.32× | 3.04× | +5.2% |
+| 1,024 | 168.56 | 119.47 | 56.72 | 1.41× | 2.97× | +5.9% |
+| 2,048 | 310.06 | 210.04 | 282.49 | 1.48× | **1.10×** | +6.3% |
+| 4,096 | 543.40 | 371.46 | 532.02 | 1.46× | **1.02×** | +6.5% |
+| 8,192 | 1337.35 | 884.13 | — | 1.51× | — | +6.6% |
+
+`chunk_size=128` is a steady ~1.45× on the training step but costs 5–7% more memory, which matters
+far more here than in inference: training already needs 13.8 GB at L=2,048 and 54.4 GB at 8,192.
+Compile's collapse from 3.04× to 1.02× is the same later-shape degradation described above, so it is
+a measurement artefact until E1-E re-measures it one shape per process. **No training claim should
+be made from this table** — it has no Transformer column.
 
 ### E2 — Remove the sequential inter-chunk loop (pure PyTorch, no dependency)
 

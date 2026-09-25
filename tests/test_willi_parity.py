@@ -6262,3 +6262,45 @@ def test_followup_wrapper_isolates_the_inductor_cache_per_arm():
     assert not any("--gres" in ln for ln in directives)
     assert "--backward" in src, "the training path is the untested half of the efficiency claim"
     assert "CKPT" not in src and "checkpoints/" not in src
+
+
+@pytest.mark.willi_parity
+def test_no_profiling_wrapper_shares_an_inductor_cache_between_arms():
+    """Job 2580198 gave every arm one TORCHINDUCTOR_CACHE_DIR and corrupted its own
+    results: re-measuring the same points with per-arm caches made them 21-30%
+    faster at L=4096, because the shared cache had handed both arms one slow
+    kernel. That is also why the cs=64 and cs=128 arms matched to a microsecond.
+
+    Any wrapper that sets the cache dir must make it arm-specific."""
+    import re
+    for name in ("verify_and_profile_e1_h100.sh", "profile_e1_followup_h100.sh",
+                 "profile_e1_confirm_h100.sh"):
+        src = (REPO_ROOT / "scripts" / name).read_text()
+        exports = [ln.strip() for ln in src.splitlines()
+                   if "TORCHINDUCTOR_CACHE_DIR=" in ln and ln.strip().startswith("export")]
+        assert exports, f"{name} compiles without pinning an Inductor cache dir"
+        for ln in exports:
+            assert re.search(r"\$\{(name|arm)\}", ln), (
+                f"{name} shares one Inductor cache across arms: {ln}"
+            )
+
+
+@pytest.mark.willi_parity
+def test_confirm_wrapper_measures_one_sequence_length_per_process():
+    """The second finding from 2582482: within a single process, shapes compiled
+    later measure worse (3.04x at L=512 down to 1.02x at L=4096). A sweep that
+    passes several lengths to one process therefore cannot produce a number that
+    means anything on its own, which is why the headline needs re-measuring."""
+    src = (REPO_ROOT / "scripts" / "profile_e1_confirm_h100.sh").read_text()
+    # Every invocation passes exactly one length, held in a shell variable.
+    assert '--seq-lengths "${len}"' in src
+    assert "for L in ${INFER_LENS}" in src and "for L in ${TRAIN_LENS}" in src
+    # The Transformer reference must come first in the training block: job 2582482
+    # timed out before reaching it, which is why its training table is unusable.
+    train_block = src[src.index("########## 2:"):]
+    assert train_block.index("train_xfmr") < train_block.index("train_base")
+    directives = [ln for ln in src.splitlines() if ln.startswith("#SBATCH")]
+    assert not any("--gres" in ln for ln in directives)
+    assert any("--partition=aisc-batch" in ln for ln in directives)
+    hours = int([ln for ln in directives if "--time=" in ln][0].split("--time=")[1].split(":")[0])
+    assert hours >= 3, "2h timed out in job 2582482"
