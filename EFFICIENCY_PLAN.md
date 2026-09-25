@@ -118,9 +118,13 @@ line is a hypothesis until E0 lands.
   `--per-layer`, using CUDA events around each `HybridBlock` (or `torch.profiler` with
   `record_shapes`), reporting ms and % by mixer type for `hybrid_150m_m3` at the 14A-7 sequence
   ladder. **This is the Amdahl bound and it gates E2/E3/E4.**
-- [ ] **E0-B** Intra-block split for `Mamba3Block`: in/out projections, causal conv, the
-  `ssd_chunked_scan` intra-chunk einsums, and the inter-chunk loop, measured separately. Confirms or
-  kills the §2 hypothesis.
+- [ ] **E0-B** Intra-block split for `Mamba3Block`. **As built (2026-09-25), this is a two-way
+  split — `ssd_chunked_scan` versus the rest of the block** (projections, conv, norm), via a
+  monkeypatch that restores itself on exit. The finer intra-chunk-vs-inter-chunk breakdown the §2
+  hypothesis needs is *not* measured directly by a timer inside the hot path; it is inferred from
+  E0-C, where sweeping `chunk_size` moves only the loop length `nc`. If E0-C comes back ambiguous,
+  add the in-path timers then and not before — instrumenting the operator is a change to the
+  operator.
 - [ ] **E0-C** Launch-overhead probe: for fixed seqlen 16,384, sweep `mamba3_chunk_size` over
   `{64, 128, 256, 512}` and record latency, peak memory and `nc`. If latency falls ~linearly in
   `nc`, the path is launch-bound and E2 is worth its cost; if flat, it is bandwidth-bound and E2 is
@@ -284,6 +288,52 @@ venv/bin/python scripts/mamba3_state.py --plan efficiency sync     # rebuild sta
 `efficiency_state.json` is the resumable record; the checkboxes above are ground truth. Local
 commands are written `venv/bin/python …` on purpose so they are never pasted into the aisc login
 node, which executes nothing scripted — cluster work goes through `sbatch`/`srun`/`source`.
+
+## 9. Cluster runbook (aisc)
+
+The login node `lx01` executes nothing scripted. Everything below is `git`, `sbatch`, `squeue` or
+`tail`; no bare `python` line appears in this file for that reason.
+
+**Once, to get onto the branch:**
+
+```bash
+cd ~/hybrid_mamba_xlstm
+git fetch origin
+git checkout -b h100_efficiency origin/h100_efficiency   # first time
+# later:  git checkout h100_efficiency && git pull
+```
+
+**E0 — the blocking measurement (~30–45 min on one H100, 1.5 h wall limit):**
+
+```bash
+sbatch scripts/profile_layer_split_h100.sh
+squeue -u $USER
+tail -f logs/h100_layersplit_<jobid>.log
+```
+
+That job runs E0-A, E0-B and both E0-D arms. Results land in
+`analysis/efficiency_layer_split/{per_layer,attn_auto,attn_math}/`.
+
+**E0-C + E1-B, the optional arms (adds ~30 min):**
+
+```bash
+CHUNK_ARM=true COMPILE_ARM=true sbatch scripts/profile_layer_split_h100.sh
+```
+
+**What to read out of the log, in order:**
+
+1. The `Amdahl:` line under E0-A at L=16384. If the SSD path is under ~50% of the forward, the
+   ceiling is below 2× and **E2/E3 are not worth running** — record that and go to E5.
+2. `-> of which ssd_chunked_scan` — if the scan is a small share of Mamba-3 time, the §2 hypothesis
+   is wrong and the cost is in the projections instead.
+3. The two E0-D sweeps side by side. `attn_math` is expected to OOM at the top of the ladder; that
+   OOM is the FlashAttention memory story stated as data, not a failed run.
+4. Under `CHUNK_ARM`, whether latency falls roughly linearly in `nc`. That is the launch-bound
+   signature that justifies E2.
+
+**Nothing here writes to `outputs/`, `results/` or any checkpoint.** The job profiles randomly
+initialised weights on random token ids, so it needs no HF cache, no MIMIC data, and cannot touch a
+DUA-covered artefact or a published number.
 
 ## 8. Unresolved questions
 

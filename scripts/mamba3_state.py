@@ -207,7 +207,7 @@ def main() -> int:
     elif args.cmd == "sync":
         state = refresh_phases(state)
         save_state(state)
-        print("state phases regenerated from MAMBA3_PLAN_V2.md checkboxes")
+        print("state phases regenerated from {} checkboxes".format(PLAN.name))
 
     elif args.cmd == "readme":
         state = refresh_phases(state)

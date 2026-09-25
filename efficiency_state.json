@@ -1,6 +1,6 @@
 {
   "current_phase": "E0_measure_before_optimising",
-  "last_updated": "2026-09-25T10:12:27+02:00",
+  "last_updated": "2026-09-25T10:21:51+02:00",
   "status": "E0 pending — no job submitted yet. Nothing in this plan changes a published number.",
   "plan_of_record": "EFFICIENCY_PLAN.md",
   "branch": "h100_mamba3_v2",
@@ -77,7 +77,7 @@
         },
         "E0-B": {
           "done": false,
-          "desc": "Intra-block split for Mamba3Block: in/out projections, causal conv, the"
+          "desc": "Intra-block split for Mamba3Block. As built (2026-09-25), this is a two-way"
         },
         "E0-C": {
           "done": false,
@@ -213,7 +213,8 @@
     }
   },
   "notes": [
-    "2026-09-25: plan created. E0 blocks every other phase: the Amdahl bound is unmeasured, so every speedup estimate above it is a hypothesis."
+    "2026-09-25: plan created. E0 blocks every other phase: the Amdahl bound is unmeasured, so every speedup estimate above it is a hypothesis.",
+    "2026-09-25: E0 tooling landed (not yet measured): performance_profile.py gains --per-layer (E0-A/E0-B, per-mixer-type + ssd_chunked_scan split with the Amdahl bound computed from the measured share), --attn-backend {auto,math,flash,efficient} (E0-D), --chunk-size (E0-C) and --compile (E1-B); scripts/profile_layer_split_h100.sh submits all four arms as one 1.5h single-GPU job. No checkbox ticked: the gate is the measurement, not the code."
   ],
   "open_questions": [
     "E0-D: unfused attention as the headline comparison or a footnote to the fused one?",

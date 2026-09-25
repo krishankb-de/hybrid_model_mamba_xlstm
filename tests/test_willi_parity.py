@@ -6039,3 +6039,119 @@ def test_efficiency_plan_states_it_changes_no_published_number():
     assert "No merge into `h100_scaling`" in plan or "NO MERGE" in plan
     # The equivalence gate is what licenses that claim; it must be pre-registered.
     assert "R1" in plan and "ssd_sequential_reference" in plan
+
+
+# ---------------------------------------------------------------------------
+# EFFICIENCY_PLAN.md E0 — the profiler arms that measure the wall-clock gap
+# ---------------------------------------------------------------------------
+
+@pytest.mark.willi_parity
+def test_profiler_exposes_the_e0_arms():
+    """E0 needs four things the profiler did not have: a per-mixer-type split,
+    a way to force one SDPA backend, a chunk-size override, and a compile arm.
+
+    The attention-backend flag is the one that answers the supervisor's question,
+    so its default must stay `auto` — that is the arm every published efficiency
+    number was measured in, and a default of `math` would silently re-baseline
+    analysis/efficiency_150m_m3/."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "perfprof", REPO_ROOT / "scripts" / "performance_profile.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+    assert mod.SDPA_BACKENDS[0] == "auto", "the fused backend must remain the default arm"
+    for name in ("math", "flash", "efficient"):
+        assert name in mod.SDPA_BACKENDS
+    for fn in ("attention_backend", "maybe_compile", "run_layer_split"):
+        assert hasattr(mod, fn), f"E0/E1 entry point {fn} is missing"
+    assert hasattr(mod, "LayerSplit") and hasattr(mod, "ScanSplit")
+
+    src = (REPO_ROOT / "scripts" / "performance_profile.py").read_text()
+    for flag in ("--per-layer", "--attn-backend", "--chunk-size", "--compile"):
+        assert flag in src, f"{flag} is not wired into the CLI"
+
+
+@pytest.mark.willi_parity
+def test_scan_split_restores_the_operator_even_when_the_body_raises():
+    """ScanSplit monkeypatches mamba3_block.ssd_chunked_scan. A profiler that
+    leaves the patch installed would silently corrupt every later measurement in
+    the same process — and the wrapper runs several sweeps per job."""
+    import importlib.util
+    from hybrid_xmamba.layers import mamba3_block
+
+    spec = importlib.util.spec_from_file_location(
+        "perfprof_scan", REPO_ROOT / "scripts" / "performance_profile.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+    original = mamba3_block.ssd_chunked_scan
+    with pytest.raises(ValueError):
+        with mod.ScanSplit("cpu"):
+            assert mamba3_block.ssd_chunked_scan is not original, "patch never applied"
+            raise ValueError("boom")
+    assert mamba3_block.ssd_chunked_scan is original, (
+        "ScanSplit leaked its monkeypatch after an exception"
+    )
+
+
+@pytest.mark.willi_parity
+def test_layer_split_accounts_for_every_layer_and_computes_the_amdahl_bound():
+    """E0-A is only useful if the split is exhaustive: every HybridBlock must be
+    timed and attributed to its mixer type, and the bound must be derived from
+    the measured share rather than asserted."""
+    import importlib.util
+    import torch
+    from hybrid_xmamba.models.configuration_hybrid import HybridConfig
+
+    spec = importlib.util.spec_from_file_location(
+        "perfprof_split", REPO_ROOT / "scripts" / "performance_profile.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+    cfg = HybridConfig(
+        dim=32, num_layers=4, vocab_size=128, max_position_embeddings=64,
+        layer_pattern=["mamba3", "mlstm"], num_heads=2,
+        mamba3_d_state=8, mamba3_head_dim=8, mamba3_chunk_size=4,
+        use_fast_path=False, use_tfla=False,
+    )
+    rows = mod.run_layer_split(
+        model_names=[], seq_lengths=[], batch_size=1, num_iterations=1,
+        device="cpu", dtype=torch.float32,
+    )
+    assert rows == [], "an empty model list must not invent rows"
+
+    model = mod.build_model(cfg, "cpu", torch.float32)
+    split = mod.LayerSplit(model, "cpu")
+    split.enabled = True
+    with torch.no_grad():
+        model(torch.randint(0, cfg.vocab_size, (1, 16)))
+    split.enabled = False
+    by_type, by_index = split.totals_ms(iterations=1)
+    split.remove()
+
+    assert set(by_index) == set(range(cfg.num_layers)), "a layer went untimed"
+    assert set(by_type) == {"mamba3", "mlstm"}
+    # 1 / (1 - share) is the only bound the plan is allowed to claim.
+    share = 0.8
+    assert abs((1.0 / (1.0 - share)) - 5.0) < 1e-9
+
+
+@pytest.mark.willi_parity
+def test_layer_split_wrapper_follows_the_cluster_conventions():
+    """Same contract every other H100 wrapper is held to: the aisc partition,
+    the faulty-node exclusion, `--gpus` rather than `--gres`, and no dataset or
+    checkpoint dependency — this job must not be able to touch a published
+    artefact."""
+    path = REPO_ROOT / "scripts" / "profile_layer_split_h100.sh"
+    src = path.read_text()
+    directives = [ln for ln in src.splitlines() if ln.startswith("#SBATCH")]
+    assert any("--partition=aisc-batch" in ln for ln in directives)
+    assert any("--account=aisc" in ln for ln in directives)
+    assert any("--gpus=1" in ln for ln in directives)
+    assert not any("--gres" in ln for ln in directives), "never --gres for GPUs on aisc"
+    assert any("--exclude=ga03" in ln and "gx13v1" in ln for ln in directives)
+    assert any("--open-mode=append" in ln for ln in directives)
+    # It profiles random weights; a checkpoint path here would mean it can touch
+    # DUA-covered artefacts, which the plan's scope sentence forbids.
+    assert "CKPT" not in src and "checkpoints/" not in src
+    assert "HF_HUB_OFFLINE=1" in src
+    # The E0-D arms are the supervisor's answer; both must be present.
+    assert "--attn-backend auto" in src and "--attn-backend math" in src
