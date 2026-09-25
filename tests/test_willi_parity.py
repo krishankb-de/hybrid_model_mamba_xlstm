@@ -6392,3 +6392,43 @@ def test_dropped_phases_record_why_rather_than_vanishing():
     assert "4.50" in plan and "4.57" in plan, (
         "the E2 verdict rests on compile having already realised more than E0-F's bound"
     )
+
+
+@pytest.mark.willi_parity
+def test_chunk_size_override_is_refused_on_a_config_with_no_mamba3_layer():
+    """Job 2583277 decoded hybrid_150m_v2_rrg -- the incumbent, 9x mamba-1 + 3x
+    mlstm -- with --chunk-size 128. The key was absent, got set, and nothing ever
+    read it, so the run produced ROUGE-L 0.18358 against the reference's 0.1836
+    and looked like a clean tie while measuring the unmodified model.
+
+    A silent no-op that yields a publishable-looking null is worse than a crash,
+    so this is a hard error now."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "evalrg", REPO_ROOT / "scripts" / "evaluate_report_generation.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+    with pytest.raises(ValueError, match="has no 'mamba3' layer"):
+        mod.load_report_generation_module(
+            "/nonexistent.ckpt", "hybrid_150m_v2_rrg", chunk_size=128)
+
+    # The Mamba-3 config must get past the guard (it then fails on the missing
+    # checkpoint, which is a different and expected failure).
+    with pytest.raises(Exception) as exc:
+        mod.load_report_generation_module(
+            "/nonexistent.ckpt", "hybrid_150m_m3_rrg", chunk_size=128)
+    assert "has no 'mamba3' layer" not in str(exc.value)
+
+
+@pytest.mark.willi_parity
+def test_e6_wrapper_decodes_the_mamba3_arm_and_both_chunk_sizes():
+    """The efficiency numbers are all hybrid_150m_m3, so the quality check must be
+    the Mamba-3 decoder -- not 13D, which is the incumbent. Both arms are decoded
+    in the same job so they differ by exactly one setting."""
+    src = (REPO_ROOT / "scripts" / "verify_optimised_decode_h100.sh").read_text()
+    assert "hybrid_150m_m3_rrg" in src
+    assert "h100_report_gen_m3_tower13d_s42" in src
+    assert "tower13d/checkpoints" not in src, "must not default to the incumbent 13D checkpoint"
+    assert 'decode_arm "${REF_DUMP}" 64' in src and 'decode_arm "${DUMP_DIR}" "${CHUNK_SIZE}"' in src
+    # A failed compile arm is data about that arm, not a reason to lose the job.
+    assert "ARM FAILED" in src

@@ -46,15 +46,20 @@ set -euo pipefail
 
 SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
-CHECKPOINT="${CHECKPOINT:-./outputs/h100_report_gen_full_ext_4gpu_tower13d/checkpoints/last.ckpt}"
-MODEL_CONFIG="${MODEL_CONFIG:-hybrid_150m_v2_rrg}"
+# ⚠ FIXED 2026-09-25 after job 2583277. These defaulted to 13D / hybrid_150m_v2_rrg -- the
+# INCUMBENT, which has no mamba3 layer -- so mamba3_chunk_size was set and never read, and the
+# run measured the unmodified model. The efficiency numbers are all hybrid_150m_m3, so the
+# quality check has to be the Mamba-3 decoder too. evaluate_report_generation.py now refuses a
+# chunk_size override on a config with no mamba3 layer, so this cannot recur silently.
+CHECKPOINT="${CHECKPOINT:-./outputs/h100_report_gen_m3_tower13d_s42/checkpoints/last.ckpt}"
+MODEL_CONFIG="${MODEL_CONFIG:-hybrid_150m_m3_rrg}"
 PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/test.parquet}"
 NUM_SAMPLES="${NUM_SAMPLES:-400}"
 CHUNK_SIZE="${CHUNK_SIZE:-128}"
-DUMP_DIR="${DUMP_DIR:-results/report_gen_13d_chunk${CHUNK_SIZE}}"
-# The chunk_size=64 dump this is compared against. V5-A's "as published" arm.
-# ⚠ Verify with `ls results/` before trusting the default.
-REF_DUMP="${REF_DUMP:-results/report_gen_13d_v5a_as_published}"
+DUMP_DIR="${DUMP_DIR:-results/report_gen_m3_s42_chunk${CHUNK_SIZE}_n${NUM_SAMPLES}}"
+# The control arm is decoded IN THIS JOB rather than paired against an existing dump, so the
+# two differ by exactly one setting and no assumption about study ordering is needed.
+REF_DUMP="${REF_DUMP:-results/report_gen_m3_s42_chunk64_n${NUM_SAMPLES}}"
 SWEEP_ARM="${SWEEP_ARM:-true}"
 
 echo "=== E6: does chunk_size=${CHUNK_SIZE} change the reports? ==="
@@ -63,23 +68,37 @@ mkdir -p logs "${DUMP_DIR}"
 
 cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"
 
-if [ ! -d "${REF_DUMP}" ]; then
-  echo "WARNING: reference dump ${REF_DUMP} not found."
-  echo "         The decode below still runs, but the bootstrap has nothing to pair against."
-  echo "         Find the chunk_size=64 dump with: ls results/"
-fi
+decode_arm () {   # dump_dir, chunk_size
+  local dump="$1" cs="$2"
+  echo ""
+  echo "--- decoding ${NUM_SAMPLES} studies at chunk_size=${cs} -> ${dump} ---"
+  mkdir -p "${dump}"
+  CHECKPOINT="${CHECKPOINT}" \
+  MODEL_CONFIG="${MODEL_CONFIG}" \
+  PARQUET="${PARQUET}" \
+  NUM_SAMPLES="${NUM_SAMPLES}" \
+  DECODE=beam BEAM_SIZE=3 MAX_NEW_TOKENS=100 \
+  CHUNK_SIZE="${cs}" \
+  DUMP_DIR="${dump}" \
+  bash scripts/inspect_report_generation_h100.sh
+}
 
 echo ""
-echo "########## E6-A: re-decode at chunk_size=${CHUNK_SIZE} ##########"
-echo "Everything except CHUNK_SIZE matches V5-A exactly, so the two dumps pair."
-CHECKPOINT="${CHECKPOINT}" \
-MODEL_CONFIG="${MODEL_CONFIG}" \
-PARQUET="${PARQUET}" \
-NUM_SAMPLES="${NUM_SAMPLES}" \
-DECODE=beam BEAM_SIZE=3 MAX_NEW_TOKENS=100 \
-CHUNK_SIZE="${CHUNK_SIZE}" \
-DUMP_DIR="${DUMP_DIR}" \
-bash scripts/inspect_report_generation_h100.sh
+echo "########## E6-A: both arms, same job, one setting apart ##########"
+echo "Watch for '[operator] mamba3_chunk_size: 64 -> N'. If the log instead says"
+echo "'TRAINED with None' the config has no mamba3 layer and the run measures nothing;"
+echo "the eval now raises rather than letting that through (job 2583277)."
+decode_arm "${REF_DUMP}" 64
+decode_arm "${DUMP_DIR}" "${CHUNK_SIZE}"
+
+echo ""
+echo "--- how many of the ${NUM_SAMPLES} reports changed textually ---"
+if [ -f "${REF_DUMP}/hyps.txt" ] && [ -f "${DUMP_DIR}/hyps.txt" ]; then
+  CHANGED=$(awk 'NR==FNR{a[FNR]=$0;next}{if(a[FNR]!=$0)c++}END{print c+0}' \
+            "${REF_DUMP}/hyps.txt" "${DUMP_DIR}/hyps.txt")
+  echo "${CHANGED} of ${NUM_SAMPLES} generated reports differ between chunk_size 64 and ${CHUNK_SIZE}."
+  echo "(Reports changing while metrics tie is a RESULT -- V5-A found exactly that.)"
+fi
 
 if [ "${SWEEP_ARM}" = "true" ]; then
   echo ""
@@ -92,10 +111,17 @@ if [ "${SWEEP_ARM}" = "true" ]; then
     rm -rf "${TORCHINDUCTOR_CACHE_DIR}"; mkdir -p "${TORCHINDUCTOR_CACHE_DIR}"
     echo ""
     echo "--- compiled, chunk_size=${cs}, L=16384 ---"
-    python scripts/performance_profile.py --sweep \
+    # Inductor failed to generate code for cs=256 at L=16384 in job 2583277
+    # ("TypeError: list indices must be integers or slices, not NoneType" inside the
+    # SplitScan cumsum codegen), which killed the whole job under `set -e`. A compiler
+    # that cannot build an arm is DATA about that arm, not a reason to lose the others.
+    if ! python scripts/performance_profile.py --sweep \
       --models hybrid_150m_m3 --seq-lengths 16384 --batch_size 4 \
       --num_iterations 10 --dtype bf16 --compile --chunk-size "${cs}" \
-      --output-dir "analysis/efficiency_e6/compiled_cs${cs}"
+      --output-dir "analysis/efficiency_e6/compiled_cs${cs}"; then
+      echo "ARM FAILED: torch.compile could not build chunk_size=${cs} at L=16384."
+      echo "Recording as a compiler limitation and continuing."
+    fi
   done
 fi
 

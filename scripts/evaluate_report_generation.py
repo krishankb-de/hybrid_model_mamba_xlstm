@@ -291,6 +291,22 @@ def load_report_generation_module(checkpoint_path, model_config_name: str = "hyb
     # performance knob -- the chunked decomposition is exact at any chunk size -- but it changes
     # floating-point association, so "the optimised inference configuration produces the same
     # reports" is a claim that has to be decoded, not inferred from a logits tolerance.
+    # A chunk_size override on a config with no Mamba-3 layer is a SILENT no-op: the key is
+    # simply absent, gets set, and nothing ever reads it. That is what job 2583277 did -- it
+    # decoded hybrid_150m_v2_rrg (9x mamba-1 + 3x mlstm) and produced ROUGE-L 0.18358 against the
+    # chunk_size=64 reference's 0.1836, a "tie" that measured nothing at all. The give-away was in
+    # the log the whole time: "the checkpoint was TRAINED with None". Refuse it instead.
+    if chunk_size is not None:
+        pattern = raw.get("layer_pattern") or []
+        if "mamba3" not in pattern:
+            raise ValueError(
+                "--chunk-size={} was requested but model config '{}' has no 'mamba3' layer "
+                "(layer_pattern={}). mamba3_chunk_size would be set and never read, so the run "
+                "would silently measure the UNMODIFIED model. Use a Mamba-3 config such as "
+                "hybrid_150m_m3_rrg together with a Mamba-3 checkpoint.".format(
+                    chunk_size, model_config_name, pattern)
+            )
+
     for name, override in (("scan_impl", scan_impl), ("tfla_impl", tfla_impl),
                            ("mamba3_chunk_size", chunk_size)):
         if override is not None and override != raw.get(name):

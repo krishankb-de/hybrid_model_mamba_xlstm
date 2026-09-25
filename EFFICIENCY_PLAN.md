@@ -449,6 +449,34 @@ metrics tie, say so explicitly — that is the V5-A result and it is honest. If 
 efficiency claim must be reported at the default configuration (562.22 ms / 7.090 GB at L=16,384,
 which is 3.4× *slower* than the Transformer) and the compiled number quoted only as headroom.
 
+**RESULT — job 2583277, 2026-09-25: INVALID, and the reason is a design error of mine.**
+
+The job ran clean and produced ROUGE-L **0.18358** against the `chunk_size=64` reference's
+**0.1836** — a perfect tie. It measured nothing. The wrapper defaulted to the **13D checkpoint and
+`hybrid_150m_v2_rrg`**, which is the *incumbent* (9× `mamba`-1 + 3× `mlstm`) and **has no `mamba3`
+layer at all**. `mamba3_chunk_size` was duly set to 128 and never read. Every efficiency number in
+this plan is `hybrid_150m_m3`; the quality check has to be the Mamba-3 decoder, not the incumbent.
+
+The evidence was in the log from the first line: `[operator] mamba3_chunk_size: None -> 128
+(OVERRIDE; the checkpoint was TRAINED with **None**)`. A config that genuinely carries the key
+reports `64 -> 128`. A tie this exact — five decimal places — should have been read as "the knob is
+disconnected" rather than "the knob does nothing", and that is the lesson worth keeping: *a null
+result that is too clean is a plumbing report, not a measurement.*
+
+**Fixed three ways.** `evaluate_report_generation.py` now **raises** when `--chunk-size` is passed to
+a config whose `layer_pattern` has no `mamba3`, so the silent no-op is impossible. The wrapper
+defaults to `h100_report_gen_m3_tower13d_s42` + `hybrid_150m_m3_rrg`. And it now decodes **both**
+arms in the same job rather than pairing against a pre-existing dump, so the two differ by exactly
+one setting and no assumption about study ordering is needed.
+
+**E6-D partial result, and it is a real finding.** At L=16,384 compiled: `chunk_size=128` measured
+**123.03 ms / 7.175 GB**, reproducing the confirmed 122.90 ms to 0.1% — good stability evidence for
+the headline. `chunk_size=256` **failed to compile**: Inductor raised `TypeError: list indices must
+be integers or slices, not NoneType` inside the `SplitScan` cumsum codegen. Under `set -e` that
+killed the job, so `chunk_size=512` never ran. So **128 is not merely the optimum, it sits next to a
+compiler cliff** — a robustness caveat that belongs beside the headline, since the fast configuration
+depends on Inductor succeeding. The sweep no longer aborts the job when an arm fails to build.
+
 - [ ] **E6-A** Re-decode 13D on the V5-A n=400 subsample at `CHUNK_SIZE=128`, beam 3, otherwise the
   identical protocol (`inspect_report_generation_h100.sh` now takes `CHUNK_SIZE`; the eval script
   takes `--chunk-size` and announces the override in the log the way `scan_impl` does).
