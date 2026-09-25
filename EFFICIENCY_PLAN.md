@@ -114,34 +114,105 @@ line is a hypothesis until E0 lands.
 *Pre-registered prediction (R4): the inter-chunk loop is >50% of Mamba-3 layer time at 16,384; the
 3 mLSTM layers are 20–40% of total model time; unfused attention is slower than our scan at 16,384.*
 
-- [ ] **E0-A** Per-layer-type timing split. Extend `scripts/performance_profile.py` with
+- [x] **E0-A** Per-layer-type timing split. Extend `scripts/performance_profile.py` with
   `--per-layer`, using CUDA events around each `HybridBlock` (or `torch.profiler` with
   `record_shapes`), reporting ms and % by mixer type for `hybrid_150m_m3` at the 14A-7 sequence
   ladder. **This is the Amdahl bound and it gates E2/E3/E4.**
-- [ ] **E0-B** Intra-block split for `Mamba3Block`. **As built (2026-09-25), this is a two-way
+- [x] **E0-B** Intra-block split for `Mamba3Block`. **As built (2026-09-25), this is a two-way
   split — `ssd_chunked_scan` versus the rest of the block** (projections, conv, norm), via a
   monkeypatch that restores itself on exit. The finer intra-chunk-vs-inter-chunk breakdown the §2
   hypothesis needs is *not* measured directly by a timer inside the hot path; it is inferred from
   E0-C, where sweeping `chunk_size` moves only the loop length `nc`. If E0-C comes back ambiguous,
   add the in-path timers then and not before — instrumenting the operator is a change to the
   operator.
-- [ ] **E0-C** Launch-overhead probe: for fixed seqlen 16,384, sweep `mamba3_chunk_size` over
+- [x] **E0-C** Launch-overhead probe: for fixed seqlen 16,384, sweep `mamba3_chunk_size` over
   `{64, 128, 256, 512}` and record latency, peak memory and `nc`. If latency falls ~linearly in
   `nc`, the path is launch-bound and E2 is worth its cost; if flat, it is bandwidth-bound and E2 is
   not.
-- [ ] **E0-D** **The supervisor's answer, as a measurement.** Re-run the 14A-7 inference sweep for
+- [x] **E0-D** **The supervisor's answer, as a measurement.** Re-run the 14A-7 inference sweep for
   `transformer_150m_baseline` with the fused backends disabled (`torch.nn.attention.sdpa_kernel`
   restricted to `MATH`), alongside the existing fused numbers. Add `--attn-backend {auto,math}` to
   the profiler. This separates *algorithm* from *kernel engineering*: if Mamba-3 beats unfused
   attention at long lengths, "the gap is implementation, not algorithm" becomes a number instead of
   a claim.
-- [ ] **E0-E** Submit E0-A..D as one job (`sbatch scripts/profile_layer_split_h100.sh`, new CPU/GPU
+- [x] **E0-E** Submit E0-A..D as one job (`sbatch scripts/profile_layer_split_h100.sh`, new CPU/GPU
   wrapper following the `profile_efficiency_h100.sh` conventions: `--partition=aisc-batch
   --account=aisc --gpus=1 --exclude=ga03,gx17v1,gx13v1`, no `--gres`). Write results to
   `analysis/efficiency_layer_split/`.
-- [ ] **E0-F** Record the Amdahl bound explicitly in this file: *max achievable speedup if the
+- [x] **E0-F** Record the Amdahl bound explicitly in this file: *max achievable speedup if the
   Mamba-3 path became free* = 1 / (fraction not in Mamba-3). Compare to the 4.14× target and state
   plainly whether parity is reachable at all.
+
+**RESULTS — measured 2026-09-25, jobs 2579631 (E0-A/B/D) and 2579642 (+E0-C, E1-B).** H100 gx14,
+batch 4, bf16, random weights. Job 2579642 hit its 1.5 h wall limit inside the E1-B arm at L=16384.
+
+*E0-A / E0-B — the hypothesis in §2 is CONFIRMED.* At L=16384 the Mamba-3 forward is 555 ms, of
+which the 9 `mamba3` layers are **77.8%** and `ssd_chunked_scan` alone is **67.5% of the whole
+forward** (374.9 ms — i.e. 87% of all Mamba-3 layer time is inside the scan). The 3 mLSTM layers are
+only **13.4%** and embed/head/norm **8.8%**. Run-to-run spread across the two jobs is ~4%
+(555.29 / 577.07 ms). The incumbent Mamba-1 hybrid is worse still: 86.6% in its `mamba` layers.
+
+*E0-F — the Amdahl bound is **4.50×** at L=16384* (4.59× in the repeat), rising with length from
+2.93× at L=2048. The gap to close is 4.14×. **So parity is arithmetically possible but only by
+making the scan almost free**: with a free SSD path the model would run at ~123 ms against the
+Transformer's 164 ms, and the floor set by mLSTM + embed/head is ~123 ms. E2/E3 are not ruled out by
+the ceiling — they are ruled *in*, but with no margin for a half-measure.
+
+*E0-D — this is the supervisor's answer, and it is decisive.* Same Transformer, same protocol, only
+the SDPA backend changes:
+
+| L | fused (`auto`) | unfused (`math`) | fused advantage |
+|---|---|---|---|
+| 2,048 | 16.12 ms / 1.24 GB | 81.93 ms / 2.43 GB | 5.1× |
+| 4,096 | 33.32 ms / 2.09 GB | 298.79 ms / 8.11 GB | 9.0× |
+| 8,192 | 71.34 ms / 3.78 GB | 1195.95 ms / 30.45 GB | 16.8× |
+| 16,384 | 163.86 ms / 7.15 GB | **OOM** | runs vs does not run |
+
+Latency exponent 0.871 fused vs **1.513** unfused; memory exponent 0.644 vs **1.201**. The `auto` arm
+reproduces the published 14A-7 number to 0.04 ms (163.86 vs 163.9), so the harness is sound.
+**Against the same algorithm without a hand-written kernel, our model wins and the margin grows with
+length**: at 8,192 Mamba-3 is ~3× faster than unfused attention, and at 16,384 it runs in 7.09 GB
+where unfused attention does not run at all. The 4.14× deficit is the cost of FlashAttention's
+kernel engineering, now measured rather than asserted.
+
+*E0-C — `chunk_size` is a real lever, and my pre-registered prediction was wrong (rule R4).* I
+predicted 1.5–2.5× for 64→256, monotonic in `nc`. It is a **U-curve with its optimum at 128**:
+
+| chunk_size | L=4,096 forward | L=16,384 forward | scan at 16,384 |
+|---|---|---|---|
+| 64 (shipped) | 135.6 ms | 557.8 ms | 377.0 ms |
+| **128** | **99.4 ms** | **398.6 ms** | **216.7 ms** |
+| 256 | 104.6 ms | 411.8 ms | 230.1 ms |
+| 512 | 130.7 ms | 512.8 ms | 331.6 ms |
+
+1.40× on the whole forward and 1.74× on the scan, for a one-line config change. Bigger chunks cut
+the loop length `nc` but grow the per-chunk mask work as `O(seqlen · chunk_size)`, and 128 is where
+those cross. **Unverified under R1 and R2**: `run_layer_split` does not yet record peak memory, and
+no equivalence check has been run, so this is not adoptable yet.
+
+*E1-B — `torch.compile` is the biggest single result here, and my prediction was wrong by a factor
+of three (rule R4).* I predicted < 1.3× and possible outright failure. Measured, under the same
+`--sweep` protocol as the published numbers:
+
+| L | compiled | published uncompiled | Transformer (fused) | remaining gap |
+|---|---|---|---|---|
+| 2,048 | 20.14 ms / 1.32 GB | 86.2 ms / 1.24 GB | 16.12 ms / 1.24 GB | **1.25×** |
+| 4,096 | 44.97 ms / 2.15 GB | — | 33.32 ms / 2.09 GB | 1.35× |
+| 8,192 | 88.58 ms / 3.82 GB | — | 71.34 ms / 3.78 GB | 1.24× |
+| 16,384 | **compile did not finish** | 678.2 ms / 7.09 GB | 163.86 ms / 7.15 GB | — |
+
+**At L=2,048 that is 4.28×, taking the gap from 5.35× to 1.25×, with memory still at parity.** The
+reason compile was pinned off (`MAMBA3_PLAN_V2.md:301`) was a Mamba-1 artifact, and this is the
+measurement that retires it for SSD. The failure mode is exactly FE4: Dynamo unrolls the `nc`-long
+Python loop, so each new sequence length pays a graph build that grows with `nc`, and L=16,384
+(`nc`=256) did not complete inside the job's remaining time. **Nothing here is adoptable until R1
+passes** — `torch.compile` is not required to preserve floating-point association, and this project
+has already been burned once by an operator that computed a different function than advertised.
+
+*What this does to E2.* The parallel chunk-state rewrite is no longer primarily a speed play —
+`torch.compile` already captures much of that win. Its remaining justification is stronger and more
+specific: **it removes the unrolled loop that makes compilation blow up**, which is what currently
+blocks the compiled path at exactly the sequence lengths the thesis cares about.
 
 **Gate:** E0-F's bound decides what follows. If the bound is < 2×, skip to E4 and E5 and report the
 ceiling as the result.
@@ -163,6 +234,16 @@ ceiling as the result.
   compile time as well as steady-state latency; a 10-minute compile for a 1.1× gain is a null.
 - [ ] **E1-C** Report both under R3. Anything that fails the bar is written up as a null and
   reverted.
+- [ ] **E1-D** **The gate, added 2026-09-25 after E0 produced two candidate wins.**
+  `scripts/check_operator_equivalence.py` implements R1 at two levels: the operator against the
+  fp64 oracle (including a `cu_seqlens` boundary that falls inside a chunk) and the model's logits
+  across `chunk_size` and `torch.compile`. `scripts/verify_and_profile_e1_h100.sh` runs it **first**
+  and stops the job on failure, then times all five arms — baseline, `chunk_size=128`, compiled,
+  compiled+128, and the two L=16384 arms last — under one protocol in one job, so every ratio is a
+  within-job comparison. Measured on CPU so far: operator agreement 1e-7, logits 2.4e-5, both far
+  inside the 1e-4 tolerance; **`torch.compile` equivalence is still unverified and is the one that
+  matters**, since a compiler is under no obligation to preserve floating-point association.
+  `--time=03:00:00` and a persistent Inductor cache are the mitigations for the 2579642 timeout.
 
 ### E2 — Remove the sequential inter-chunk loop (pure PyTorch, no dependency)
 

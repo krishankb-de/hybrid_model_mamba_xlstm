@@ -1,7 +1,7 @@
 {
-  "current_phase": "E0_measure_before_optimising",
-  "last_updated": "2026-09-25T10:21:51+02:00",
-  "status": "E0 pending — no job submitted yet. Nothing in this plan changes a published number.",
+  "current_phase": "E1_adopt_or_reject",
+  "last_updated": "2026-09-25T12:25:34+02:00",
+  "status": "E0 COMPLETE (jobs 2579631/2579642). Scan = 67.5% of forward at L=16384, Amdahl bound 4.50x vs a 4.14x gap, so parity needs the scan to become nearly free. E0-D decisive: unfused attention is 16.8x slower at 8192 and OOMs at 16384 -- the deficit is kernel engineering, not algorithm. E1 candidates measured but NOT adopted: chunk_size=128 (1.40x) and torch.compile (4.28x at L=2048, gap 5.35x -> 1.25x). Both blocked on the R1 gate; torch.compile equivalence is unverified on GPU.",
   "plan_of_record": "EFFICIENCY_PLAN.md",
   "branch": "h100_mamba3_v2",
   "helper": "venv/bin/python scripts/mamba3_state.py --plan efficiency ...",
@@ -69,34 +69,40 @@
   "phases": {
     "E0": {
       "title": "Measure before optimising: where does the time actually go?",
-      "status": "pending",
+      "status": "complete",
       "checkboxes": {
         "E0-A": {
-          "done": false,
+          "done": true,
           "desc": "Per-layer-type timing split. Extend scripts/performance_profile.py with"
         },
         "E0-B": {
-          "done": false,
+          "done": true,
           "desc": "Intra-block split for Mamba3Block. As built (2026-09-25), this is a two-way"
         },
         "E0-C": {
-          "done": false,
+          "done": true,
           "desc": "Launch-overhead probe: for fixed seqlen 16,384, sweep mamba3_chunk_size over"
         },
         "E0-D": {
-          "done": false,
+          "done": true,
           "desc": "The supervisor's answer, as a measurement. Re-run the 14A-7 inference sweep for"
         },
         "E0-E": {
-          "done": false,
+          "done": true,
           "desc": "Submit E0-A..D as one job (sbatch scripts/profile_layer_split_h100.sh, new CPU/GPU"
         },
         "E0-F": {
-          "done": false,
+          "done": true,
           "desc": "Record the Amdahl bound explicitly in this file: *max achievable speedup if the"
         }
       },
-      "evidence": {},
+      "evidence": {
+        "jobs": "2579631,2579642",
+        "amdahl_bound_16384": "4.50",
+        "scan_share_16384": "0.675",
+        "unfused_attn_8192_ms": "1195.95",
+        "compile_speedup_2048": "4.28"
+      },
       "verdict": null
     },
     "E1": {
@@ -114,6 +120,10 @@
         "E1-C": {
           "done": false,
           "desc": "Report both under R3. Anything that fails the bar is written up as a null and"
+        },
+        "E1-D": {
+          "done": false,
+          "desc": "The gate, added 2026-09-25 after E0 produced two candidate wins."
         }
       },
       "evidence": {},
@@ -214,7 +224,9 @@
   },
   "notes": [
     "2026-09-25: plan created. E0 blocks every other phase: the Amdahl bound is unmeasured, so every speedup estimate above it is a hypothesis.",
-    "2026-09-25: E0 tooling landed (not yet measured): performance_profile.py gains --per-layer (E0-A/E0-B, per-mixer-type + ssd_chunked_scan split with the Amdahl bound computed from the measured share), --attn-backend {auto,math,flash,efficient} (E0-D), --chunk-size (E0-C) and --compile (E1-B); scripts/profile_layer_split_h100.sh submits all four arms as one 1.5h single-GPU job. No checkbox ticked: the gate is the measurement, not the code."
+    "2026-09-25: E0 tooling landed (not yet measured): performance_profile.py gains --per-layer (E0-A/E0-B, per-mixer-type + ssd_chunked_scan split with the Amdahl bound computed from the measured share), --attn-backend {auto,math,flash,efficient} (E0-D), --chunk-size (E0-C) and --compile (E1-B); scripts/profile_layer_split_h100.sh submits all four arms as one 1.5h single-GPU job. No checkbox ticked: the gate is the measurement, not the code.",
+    "2026-09-25: E0 COMPLETE (jobs 2579631, 2579642). Scan is 67.5% of the forward at L=16384; Amdahl bound 4.50x vs a 4.14x gap. E0-D decisive: unfused attention is 16.8x slower at 8192 and OOMs at 16384, so the deficit is kernel engineering, not algorithm. Two pre-registered predictions WRONG: chunk_size is a U-curve peaking at 128 (1.40x, not monotonic 1.5-2.5x), and torch.compile gave 4.28x at L=2048 (predicted <1.3x), cutting the gap to 1.25x. Neither is adoptable until R1/R2 are checked; 2579642 timed out compiling L=16384 (FE4 as predicted).",
+    "2026-09-25: current_phase -> E1_adopt_or_reject"
   ],
   "open_questions": [
     "E0-D: unfused attention as the headline comparison or a footnote to the fused one?",

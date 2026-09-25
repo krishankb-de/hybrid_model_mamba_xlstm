@@ -716,6 +716,9 @@ def run_layer_split(model_names, seq_lengths, batch_size, num_iterations, device
                                 model(input_ids)
                         _sync(device)
                         split.reset(); scan.reset()
+                        # Rule R2 is checked against this: a chunk size or a compile arm that
+                        # buys speed by exceeding the Transformer's peak memory is rejected.
+                        _reset_peak_memory(device)
                         split.enabled = scan.enabled = True
                         wall_start = time.perf_counter()
                         with torch.no_grad():
@@ -743,6 +746,7 @@ def run_layer_split(model_names, seq_lengths, batch_size, num_iterations, device
 
                 row.update({
                     "forward_ms": round(wall_ms, 3),
+                    "peak_memory_gb": round(_peak_memory_gb(device), 4),
                     "by_type_ms": {k: round(v, 3) for k, v in by_type.items()},
                     "by_layer_ms": {str(k): round(v, 3) for k, v in sorted(by_index.items())},
                     "ssd_scan_ms": None if scan_ms is None else round(scan_ms, 3),
@@ -750,7 +754,8 @@ def run_layer_split(model_names, seq_lengths, batch_size, num_iterations, device
                 mixer_total = sum(by_type.values())
                 row["outside_mixers_ms"] = round(max(wall_ms - mixer_total, 0.0), 3)
 
-                print("  L={:<6} forward {:8.2f} ms".format(seq_length, wall_ms))
+                print("  L={:<6} forward {:8.2f} ms   peak {:7.3f} GB".format(
+                    seq_length, wall_ms, row["peak_memory_gb"]))
                 for lt, ms in sorted(by_type.items(), key=lambda kv: -kv[1]):
                     print("      {:<10} {:8.2f} ms  {:5.1f}%  ({} layers)".format(
                         lt, ms, 100.0 * ms / wall_ms, counts.get(lt, 0)))
@@ -785,7 +790,7 @@ def run_layer_split(model_names, seq_lengths, batch_size, num_iterations, device
         csv_path = out / "layer_split.csv"
         types = sorted({t for r in rows for t in r.get("by_type_ms", {})})
         fieldnames = (["model", "seq_length", "batch_size", "dtype", "attn_backend",
-                       "chunk_size", "oom", "forward_ms"]
+                       "chunk_size", "oom", "forward_ms", "peak_memory_gb"]
                       + ["ms_" + t for t in types]
                       + ["outside_mixers_ms", "ssd_scan_ms", "ssd_scan_share",
                          "amdahl_bound_if_ssd_free"])

@@ -6155,3 +6155,77 @@ def test_layer_split_wrapper_follows_the_cluster_conventions():
     assert "HF_HUB_OFFLINE=1" in src
     # The E0-D arms are the supervisor's answer; both must be present.
     assert "--attn-backend auto" in src and "--attn-backend math" in src
+
+
+# ---------------------------------------------------------------------------
+# EFFICIENCY_PLAN.md E1 — the R1 gate that stands between a stopwatch and a claim
+# ---------------------------------------------------------------------------
+
+@pytest.mark.willi_parity
+def test_r1_gate_checks_the_document_boundary_and_the_fp64_oracle():
+    """E0 found two speedups. Neither may be adopted on timing alone: this repo
+    has already shipped an operator that computed a different function than
+    advertised (the A_cum.clamp defect, rel-max-err 0.92), and the entire Mamba-3
+    campaign exists to repair it.
+
+    The gate must compare against the fp64 oracle rather than only against the
+    shipped chunked path — two chunked variants can agree with each other and
+    both be wrong — and it must include a cu_seqlens boundary that lands inside a
+    chunk, which is exactly where the Mamba-1 defect lived."""
+    src = (REPO_ROOT / "scripts" / "check_operator_equivalence.py").read_text()
+    assert "ssd_sequential_reference" in src, "R1 requires the fp64 oracle, not just self-consistency"
+    assert "cu_seqlens" in src and "mid-chunk" in src
+    assert "R1_TOLERANCE = 1e-4" in src
+    # It has to be usable as a gate, i.e. fail the process, not just print.
+    assert "return 1" in src and "sys.exit(main())" in src
+
+
+@pytest.mark.willi_parity
+def test_r1_gate_actually_separates_a_correct_variant_from_a_wrong_one():
+    """A gate that passes everything is not a gate. Feed it the same operands
+    with and without the document reset: the chunked scan must track the oracle
+    that shares its cu_seqlens and must NOT match the one that does not."""
+    import importlib.util
+    import torch
+    from hybrid_xmamba.kernels.ssd import ssd_chunked_scan, ssd_sequential_reference
+
+    spec = importlib.util.spec_from_file_location(
+        "r1gate", REPO_ROOT / "scripts" / "check_operator_equivalence.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+    x, dt, A, B, C, D = mod._operands(2, 128, 4, 16, 1, 32, "cpu")
+    seg = torch.zeros(2, 128, dtype=torch.long)
+    seg[:, 50:] = 1                       # boundary inside every chunk size tested
+
+    got = ssd_chunked_scan(x, dt, A, B, C, D=D, chunk_size=64, cu_seqlens=seg)
+    right = ssd_sequential_reference(x, dt, A, B, C, D=D, cu_seqlens=seg)
+    wrong = ssd_sequential_reference(x, dt, A, B, C, D=D)     # boundary ignored
+
+    assert mod.rel_max_err(got, right) < mod.R1_TOLERANCE, (
+        "the chunked scan no longer matches the fp64 oracle across a document reset"
+    )
+    assert mod.rel_max_err(got, wrong) > 0.01, (
+        "cu_seqlens is being ignored somewhere, so the boundary case tests nothing"
+    )
+
+
+@pytest.mark.willi_parity
+def test_e1_wrapper_runs_the_gate_before_it_times_anything():
+    """Ordering is the whole design: if the equivalence check ran after the
+    sweeps, a failing gate would still have produced numbers someone could quote.
+    Also: job 2579642 died at 1.5h compiling L=16384, so this wrapper must ask
+    for more time than that."""
+    src = (REPO_ROOT / "scripts" / "verify_and_profile_e1_h100.sh").read_text()
+    gate_at = src.index("check_operator_equivalence.py")
+    first_sweep = src.index("performance_profile.py --sweep")
+    assert gate_at < first_sweep, "the R1 gate must run before any timing arm"
+
+    directives = [ln for ln in src.splitlines() if ln.startswith("#SBATCH")]
+    assert any("--partition=aisc-batch" in ln for ln in directives)
+    assert any("--gpus=1" in ln for ln in directives)
+    assert not any("--gres" in ln for ln in directives)
+    assert any("--exclude=ga03" in ln and "gx13v1" in ln for ln in directives)
+    time_line = [ln for ln in directives if "--time=" in ln][0]
+    hours = int(time_line.split("--time=")[1].split(":")[0])
+    assert hours >= 3, "1.5h already timed out on the L=16384 compile (job 2579642)"
+    assert "CKPT" not in src and "checkpoints/" not in src
