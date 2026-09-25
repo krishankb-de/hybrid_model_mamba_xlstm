@@ -477,13 +477,60 @@ killed the job, so `chunk_size=512` never ran. So **128 is not merely the optimu
 compiler cliff** — a robustness caveat that belongs beside the headline, since the fast configuration
 depends on Inductor succeeding. The sweep no longer aborts the job when an arm fails to build.
 
-- [ ] **E6-A** Re-decode 13D on the V5-A n=400 subsample at `CHUNK_SIZE=128`, beam 3, otherwise the
+**RESULT — job 2583455, 2026-09-25. The optimised configuration produces BYTE-IDENTICAL reports.**
+
+Both arms decoded the Mamba-3 decoder (`h100_report_gen_m3_tower13d_s42`, `hybrid_150m_m3_rrg`),
+n=400, beam 3, differing in exactly one setting. The override reached the operator this time and
+said so: `[operator] mamba3_chunk_size: 64 -> 128 (OVERRIDE; the checkpoint was TRAINED with 64)` —
+the `TRAINED with 64` is what distinguishes this from job 2583277's `TRAINED with None`. The control
+arm prints no override line because 64 is already the config value.
+
+| | chunk_size=64 | chunk_size=128 |
+|---|---|---|
+| ROUGE-L | 0.18740664158420808 | 0.18740664158420808 |
+| BLEU-1 | 0.24428375611088468 | 0.24428375611088468 |
+| BLEU-4 | 0.051852808625198483 | 0.051852808625198483 |
+| reports differing textually | — | **0 of 400** |
+
+**Not "the metrics tie" — the generated text is identical, token for token, across 400 studies.**
+That is a stronger outcome than the pre-registered rule asked for, and it makes E6-B moot: identical
+hypothesis files give identical CheXbert labels and a degenerate bootstrap, so running them would
+consume GPU time to re-derive a tautology. Recorded as satisfied-by-construction rather than run.
+
+Why it lands this cleanly: `chunk_size` perturbs floating-point association at the ~1e-5 level (R1
+measured 2.3e-05 on logits), and beam search only changes its output when that perturbation exceeds
+the top-2 margin. Across roughly 40,000 token decisions (400 reports × ~100 tokens) it never did.
+
+**Verdict under the pre-registered rule: the optimised configuration IS the efficiency
+configuration.** `chunk_size=128` may be reported alongside the published quality numbers without
+qualification.
+
+⚠ **One gap stated plainly.** This verifies `chunk_size`, not `torch.compile`. The efficiency
+headline uses both. Compile's logit perturbation was measured at **3.0e-05** (R1), the same order as
+`chunk_size`'s 2.3e-05 which produced zero token flips here — so the inference extends by analogy,
+but it is an analogy and not a measurement on decoded text. Closing it needs a compiled beam-search
+decode, which recompiles at every step as the sequence grows and is expensive. Stated as a known
+limitation in `analysis/EFFICIENCY_NOTE.md` §6.
+
+**E6-D complete, and `chunk_size=128` turns out to be a ceiling, not just an optimum.** At L=16,384
+compiled, `chunk_size=128` measured **122.94 ms / 7.175 GB** — the third independent measurement of
+the headline (122.90 / 123.03 / 122.94, a 0.1% spread). **Both `chunk_size=256` and `chunk_size=512`
+fail to compile**, with the identical Inductor error in the `SplitScan` cumsum codegen
+(`TypeError: list indices must be integers or slices, not NoneType`). The fault-tolerance fix worked:
+both arms reported `ARM FAILED` and the job continued.
+
+So the `chunk_size` lever is exhausted — 128 is the largest value Inductor can build at this length —
+and the fast configuration sits directly against a compiler limit. That belongs beside the headline:
+**the 1.34× depends on an Inductor code path that fails one step further along.** It also closes the
+"free version of E2" question: there is no larger chunk to take.
+
+- [x] **E6-A** Re-decode 13D on the V5-A n=400 subsample at `CHUNK_SIZE=128`, beam 3, otherwise the
   identical protocol (`inspect_report_generation_h100.sh` now takes `CHUNK_SIZE`; the eval script
   takes `--chunk-size` and announces the override in the log the way `scan_impl` does).
-- [ ] **E6-B** CheXbert + paired bootstrap against the existing `chunk_size=64` dump; report how many
+- [x] **E6-B** CheXbert + paired bootstrap against the existing `chunk_size=64` dump; report how many
   of 400 reports changed textually alongside whether any metric moved.
-- [ ] **E6-C** Record the verdict in `analysis/EFFICIENCY_NOTE.md` §6 and `mamba3_results.md` §6.
-- [ ] **E6-D** Cheap bonus in the same job: sweep `chunk_size` ∈ {128, 256, 512} **under compile** at
+- [x] **E6-C** Record the verdict in `analysis/EFFICIENCY_NOTE.md` §6 and `mamba3_results.md` §6.
+- [x] **E6-D** Cheap bonus in the same job: sweep `chunk_size` ∈ {128, 256, 512} **under compile** at
   L=16,384. E0-C swept it uncompiled only, and the optimum may move once Inductor changes the
   balance between loop overhead and mask work. ~15 minutes, and it is the free version of E2.
 

@@ -1,7 +1,7 @@
 {
-  "current_phase": "E6_verify_optimised_decode",
-  "last_updated": "2026-09-25T21:01:23+02:00",
-  "status": "E0, E1, E5 COMPLETE. Headline confirmed (job 2582775): 1.15x faster than FlashAttention at L=8192 and 1.34x at L=16384, memory parity, exponent 0.985 vs 1.210, all equivalence-gated. E2/E3/E4 DROPPED with recorded reasoning. REMAINING: E6 -- efficiency is reported at chunk_size=128+compile while every quality number was decoded at chunk_size=64, and a 3.0e-05 logits agreement is not proof the decoded tokens agree. scripts/verify_optimised_decode_h100.sh re-decodes 13D on the V5-A n=400 subsample under the identical protocol with only CHUNK_SIZE changed. Pre-registered rule in the plan: metrics tie -> optimised config is THE efficiency config; metrics move -> revert the claim to the default config (562 ms, 3.4x SLOWER than the Transformer).",
+  "current_phase": "COMPLETE",
+  "last_updated": "2026-09-25T23:14:18+02:00",
+  "status": "PLAN COMPLETE 2026-09-25. E0, E1, E5, E6 done; E2/E3/E4 dropped with measured reasoning. HEADLINE: at L=16384 the corrected Mamba-3 runs 122.94 ms / 7.169 GB against FlashAttention's 164.85 ms / 7.152 GB = 1.34x FASTER at memory parity (three reproductions, 0.1% spread), and 1.15x faster at L=8192. Latency exponent 0.985 vs attention's 1.210. Reached with two inference-time settings, chunk_size=128 and torch.compile, both equivalence-gated against the fp64 oracle including packed-document boundaries. VERIFIED ON DECODED TEXT: 0 of 400 reports differ between chunk_size 64 and 128, metrics identical to every digit (job 2583455), so the efficiency configuration and the quality configuration are the same system. NO QUALITY METRIC MOVES. Known limits, all recorded: torch.compile is verified on logits (3.0e-05) not on decoded text; memory parity is inference-only (training uses 1.59x the Transformer's); chunk_size=128 is a compiler CEILING, since 256 and 512 both fail to build. Deliverable: analysis/EFFICIENCY_NOTE.md.",
   "plan_of_record": "EFFICIENCY_PLAN.md",
   "branch": "h100_mamba3_v2",
   "helper": "venv/bin/python scripts/mamba3_state.py --plan efficiency ...",
@@ -167,26 +167,32 @@
     },
     "E6": {
       "title": "Does the optimised configuration produce the same reports?",
-      "status": "pending",
+      "status": "complete",
       "checkboxes": {
         "E6-A": {
-          "done": false,
+          "done": true,
           "desc": "Re-decode 13D on the V5-A n=400 subsample at CHUNK_SIZE=128, beam 3, otherwise the"
         },
         "E6-B": {
-          "done": false,
+          "done": true,
           "desc": "CheXbert + paired bootstrap against the existing chunk_size=64 dump; report how many"
         },
         "E6-C": {
-          "done": false,
+          "done": true,
           "desc": "Record the verdict in analysis/EFFICIENCY_NOTE.md §6 and mamba3_results.md §6."
         },
         "E6-D": {
-          "done": false,
+          "done": true,
           "desc": "Cheap bonus in the same job: sweep chunk_size ∈ {128, 256, 512} under compile at"
         }
       },
-      "evidence": {},
+      "evidence": {
+        "job": "2583455",
+        "reports_differing": "0 of 400",
+        "rouge_l_both": "0.18740664158420808",
+        "headline_reproductions": "122.90 / 123.03 / 122.94 ms",
+        "compile_cliff": "cs=256 and cs=512 both fail to build"
+      },
       "verdict": null
     },
     "E5": {
@@ -226,7 +232,10 @@
     "2026-09-25: E5-A/B/C complete. analysis/EFFICIENCY_NOTE.md written (supervisor-facing, allowlisted). analysis/mamba3_results.md section 6 rewritten: the old 'Transformer is faster at every length / a Triton kernel is the unexploited headroom' paragraph is marked overturned and replaced with the measured reversal, plus three explicit limits (compile is opt-in; memory parity is inference-only, training uses 1.59x the Transformer's; training still 2.71x slower at L=2048). E5-C removed four artefacts that made the repo look like it had hand-written Triton kernels: root test_triton_fix.py (deleted), triton>=2.1.0 in both requirements files, the package docstring's 'custom CUDA/Triton kernels', and train_biomedclip_kd_h100.sh's claim -- with a parity test so they cannot return. Nuance recorded: Inductor DOES emit Triton under torch.compile, so the accurate line is 'we never hand-wrote one; the compiler writes them now'.",
     "2026-09-25: E5-D done. Note appended to mamba3_v2_state.json recording the section-6 rewrite. E2/E3/E4 DROPPED with measured reasoning: compile already realised 4.57x against E0-F's 4.50x bound, E2's remaining ceiling is an estimated 1.1-1.3x on a configuration that already wins, and E2 would ADD 0.2-0.4 GB to the one claim this project cannot make (training memory, already 1.59x the Transformer's). E3 dropped harder: goal met, external CUDA dependency is a reproducibility liability, and 'we adopted someone else's kernel' is a weaker contribution. New phase E6 opened -- the item they were displacing -- to verify the optimised configuration produces the same reports.",
     "2026-09-25: current_phase -> E6_verify_optimised_decode",
-    "2026-09-25: 2026-09-25: E6 job 2583277 INVALID -- my design error. The wrapper defaulted to the 13D checkpoint + hybrid_150m_v2_rrg, the INCUMBENT, which has no mamba3 layer, so mamba3_chunk_size was set and never read. ROUGE-L 0.18358 vs the reference 0.1836 was a perfect tie because the knob was disconnected, not because it does nothing; the log said 'TRAINED with None' throughout. Fixed three ways: evaluate_report_generation.py now RAISES on a chunk_size override for a config with no mamba3 layer; the wrapper defaults to h100_report_gen_m3_tower13d_s42 + hybrid_150m_m3_rrg; and it decodes both arms in one job so they differ by exactly one setting. E6-D partial and real: compiled cs=128 at L=16384 gave 123.03 ms / 7.175 GB (reproducing 122.90 to 0.1%), while cs=256 FAILED TO COMPILE (Inductor SplitScan cumsum codegen, 'list indices must be integers or slices, not NoneType') and killed the job under set -e, so cs=512 never ran. 128 sits next to a compiler cliff; the sweep no longer aborts on a failed arm."
+    "2026-09-25: 2026-09-25: E6 job 2583277 INVALID -- my design error. The wrapper defaulted to the 13D checkpoint + hybrid_150m_v2_rrg, the INCUMBENT, which has no mamba3 layer, so mamba3_chunk_size was set and never read. ROUGE-L 0.18358 vs the reference 0.1836 was a perfect tie because the knob was disconnected, not because it does nothing; the log said 'TRAINED with None' throughout. Fixed three ways: evaluate_report_generation.py now RAISES on a chunk_size override for a config with no mamba3 layer; the wrapper defaults to h100_report_gen_m3_tower13d_s42 + hybrid_150m_m3_rrg; and it decodes both arms in one job so they differ by exactly one setting. E6-D partial and real: compiled cs=128 at L=16384 gave 123.03 ms / 7.175 GB (reproducing 122.90 to 0.1%), while cs=256 FAILED TO COMPILE (Inductor SplitScan cumsum codegen, 'list indices must be integers or slices, not NoneType') and killed the job under set -e, so cs=512 never ran. 128 sits next to a compiler cliff; the sweep no longer aborts on a failed arm.",
+    "2026-09-25: E6 COMPLETE (job 2583455). chunk_size=128 produces BYTE-IDENTICAL reports: 0 of 400 differ textually, and ROUGE-L/BLEU-1/BLEU-4 match to every digit (0.18740664158420808 / 0.24428375611088468 / 0.051852808625198483). Both arms decoded the Mamba-3 decoder; the override announced '64 -> 128 (TRAINED with 64)', the tell that distinguishes this from 2583277's 'TRAINED with None'. E6-B moot by construction: identical hypothesis files give identical CheXbert labels and a degenerate bootstrap. VERDICT: the optimised configuration IS the efficiency configuration. GAP: this verifies chunk_size, not torch.compile -- compile's logit perturbation is 3.0e-05 vs chunk_size's 2.3e-05, same order, but that is an analogy not a decoded-text measurement. E6-D: cs=128 gave 122.94 ms (third reproduction, 0.1% spread), and BOTH cs=256 and cs=512 FAIL to compile with the same Inductor SplitScan error -- 128 is a ceiling, not just an optimum, and the fast config sits against a compiler limit.",
+    "2026-09-25: E6-C done. Verdict written into analysis/EFFICIENCY_NOTE.md (new section 5b: 0 of 400 reports differ, metrics identical to every digit, plus the torch.compile gap and the compiler-cliff caveat) and analysis/mamba3_results.md section 6.",
+    "2026-09-25: current_phase -> COMPLETE"
   ],
   "open_questions": [
     "E0-D: unfused attention as the headline comparison or a footnote to the fused one?",

@@ -303,13 +303,22 @@ length per process, one compiler cache per point):
 From 8,192 to 16,384 our latency exponent is **0.985** against attention's **1.210** — linear against
 superlinear, with the advantage growing in length. Memory stays at parity (+0.24%).
 
+**The optimised configuration was verified on decoded text, not assumed.** Decoding the Mamba-3
+decoder twice over 400 test studies with beam search, differing only in `mamba3_chunk_size`, gives
+**0 of 400 reports different** and ROUGE-L / BLEU-1 / BLEU-4 identical to every digit (0.1874066 /
+0.2442838 / 0.0518528). So the efficiency configuration and the quality configuration are the same
+system. This checks `chunk_size`; `torch.compile`'s effect on decoded text is inferred from its
+3.0e-05 logit perturbation rather than measured (job 2583455).
+
 ⚠ **Three limits on that result, all measured.** `torch.compile` is **opt-in and not the default**: the
 uncompiled default path at 16,384 is 562 ms / 7.090 GB, and no training config in this project enables it.
 **Memory parity is an inference claim only** — in training we use 12.02 GB against the Transformer's 7.55 GB
 at 2,048, **1.59× more**, unchanged by this work. And **training is still slower**, though the deficit falls
 from 5.86× to **2.71×** at 2,048 tokens and from 8.74× to 1.23× at 1,024. The "8× slower at 2,048" figure
 above does not reproduce on the newer protocol (measured 5.86×) and should not be re-quoted without
-re-measurement.
+re-measurement. Finally, `chunk_size=128` is a **ceiling rather than a tuning choice**: at
+16,384 tokens both 256 and 512 fail to compile with the same Inductor error, so the compiled result
+sits directly against a compiler limit.
 
 **Decode, prompt 256, 64 new tokens, batch 1.** The O(1) recurrent cache works at full scale:
 

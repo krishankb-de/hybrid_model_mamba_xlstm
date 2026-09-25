@@ -119,6 +119,35 @@ The scaling is the part worth putting in a thesis. From 8,192 to 16,384 tokens o
 is **0.985** and attention's is **1.210**. Ours is linear in sequence length, as the architecture
 predicts; attention's is not, and the advantage grows with length.
 
+## 5b. Does the fast configuration change what the model writes?
+
+It does not. The optimised setting was checked the only way that settles it: by decoding with it.
+The Mamba-3 decoder was run twice over 400 test studies with beam search, identical in every respect
+except `mamba3_chunk_size`:
+
+| | chunk_size = 64 | chunk_size = 128 |
+|---|---|---|
+| ROUGE-L | 0.1874066 | 0.1874066 |
+| BLEU-1 | 0.2442838 | 0.2442838 |
+| BLEU-4 | 0.0518528 | 0.0518528 |
+| reports differing textually | — | **0 of 400** |
+
+Not "the metrics tie" — **the generated text is identical token for token**. `chunk_size` perturbs
+floating-point association at the 1e-5 level, and beam search changes its output only when that
+exceeds the top-2 margin; across roughly 40,000 token decisions it never did.
+
+⚠ This verifies `chunk_size`. It does **not** verify `torch.compile`, which the efficiency numbers
+also use. Compile's logit perturbation measures 3.0e-05, the same order as `chunk_size`'s 2.3e-05
+which produced zero token flips here, so the conclusion extends by analogy — but an analogy is not a
+measurement, and closing it would need a compiled beam-search decode, which recompiles at every step
+as the sequence grows.
+
+**One robustness caveat belongs with the headline.** `chunk_size=128` is not merely the optimum, it
+is a **ceiling**: at 16,384 tokens both 256 and 512 fail to compile at all, with the same PyTorch
+Inductor error in the scan's cumulative-sum code generation. The 1.34× therefore depends on a
+compiler path that fails one step further along. The uncompiled default configuration is unaffected
+and always available, at 562 ms.
+
 ## 6. What is *not* claimed
 
 - **Memory parity is an inference result only.** In training we use **12.02 GB against the
