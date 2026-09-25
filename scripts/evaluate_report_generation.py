@@ -273,7 +273,7 @@ def resolve_prefix_k(checkpoint_path, yaml_prefix_k: int, override: Optional[int
     return int(yaml_prefix_k)
 
 
-def load_report_generation_module(checkpoint_path, model_config_name: str = "hybrid_150m_v2_rrg", device: str = "cpu", prefix_k: Optional[int] = None, scan_impl: Optional[str] = None, tfla_impl: Optional[str] = None):
+def load_report_generation_module(checkpoint_path, model_config_name: str = "hybrid_150m_v2_rrg", device: str = "cpu", prefix_k: Optional[int] = None, scan_impl: Optional[str] = None, tfla_impl: Optional[str] = None, chunk_size: Optional[int] = None):
     """Load a trained ReportGenerationLightningModule from a Lightning .ckpt
     for inference. Mirrors evaluate_lm.py's checkpoint-loading convention
     (defensive _orig_mod. prefix strip, missing/unexpected key counts printed)."""
@@ -287,7 +287,12 @@ def load_report_generation_module(checkpoint_path, model_config_name: str = "hyb
     # measurement: same checkpoint, same split, scan_impl/tfla_impl flipped to "exact". Both flags
     # are parameter-invisible, so the weights load identically either way -- which is exactly why
     # an override has to be announced in the log rather than inferred later.
-    for name, override in (("scan_impl", scan_impl), ("tfla_impl", tfla_impl)):
+    # EFFICIENCY_PLAN.md E6 adds `mamba3_chunk_size` to the same mechanism. It is a pure
+    # performance knob -- the chunked decomposition is exact at any chunk size -- but it changes
+    # floating-point association, so "the optimised inference configuration produces the same
+    # reports" is a claim that has to be decoded, not inferred from a logits tolerance.
+    for name, override in (("scan_impl", scan_impl), ("tfla_impl", tfla_impl),
+                           ("mamba3_chunk_size", chunk_size)):
         if override is not None and override != raw.get(name):
             print("  [operator] %s: %s -> %s (OVERRIDE; the checkpoint was TRAINED with %s)"
                   % (name, raw.get(name), override, raw.get(name)))
@@ -426,6 +431,7 @@ def run_checkpoint_inspection(args) -> None:
         prefix_k=getattr(args, "prefix_k", None),
         scan_impl=getattr(args, "scan_impl", None),
         tfla_impl=getattr(args, "tfla_impl", None),
+        chunk_size=getattr(args, "chunk_size", None),
     )
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
@@ -782,6 +788,12 @@ def main():
                              "worth on the reported metrics. Announced in the log when it differs.")
     parser.add_argument("--tfla-impl", type=str, default=None, choices=["legacy", "exact"],
                         help="Same, for the mLSTM recurrence.")
+    parser.add_argument("--chunk-size", type=int, default=None,
+                        help="EFFICIENCY_PLAN.md E6: override mamba3_chunk_size at decode. "
+                             "The chunked decomposition is exact at any chunk size, so this "
+                             "changes no function -- but it changes float association, which "
+                             "is why the optimised configuration is re-decoded rather than "
+                             "assumed equivalent.")
     parser.add_argument("--cached-decode", action="store_true",
                         help="Use the O(1) recurrent cache for beam search (M6). Token-identical "
                              "to the default path by test and ~5x faster per token, but only "

@@ -1,7 +1,7 @@
 {
-  "current_phase": "E1_complete_followup_pending",
-  "last_updated": "2026-09-25T19:06:02+02:00",
-  "status": "E0 and E1 COMPLETE (jobs 2579631/2579642/2580198). R1 PASSED on GPU including torch.compile (logits 3.0e-05 vs 1e-4 tolerance), so both levers are verified to compute the same function. CROSSOVER: at L=16384 compiled+chunk128 runs 122.68 ms vs FlashAttention's 163.86 ms = 1.34x FASTER at memory parity (7.169 vs 7.152 GB); top-of-ladder latency exponent 0.47 ours vs 1.20 attention. chunk_size=128 adopted; torch.compile adopted as an INFERENCE-TIME OPT-IN only (R2: +17 MB over the Transformer, permitted because compile is off by default project-wide). OPEN: compiled cs=64 and cs=128 time identically at 4096/8192 (1 us apart) while uncompiled differ 45% -- shared Inductor cache suspected; profile_e1_followup_h100.sh part A settles it and part B measures the untested training path. RECOMMENDED: drop E2 and E3, go to E5.",
+  "current_phase": "E6_verify_optimised_decode",
+  "last_updated": "2026-09-25T19:16:27+02:00",
+  "status": "E0, E1, E5 COMPLETE. Headline confirmed (job 2582775): 1.15x faster than FlashAttention at L=8192 and 1.34x at L=16384, memory parity, exponent 0.985 vs 1.210, all equivalence-gated. E2/E3/E4 DROPPED with recorded reasoning. REMAINING: E6 -- efficiency is reported at chunk_size=128+compile while every quality number was decoded at chunk_size=64, and a 3.0e-05 logits agreement is not proof the decoded tokens agree. scripts/verify_optimised_decode_h100.sh re-decodes 13D on the V5-A n=400 subsample under the identical protocol with only CHUNK_SIZE changed. Pre-registered rule in the plan: metrics tie -> optimised config is THE efficiency config; metrics move -> revert the claim to the default config (562 ms, 3.4x SLOWER than the Transformer).",
   "plan_of_record": "EFFICIENCY_PLAN.md",
   "branch": "h100_mamba3_v2",
   "helper": "venv/bin/python scripts/mamba3_state.py --plan efficiency ...",
@@ -64,6 +64,7 @@
     "E2",
     "E3",
     "E4",
+    "E6",
     "E5"
   ],
   "phases": {
@@ -144,68 +145,45 @@
       "verdict": null
     },
     "E2": {
-      "title": "Remove the sequential inter-chunk loop (pure PyTorch, no dependency)",
+      "title": "DROPPED 2026-09-25. Remove the sequential inter-chunk loop (pure PyTorch)",
       "status": "pending",
-      "checkboxes": {
-        "E2-A": {
-          "done": false,
-          "desc": "Test first (TDD). Extend tests/test_mamba3_numerics.py: the parallel form must"
-        },
-        "E2-B": {
-          "done": false,
-          "desc": "Implement behind ssd_impl: {\"loop\" (default) | \"parallel\"}, threaded like the"
-        },
-        "E2-C": {
-          "done": false,
-          "desc": "Measure. Peak memory is the risk: the batched contrib tensor is"
-        },
-        "E2-D": {
-          "done": false,
-          "desc": "Fallback if R2 bites: two-level blocking — loop over super-blocks of k chunks,"
-        },
-        "E2-E": {
-          "done": false,
-          "desc": "Confirm the O(1) decode path (ssd_step) is untouched, and that"
-        }
-      },
+      "checkboxes": {},
       "evidence": {},
       "verdict": null
     },
     "E3": {
-      "title": "Fused external kernel (gated on E0-F, not assumed)",
+      "title": "DROPPED 2026-09-25. Fused external Mamba-2 Triton kernel",
       "status": "pending",
-      "checkboxes": {
-        "E3-A": {
-          "done": false,
-          "desc": "Feasibility spike, timeboxed to one day: does mamba-ssm build against the cluster's"
-        },
-        "E3-B": {
-          "done": false,
-          "desc": "Bind mamba_chunk_scan_combined behind scan_impl: \"fused\" for Mamba3Block only,"
-        },
-        "E3-C": {
-          "done": false,
-          "desc": "Re-measure the 14A-7 sweep; report against E0-D's unfused-attention line and the"
-        },
-        "E3-D": {
-          "done": false,
-          "desc": "Record the dependency cost honestly: a fused path that only exists on one cluster's"
-        }
-      },
+      "checkboxes": {},
       "evidence": {},
       "verdict": null
     },
     "E4": {
-      "title": "The other three layers: mLSTM TFLA",
+      "title": "DROPPED 2026-09-25. The other three layers: mLSTM TFLA",
+      "status": "pending",
+      "checkboxes": {},
+      "evidence": {},
+      "verdict": null
+    },
+    "E6": {
+      "title": "Does the optimised configuration produce the same reports?",
       "status": "pending",
       "checkboxes": {
-        "E4-A": {
+        "E6-A": {
           "done": false,
-          "desc": "Apply the E0-B treatment to mlstm_block.py / tfla_interface.py: where does its"
+          "desc": "Re-decode 13D on the V5-A n=400 subsample at CHUNK_SIZE=128, beam 3, otherwise the"
         },
-        "E4-B": {
+        "E6-B": {
           "done": false,
-          "desc": "If it does, apply E2's parallel-carry transformation behind a tfla_impl value, under"
+          "desc": "CheXbert + paired bootstrap against the existing chunk_size=64 dump; report how many"
+        },
+        "E6-C": {
+          "done": false,
+          "desc": "Record the verdict in analysis/EFFICIENCY_NOTE.md §6 and mamba3_results.md §6."
+        },
+        "E6-D": {
+          "done": false,
+          "desc": "Cheap bonus in the same job: sweep chunk_size ∈ {128, 256, 512} under compile at"
         }
       },
       "evidence": {},
@@ -213,7 +191,7 @@
     },
     "E5": {
       "title": "Writeup, and remove the artefacts that caused the question",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "E5-A": {
           "done": true,
@@ -228,7 +206,7 @@
           "desc": "Delete the misleading artefacts: root test_triton_fix.py (stale Colab-era script"
         },
         "E5-D": {
-          "done": false,
+          "done": true,
           "desc": "venv/bin/python scripts/mamba3_state.py --plan efficiency readme-equivalent"
         }
       },
@@ -245,7 +223,9 @@
     "2026-09-25: current_phase -> E1_complete_followup_pending",
     "2026-09-25: 2026-09-25: job 2582482 (2h TIMEOUT, partial). Part A RESOLVED the anomaly: chunk_size always reached the operator (both arms printed effective_chunk_size); the 1us match was a SHARED Inductor cache serving both arms one slow kernel at L=4096. Isolated caches made the same points 21-30% faster. Larger finding: within one process, shapes compiled later measure worse (3.04x at L=512 -> 1.02x at L=4096), so EVERY compiled number depends on what else was compiled beside it -- the 1.34x headline at L=16384 is UNCONFIRMED and must be re-measured. Part B: first training numbers ever taken (chunk128 ~1.45x at +6.5% memory; compile 3.04x at 512 collapsing to 1.02x at 4096) but the Transformer reference row never ran, so no training claim is available. Both wrappers now isolate caches; new profile_e1_confirm_h100.sh runs one shape per process.",
     "2026-09-25: E1-E CONFIRMED (job 2582775, one shape per process, isolated caches, no timeout). Headline HOLDS: 122.90 ms vs FlashAttention's 164.85 ms at L=16384 = 1.34x faster at +0.24% memory, reproducing the contaminated run to 0.2%. NEW: also 1.15x faster at L=8192 (62.09 vs 71.26) where the contaminated run said 0.80x BEHIND. CORRECTION: the 0.47 exponent was an artefact of a too-slow contaminated 8192 point; clean exponents are ours 0.985 vs attention 1.210 -- our latency is linear, attention's is not. TRAINING with the Transformer reference at last: compile+chunk128 cuts the deficit from 5.86x to 2.71x at L=2048 and 8.74x to 1.23x at 1024, and compile LOWERS training memory. LIMITATION: memory parity is an INFERENCE claim only -- training uses 1.59x the Transformer's memory even compiled. Also: the standing '8x slower training' figure does not reproduce (measured 5.86x).",
-    "2026-09-25: E5-A/B/C complete. analysis/EFFICIENCY_NOTE.md written (supervisor-facing, allowlisted). analysis/mamba3_results.md section 6 rewritten: the old 'Transformer is faster at every length / a Triton kernel is the unexploited headroom' paragraph is marked overturned and replaced with the measured reversal, plus three explicit limits (compile is opt-in; memory parity is inference-only, training uses 1.59x the Transformer's; training still 2.71x slower at L=2048). E5-C removed four artefacts that made the repo look like it had hand-written Triton kernels: root test_triton_fix.py (deleted), triton>=2.1.0 in both requirements files, the package docstring's 'custom CUDA/Triton kernels', and train_biomedclip_kd_h100.sh's claim -- with a parity test so they cannot return. Nuance recorded: Inductor DOES emit Triton under torch.compile, so the accurate line is 'we never hand-wrote one; the compiler writes them now'."
+    "2026-09-25: E5-A/B/C complete. analysis/EFFICIENCY_NOTE.md written (supervisor-facing, allowlisted). analysis/mamba3_results.md section 6 rewritten: the old 'Transformer is faster at every length / a Triton kernel is the unexploited headroom' paragraph is marked overturned and replaced with the measured reversal, plus three explicit limits (compile is opt-in; memory parity is inference-only, training uses 1.59x the Transformer's; training still 2.71x slower at L=2048). E5-C removed four artefacts that made the repo look like it had hand-written Triton kernels: root test_triton_fix.py (deleted), triton>=2.1.0 in both requirements files, the package docstring's 'custom CUDA/Triton kernels', and train_biomedclip_kd_h100.sh's claim -- with a parity test so they cannot return. Nuance recorded: Inductor DOES emit Triton under torch.compile, so the accurate line is 'we never hand-wrote one; the compiler writes them now'.",
+    "2026-09-25: E5-D done. Note appended to mamba3_v2_state.json recording the section-6 rewrite. E2/E3/E4 DROPPED with measured reasoning: compile already realised 4.57x against E0-F's 4.50x bound, E2's remaining ceiling is an estimated 1.1-1.3x on a configuration that already wins, and E2 would ADD 0.2-0.4 GB to the one claim this project cannot make (training memory, already 1.59x the Transformer's). E3 dropped harder: goal met, external CUDA dependency is a reproducibility liability, and 'we adopted someone else's kernel' is a weaker contribution. New phase E6 opened -- the item they were displacing -- to verify the optimised configuration produces the same reports.",
+    "2026-09-25: current_phase -> E6_verify_optimised_decode"
   ],
   "open_questions": [
     "E0-D: unfused attention as the headline comparison or a footnote to the fused one?",

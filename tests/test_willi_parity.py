@@ -6336,3 +6336,59 @@ def test_no_tracked_file_claims_a_triton_kernel_this_project_does_not_have():
     assert "no hand-written CUDA or Triton kernels" in init
     kd = (REPO_ROOT / "scripts" / "train_biomedclip_kd_h100.sh").read_text()
     assert "custom Mamba/mLSTM Triton kernels" not in kd
+
+
+@pytest.mark.willi_parity
+def test_decode_path_can_override_chunk_size_the_way_it_overrides_the_operators():
+    """EFFICIENCY_PLAN.md E6. Efficiency is reported at chunk_size=128 while every
+    quality number was decoded at 64. R1 shows the logits agree to 3.0e-05, which
+    is not the same as showing the decoded tokens agree -- beam search can flip on
+    an arbitrarily small margin, and V5-A watched 227 of 400 reports change under
+    an operator swap that moved no metric.
+
+    So chunk_size must be overridable at decode, on the same mechanism as
+    scan_impl/tfla_impl, and the override must be announced in the log rather than
+    inferred later from a config file."""
+    src = (REPO_ROOT / "scripts" / "evaluate_report_generation.py").read_text()
+    assert "--chunk-size" in src
+    assert "chunk_size=getattr(args, \"chunk_size\", None)" in src
+    # It rides the same announce-on-override loop as the operator flags.
+    i = src.index('("scan_impl", scan_impl)')
+    assert "mamba3_chunk_size" in src[i:i + 300], (
+        "chunk_size must go through the same override-announcing loop as scan_impl"
+    )
+    wrapper = (REPO_ROOT / "scripts" / "inspect_report_generation_h100.sh").read_text()
+    assert 'CHUNK_SIZE="${CHUNK_SIZE:-}"' in wrapper
+    assert '--chunk-size "${CHUNK_SIZE}"' in wrapper
+
+
+@pytest.mark.willi_parity
+def test_e6_wrapper_matches_the_v5a_protocol_it_must_pair_with():
+    """E6's dump is compared against V5-A's by paired bootstrap, so every knob
+    except chunk_size has to match V5-A: 13D, beam 3, 100 new tokens. A wrapper
+    that quietly changed the beam size would manufacture a difference."""
+    src = (REPO_ROOT / "scripts" / "verify_optimised_decode_h100.sh").read_text()
+    assert "DECODE=beam BEAM_SIZE=3 MAX_NEW_TOKENS=100" in src
+    assert "tower13d" in src, "E6 must decode the same 13D checkpoint V5-A used"
+    directives = [ln for ln in src.splitlines() if ln.startswith("#SBATCH")]
+    assert any("--partition=aisc-batch" in ln for ln in directives)
+    assert not any("--gres" in ln for ln in directives)
+    # The pre-registered rule has to be in the wrapper, not only in the plan:
+    # whoever reads the log is the person who will over-claim.
+    assert "PRE-REGISTERED RULE" in src
+    assert "reverts to" in src or "headroom" in src
+
+
+@pytest.mark.willi_parity
+def test_dropped_phases_record_why_rather_than_vanishing():
+    """E2, E3 and E4 were dropped on 2026-09-25 after E1 measured the gap closed.
+    A plan that deletes a phase loses the reasoning; a plan that keeps an untouched
+    checkbox implies work still pending. Both are wrong, so the phases stay with
+    an explicit verdict and no checkboxes."""
+    plan = (REPO_ROOT / "EFFICIENCY_PLAN.md").read_text()
+    for pid in ("E2", "E3", "E4"):
+        assert f"### {pid} — DROPPED" in plan, f"{pid} must record that it was dropped, and why"
+    # The decisive argument is measured, not asserted.
+    assert "4.50" in plan and "4.57" in plan, (
+        "the E2 verdict rests on compile having already realised more than E0-F's bound"
+    )

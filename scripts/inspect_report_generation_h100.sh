@@ -55,6 +55,7 @@ CACHED_DECODE="${CACHED_DECODE:-false}"
 # model yaml pins, which is what every published number used.
 SCAN_IMPL="${SCAN_IMPL:-}"
 TFLA_IMPL="${TFLA_IMPL:-}"
+CHUNK_SIZE="${CHUNK_SIZE:-}"   # EFFICIENCY_PLAN.md E6
 # Default to VALIDATION images, not train -- generations on train images look
 # artificially good even under genuine overfitting; validation is the honest check.
 PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/validate.parquet}"
@@ -109,6 +110,7 @@ python scripts/evaluate_report_generation.py \
   $([ "${CACHED_DECODE}" = "true" ] && echo "--cached-decode") \
   ${SCAN_IMPL:+--scan-impl "${SCAN_IMPL}"} \
   ${TFLA_IMPL:+--tfla-impl "${TFLA_IMPL}"} \
+  ${CHUNK_SIZE:+--chunk-size "${CHUNK_SIZE}"} \
   --parquet "${PARQUET}" \
   --num-samples "${NUM_SAMPLES}" \
   --decode "${DECODE}" \

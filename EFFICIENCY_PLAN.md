@@ -386,61 +386,78 @@ without re-measurement. Second, and more important for the writeup: **memory par
 claim only.** In training we use 12.02 GB against the Transformer's 7.55 GB — **1.59× more** — even
 compiled. Nothing in this plan changes that, and §6 of `analysis/mamba3_results.md` must say so.
 
-### E2 — Remove the sequential inter-chunk loop (pure PyTorch, no dependency)
+### E2 — DROPPED 2026-09-25. Remove the sequential inter-chunk loop (pure PyTorch)
 
-*Pre-registered prediction (R4): 2–4× on the Mamba-3 layers at 16,384; the binding risk is R2, not
-correctness.*
+**Decision: do not build this.** The phase is kept for the record because the reasoning is the
+deliverable, not the code.
 
-The inter-chunk carry is `state_c = g_c · state_{c-1} + contrib_c` with
-`g_c = exp(A_cum[:, c, -1]) · carry_ok[:, c, -1]`, scalar per `(batch, head, chunk)`. Computing every
-`contrib_c` in one batched einsum and combining them with `exp(segsum(log g))` over the chunk axis
-replaces `nc` sequential steps with `O(1)` kernel launches and an `(nc, nc)` matmul per
-`(batch, head)` — the identical trick already used for the intra-chunk mask, applied one level up.
-Document resets carry over unchanged: `carry_ok = False` sets `log g = -inf`, which `segsum` already
-encodes.
+*It was scoped against a bound that `torch.compile` has already spent.* E0-F measured that making
+the SSD path entirely free caps the speedup at **4.50×**. Compile plus `chunk_size=128` delivered
+**4.57×** (562.22 → 122.90 ms at L=16,384) — more than the whole bound, because it sped up the
+non-SSD parts too. There is no 4.5× sitting in the loop any more.
 
-- [ ] **E2-A** Test first (TDD). Extend `tests/test_mamba3_numerics.py`: the parallel form must
-  match `ssd_chunked_scan` and `ssd_sequential_reference` under R1, including (i) `cu_seqlens` with
-  a document boundary inside a chunk, (ii) `seqlen % chunk_size != 0` padding, (iii) `ngroups > 1`,
-  (iv) `extra_terms` non-empty (trapezoid/bias arms), (v) `nc == 1`. Tests fail before the
-  implementation exists.
-- [ ] **E2-B** Implement behind `ssd_impl: {"loop" (default) | "parallel"}`, threaded like the
-  existing `scan_impl`/`tfla_impl` flags — parameter-invisible, so the same weights load either way,
-  and pinned explicitly in every m3 yaml per the V1-E rule.
-- [ ] **E2-C** Measure. Peak memory is the risk: the batched `contrib` tensor is
-  `(batch, nc, nheads, headdim, dstate)` ≈ 0.4 GB (bf16) / 0.8 GB (fp32) at batch 4, seqlen 16,384.
-  **R2 applies:** if peak exceeds the Transformer's 7.15 GB, `parallel` does not become the default.
-- [ ] **E2-D** Fallback if R2 bites: two-level blocking — loop over super-blocks of `k` chunks,
-  parallel within each. Cuts iterations by `k` while capping extra memory at `1/k` of E2-C's. Pick
-  `k` from the E2-C Pareto front rather than guessing.
-- [ ] **E2-E** Confirm the O(1) decode path (`ssd_step`) is untouched, and that
-  `tests/test_mamba3_numerics.py`'s cached-vs-uncached token-identity test still passes. Decode is
-  where the architecture already wins (5.19× per token); this must not regress it.
+*What is left is small and estimated, not measured.* Loop length still matters under compile, but
+much less: halving `nc` buys 1.14× compiled against 1.40× uncompiled. Extrapolating that saving
+linearly in `nc` — the optimistic reading, since larger chunks also add mask work — removing the
+loop entirely from the `chunk_size=64` configuration lands near **105 ms against today's 122.90**,
+so at most ~1.17×, call it 1.1–1.3×. That moves us from 1.34× ahead of FlashAttention to perhaps
+1.5–1.7× ahead. Nobody needs that number.
 
-### E3 — Fused external kernel (gated on E0-F, not assumed)
+*And it would damage the claim that is actually weak.* The parallel form materialises a
+`(batch, nc, nheads, headdim, dstate)` tensor — 0.20 GB in bf16, 0.40 GB in fp32 at the headline
+shape. Inference has **no** memory headroom (7.169 GB ours against the Transformer's 7.152), and
+training already uses **1.59×** the Transformer's memory, which is the one efficiency claim this
+project cannot make. **E2 would trade the weakest claim to improve the strongest one.** Rule R2
+exists precisely to stop that trade.
 
-*Entered only if E0-F's bound justifies it and E2 has landed. Pre-registered prediction (R4): the
-dependency build is the risk that materialises, not the numerics.*
+### E3 — DROPPED 2026-09-25. Fused external Mamba-2 Triton kernel
 
-- [ ] **E3-A** Feasibility spike, timeboxed to one day: does `mamba-ssm` build against the cluster's
-  CUDA and torch in the `.venv`? Answer on a compute node via `srun`/`sbatch`, never on lx01. If it
-  does not build cleanly, stop and record that as the finding.
-- [ ] **E3-B** Bind `mamba_chunk_scan_combined` behind `scan_impl: "fused"` for `Mamba3Block` only,
-  active only when `use_trapezoid/use_rope/bc_bias` are at their Mamba-2 defaults; every other flag
-  combination falls back to the PyTorch path with a warning. Gate on R1 against the fp64 oracle.
-- [ ] **E3-C** Re-measure the 14A-7 sweep; report against E0-D's unfused-attention line and the
-  fused one.
-- [ ] **E3-D** Record the dependency cost honestly: a fused path that only exists on one cluster's
-  build is a caveat on every number it produces.
+**Decision: do not do this, and the reasons are stronger than E2's.**
 
-### E4 — The other three layers: mLSTM TFLA
+1. *The goal is met.* E3 existed to reach parity with FlashAttention. We are past it — 1.15× ahead
+   at 8,192 and 1.34× at 16,384 — using an equivalence-gated compiler flag and a config value.
+2. *It is a reproducibility liability.* `mamba-ssm` is a CUDA extension that must build against this
+   cluster's exact toolchain (torch 2.11.0+cu128). A thesis artefact whose headline number only
+   reproduces on one machine's build is worse than one that runs anywhere PyTorch does.
+3. *It weakens the contribution rather than strengthening it.* "We adopted someone else's kernel" is
+   a smaller claim than "the architecture is competitive once the compiler is allowed to do its
+   job, and we verified the operator is unchanged while doing it."
+4. *It fragments the code.* The reference kernel only applies with `trapezoid`/`rope`/`bc_bias` at
+   their Mamba-2 defaults, so every other arm would need the PyTorch fallback anyway.
 
-*Entered only if E0-A says mLSTM is a material share.*
+### E4 — DROPPED 2026-09-25. The other three layers: mLSTM TFLA
 
-- [ ] **E4-A** Apply the E0-B treatment to `mlstm_block.py` / `tfla_interface.py`: where does its
-  time go, and does it carry the same sequential-chunk structure?
-- [ ] **E4-B** If it does, apply E2's parallel-carry transformation behind a `tfla_impl` value, under
-  the same R1/R2/R3 gates. `tfla_impl: exact` must remain byte-compatible.
+**Decision: do not do this.** Its gate was "only if E0-A says mLSTM is a material share". E0-A says
+the 3 mLSTM layers are **13.4%** of the uncompiled forward at L=16,384. Even eliminating them
+entirely caps at 1.15×, on a configuration that already wins, and the same memory argument as E2
+applies. Recorded as measured-and-declined rather than untried.
+
+### E6 — Does the optimised configuration produce the same reports?
+
+*This is the item E2 and E3 were displacing, and it is the one that makes the efficiency chapter
+airtight.* Efficiency is reported for `chunk_size=128` + `torch.compile`; every quality number in
+`analysis/mamba3_results.md` was decoded at `chunk_size=64`, uncompiled. R1 shows the logits agree
+to 3.0e-05, which is **not** the same as showing the decoded tokens agree — beam search can flip on
+an arbitrarily small margin, and this project has already seen a 2.4e-05 logit difference sit
+underneath a completely different decoded sentence (V5-A: 227 of 400 reports changed under an
+operator swap that moved no metric).
+
+*Pre-registered rule, written before the run:* the optimised configuration is reportable as the
+efficiency configuration **only if** its CheXbert-14-micro, ROUGE-L and BLEU on the n=400 V5-A
+subsample are within the paired-bootstrap CI of the `chunk_size=64` dump. If reports change but
+metrics tie, say so explicitly — that is the V5-A result and it is honest. If metrics move, the
+efficiency claim must be reported at the default configuration (562.22 ms / 7.090 GB at L=16,384,
+which is 3.4× *slower* than the Transformer) and the compiled number quoted only as headroom.
+
+- [ ] **E6-A** Re-decode 13D on the V5-A n=400 subsample at `CHUNK_SIZE=128`, beam 3, otherwise the
+  identical protocol (`inspect_report_generation_h100.sh` now takes `CHUNK_SIZE`; the eval script
+  takes `--chunk-size` and announces the override in the log the way `scan_impl` does).
+- [ ] **E6-B** CheXbert + paired bootstrap against the existing `chunk_size=64` dump; report how many
+  of 400 reports changed textually alongside whether any metric moved.
+- [ ] **E6-C** Record the verdict in `analysis/EFFICIENCY_NOTE.md` §6 and `mamba3_results.md` §6.
+- [ ] **E6-D** Cheap bonus in the same job: sweep `chunk_size` ∈ {128, 256, 512} **under compile** at
+  L=16,384. E0-C swept it uncompiled only, and the optimum may move once Inductor changes the
+  balance between loop overhead and mask work. ~15 minutes, and it is the free version of E2.
 
 ### E5 — Writeup, and remove the artefacts that caused the question
 
@@ -457,7 +474,7 @@ dependency build is the risk that materialises, not the numerics.*
   whose docstring says "Test script to verify the Triton kernel fix") and the unused
   `triton>=2.1.0` line in `requirements.txt:8`. Add a parity test asserting no tracked file claims a
   Triton kernel that does not exist.
-- [ ] **E5-D** `venv/bin/python scripts/mamba3_state.py --plan efficiency readme`-equivalent
+- [x] **E5-D** `venv/bin/python scripts/mamba3_state.py --plan efficiency readme`-equivalent
   bookkeeping: final verdict in `efficiency_state.json`, one note appended to
   `mamba3_v2_state.json` if any efficiency number cited there changes. **No merge into
   `h100_scaling`.**
