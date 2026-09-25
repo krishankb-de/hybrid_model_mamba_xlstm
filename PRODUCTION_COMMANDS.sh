@@ -151,8 +151,8 @@ tar -czf logs/production_training_$(date +%Y%m%d).tar.gz \
 # If CUDA OOM: reduce batch size
 # python scripts/train.py ... dataset.batch_size=16
 
-# If Triton kernel fails: disable compiled kernels
-# python scripts/train.py ... use_triton_kernels=false
+# NOTE: there is no `use_triton_kernels` flag and no Triton kernel to disable -- the live
+# scans are pure PyTorch. This line used to suggest otherwise (EFFICIENCY_PLAN.md E5-C).
 
 # If gradient explosion: reduce learning rate
 # python scripts/train.py ... model.learning_rate=3e-4

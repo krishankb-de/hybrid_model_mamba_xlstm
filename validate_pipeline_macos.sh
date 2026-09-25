@@ -325,7 +325,8 @@ This macOS validation checks PIPELINE STRUCTURE only:
 
 This is NOT a full training run (CPU mode, no CUDA):
   - Full validation (Stage 0 + 1 training) happens on A100
-  - Triton kernels require CUDA (not available on macOS)
+  - GPU kernels require CUDA (not available on macOS); note this project has
+    no hand-written Triton kernels -- its scans are pure PyTorch
   - GPU training requires Linux/A100 hardware
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

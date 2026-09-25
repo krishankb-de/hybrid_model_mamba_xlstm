@@ -46,8 +46,10 @@ BATCH_SIZE="${BATCH_SIZE:-128}"
 # 2026-07-19: compile OFF by default. With compile_model=true the joint run died in
 # sanity-val with "CUDA error: Invalid access of peer GPU memory over nvlink or a
 # hardware error" (async — reported at the embedding lookup, faulted earlier). The text
-# encoder uses the same custom Mamba/mLSTM Triton kernels that Stage-0 runs with
-# compile_model=false for exactly this reason. Set COMPILE=true to re-test.
+# encoder uses the same pure-PyTorch Mamba/mLSTM scans that Stage-0 runs with
+# compile_model=false for exactly this reason. (Corrected 2026-09-25, EFFICIENCY_PLAN.md
+# E5-C: this line used to credit hand-written Triton kernels, which never existed.)
+# Set COMPILE=true to re-test.
 COMPILE="${COMPILE:-false}"
 GRAD_CKPT="${GRAD_CKPT:-false}"   # flip true if bs=128 OOMs on the 80GB card
 # Epoch budget matters more than raw steps: MIMIC is only 27570 pairs, so bs=128 x

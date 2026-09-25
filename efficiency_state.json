@@ -1,6 +1,6 @@
 {
   "current_phase": "E1_complete_followup_pending",
-  "last_updated": "2026-09-25T17:06:56+02:00",
+  "last_updated": "2026-09-25T19:06:02+02:00",
   "status": "E0 and E1 COMPLETE (jobs 2579631/2579642/2580198). R1 PASSED on GPU including torch.compile (logits 3.0e-05 vs 1e-4 tolerance), so both levers are verified to compute the same function. CROSSOVER: at L=16384 compiled+chunk128 runs 122.68 ms vs FlashAttention's 163.86 ms = 1.34x FASTER at memory parity (7.169 vs 7.152 GB); top-of-ladder latency exponent 0.47 ours vs 1.20 attention. chunk_size=128 adopted; torch.compile adopted as an INFERENCE-TIME OPT-IN only (R2: +17 MB over the Transformer, permitted because compile is off by default project-wide). OPEN: compiled cs=64 and cs=128 time identically at 4096/8192 (1 us apart) while uncompiled differ 45% -- shared Inductor cache suspected; profile_e1_followup_h100.sh part A settles it and part B measures the untested training path. RECOMMENDED: drop E2 and E3, go to E5.",
   "plan_of_record": "EFFICIENCY_PLAN.md",
   "branch": "h100_mamba3_v2",
@@ -107,7 +107,7 @@
     },
     "E1": {
       "title": "Free levers: no new code path",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "E1-A": {
           "done": true,
@@ -122,7 +122,7 @@
           "desc": "Report both under R3. Anything that fails the bar is written up as a null and"
         },
         "E1-E": {
-          "done": false,
+          "done": true,
           "desc": "Re-measure the headline under a protocol the last two jobs proved is necessary"
         },
         "E1-D": {
@@ -131,10 +131,15 @@
         }
       },
       "evidence": {
-        "job": "2580198",
+        "job": "2582775",
         "crossover_16384": "122.68ms vs 163.86ms = 1.34x",
         "r1_compile_logits": "3.0e-05",
-        "exponent_8k_16k": "0.47 ours vs 1.20 attention"
+        "exponent_8k_16k": "0.47 ours vs 1.20 attention",
+        "infer_16384": "122.90 vs 164.85 = 1.34x",
+        "infer_8192": "62.09 vs 71.26 = 1.15x",
+        "exponents": "ours 0.985 vs attention 1.210",
+        "train_2048": "141.14 vs 52.17 = 2.71x slower",
+        "train_memory_ratio": "1.59"
       },
       "verdict": null
     },
@@ -208,18 +213,18 @@
     },
     "E5": {
       "title": "Writeup, and remove the artefacts that caused the question",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "E5-A": {
-          "done": false,
+          "done": true,
           "desc": "analysis/EFFICIENCY_NOTE.md — supervisor-facing, matching"
         },
         "E5-B": {
-          "done": false,
+          "done": true,
           "desc": "Update analysis/mamba3_results.md §6 (Efficiency) with the measured numbers and the"
         },
         "E5-C": {
-          "done": false,
+          "done": true,
           "desc": "Delete the misleading artefacts: root test_triton_fix.py (stale Colab-era script"
         },
         "E5-D": {
@@ -238,7 +243,9 @@
     "2026-09-25: current_phase -> E1_adopt_or_reject",
     "2026-09-25: E1 COMPLETE (job 2580198). R1 PASSED on GPU incl. torch.compile (logits 3.0e-05 vs 1e-4 tol). CROSSOVER FOUND: compiled+chunk128 at L=16384 is 122.68 ms vs FlashAttention's 163.86 ms = 1.34x FASTER at memory parity (7.169 vs 7.152 GB); top-of-ladder latency exponent 0.47 ours vs 1.20 attention. chunk_size=128 adopt (>=1.25x at 5/7 lengths); torch.compile adopt as inference-time opt-in (R2: +17 MB over the Transformer, permitted only because compile is off by default). ANOMALY: compiled cs=64 and cs=128 time identically at 4096/8192 (1 us apart) while uncompiled differ 45% -- shared Inductor cache suspected; follow-up job isolates caches and prints the effective chunk size. RECOMMEND DROPPING E2 and E3: the gap they were justified by is closed.",
     "2026-09-25: current_phase -> E1_complete_followup_pending",
-    "2026-09-25: 2026-09-25: job 2582482 (2h TIMEOUT, partial). Part A RESOLVED the anomaly: chunk_size always reached the operator (both arms printed effective_chunk_size); the 1us match was a SHARED Inductor cache serving both arms one slow kernel at L=4096. Isolated caches made the same points 21-30% faster. Larger finding: within one process, shapes compiled later measure worse (3.04x at L=512 -> 1.02x at L=4096), so EVERY compiled number depends on what else was compiled beside it -- the 1.34x headline at L=16384 is UNCONFIRMED and must be re-measured. Part B: first training numbers ever taken (chunk128 ~1.45x at +6.5% memory; compile 3.04x at 512 collapsing to 1.02x at 4096) but the Transformer reference row never ran, so no training claim is available. Both wrappers now isolate caches; new profile_e1_confirm_h100.sh runs one shape per process."
+    "2026-09-25: 2026-09-25: job 2582482 (2h TIMEOUT, partial). Part A RESOLVED the anomaly: chunk_size always reached the operator (both arms printed effective_chunk_size); the 1us match was a SHARED Inductor cache serving both arms one slow kernel at L=4096. Isolated caches made the same points 21-30% faster. Larger finding: within one process, shapes compiled later measure worse (3.04x at L=512 -> 1.02x at L=4096), so EVERY compiled number depends on what else was compiled beside it -- the 1.34x headline at L=16384 is UNCONFIRMED and must be re-measured. Part B: first training numbers ever taken (chunk128 ~1.45x at +6.5% memory; compile 3.04x at 512 collapsing to 1.02x at 4096) but the Transformer reference row never ran, so no training claim is available. Both wrappers now isolate caches; new profile_e1_confirm_h100.sh runs one shape per process.",
+    "2026-09-25: E1-E CONFIRMED (job 2582775, one shape per process, isolated caches, no timeout). Headline HOLDS: 122.90 ms vs FlashAttention's 164.85 ms at L=16384 = 1.34x faster at +0.24% memory, reproducing the contaminated run to 0.2%. NEW: also 1.15x faster at L=8192 (62.09 vs 71.26) where the contaminated run said 0.80x BEHIND. CORRECTION: the 0.47 exponent was an artefact of a too-slow contaminated 8192 point; clean exponents are ours 0.985 vs attention 1.210 -- our latency is linear, attention's is not. TRAINING with the Transformer reference at last: compile+chunk128 cuts the deficit from 5.86x to 2.71x at L=2048 and 8.74x to 1.23x at 1024, and compile LOWERS training memory. LIMITATION: memory parity is an INFERENCE claim only -- training uses 1.59x the Transformer's memory even compiled. Also: the standing '8x slower training' figure does not reproduce (measured 5.86x).",
+    "2026-09-25: E5-A/B/C complete. analysis/EFFICIENCY_NOTE.md written (supervisor-facing, allowlisted). analysis/mamba3_results.md section 6 rewritten: the old 'Transformer is faster at every length / a Triton kernel is the unexploited headroom' paragraph is marked overturned and replaced with the measured reversal, plus three explicit limits (compile is opt-in; memory parity is inference-only, training uses 1.59x the Transformer's; training still 2.71x slower at L=2048). E5-C removed four artefacts that made the repo look like it had hand-written Triton kernels: root test_triton_fix.py (deleted), triton>=2.1.0 in both requirements files, the package docstring's 'custom CUDA/Triton kernels', and train_biomedclip_kd_h100.sh's claim -- with a parity test so they cannot return. Nuance recorded: Inductor DOES emit Triton under torch.compile, so the accurate line is 'we never hand-wrote one; the compiler writes them now'."
   ],
   "open_questions": [
     "E0-D: unfused attention as the headline comparison or a footnote to the fused one?",

@@ -6304,3 +6304,35 @@ def test_confirm_wrapper_measures_one_sequence_length_per_process():
     assert any("--partition=aisc-batch" in ln for ln in directives)
     hours = int([ln for ln in directives if "--time=" in ln][0].split("--time=")[1].split(":")[0])
     assert hours >= 3, "2h timed out in job 2582482"
+
+
+@pytest.mark.willi_parity
+def test_no_tracked_file_claims_a_triton_kernel_this_project_does_not_have():
+    """EFFICIENCY_PLAN.md E5-C. A supervisor read this repo and concluded we had
+    written Triton kernels to make Mamba FlashAttention-compatible. We never did:
+    scan_triton.py and tfla_triton.py had one call site between them, in the dead
+    mamba_block_v2.py, and were deleted in 37f7964.
+
+    Four artefacts created that impression and are removed: the root
+    test_triton_fix.py ("Test script to verify the Triton kernel fix"), an unused
+    `triton>=2.1.0` requirement, a package docstring advertising "custom
+    CUDA/Triton kernels", and a wrapper comment about "the same custom Mamba/mLSTM
+    Triton kernels".
+
+    Claiming a kernel you do not have is a correctness claim about your own
+    efficiency numbers, so this is a test, not a style preference. Note that
+    Inductor DOES emit Triton under torch.compile -- describing that is fine;
+    claiming a hand-written kernel is not."""
+    assert not (REPO_ROOT / "test_triton_fix.py").exists(), (
+        "the stale Colab-era Triton script is back"
+    )
+    for req in ("requirements.txt", "requirements-colab.txt"):
+        text = (REPO_ROOT / req).read_text()
+        assert not any(ln.strip().startswith("triton") for ln in text.splitlines()), (
+            f"{req} declares triton, which nothing in this project imports"
+        )
+    init = (REPO_ROOT / "hybrid_xmamba" / "__init__.py").read_text()
+    assert "custom CUDA/Triton kernels" not in init
+    assert "no hand-written CUDA or Triton kernels" in init
+    kd = (REPO_ROOT / "scripts" / "train_biomedclip_kd_h100.sh").read_text()
+    assert "custom Mamba/mLSTM Triton kernels" not in kd

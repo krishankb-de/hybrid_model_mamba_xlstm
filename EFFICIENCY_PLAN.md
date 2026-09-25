@@ -234,7 +234,7 @@ ceiling as the result.
   compile time as well as steady-state latency; a 10-minute compile for a 1.1× gain is a null.
 - [x] **E1-C** Report both under R3. Anything that fails the bar is written up as a null and
   reverted.
-- [ ] **E1-E** **Re-measure the headline under a protocol the last two jobs proved is necessary**
+- [x] **E1-E** **Re-measure the headline under a protocol the last two jobs proved is necessary**
   (`scripts/profile_e1_confirm_h100.sh`). One sequence length per *process*, each with its own
   Inductor cache, Transformer arms first. Also finishes the training reference job 2582482 never
   reached. See the E1 follow-up results below for why this is not optional.
@@ -347,6 +347,45 @@ Compile's collapse from 3.04× to 1.02× is the same later-shape degradation des
 a measurement artefact until E1-E re-measures it one shape per process. **No training claim should
 be made from this table** — it has no Transformer column.
 
+**CONFIRMED — job 2582775 on the corrected protocol: one sequence length per process, one Inductor
+cache per point, no timeout.** These supersede every earlier compiled number in this plan.
+
+*Inference. The headline holds, and the crossover is earlier than we thought.*
+
+| L | Transformer | baseline | cs=128 | compiled | compiled+128 | ours vs Transformer |
+|---|---|---|---|---|---|---|
+| 8,192 | 71.26 ms / 3.776 GB | 269.99 | 195.27 | 70.48 | **62.09 / 3.824 GB** | **1.15× faster** |
+| 16,384 | 164.85 ms / 7.152 GB | 562.22 | 402.96 | 140.35 | **122.90 / 7.169 GB** | **1.34× faster** |
+
+The 16,384 result reproduces the contaminated run to 0.2% (122.90 vs 122.68), so **1.34× faster than
+FlashAttention at memory parity (+0.24%) is confirmed**. The 8,192 point is where isolation changed
+the answer: 88.80 → 62.09 ms, turning 0.80× *behind* into **1.15× ahead**. We are now faster at both
+lengths, not just the top one.
+
+*Correction: the 0.47 exponent was an artefact and must not be used.* It came from dividing a
+correct 16,384 number by a contaminated, too-slow 8,192 number. Clean exponents from 8,192 to
+16,384: **ours 0.985, attention 1.210** (baseline 1.058, cs=128 1.045, compiled 0.994). The honest
+claim is the better one anyway and matches the theory: **our latency is linear in sequence length;
+attention's is not.**
+
+*Training, with the Transformer reference measured for the first time.*
+
+| L | Transformer | baseline | cs=128 | compiled | compiled+128 |
+|---|---|---|---|---|---|
+| 1,024 | 29.65 ms / 3.99 GB | 259.05 (8.74×) | 121.84 (4.11×) | 56.62 (1.91×) | **36.35 (1.23×)** |
+| 2,048 | 52.17 ms / 7.55 GB | 305.50 (5.86×) | 209.98 (4.02×) | 264.39 (5.07×) | **141.14 (2.71×)** |
+
+`compile` + `chunk_size=128` cuts the training deficit from **5.86× to 2.71×** at L=2,048 and from
+8.74× to 1.23× at 1,024. Compile *lowers* training memory (13.83 → 12.02 GB at 2,048), the opposite
+of its effect on inference.
+
+**Two honest limitations this exposes.** First, the project's standing "8× slower training at
+L=2,048" figure does not reproduce here: the measured baseline is **5.86×**, on a 5-iteration
+protocol on gx10. The discrepancy is unexplained and the older number should not be re-quoted
+without re-measurement. Second, and more important for the writeup: **memory parity is an inference
+claim only.** In training we use 12.02 GB against the Transformer's 7.55 GB — **1.59× more** — even
+compiled. Nothing in this plan changes that, and §6 of `analysis/mamba3_results.md` must say so.
+
 ### E2 — Remove the sequential inter-chunk loop (pure PyTorch, no dependency)
 
 *Pre-registered prediction (R4): 2–4× on the Mamba-3 layers at 16,384; the binding risk is R2, not
@@ -407,14 +446,14 @@ dependency build is the risk that materialises, not the numerics.*
 
 *No cluster needed.*
 
-- [ ] **E5-A** `analysis/EFFICIENCY_NOTE.md` — supervisor-facing, matching
+- [x] **E5-A** `analysis/EFFICIENCY_NOTE.md` — supervisor-facing, matching
   `analysis/PHASE14_SUPERVISOR_REVIEW.md` in form: the Triton premise answered factually, the
   memory-parity win, the wall-clock gap, E0-D's fused-vs-unfused separation, and the Amdahl bound.
   **Allowlist it in `.gitignore` in the same commit** (the blanket `*.md` at line 84 silently ate
   `analysis/ARCHIVE_MANIFEST.md` on 2026-09-20).
-- [ ] **E5-B** Update `analysis/mamba3_results.md` §6 (Efficiency) with the measured numbers and the
+- [x] **E5-B** Update `analysis/mamba3_results.md` §6 (Efficiency) with the measured numbers and the
   ceiling. State explicitly that no report-generation metric changes.
-- [ ] **E5-C** Delete the misleading artefacts: root `test_triton_fix.py` (stale Colab-era script
+- [x] **E5-C** Delete the misleading artefacts: root `test_triton_fix.py` (stale Colab-era script
   whose docstring says "Test script to verify the Triton kernel fix") and the unused
   `triton>=2.1.0` line in `requirements.txt:8`. Add a parity test asserting no tracked file claims a
   Triton kernel that does not exist.

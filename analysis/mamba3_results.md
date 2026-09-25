@@ -278,11 +278,38 @@ arithmetic, and the end-to-end model measures 5.9× at the longest length.
 while the corrected Mamba-3 trains to 8192. At L = 2048 it is **2.6× faster and uses 3.9× less memory**
 (416 ms / 13.9 GB against 1096 ms / 54.0 GB). Its latency exponent is 0.886 against the incumbent's 1.285.
 
-**Against attention, the honest position is unchanged from 14A-7 in direction and much narrower in size.** The
-Transformer is still faster at every length tested (4.1× at 16,384 inference, 8× at 2048 training), because
-`F.scaled_dot_product_attention` dispatches to a fused FlashAttention kernel while the scan is pure PyTorch.
-What changed is that the memory half of the efficiency claim now holds rather than fails, and the latency gap
-narrowed by 1.35-2.6×. A Triton SSD kernel remains the obvious unexploited headroom.
+**Against attention, the position above was correct when written and has since been overturned — by
+engineering, not by a new algorithm.** It said the Transformer is faster at every length tested (4.1× at
+16,384 inference, 8× at 2,048 training) because `F.scaled_dot_product_attention` dispatches to a fused
+FlashAttention kernel while our scan is pure PyTorch, and that a Triton SSD kernel was the unexploited
+headroom. `EFFICIENCY_PLAN.md` tested that attribution and acted on it. Two results follow, and
+`analysis/EFFICIENCY_NOTE.md` is the full account.
+
+*First, the attribution was right.* Re-running the same Transformer with the fused SDPA backends disabled
+makes it **16.8× slower at 8,192 tokens and out of memory at 16,384**, with its latency exponent rising from
+0.871 to 1.513. Against the same attention algorithm without its hand-written kernel, this model was already
+ahead. The deficit was kernel engineering.
+
+*Second, no Triton kernel was needed to close it.* Two inference-time settings — `mamba3_chunk_size` 64→128
+and `torch.compile`, both gated on float64-oracle equivalence including packed-document boundaries
+(operator 2.1e-07, logits 3.0e-05, tolerance 1e-4) — reverse the comparison (job 2582775, one sequence
+length per process, one compiler cache per point):
+
+| L | Transformer (FlashAttention) | Mamba-3, compiled, chunk 128 | |
+|---|---|---|---|
+| 8,192 | 71.26 ms / 3.776 GB | **62.09 ms / 3.824 GB** | **1.15× faster** |
+| 16,384 | 164.85 ms / 7.152 GB | **122.90 ms / 7.169 GB** | **1.34× faster** |
+
+From 8,192 to 16,384 our latency exponent is **0.985** against attention's **1.210** — linear against
+superlinear, with the advantage growing in length. Memory stays at parity (+0.24%).
+
+⚠ **Three limits on that result, all measured.** `torch.compile` is **opt-in and not the default**: the
+uncompiled default path at 16,384 is 562 ms / 7.090 GB, and no training config in this project enables it.
+**Memory parity is an inference claim only** — in training we use 12.02 GB against the Transformer's 7.55 GB
+at 2,048, **1.59× more**, unchanged by this work. And **training is still slower**, though the deficit falls
+from 5.86× to **2.71×** at 2,048 tokens and from 8.74× to 1.23× at 1,024. The "8× slower at 2,048" figure
+above does not reproduce on the newer protocol (measured 5.86×) and should not be re-quoted without
+re-measurement.
 
 **Decode, prompt 256, 64 new tokens, batch 1.** The O(1) recurrent cache works at full scale:
 
