@@ -1,6 +1,6 @@
 {
   "current_phase": "E1_adopt_or_reject",
-  "last_updated": "2026-09-25T12:25:34+02:00",
+  "last_updated": "2026-09-25T14:49:43+02:00",
   "status": "E0 COMPLETE (jobs 2579631/2579642). Scan = 67.5% of forward at L=16384, Amdahl bound 4.50x vs a 4.14x gap, so parity needs the scan to become nearly free. E0-D decisive: unfused attention is 16.8x slower at 8192 and OOMs at 16384 -- the deficit is kernel engineering, not algorithm. E1 candidates measured but NOT adopted: chunk_size=128 (1.40x) and torch.compile (4.28x at L=2048, gap 5.35x -> 1.25x). Both blocked on the R1 gate; torch.compile equivalence is unverified on GPU.",
   "plan_of_record": "EFFICIENCY_PLAN.md",
   "branch": "h100_mamba3_v2",
@@ -107,26 +107,31 @@
     },
     "E1": {
       "title": "Free levers: no new code path",
-      "status": "pending",
+      "status": "complete",
       "checkboxes": {
         "E1-A": {
-          "done": false,
+          "done": true,
           "desc": "mamba3_chunk_size as an inference-time knob. It is already a config key and needs"
         },
         "E1-B": {
-          "done": false,
+          "done": true,
           "desc": "torch.compile arm for inference only. Add --compile to performance_profile.py"
         },
         "E1-C": {
-          "done": false,
+          "done": true,
           "desc": "Report both under R3. Anything that fails the bar is written up as a null and"
         },
         "E1-D": {
-          "done": false,
+          "done": true,
           "desc": "The gate, added 2026-09-25 after E0 produced two candidate wins."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "job": "2580198",
+        "crossover_16384": "122.68ms vs 163.86ms = 1.34x",
+        "r1_compile_logits": "3.0e-05",
+        "exponent_8k_16k": "0.47 ours vs 1.20 attention"
+      },
       "verdict": null
     },
     "E2": {
@@ -226,7 +231,8 @@
     "2026-09-25: plan created. E0 blocks every other phase: the Amdahl bound is unmeasured, so every speedup estimate above it is a hypothesis.",
     "2026-09-25: E0 tooling landed (not yet measured): performance_profile.py gains --per-layer (E0-A/E0-B, per-mixer-type + ssd_chunked_scan split with the Amdahl bound computed from the measured share), --attn-backend {auto,math,flash,efficient} (E0-D), --chunk-size (E0-C) and --compile (E1-B); scripts/profile_layer_split_h100.sh submits all four arms as one 1.5h single-GPU job. No checkbox ticked: the gate is the measurement, not the code.",
     "2026-09-25: E0 COMPLETE (jobs 2579631, 2579642). Scan is 67.5% of the forward at L=16384; Amdahl bound 4.50x vs a 4.14x gap. E0-D decisive: unfused attention is 16.8x slower at 8192 and OOMs at 16384, so the deficit is kernel engineering, not algorithm. Two pre-registered predictions WRONG: chunk_size is a U-curve peaking at 128 (1.40x, not monotonic 1.5-2.5x), and torch.compile gave 4.28x at L=2048 (predicted <1.3x), cutting the gap to 1.25x. Neither is adoptable until R1/R2 are checked; 2579642 timed out compiling L=16384 (FE4 as predicted).",
-    "2026-09-25: current_phase -> E1_adopt_or_reject"
+    "2026-09-25: current_phase -> E1_adopt_or_reject",
+    "2026-09-25: E1 COMPLETE (job 2580198). R1 PASSED on GPU incl. torch.compile (logits 3.0e-05 vs 1e-4 tol). CROSSOVER FOUND: compiled+chunk128 at L=16384 is 122.68 ms vs FlashAttention's 163.86 ms = 1.34x FASTER at memory parity (7.169 vs 7.152 GB); top-of-ladder latency exponent 0.47 ours vs 1.20 attention. chunk_size=128 adopt (>=1.25x at 5/7 lengths); torch.compile adopt as inference-time opt-in (R2: +17 MB over the Transformer, permitted only because compile is off by default). ANOMALY: compiled cs=64 and cs=128 time identically at 4096/8192 (1 us apart) while uncompiled differ 45% -- shared Inductor cache suspected; follow-up job isolates caches and prints the effective chunk size. RECOMMEND DROPPING E2 and E3: the gap they were justified by is closed."
   ],
   "open_questions": [
     "E0-D: unfused attention as the headline comparison or a footnote to the fused one?",

@@ -289,10 +289,23 @@ def run_sweep(model_names, seq_lengths, batch_sizes, num_iterations, device,
             config.mamba3_chunk_size = chunk_size
         model = build_model(config, device, dtype)
         num_params = model.get_num_params(non_embedding=True)
+        # Read the chunk size back OFF THE BUILT MODULE, not off the config. In the
+        # E1 run (job 2580198) the compiled cs=64 and cs=128 arms timed identically
+        # to 1 microsecond at L=4096 and L=8192 while the uncompiled arms differed by
+        # 45%, which is not a plausible coincidence. Either the override stopped
+        # reaching the operator under compile, or those points genuinely plateau.
+        # Printing the effective value is what tells those two apart.
+        effective_chunk = None
+        for layer in model.layers:
+            if hasattr(layer.mixer, "chunk_size"):
+                effective_chunk = layer.mixer.chunk_size
+                break
         model, compile_s = maybe_compile(model, compile_model)
         if compile_model:
             print("torch.compile: wrapped in {:.1f}s (graph build happens on the "
                   "first forward of each new shape)".format(compile_s))
+        if effective_chunk is not None:
+            print("effective chunk_size on the built module: {}".format(effective_chunk))
         pattern = ",".join(config.layer_pattern)
         print("\n" + "=" * 80)
         print("{}  |  {:.1f}M non-emb params  |  dim={} layers={}  |  [{}]".format(
@@ -318,6 +331,7 @@ def run_sweep(model_names, seq_lengths, batch_sizes, num_iterations, device,
                     "attn_backend": attn_backend,
                     "compiled": bool(compile_model),
                     "chunk_size": getattr(config, "mamba3_chunk_size", None),
+                    "effective_chunk_size": effective_chunk,
                     "oom": res["oom"],
                 }
                 if res["oom"]:
@@ -381,7 +395,7 @@ def run_sweep(model_names, seq_lengths, batch_sizes, num_iterations, device,
         fieldnames = [
             "model", "params_non_emb_m", "dim", "num_layers", "layer_pattern",
             "device", "dtype", "pass", "batch_size", "seq_length",
-            "attn_backend", "compiled", "chunk_size", "oom",
+            "attn_backend", "compiled", "chunk_size", "effective_chunk_size", "oom",
             "latency_median_ms", "latency_mean_ms", "latency_std_ms",
             "tokens_per_s", "peak_memory_gb",
         ]

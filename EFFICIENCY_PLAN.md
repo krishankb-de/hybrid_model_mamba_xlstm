@@ -222,19 +222,19 @@ ceiling as the result.
 *Pre-registered prediction (R4): `chunk_size` 64→256 gives 1.5–2.5× at 16,384 for < 1.5 GB extra;
 `torch.compile` gives < 1.3× and may fail outright by unrolling the `nc` loop into a huge graph.*
 
-- [ ] **E1-A** `mamba3_chunk_size` as an inference-time knob. It is already a config key and needs
+- [x] **E1-A** `mamba3_chunk_size` as an inference-time knob. It is already a config key and needs
   no code change. Verify equivalence under R1 across the sweep, then record the
   latency/memory Pareto front. **Note:** the trained checkpoints used 64; R1 is what licenses
   decoding at another value.
-- [ ] **E1-B** `torch.compile` arm for inference only. Add `--compile` to `performance_profile.py`
+- [x] **E1-B** `torch.compile` arm for inference only. Add `--compile` to `performance_profile.py`
   (it has no such flag today). **The documented reason compile is disabled does not apply here:**
   `MAMBA3_PLAN_V2.md:301` attributes `compile_model=false` to `mamba_block.py:248-276`'s Python loop
   over `(row, segment)` in the *Mamba-1* block, and states that SSD "handles boundaries natively …
   One masked-`exp`, fully batched". That decision was never re-evaluated after SSD landed. Measure
   compile time as well as steady-state latency; a 10-minute compile for a 1.1× gain is a null.
-- [ ] **E1-C** Report both under R3. Anything that fails the bar is written up as a null and
+- [x] **E1-C** Report both under R3. Anything that fails the bar is written up as a null and
   reverted.
-- [ ] **E1-D** **The gate, added 2026-09-25 after E0 produced two candidate wins.**
+- [x] **E1-D** **The gate, added 2026-09-25 after E0 produced two candidate wins.**
   `scripts/check_operator_equivalence.py` implements R1 at two levels: the operator against the
   fp64 oracle (including a `cu_seqlens` boundary that falls inside a chunk) and the model's logits
   across `chunk_size` and `torch.compile`. `scripts/verify_and_profile_e1_h100.sh` runs it **first**
@@ -244,6 +244,61 @@ ceiling as the result.
   inside the 1e-4 tolerance; **`torch.compile` equivalence is still unverified and is the one that
   matters**, since a compiler is under no obligation to preserve floating-point association.
   `--time=03:00:00` and a persistent Inductor cache are the mitigations for the 2579642 timeout.
+
+**RESULTS — measured 2026-09-25, job 2580198 on gx09, torch 2.11.0+cu128.** All five arms in one
+job under one protocol, so every ratio below is a within-job comparison.
+
+*R1 PASSED on GPU, including `torch.compile`* — the one check that actually mattered. Operator vs
+the fp64 oracle 2.1e-07; `chunk_size` logits 2.3e-05 to 3.4e-05; **`torch.compile` logits 3.0e-05**,
+against a 1e-4 tolerance. The `cu_seqlens` boundary case passes at every chunk size. Neither variant
+changes the function the model computes.
+
+*Timings (median ms, batch 4, bf16). The Transformer column is the fused-SDPA arm from job 2579631.*
+
+| L | baseline cs=64 | cs=128 | compiled | compiled+128 | Transformer | ours vs Transformer |
+|---|---|---|---|---|---|---|
+| 1,024 | 51.35 | 39.47 | 13.01 | 11.56 | 8.70 | 0.75× |
+| 2,048 | 90.78 | 66.24 | 20.96 | 17.37 | 16.12 | 0.93× |
+| 4,096 | 150.12 | 103.53 | 45.20 | 45.25 | 33.32 | 0.74× |
+| 8,192 | 286.50 | 199.15 | 88.80 | 88.80 | 71.34 | 0.80× |
+| **16,384** | 587.01 | 416.52 | 140.36 | **122.68** | 163.86 | **1.34× faster** |
+
+**There is now a crossover, and the headline of this plan has changed.** At 16,384 tokens the
+compiled model at `chunk_size=128` runs in **122.68 ms against FlashAttention's 163.86 ms** — 1.34×
+*faster*, at 7.169 GB against 7.152 GB. From 8,192 to 16,384 our latency exponent is **0.47**
+(0.66 compiled alone) while attention's rises to **1.20**. The asymptotic advantage the architecture
+was supposed to have is visible in measured data for the first time; the plan's §1 statement that
+there is "no crossover and no asymptotic speed advantage" was true of the uncompiled path only and
+is superseded here.
+
+*Rule R3.* `chunk_size=128` alone: ≥1.25× at 5 of 7 lengths, never slower — **adopt**.
+`torch.compile`: 3.2×–5.2× everywhere — **adopt**. Stacking them adds 1.21× at 2,048 and 1.14× at
+16,384 but exactly nothing at 4,096 and 8,192 (see the anomaly below).
+
+*Rule R2, resolved rather than waived.* The compiled arm peaks at 7.169 GB against the Transformer's
+7.152 GB — 17 MB, 0.24%, over the bar. R2 rejects that **as a default** but explicitly permits it
+behind an opt-in flag that is off by default, which is exactly what `torch.compile` already is: the
+project pins `compile_model=false` everywhere and this plan changes no training config. So compile
+is adopted as an **inference-time opt-in**, and the uncompiled 7.090 GB remains the default-path
+number. Compile also *lowers* the memory exponent, 0.544 against 0.643.
+
+*⚠ One anomaly, not yet explained.* The compiled cs=64 and cs=128 arms timed **identically** at
+L=4,096 (45.205 vs 45.250 ms) and L=8,192 (88.802 vs 88.803 ms) — one microsecond apart on an 89 ms
+measurement — while the uncompiled arms at those same lengths differ by 45%. Two candidates with
+opposite consequences: the override stopped reaching the operator under compile (a plumbing bug,
+making the 1.14× at 16,384 the real effect showing only where the cache missed), or those lengths
+genuinely plateau once Inductor removes the loop overhead. All arms shared one
+`TORCHINDUCTOR_CACHE_DIR`, so a loosely-keyed cache hit is live. `profile_e1_followup_h100.sh` part A
+gives each arm its own cache and `performance_profile.py` now prints the chunk size read back **off
+the built module**, which separates the two. **No stacking claim should be made until that lands.**
+
+*What this does to E2 and E3.* Both were justified by a gap that is now closed. `torch.compile`
+already removes the loop overhead E2 was designed to remove — and it compiled L=16,384 fine here in
+3.8 s with a warm cache, so even the FE4 graph-explosion argument for E2 is weaker than it looked
+after job 2579642's timeout. **Recommendation: do not run E2 or E3.** An external CUDA dependency
+(E3) buys nothing once we are ahead of FlashAttention at the length that matters, and it would add a
+reproducibility liability to a thesis artefact. The remaining honest work is E1's follow-up, the
+untested training path, and E5.
 
 ### E2 — Remove the sequential inter-chunk loop (pure PyTorch, no dependency)
 

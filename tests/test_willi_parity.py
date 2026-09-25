@@ -6229,3 +6229,36 @@ def test_e1_wrapper_runs_the_gate_before_it_times_anything():
     hours = int(time_line.split("--time=")[1].split(":")[0])
     assert hours >= 3, "1.5h already timed out on the L=16384 compile (job 2579642)"
     assert "CKPT" not in src and "checkpoints/" not in src
+
+
+@pytest.mark.willi_parity
+def test_sweep_reports_the_chunk_size_it_actually_used_not_the_one_it_was_asked_for():
+    """Job 2580198: the compiled cs=64 and cs=128 arms timed identically to one
+    microsecond at L=4096 and L=8192 while the uncompiled arms differed by 45%.
+    Recording the requested value proves nothing about what ran, so the sweep has
+    to read the chunk size back off the built module and carry it in the CSV."""
+    src = (REPO_ROOT / "scripts" / "performance_profile.py").read_text()
+    assert "effective_chunk_size" in src
+    assert "effective chunk_size on the built module" in src
+    # It must come from the module, not from the config object.
+    idx = src.index("effective_chunk = None")
+    window = src[idx:idx + 400]
+    assert "layer.mixer.chunk_size" in window, (
+        "the readback must come off the built layer, otherwise it just echoes the config"
+    )
+
+
+@pytest.mark.willi_parity
+def test_followup_wrapper_isolates_the_inductor_cache_per_arm():
+    """The anomaly's leading explanation is a shared TORCHINDUCTOR_CACHE_DIR
+    handing two different chunk sizes the same compiled kernel. An arm that
+    reuses the previous arm's cache cannot test that."""
+    src = (REPO_ROOT / "scripts" / "profile_e1_followup_h100.sh").read_text()
+    assert "inductor_cache_${name}" in src, "each arm needs its own Inductor cache"
+    assert "rm -rf" in src, "a stale cache from a previous job would defeat the isolation"
+    directives = [ln for ln in src.splitlines() if ln.startswith("#SBATCH")]
+    assert any("--partition=aisc-batch" in ln for ln in directives)
+    assert any("--gpus=1" in ln for ln in directives)
+    assert not any("--gres" in ln for ln in directives)
+    assert "--backward" in src, "the training path is the untested half of the efficiency claim"
+    assert "CKPT" not in src and "checkpoints/" not in src
