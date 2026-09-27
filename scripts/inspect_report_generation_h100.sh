@@ -56,6 +56,12 @@ CACHED_DECODE="${CACHED_DECODE:-false}"
 SCAN_IMPL="${SCAN_IMPL:-}"
 TFLA_IMPL="${TFLA_IMPL:-}"
 CHUNK_SIZE="${CHUNK_SIZE:-}"   # EFFICIENCY_PLAN.md E6
+# EFFICIENCY_PLAN.md E7: decode under torch.compile. The efficiency headline is
+# measured compiled, but until E7 compile was only ever verified on LOGITS. This
+# is INFERENCE ONLY -- no training configuration in this project turns compile on.
+# The eval aborts if Dynamo captured nothing, so a silent eager fallback cannot
+# masquerade as agreement.
+COMPILE="${COMPILE:-false}"
 # Default to VALIDATION images, not train -- generations on train images look
 # artificially good even under genuine overfitting; validation is the honest check.
 PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/validate.parquet}"
@@ -76,6 +82,7 @@ DUMP_DIR="${DUMP_DIR:-}"
 
 echo "=== Phase 11A checkpoint inspection: ${CHECKPOINT} ==="
 echo "=== parquet=${PARQUET} num_samples=${NUM_SAMPLES} decode=${DECODE} ==="
+echo "=== chunk_size=${CHUNK_SIZE:-<yaml>} compile=${COMPILE} ==="
 date; hostname
 mkdir -p logs
 
@@ -111,6 +118,7 @@ python scripts/evaluate_report_generation.py \
   ${SCAN_IMPL:+--scan-impl "${SCAN_IMPL}"} \
   ${TFLA_IMPL:+--tfla-impl "${TFLA_IMPL}"} \
   ${CHUNK_SIZE:+--chunk-size "${CHUNK_SIZE}"} \
+  $([ "${COMPILE}" = "true" ] && echo "--compile") \
   --parquet "${PARQUET}" \
   --num-samples "${NUM_SAMPLES}" \
   --decode "${DECODE}" \

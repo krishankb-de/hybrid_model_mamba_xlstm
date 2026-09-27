@@ -429,6 +429,80 @@ def write_hyps_refs(dump_dir: str, hyps: List[str], refs: List[str]) -> None:
     print(f"  Dumped {len(hyps)} hyp/ref pairs to {out_dir}/hyps.txt, {out_dir}/refs.txt")
 
 
+# ---------------------------------------------------------------------------
+# EFFICIENCY_PLAN.md E7 — decode under torch.compile.
+#
+# WHY THIS EXISTS. The efficiency headline (1.34x faster than FlashAttention at
+# 16,384 tokens) is measured with torch.compile ON. E6 settled the OTHER lever:
+# mamba3_chunk_size 64 -> 128 leaves all 400 decoded reports byte-identical.
+# torch.compile was only ever checked on LOGITS -- 3.0e-05 against a 1e-4 gate.
+# Logit closeness is not token identity. Beam search flips whenever a
+# perturbation exceeds the top-2 margin, and this project has already watched an
+# operator swap change 227 of 400 reports while moving no metric (V5-A). So the
+# compiled configuration gets decoded rather than argued from a tolerance.
+#
+# THE TRAP THIS CODE IS BUILT AROUND. torch.compile fails OPEN. If Dynamo cannot
+# capture the graph, or the recompile limit is exhausted as the beam grows by one
+# token per step, it falls back to eager and the run still emits perfectly good
+# reports -- which would then agree with the eager arm for the trivial reason
+# that BOTH arms ran eager. That is the same class of silent no-op as job
+# 2583277, where a chunk_size override was set on a config that never read it and
+# produced a "tie" measuring nothing. So:
+#   * dynamic=True, so one graph covers every decode length instead of ~100;
+#   * the recompile limit is raised, so sequence growth cannot exhaust it;
+#   * Dynamo's own counters are read back AFTER decoding, and the run FAILS if
+#     nothing was ever captured.
+# A compile that did not happen is reported as an error, never as agreement.
+#
+# Inference only. The project pins compile_model=false for training and this
+# does not change that.
+# ---------------------------------------------------------------------------
+
+def dynamo_capture_stats() -> Dict[str, int]:
+    """Dynamo's own record of what it captured, read off the live counters."""
+    import torch._dynamo as dynamo
+    stats = dynamo.utils.counters.get("stats", {})
+    return {
+        "calls_captured": int(stats.get("calls_captured", 0)),
+        "unique_graphs": int(stats.get("unique_graphs", 0)),
+    }
+
+
+def compile_decoder_for_inference(module, dynamic: bool = True, recompile_limit: int = 256):
+    """Replace module.decoder with a torch.compile'd view of itself and clear
+    Dynamo's counters, so assert_decoder_was_compiled() measures only this run."""
+    import torch._dynamo as dynamo
+
+    dynamo.reset()
+    dynamo.utils.counters.clear()
+    # Beam search feeds a sequence one token longer at every step. Under the
+    # default static-shape policy that is a fresh graph per length, and the
+    # default cache_size_limit of 8 would be exhausted within 8 generated tokens
+    # -- after which Dynamo serves EAGER for the remaining 92 and says so only in
+    # a warning nobody reads at the bottom of a 13,000-line log.
+    if dynamo.config.cache_size_limit < recompile_limit:
+        dynamo.config.cache_size_limit = recompile_limit
+    module.decoder = torch.compile(module.decoder, dynamic=dynamic)
+    print("  [compile] torch.compile(decoder, dynamic=%s); cache_size_limit=%d"
+          % (dynamic, dynamo.config.cache_size_limit))
+    return module
+
+
+def assert_decoder_was_compiled() -> Dict[str, int]:
+    """Raise unless Dynamo actually captured a graph during this run."""
+    stats = dynamo_capture_stats()
+    print("  [compile] Dynamo captured %d call(s) into %d unique graph(s)."
+          % (stats["calls_captured"], stats["unique_graphs"]))
+    if stats["calls_captured"] == 0:
+        raise RuntimeError(
+            "--compile was requested but Dynamo captured NOTHING: this decode ran in "
+            "eager mode and measures the unmodified path. Agreement with the eager arm "
+            "would be vacuous, so the run fails instead of reporting it. Look further up "
+            "the log for a Dynamo fallback or graph-break message."
+        )
+    return stats
+
+
 def run_checkpoint_inspection(args) -> None:
     """--checkpoint mode: generate from real images with a real trained
     checkpoint and print generated-vs-reference text side by side. Qualitative
@@ -449,6 +523,10 @@ def run_checkpoint_inspection(args) -> None:
         tfla_impl=getattr(args, "tfla_impl", None),
         chunk_size=getattr(args, "chunk_size", None),
     )
+    # E7: compile AFTER the weights are loaded and the module is on-device, so the
+    # graph Dynamo captures is the one that actually decodes.
+    if getattr(args, "compile_decoder", False):
+        module = compile_decoder_for_inference(module)
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
     # BiomedCLIP CLIP normalisation — matches cxr_mimic_arm0.yaml/cxr_mimic_full.yaml.
@@ -487,6 +565,12 @@ def run_checkpoint_inspection(args) -> None:
         print(f"ROUGE-L (single sample): {rouge_l_score(generated.split(), reference.split()):.3f}\n")
         hyps.append(generated)
         refs.append(reference)
+
+    # E7: checked BEFORE the dump is written. A dump produced by an accidental
+    # eager run is indistinguishable from a real one on disk, and would be
+    # compared, scored and believed.
+    if getattr(args, "compile_decoder", False):
+        assert_decoder_was_compiled()
 
     if args.dump_dir:
         write_hyps_refs(args.dump_dir, hyps, refs)
@@ -810,6 +894,13 @@ def main():
                              "changes no function -- but it changes float association, which "
                              "is why the optimised configuration is re-decoded rather than "
                              "assumed equivalent.")
+    parser.add_argument("--compile", dest="compile_decoder", action="store_true",
+                        help="EFFICIENCY_PLAN.md E7: decode with torch.compile on the decoder "
+                             "(INFERENCE ONLY -- training still pins compile_model=false). The "
+                             "efficiency headline is measured compiled, so this is how 'the fast "
+                             "configuration writes the same reports' gets checked on text instead "
+                             "of inferred from a logit tolerance. The run FAILS if Dynamo captured "
+                             "nothing, because a silent eager fallback would agree trivially.")
     parser.add_argument("--cached-decode", action="store_true",
                         help="Use the O(1) recurrent cache for beam search (M6). Token-identical "
                              "to the default path by test and ~5x faster per token, but only "

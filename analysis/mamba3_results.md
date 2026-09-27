@@ -307,18 +307,33 @@ superlinear, with the advantage growing in length. Memory stays at parity (+0.24
 decoder twice over 400 test studies with beam search, differing only in `mamba3_chunk_size`, gives
 **0 of 400 reports different** and ROUGE-L / BLEU-1 / BLEU-4 identical to every digit (0.1874066 /
 0.2442838 / 0.0518528). So the efficiency configuration and the quality configuration are the same
-system. This checks `chunk_size`; `torch.compile`'s effect on decoded text is inferred from its
-3.0e-05 logit perturbation rather than measured (job 2583455).
+system. This checks `chunk_size` (job 2583455); `torch.compile`'s effect on decoded text is
+currently inferred from its 3.0e-05 logit perturbation rather than measured, and the same decode
+check is specified for it in `EFFICIENCY_PLAN.md` E7.
 
-⚠ **Three limits on that result, all measured.** `torch.compile` is **opt-in and not the default**: the
-uncompiled default path at 16,384 is 562 ms / 7.090 GB, and no training config in this project enables it.
-**Memory parity is an inference claim only** — in training we use 12.02 GB against the Transformer's 7.55 GB
-at 2,048, **1.59× more**, unchanged by this work. And **training is still slower**, though the deficit falls
-from 5.86× to **2.71×** at 2,048 tokens and from 8.74× to 1.23× at 1,024. The "8× slower at 2,048" figure
-above does not reproduce on the newer protocol (measured 5.86×) and should not be re-quoted without
-re-measurement. Finally, `chunk_size=128` is a **ceiling rather than a tuning choice**: at
-16,384 tokens both 256 and 512 fail to compile with the same Inductor error, so the compiled result
-sits directly against a compiler limit.
+⚠ **The envelope of the speed result, stated precisely.** The 1.34× holds in one configuration, and
+the boundary is close on both sides:
+
+| configuration | L=8,192 | vs Transformer | L=16,384 | vs Transformer |
+|---|---|---|---|---|
+| Transformer (FlashAttention) | 71.26 ms | — | 164.85 ms | — |
+| compiled, chunk 128 | **62.09 ms** | **1.15× faster** | **122.90 ms** | **1.34× faster** |
+| compiled, chunk 64 | 70.48 ms | 1.01× (tie) | 140.35 ms | 1.17× faster |
+| eager, chunk 128 | 195.27 ms | 2.74× slower | 402.96 ms | 2.44× slower |
+| eager, chunk 64 (shipped default) | 269.99 ms | 3.79× slower | 562.22 ms | 3.41× slower |
+| compiled, chunk ≥ 256 | — | — | **does not build** | — |
+
+So: **the win is compile-gated, not chunk-gated** — `torch.compile` alone already wins at 16,384 and
+draws at 8,192, while `chunk_size=128` alone never wins at any length; **outside compile we lose by
+2.4–3.8×**, so the uncompiled path is the correctness fallback and not a speed fallback; and
+**`chunk_size=128` is a ceiling rather than a tuning choice**, since 256 and 512 both fail to compile
+at 16,384 with the same Inductor error, leaving the fast configuration one step from a compiler limit.
+
+⚠ **Two further limits, both measured.** **Memory parity is an inference claim only** — in training we
+use 12.02 GB against the Transformer's 7.55 GB at 2,048, **1.59× more**, unchanged by this work. And
+**training is still slower**, though the deficit falls from 5.86× to **2.71×** at 2,048 tokens and from
+8.74× to 1.23× at 1,024. The "8× slower at 2,048" figure above does not reproduce on the newer protocol
+(measured 5.86×) and should not be re-quoted without re-measurement.
 
 **Decode, prompt 256, 64 new tokens, batch 1.** The O(1) recurrent cache works at full scale:
 

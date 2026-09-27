@@ -136,17 +136,48 @@ Not "the metrics tie" — **the generated text is identical token for token**. `
 floating-point association at the 1e-5 level, and beam search changes its output only when that
 exceeds the top-2 margin; across roughly 40,000 token decisions it never did.
 
-⚠ This verifies `chunk_size`. It does **not** verify `torch.compile`, which the efficiency numbers
-also use. Compile's logit perturbation measures 3.0e-05, the same order as `chunk_size`'s 2.3e-05
-which produced zero token flips here, so the conclusion extends by analogy — but an analogy is not a
-measurement, and closing it would need a compiled beam-search decode, which recompiles at every step
-as the sequence grows.
+⚠ **This verifies `chunk_size`, not `torch.compile`, and the efficiency numbers use both.** Compile's
+logit perturbation measures 3.0e-05 — the same order as `chunk_size`'s 2.3e-05, which produced zero
+token flips across roughly 40,000 decisions here — so the conclusion extends by analogy. An analogy
+is not a measurement. The same check is therefore specified for compile
+(`scripts/verify_compiled_decode_h100.sh`, `EFFICIENCY_PLAN.md` E7): the identical 400 studies at
+`chunk_size=128`, decoded twice, compile on and off. **This section will be updated with that
+result; until it is, treat compile-on-text as argued rather than shown.** The one wrinkle is that
+`torch.compile` fails *open* — a capture failure quietly falls back to eager and would produce
+perfect agreement for the wrong reason — so the harness reads Dynamo's own counters back after
+decoding and aborts rather than reporting a run that never compiled.
 
-**One robustness caveat belongs with the headline.** `chunk_size=128` is not merely the optimum, it
-is a **ceiling**: at 16,384 tokens both 256 and 512 fail to compile at all, with the same PyTorch
-Inductor error in the scan's cumulative-sum code generation. The 1.34× therefore depends on a
-compiler path that fails one step further along. The uncompiled default configuration is unaffected
-and always available, at 562 ms.
+## 5c. The operating envelope of that result
+
+**The 1.34× is true in one configuration, and the boundary is close on both sides.** Stating it
+ourselves is more useful than having it found:
+
+| configuration | L=8,192 | vs Transformer | L=16,384 | vs Transformer |
+|---|---|---|---|---|
+| Transformer (FlashAttention) | 71.26 ms | — | 164.85 ms | — |
+| compiled, `chunk_size=128` | **62.09 ms** | **1.15× faster** | **122.90 ms** | **1.34× faster** |
+| compiled, `chunk_size=64` | 70.48 ms | 1.01× (tie) | 140.35 ms | 1.17× faster |
+| eager, `chunk_size=128` | 195.27 ms | 2.74× slower | 402.96 ms | 2.44× slower |
+| eager, `chunk_size=64` (shipped default) | 269.99 ms | 3.79× slower | 562.22 ms | 3.41× slower |
+| compiled, `chunk_size` ≥ 256 | — | — | **does not build** | — |
+
+Three things follow, and none of them is hidden by the headline:
+
+1. **The win is compile-gated, not chunk-gated.** `torch.compile` on its own already wins at 16,384
+   (1.17×) and draws at 8,192. `chunk_size=128` on its own never wins at any length. Compile is the
+   mechanism; the chunk size is the margin on top of it.
+2. **Outside `torch.compile` we lose, by 2.4–3.8×.** There is no eager configuration that beats
+   FlashAttention at any length measured. The uncompiled path remains the default and the
+   correctness fallback — it is not a speed fallback, and the note above about compile being opt-in
+   should be read with that in mind.
+3. **`chunk_size=128` is a ceiling, not an optimum.** At 16,384 tokens both 256 and 512 fail to
+   compile at all, with the same PyTorch Inductor error in the scan's cumulative-sum code
+   generation. The fast configuration therefore sits one step from a compiler limit, with no third
+   setting to retreat to if a future PyTorch release moves that limit.
+
+In one sentence: **we are faster than FlashAttention inside `torch.compile` at `chunk_size` 64 or
+128, and nowhere else** — the scaling-exponent result (0.985 vs 1.210) is what says the advantage
+grows with length rather than being a fixed 1.34×.
 
 ## 6. What is *not* claimed
 
@@ -158,9 +189,11 @@ and always available, at 562 ms.
 - **The older "8× slower training at L=2,048" figure does not reproduce.** The measured baseline here
   is 5.86× on a 5-iteration protocol. The discrepancy is unexplained; the older number should not be
   re-quoted without re-measurement.
-- **`torch.compile` is opt-in, not the default.** It costs a few seconds of graph build per sequence
-  length and slightly more inference memory, and no training configuration in this project turns it
-  on. The uncompiled default-path number at 16,384 is 562 ms / 7.090 GB.
+- **`torch.compile` is opt-in, not the default, and the speed result does not survive without it.**
+  It costs a few seconds of graph build per sequence length and slightly more inference memory, and
+  no training configuration in this project turns it on. The uncompiled default-path number at
+  16,384 is 562 ms / 7.090 GB — **3.41× slower than the Transformer**, not a fallback that merely
+  gives up the margin. See §5c for the full envelope.
 - **None of this changes a single quality metric.** Every reported ROUGE-L, BLEU and CheXbert number
   stands exactly as published.
 

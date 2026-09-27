@@ -1,6 +1,6 @@
 {
-  "current_phase": "COMPLETE",
-  "last_updated": "2026-09-25T23:14:18+02:00",
+  "current_phase": "E7",
+  "last_updated": "2026-09-27T12:36:49+02:00",
   "status": "PLAN COMPLETE 2026-09-25. E0, E1, E5, E6 done; E2/E3/E4 dropped with measured reasoning. HEADLINE: at L=16384 the corrected Mamba-3 runs 122.94 ms / 7.169 GB against FlashAttention's 164.85 ms / 7.152 GB = 1.34x FASTER at memory parity (three reproductions, 0.1% spread), and 1.15x faster at L=8192. Latency exponent 0.985 vs attention's 1.210. Reached with two inference-time settings, chunk_size=128 and torch.compile, both equivalence-gated against the fp64 oracle including packed-document boundaries. VERIFIED ON DECODED TEXT: 0 of 400 reports differ between chunk_size 64 and 128, metrics identical to every digit (job 2583455), so the efficiency configuration and the quality configuration are the same system. NO QUALITY METRIC MOVES. Known limits, all recorded: torch.compile is verified on logits (3.0e-05) not on decoded text; memory parity is inference-only (training uses 1.59x the Transformer's); chunk_size=128 is a compiler CEILING, since 256 and 512 both fail to build. Deliverable: analysis/EFFICIENCY_NOTE.md.",
   "plan_of_record": "EFFICIENCY_PLAN.md",
   "branch": "h100_mamba3_v2",
@@ -65,6 +65,7 @@
     "E3",
     "E4",
     "E6",
+    "E7",
     "E5"
   ],
   "phases": {
@@ -195,6 +196,36 @@
       },
       "verdict": null
     },
+    "E7": {
+      "title": "Close the two things a reviewer will find first",
+      "status": "in_progress",
+      "checkboxes": {
+        "E7-A": {
+          "done": true,
+          "desc": "Compile lever in the decode harness: --compile on"
+        },
+        "E7-B": {
+          "done": true,
+          "desc": "State the operating envelope in analysis/EFFICIENCY_NOTE.md §5 and"
+        },
+        "E7-C": {
+          "done": false,
+          "desc": "sbatch scripts/verify_compiled_decode_h100.sh — both arms in one job at"
+        },
+        "E7-D": {
+          "done": false,
+          "desc": "Record the verdict against the pre-registered rule: EFFICIENCY_PLAN.md,"
+        },
+        "E7-E": {
+          "done": false,
+          "desc": "If and only if reports differ: CheXbert on both dumps and a paired bootstrap. If 0"
+        }
+      },
+      "evidence": {
+        "artifacts": "EFFICIENCY_NOTE.md 5c + 6; mamba3_results.md 6"
+      },
+      "verdict": null
+    },
     "E5": {
       "title": "Writeup, and remove the artefacts that caused the question",
       "status": "complete",
@@ -235,7 +266,11 @@
     "2026-09-25: 2026-09-25: E6 job 2583277 INVALID -- my design error. The wrapper defaulted to the 13D checkpoint + hybrid_150m_v2_rrg, the INCUMBENT, which has no mamba3 layer, so mamba3_chunk_size was set and never read. ROUGE-L 0.18358 vs the reference 0.1836 was a perfect tie because the knob was disconnected, not because it does nothing; the log said 'TRAINED with None' throughout. Fixed three ways: evaluate_report_generation.py now RAISES on a chunk_size override for a config with no mamba3 layer; the wrapper defaults to h100_report_gen_m3_tower13d_s42 + hybrid_150m_m3_rrg; and it decodes both arms in one job so they differ by exactly one setting. E6-D partial and real: compiled cs=128 at L=16384 gave 123.03 ms / 7.175 GB (reproducing 122.90 to 0.1%), while cs=256 FAILED TO COMPILE (Inductor SplitScan cumsum codegen, 'list indices must be integers or slices, not NoneType') and killed the job under set -e, so cs=512 never ran. 128 sits next to a compiler cliff; the sweep no longer aborts on a failed arm.",
     "2026-09-25: E6 COMPLETE (job 2583455). chunk_size=128 produces BYTE-IDENTICAL reports: 0 of 400 differ textually, and ROUGE-L/BLEU-1/BLEU-4 match to every digit (0.18740664158420808 / 0.24428375611088468 / 0.051852808625198483). Both arms decoded the Mamba-3 decoder; the override announced '64 -> 128 (TRAINED with 64)', the tell that distinguishes this from 2583277's 'TRAINED with None'. E6-B moot by construction: identical hypothesis files give identical CheXbert labels and a degenerate bootstrap. VERDICT: the optimised configuration IS the efficiency configuration. GAP: this verifies chunk_size, not torch.compile -- compile's logit perturbation is 3.0e-05 vs chunk_size's 2.3e-05, same order, but that is an analogy not a decoded-text measurement. E6-D: cs=128 gave 122.94 ms (third reproduction, 0.1% spread), and BOTH cs=256 and cs=512 FAIL to compile with the same Inductor SplitScan error -- 128 is a ceiling, not just an optimum, and the fast config sits against a compiler limit.",
     "2026-09-25: E6-C done. Verdict written into analysis/EFFICIENCY_NOTE.md (new section 5b: 0 of 400 reports differ, metrics identical to every digit, plus the torch.compile gap and the compiler-cliff caveat) and analysis/mamba3_results.md section 6.",
-    "2026-09-25: current_phase -> COMPLETE"
+    "2026-09-25: current_phase -> COMPLETE",
+    "2026-09-27: current_phase -> E7",
+    "2026-09-27: E7 opened 2026-09-27 on user instruction, after the plan was marked COMPLETE. Two gaps: (1) torch.compile is verified only on logits (3.0e-05), not on decoded text the way chunk_size is; (2) the headline quotes 1.34x without its operating envelope. E7-A (compile lever + silent-eager-fallback guard) and E7-B (envelope stated) are local; E7-C is a cluster job.",
+    "2026-09-27: ticked E7-A",
+    "2026-09-27: ticked E7-B"
   ],
   "open_questions": [
     "E0-D: unfused attention as the headline comparison or a footnote to the fused one?",

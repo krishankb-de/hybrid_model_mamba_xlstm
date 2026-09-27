@@ -6432,3 +6432,83 @@ def test_e6_wrapper_decodes_the_mamba3_arm_and_both_chunk_sizes():
     assert 'decode_arm "${REF_DUMP}" 64' in src and 'decode_arm "${DUMP_DIR}" "${CHUNK_SIZE}"' in src
     # A failed compile arm is data about that arm, not a reason to lose the job.
     assert "ARM FAILED" in src
+
+
+# ---------------------------------------------------------------------------
+# EFFICIENCY_PLAN.md E7 — the second lever, verified on text instead of logits
+# ---------------------------------------------------------------------------
+
+@pytest.mark.willi_parity
+def test_compile_is_a_decode_lever_threaded_from_the_wrapper_to_the_eval():
+    """The efficiency headline uses TWO settings: chunk_size=128 and torch.compile.
+    E6 verified the first on decoded text. The second was verified only on logits
+    (3.0e-05 against a 1e-4 gate), which is not token identity -- beam search flips
+    on an arbitrarily small margin. So compile has to be reachable from the same
+    decode harness the quality numbers come from."""
+    ev = (REPO_ROOT / "scripts" / "evaluate_report_generation.py").read_text()
+    assert '"--compile", dest="compile_decoder"' in ev
+    assert "compile_decoder_for_inference" in ev
+
+    wrapper = (REPO_ROOT / "scripts" / "inspect_report_generation_h100.sh").read_text()
+    assert 'COMPILE="${COMPILE:-false}"' in wrapper, "compile must default OFF"
+    assert '$([ "${COMPILE}" = "true" ] && echo "--compile")' in wrapper
+
+
+@pytest.mark.willi_parity
+def test_a_compiled_decode_that_silently_ran_eager_is_an_error_not_agreement():
+    """torch.compile fails OPEN. A capture failure, or an exhausted recompile
+    limit as the beam grows one token per step, drops back to eager and still
+    emits perfectly good reports -- which would agree with the eager arm for the
+    trivial reason that neither arm compiled.
+
+    That is the job-2583277 failure class: a no-op producing a publishable-looking
+    null. So the run must abort instead, and it must abort BEFORE writing a dump,
+    because an eager dump is indistinguishable from a real one on disk."""
+    import importlib.util
+    import torch._dynamo as dynamo
+    spec = importlib.util.spec_from_file_location(
+        "evalrg_e7", REPO_ROOT / "scripts" / "evaluate_report_generation.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+    dynamo.reset()
+    dynamo.utils.counters.clear()
+    with pytest.raises(RuntimeError, match="captured NOTHING"):
+        mod.assert_decoder_was_compiled()
+
+    src = (REPO_ROOT / "scripts" / "evaluate_report_generation.py").read_text()
+    guard = src.index("assert_decoder_was_compiled()\n\n    if args.dump_dir:")
+    assert guard > 0, "the compile check must run before write_hyps_refs, not after"
+
+
+@pytest.mark.willi_parity
+def test_compiling_the_decoder_raises_the_recompile_limit():
+    """Beam search feeds a sequence one token longer every step. Under the default
+    static-shape policy that is a fresh graph per length, and Dynamo's default
+    cache_size_limit of 8 is exhausted within 8 generated tokens -- after which it
+    serves eager for the remaining 92 and says so only in a warning buried in a
+    13,000-line log. dynamic=True plus a raised limit is what makes the compiled
+    arm actually compiled."""
+    src = (REPO_ROOT / "scripts" / "evaluate_report_generation.py").read_text()
+    i = src.index("def compile_decoder_for_inference")
+    window = src[i:i + 1600]
+    assert "dynamic: bool = True" in window
+    assert "cache_size_limit" in window
+    assert "torch.compile(module.decoder" in window
+
+
+@pytest.mark.willi_parity
+def test_e7_wrapper_runs_both_arms_and_times_the_canary_on_a_warm_cache():
+    """One job, one setting apart, compiled arm first because its cost is the
+    unknown one. The canary's two timed points must both run warm: if n=4 carries
+    a cold graph build that n=20 does not, the fitted slope lands BELOW the true
+    per-study cost and the projection is optimistic -- the one direction that
+    loses the eight GPU-hours the canary exists to protect."""
+    src = (REPO_ROOT / "scripts" / "verify_compiled_decode_h100.sh").read_text()
+    assert "hybrid_150m_m3_rrg" in src and "h100_report_gen_m3_tower13d_s42" in src
+
+    compiled_at = src.index('decode_arm "${DUMP_DIR}" "${NUM_SAMPLES}" true')
+    eager_at = src.index('decode_arm "${REF_DUMP}" "${NUM_SAMPLES}" false')
+    assert compiled_at < eager_at, "the compiled arm runs first; we already own an eager dump"
+
+    warm_at = src.index("WARM=$(run_canary 2)")
+    assert warm_at < src.index("E4=$(run_canary 4)") < src.index("E20=$(run_canary 20)")

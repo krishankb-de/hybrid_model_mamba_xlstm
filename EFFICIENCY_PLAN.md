@@ -534,6 +534,80 @@ and the fast configuration sits directly against a compiler limit. That belongs 
   L=16,384. E0-C swept it uncompiled only, and the optimum may move once Inductor changes the
   balance between loop overhead and mask work. ~15 minutes, and it is the free version of E2.
 
+### E7 — Close the two things a reviewer will find first
+
+*Opened 2026-09-27 on user instruction, after the plan had been marked COMPLETE. Two loose threads,
+both cheap, both of the kind that is much better stated by us than discovered in review.*
+
+**(1) `torch.compile` is verified on logits, not on decoded text.** E6 settled the other lever —
+`chunk_size` 64→128 leaves all 400 reports byte-identical — but the efficiency configuration uses
+both, and compile's evidence is a 3.0e-05 logit agreement against a 1e-4 gate. Logit closeness is
+not token identity: beam search flips whenever a perturbation exceeds the top-2 margin, and V5-A in
+this project changed **227 of 400** reports under an operator swap that moved no metric. The
+harness already exists; this is one more run of it with one more flag.
+
+**(2) The headline states a number without its envelope.** "1.34× faster than FlashAttention" is
+true in exactly one configuration. `chunk_size` 256 and 512 do not compile at 16,384 tokens, and
+without `torch.compile` the model *loses* to the Transformer at every length measured. A reviewer
+will ask what happens outside `chunk_size=128`; the answer should be in our own text.
+
+**The envelope, from the E1-E confirm run (job 2582775) and E6-D (job 2583455).** Inference, batch
+4, bf16, one sequence length per process, one Inductor cache per point:
+
+| configuration | L=8,192 | vs Transformer | L=16,384 | vs Transformer |
+|---|---|---|---|---|
+| Transformer (FlashAttention) | 71.26 ms | — | 164.85 ms | — |
+| compiled, `chunk_size=128` | **62.09 ms** | **1.15× faster** | **122.90 ms** | **1.34× faster** |
+| compiled, `chunk_size=64` | 70.48 ms | 1.01× faster (tie) | 140.35 ms | 1.17× faster |
+| eager, `chunk_size=128` | 195.27 ms | 2.74× slower | 402.96 ms | 2.44× slower |
+| eager, `chunk_size=64` (shipped default) | 269.99 ms | 3.79× slower | 562.22 ms | 3.41× slower |
+| compiled, `chunk_size` ≥ 256 | — | — | **does not build** | — |
+
+Three things follow, and all three belong in the writeup:
+
+1. **The win is compile-gated, not chunk-gated.** `torch.compile` alone already wins at 16,384
+   (1.17×) and ties at 8,192. `chunk_size=128` alone never wins at any length. Compile is the
+   mechanism; the chunk size is the margin.
+2. **Outside compile we lose, by 2.4–3.8×.** There is no eager configuration that beats
+   FlashAttention. The uncompiled path is the fallback for correctness, not for speed.
+3. **128 is a ceiling, not an optimum.** Above it Inductor cannot generate code at all (identical
+   `SplitScan` cumsum failure at 256 and 512), so the fast configuration sits one step from a
+   compiler limit — with no third setting to retreat to if a future PyTorch moves that limit.
+
+*Pre-registered rule for E7-C, written before the run:*
+- **0 of n reports differ** → compile is verified on text. The §5b caveat in
+  `analysis/EFFICIENCY_NOTE.md` comes out and is replaced by the measurement.
+- **reports differ, metrics tie within the paired bootstrap** → report exactly that. It is the V5-A
+  result, it is honest, and the efficiency configuration stays reportable with the text change
+  stated alongside it.
+- **a metric moves** → the speed claim reverts to what is verified on text, which is
+  `chunk_size=128` *uncompiled*: 402.96 ms at L=16,384, i.e. **2.44× slower than the Transformer**.
+  The honest headline would then be memory parity plus the scaling exponent, with the compiled
+  number quoted as headroom. This rule is why E7 is worth running rather than assuming.
+
+- [x] **E7-A** Compile lever in the decode harness: `--compile` on
+  `evaluate_report_generation.py`, `COMPILE` on `inspect_report_generation_h100.sh`. **The guard is
+  the point, not the flag**: `torch.compile` fails *open*, so a capture failure or an exhausted
+  recompile limit silently serves eager and both arms then agree for the trivial reason that
+  neither compiled. `dynamic=True` (one graph, not ~100 as the beam grows a token per step), a
+  raised `cache_size_limit`, Dynamo's counters read back after decoding, and a hard abort on zero
+  captures — checked *before* any dump is written, since an eager dump is indistinguishable from a
+  real one on disk. Same failure class as job 2583277. Parity tests for all of it.
+- [x] **E7-B** State the operating envelope in `analysis/EFFICIENCY_NOTE.md` §5 and
+  `analysis/mamba3_results.md` §6: the table above, plus the three consequences. No cluster needed.
+- [ ] **E7-C** `sbatch scripts/verify_compiled_decode_h100.sh` — both arms in one job at
+  `chunk_size=128`, compiled first (its cost is the unknown one; we already own an eager dump), the
+  same 400 test studies and beam 3 as E6 so the two results are directly comparable. A two-point
+  canary on a **warm** Inductor cache projects the full runtime and aborts before the full arm if it
+  will not fit — a cold n=4 against a warm n=20 would fit a slope below the true per-study cost and
+  fail optimistically, which is the direction that loses the eight GPU-hours the canary is there to
+  protect.
+- [ ] **E7-D** Record the verdict against the pre-registered rule: `EFFICIENCY_PLAN.md`,
+  `analysis/EFFICIENCY_NOTE.md` §5b, `analysis/mamba3_results.md` §6, `efficiency_state.json`.
+- [ ] **E7-E** If and only if reports differ: CheXbert on both dumps and a paired bootstrap. If 0
+  differ the comparison is degenerate by construction (identical files, identical labels) and is
+  not worth a job — say that rather than running it for appearances.
+
 ### E5 — Writeup, and remove the artefacts that caused the question
 
 *No cluster needed.*
