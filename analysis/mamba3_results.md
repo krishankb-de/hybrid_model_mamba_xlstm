@@ -307,9 +307,14 @@ superlinear, with the advantage growing in length. Memory stays at parity (+0.24
 decoder twice over 400 test studies with beam search, differing only in `mamba3_chunk_size`, gives
 **0 of 400 reports different** and ROUGE-L / BLEU-1 / BLEU-4 identical to every digit (0.1874066 /
 0.2442838 / 0.0518528). So the efficiency configuration and the quality configuration are the same
-system. This checks `chunk_size` (job 2583455); `torch.compile`'s effect on decoded text is
-currently inferred from its 3.0e-05 logit perturbation rather than measured, and the same decode
-check is specified for it in `EFFICIENCY_PLAN.md` E7.
+system. **Both settings are verified this way**: `chunk_size` in job 2583455, and `torch.compile` in
+job 2587640, which decoded the same 400 studies twice with compile on and off and again found
+**0 of 400 different** with every metric digit identical. The compiled arm's log records `Dynamo
+captured 5809 call(s) into 33 unique graph(s)`, which is what makes the null meaningful — compile
+fails open, so an uncaught fallback to eager would produce agreement for the wrong reason. The
+decode runs at lengths ≤132; agreement at 16,384 rests on the logit gate at that shape (3.0e-05
+against 1e-4), and the two together are the coverage. Compiled decoding also ran **1.57× faster**
+than eager over those 400 studies, so compile is a decode win as well as a prefill one.
 
 ⚠ **The envelope of the speed result, stated precisely.** The 1.34× holds in one configuration, and
 the boundary is close on both sides:

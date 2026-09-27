@@ -1,7 +1,7 @@
 {
-  "current_phase": "E7",
-  "last_updated": "2026-09-27T12:36:49+02:00",
-  "status": "PLAN COMPLETE 2026-09-25. E0, E1, E5, E6 done; E2/E3/E4 dropped with measured reasoning. HEADLINE: at L=16384 the corrected Mamba-3 runs 122.94 ms / 7.169 GB against FlashAttention's 164.85 ms / 7.152 GB = 1.34x FASTER at memory parity (three reproductions, 0.1% spread), and 1.15x faster at L=8192. Latency exponent 0.985 vs attention's 1.210. Reached with two inference-time settings, chunk_size=128 and torch.compile, both equivalence-gated against the fp64 oracle including packed-document boundaries. VERIFIED ON DECODED TEXT: 0 of 400 reports differ between chunk_size 64 and 128, metrics identical to every digit (job 2583455), so the efficiency configuration and the quality configuration are the same system. NO QUALITY METRIC MOVES. Known limits, all recorded: torch.compile is verified on logits (3.0e-05) not on decoded text; memory parity is inference-only (training uses 1.59x the Transformer's); chunk_size=128 is a compiler CEILING, since 256 and 512 both fail to build. Deliverable: analysis/EFFICIENCY_NOTE.md.",
+  "current_phase": "COMPLETE",
+  "last_updated": "2026-09-27T14:40:00+02:00",
+  "status": "PLAN COMPLETE 2026-09-27 (reopened 2026-09-27 as E7, now closed). E0, E1, E5, E6, E7 done; E2/E3/E4 dropped with measured reasoning. HEADLINE: at L=16384 the corrected Mamba-3 runs 122.90 ms / 7.169 GB against FlashAttention's 164.85 ms / 7.152 GB = 1.34x FASTER at memory parity (three reproductions, 0.1% spread), and 1.15x faster at L=8192. Latency exponent 0.985 vs attention's 1.210. Reached with two inference-time settings, chunk_size=128 and torch.compile, both equivalence-gated against the fp64 oracle including packed-document boundaries. BOTH SETTINGS NOW VERIFIED ON DECODED TEXT: 0 of 400 reports differ for chunk_size 64->128 (job 2583455) and 0 of 400 for torch.compile on/off (job 2587640), metrics identical to every digit in both, with Dynamo counters proving the compiled arm actually compiled (5809 calls / 33 graphs). NO QUALITY METRIC MOVES. OPERATING ENVELOPE, stated in the writeups: the win is compile-gated not chunk-gated (compile alone wins at 16384 and ties at 8192; chunk_size=128 alone never wins); outside torch.compile we LOSE by 2.4-3.8x; chunk_size=128 is a compiler CEILING since 256 and 512 both fail to build. Remaining limits: decode identity is measured at lengths <=132 while the speed claim is at 16384, where the logit gate (3.0e-05) is the evidence; memory parity is inference-only (training uses 1.59x the Transformer's). Deliverable: analysis/EFFICIENCY_NOTE.md.",
   "plan_of_record": "EFFICIENCY_PLAN.md",
   "branch": "h100_mamba3_v2",
   "helper": "venv/bin/python scripts/mamba3_state.py --plan efficiency ...",
@@ -44,7 +44,7 @@
   "hypothesis": {
     "primary": "ssd_interface.py:169-190 carries chunk state in a Python `for ci in range(nc)` loop. At mamba3_chunk_size=64 and seqlen 16384, nc=256; with 9 Mamba-3 layers that is 2304 sequential iterations per forward, each launching several small CUDA kernels.",
     "amdahl_caveat": "3 of 12 layers are mLSTM on pure-PyTorch TFLA and no Mamba kernel touches them. The ceiling on any SSD-only fix is 1/(1 - mamba3_time_fraction) and is UNMEASURED until E0-A.",
-    "status": "UNVERIFIED — E0 exists to test this, not to assume it."
+    "status": "UNVERIFIED \u2014 E0 exists to test this, not to assume it."
   },
   "pre_registered": {
     "R1": "Equivalence gate: rel-max-err <= 1e-4 vs the current operator in fp32, and agreement with ssd_sequential_reference (fp64) no worse than the current operator. A cu_seqlens boundary mismatch is an automatic fail.",
@@ -180,11 +180,11 @@
         },
         "E6-C": {
           "done": true,
-          "desc": "Record the verdict in analysis/EFFICIENCY_NOTE.md §6 and mamba3_results.md §6."
+          "desc": "Record the verdict in analysis/EFFICIENCY_NOTE.md \u00a76 and mamba3_results.md \u00a76."
         },
         "E6-D": {
           "done": true,
-          "desc": "Cheap bonus in the same job: sweep chunk_size ∈ {128, 256, 512} under compile at"
+          "desc": "Cheap bonus in the same job: sweep chunk_size \u2208 {128, 256, 512} under compile at"
         }
       },
       "evidence": {
@@ -206,14 +206,14 @@
         },
         "E7-B": {
           "done": true,
-          "desc": "State the operating envelope in analysis/EFFICIENCY_NOTE.md §5 and"
+          "desc": "State the operating envelope in analysis/EFFICIENCY_NOTE.md \u00a75 and"
         },
         "E7-C": {
-          "done": false,
-          "desc": "sbatch scripts/verify_compiled_decode_h100.sh — both arms in one job at"
+          "done": true,
+          "desc": "sbatch scripts/verify_compiled_decode_h100.sh \u2014 both arms in one job at"
         },
         "E7-D": {
-          "done": false,
+          "done": true,
           "desc": "Record the verdict against the pre-registered rule: EFFICIENCY_PLAN.md,"
         },
         "E7-E": {
@@ -222,7 +222,8 @@
         }
       },
       "evidence": {
-        "artifacts": "EFFICIENCY_NOTE.md 5c + 6; mamba3_results.md 6"
+        "artifacts": "EFFICIENCY_NOTE.md 5c + 6; mamba3_results.md 6",
+        "result": "0 of 400 reports differ; Dynamo captured 5809 calls / 33 graphs; metrics identical to every digit"
       },
       "verdict": null
     },
@@ -232,11 +233,11 @@
       "checkboxes": {
         "E5-A": {
           "done": true,
-          "desc": "analysis/EFFICIENCY_NOTE.md — supervisor-facing, matching"
+          "desc": "analysis/EFFICIENCY_NOTE.md \u2014 supervisor-facing, matching"
         },
         "E5-B": {
           "done": true,
-          "desc": "Update analysis/mamba3_results.md §6 (Efficiency) with the measured numbers and the"
+          "desc": "Update analysis/mamba3_results.md \u00a76 (Efficiency) with the measured numbers and the"
         },
         "E5-C": {
           "done": true,
@@ -270,7 +271,9 @@
     "2026-09-27: current_phase -> E7",
     "2026-09-27: E7 opened 2026-09-27 on user instruction, after the plan was marked COMPLETE. Two gaps: (1) torch.compile is verified only on logits (3.0e-05), not on decoded text the way chunk_size is; (2) the headline quotes 1.34x without its operating envelope. E7-A (compile lever + silent-eager-fallback guard) and E7-B (envelope stated) are local; E7-C is a cluster job.",
     "2026-09-27: ticked E7-A",
-    "2026-09-27: ticked E7-B"
+    "2026-09-27: ticked E7-B",
+    "2026-09-27: ticked E7-C, E7-D",
+    "2026-09-27 E7-C/D/E: job 2587640. torch.compile verified on decoded text -- 0 of 400 reports differ from eager at chunk_size=128, all metrics identical to every digit, Dynamo captured 5809 calls into 33 graphs (the eager arm emits no [compile] line, no fallback warnings anywhere). E7-E moot by construction: identical files give identical CheXbert labels and a degenerate bootstrap. Unplanned finding: compiled decode is 1.57x FASTER than eager over the same 400 studies (27m57s vs 43m54s warm; ~1.20x even paying the ~510s cold build), which contradicts the cost estimate that nearly caused this check to be skipped. Canary projected 1561s vs 1677s actual, 7% low, from bash integer truncation of the fitted slope -- now computed in centiseconds."
   ],
   "open_questions": [
     "E0-D: unfused attention as the headline comparison or a footnote to the fused one?",

@@ -141,13 +141,17 @@ if [ "${SKIP_CANARY}" != "true" ]; then
   echo "  cold build + 2 studies: ${WARM}s"
   E4=$(run_canary 4)
   E20=$(run_canary 20)
-  PER=$(( (E20 - E4) / 16 ))
-  [ "${PER}" -lt 1 ] && PER=1
-  FIXED=$(( E4 - 4*PER )); [ "${FIXED}" -lt 0 ] && FIXED=0
+  # Centiseconds, not seconds. Job 2587640 fitted (224-170)/16 = 3.375 s/study,
+  # bash truncated it to 3, and the raw projection came out 7% BELOW the actual
+  # runtime. Truncation always biases the slope low -- the one direction that
+  # lets an unaffordable arm start. The +15% margin covered it that time.
+  PER_CS=$(( (E20 - E4) * 100 / 16 ))
+  [ "${PER_CS}" -lt 1 ] && PER_CS=1
+  FIXED=$(( E4 - (4*PER_CS)/100 )); [ "${FIXED}" -lt 0 ] && FIXED=0
   # +15%: a two-point fit on a shared node is not a guarantee.
-  PROJ=$(( (FIXED + PER*NUM_SAMPLES) * 115 / 100 ))
+  PROJ=$(( (FIXED + (PER_CS*NUM_SAMPLES)/100) * 115 / 100 ))
   echo "n=4 took ${E4}s; n=20 took ${E20}s (both warm)"
-  echo "  => fixed startup ~${FIXED}s, per study ~${PER}s"
+  echo "  => fixed startup ~${FIXED}s, per study ~${PER_CS}cs"
   echo "  => projected ${NUM_SAMPLES} studies +15%: ${PROJ}s ($((PROJ/60)) min), budget ${TIME_BUDGET_S}s"
   if [ "${PROJ}" -gt "${TIME_BUDGET_S}" ]; then
     echo ""

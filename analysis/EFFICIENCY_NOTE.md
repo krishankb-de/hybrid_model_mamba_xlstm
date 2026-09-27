@@ -136,16 +136,37 @@ Not "the metrics tie" — **the generated text is identical token for token**. `
 floating-point association at the 1e-5 level, and beam search changes its output only when that
 exceeds the top-2 margin; across roughly 40,000 token decisions it never did.
 
-⚠ **This verifies `chunk_size`, not `torch.compile`, and the efficiency numbers use both.** Compile's
-logit perturbation measures 3.0e-05 — the same order as `chunk_size`'s 2.3e-05, which produced zero
-token flips across roughly 40,000 decisions here — so the conclusion extends by analogy. An analogy
-is not a measurement. The same check is therefore specified for compile
-(`scripts/verify_compiled_decode_h100.sh`, `EFFICIENCY_PLAN.md` E7): the identical 400 studies at
-`chunk_size=128`, decoded twice, compile on and off. **This section will be updated with that
-result; until it is, treat compile-on-text as argued rather than shown.** The one wrinkle is that
-`torch.compile` fails *open* — a capture failure quietly falls back to eager and would produce
-perfect agreement for the wrong reason — so the harness reads Dynamo's own counters back after
-decoding and aborts rather than reporting a run that never compiled.
+**The other lever, `torch.compile`, was then checked the same way** (job 2587640, E7). The same 400
+studies at `chunk_size=128`, decoded twice in one job, compile on and off:
+
+| | eager | compiled |
+|---|---|---|
+| ROUGE-L | 0.18740664158420808 | 0.18740664158420808 |
+| BLEU-1 | 0.24428375611088468 | 0.24428375611088468 |
+| BLEU-4 | 0.051852808625198483 | 0.051852808625198483 |
+| reports differing textually | — | **0 of 400** |
+
+**So both settings behind the efficiency numbers are now verified on generated text, not inferred
+from a logit tolerance.** The compiled arm's log records `Dynamo captured 5809 call(s) into 33
+unique graph(s)`; the eager arm emits no such line. That check is the reason the null means
+anything — `torch.compile` fails *open*, so a capture failure falls back to eager silently, and
+"both arms agree" would otherwise be equally consistent with "neither arm compiled". The harness
+reads Dynamo's counters back after decoding and aborts on zero rather than reporting agreement.
+
+⚠ **What this does and does not cover.** The decode runs at sequence lengths ≤132, not the 16,384
+the speed headline is measured at. It shows the compiled operator emits identical tokens through
+~120,000 forward passes and ~40,000 beam decisions; agreement at 16,384 rests on R1's logit gate at
+that exact shape (3.0e-05 against a 1e-4 tolerance). The two together are the coverage — neither
+alone is. The compiled arm also contains graph breaks (33 graphs, from a `Tensor.item()` in the
+packed-document padding path), so "compiled" means partially compiled — the same condition the
+profiled configuration runs in.
+
+*A side result worth having.* The compiled decode was also **1.57× faster** than the eager one for
+the same 400 studies (27 min 57 s against 43 min 54 s, warm compiler cache; ~1.20× even paying the
+~8.5-minute cold graph build). `torch.compile` helps short-sequence decoding, not only long-context
+prefill. This check was nearly skipped on the argument that compiled beam search would recompile at
+every step and cost too much; `dynamic=True` made it 33 graphs rather than ~100, and the run was
+cheaper than the eager reference it was compared against.
 
 ## 5c. The operating envelope of that result
 
@@ -195,7 +216,8 @@ grows with length rather than being a fixed 1.34×.
   16,384 is 562 ms / 7.090 GB — **3.41× slower than the Transformer**, not a fallback that merely
   gives up the margin. See §5c for the full envelope.
 - **None of this changes a single quality metric.** Every reported ROUGE-L, BLEU and CheXbert number
-  stands exactly as published.
+  stands exactly as published — and for the efficiency configuration specifically, that is now a
+  measurement on decoded text for both settings (§5b), not an inference from a tolerance.
 
 ## 7. An error in this project's own measurements, and how it was caught
 

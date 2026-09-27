@@ -585,6 +585,57 @@ Three things follow, and all three belong in the writeup:
   The honest headline would then be memory parity plus the scaling exponent, with the compiled
   number quoted as headroom. This rule is why E7 is worth running rather than assuming.
 
+**RESULT — job 2587640, 2026-09-27: 0 of 400 reports differ. `torch.compile` is verified on decoded
+text.** Both arms ran in one job at `chunk_size=128` on the official test split, beam 3, differing
+only in the compile flag, and every digit of every metric matches:
+
+| | eager | compiled |
+|---|---|---|
+| ROUGE-L | 0.18740664158420808 | 0.18740664158420808 |
+| BLEU-1 | 0.24428375611088468 | 0.24428375611088468 |
+| BLEU-4 | 0.051852808625198483 | 0.051852808625198483 |
+| reports differing textually | — | **0 of 400** |
+
+**The compile was real, and the log proves it rather than asserting it.** The compiled arm reports
+`[compile] Dynamo captured 5809 call(s) into 33 unique graph(s)`; the eager arm reports
+`compile=false` and emits no `[compile]` line at all. No recompile-limit or fallback warning appears
+anywhere in the job. This is the check that makes the null meaningful: without it, "both arms agree"
+is equally consistent with "neither arm compiled", which is how job 2583277 produced a perfect tie
+while measuring nothing.
+
+*By the pre-registered rule, the first branch applies:* compile is verified on text, the §5b caveat
+in `analysis/EFFICIENCY_NOTE.md` is replaced by this measurement, and E7-E is moot by construction —
+identical hypothesis files give identical CheXbert labels and a degenerate bootstrap.
+
+**Scope, stated honestly.** This decodes at sequence lengths ≤132 (32 prefix + 100 generated), not
+the 16,384 the speed headline is measured at. It shows that the Inductor-compiled operator produces
+the same tokens through ~120,000 forward passes and roughly 40,000 beam decisions. Agreement at
+16,384 is covered by R1's logit gate at that exact shape (3.0e-05 against 1e-4), not by this run.
+The two together are the coverage; neither alone is. There are also graph breaks — 33 graphs, from
+`Tensor.item()` at `ssd_interface.py:117` in the `cu_seqlens` padding path — so the compiled arm is
+*partially* compiled. That is the same condition the profiled configuration runs in, so the two
+match; it is not a caveat on the comparison, but it is a fact about what "compiled" means here.
+
+**Unplanned finding: compile is a decode win too, not only a long-context prefill win.** Wall-clock
+for the same 400 studies, same job, same node:
+
+| arm | wall | |
+|---|---|---|
+| compiled (warm Inductor cache) | 27 min 57 s | **1.57× faster** |
+| eager | 43 min 54 s | — |
+
+The cold graph build costs ~510 s one-off (derived from the canary's 674 s warm-up), so even paying
+it from scratch the compiled decode finishes in ~36.5 min and still beats eager by 1.20×. **This
+contradicts the reason this check was nearly skipped.** The estimate was that compiled beam search
+would recompile at every step as the sequence grows and be prohibitively slow; `dynamic=True` made
+it 33 graphs, not ~100, and the run was *cheaper* than the eager reference it was compared against.
+The cost objection was wrong, and it was wrong in the direction that would have left the gap open.
+
+**The canary worked, and it was 7% optimistic.** It projected 1561 s against an actual 1677 s. The
+cause is bash integer division: the fitted slope `(224−170)/16 = 3.375` truncated to `3`. The +15%
+margin absorbed it, but truncation biases the projection *low*, which is the direction that loses
+the GPU-hours the canary exists to protect — so the fit now computes in centiseconds.
+
 - [x] **E7-A** Compile lever in the decode harness: `--compile` on
   `evaluate_report_generation.py`, `COMPILE` on `inspect_report_generation_h100.sh`. **The guard is
   the point, not the flag**: `torch.compile` fails *open*, so a capture failure or an exhausted
@@ -595,18 +646,19 @@ Three things follow, and all three belong in the writeup:
   real one on disk. Same failure class as job 2583277. Parity tests for all of it.
 - [x] **E7-B** State the operating envelope in `analysis/EFFICIENCY_NOTE.md` §5 and
   `analysis/mamba3_results.md` §6: the table above, plus the three consequences. No cluster needed.
-- [ ] **E7-C** `sbatch scripts/verify_compiled_decode_h100.sh` — both arms in one job at
+- [x] **E7-C** `sbatch scripts/verify_compiled_decode_h100.sh` — both arms in one job at
   `chunk_size=128`, compiled first (its cost is the unknown one; we already own an eager dump), the
   same 400 test studies and beam 3 as E6 so the two results are directly comparable. A two-point
   canary on a **warm** Inductor cache projects the full runtime and aborts before the full arm if it
   will not fit — a cold n=4 against a warm n=20 would fit a slope below the true per-study cost and
   fail optimistically, which is the direction that loses the eight GPU-hours the canary is there to
   protect.
-- [ ] **E7-D** Record the verdict against the pre-registered rule: `EFFICIENCY_PLAN.md`,
+- [x] **E7-D** Record the verdict against the pre-registered rule: `EFFICIENCY_PLAN.md`,
   `analysis/EFFICIENCY_NOTE.md` §5b, `analysis/mamba3_results.md` §6, `efficiency_state.json`.
-- [ ] **E7-E** If and only if reports differ: CheXbert on both dumps and a paired bootstrap. If 0
-  differ the comparison is degenerate by construction (identical files, identical labels) and is
-  not worth a job — say that rather than running it for appearances.
+- [x] **E7-E** MOOT by construction — 0 of 400 reports differ, so the two hypothesis files are
+  byte-identical, CheXbert would assign identical labels and the paired bootstrap would compare a
+  file with itself. Not submitted, and that is the honest call rather than running it for
+  appearances.
 
 ### E5 — Writeup, and remove the artefacts that caused the question
 
