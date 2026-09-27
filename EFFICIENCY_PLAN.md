@@ -723,6 +723,36 @@ CHUNK_ARM=true COMPILE_ARM=true sbatch scripts/profile_layer_split_h100.sh
 initialised weights on random token ids, so it needs no HF cache, no MIMIC data, and cannot touch a
 DUA-covered artefact or a published number.
 
+**E7-C — the compiled-decode text check (one job, ~2–4 h incl. canary):**
+
+```bash
+sbatch scripts/verify_compiled_decode_h100.sh
+squeue -u $USER
+tail -f logs/h100_e7_compiled_decode_<jobid>.log
+```
+
+Unlike everything above, this one **does** read the MIMIC test split and a trained checkpoint, and
+writes two dumps under `results/`. Both are DUA-covered; neither is committed.
+
+**What to read out of the log, in order:**
+
+1. `[operator] mamba3_chunk_size: 64 -> 128 (OVERRIDE; the checkpoint was TRAINED with 64)`. If it
+   instead says `TRAINED with None` the config has no `mamba3` layer and the run measures nothing —
+   the eval raises on that now, but read the line anyway (job 2583277).
+2. `[compile] Dynamo captured N call(s) into M unique graph(s)` with **N > 0**. This is the whole
+   reason the run is worth anything: `torch.compile` fails open, and a zero here means the "compiled"
+   arm ran eager. The eval aborts on N = 0 rather than reporting agreement.
+3. The canary's projection line. If it aborts with exit 2, the compiled decode does not fit the wall
+   clock — re-submit with a larger `--time` and `TIME_BUDGET_S`, or a smaller `NUM_SAMPLES`, and
+   state the smaller n in the writeup.
+4. `K of 400 generated reports differ between eager and compiled`, then apply the E7 rule. K = 0 is
+   the outcome the logit bound predicts; K > 0 is a result too, and needs the CheXbert + bootstrap
+   follow-up the log prints.
+
+**Only if K > 0** are the two `score_chexbert_h100.sh` jobs and the paired bootstrap worth
+submitting. At K = 0 the files are identical, so the labels and the bootstrap are degenerate by
+construction — say that instead of running it for appearances.
+
 ## 8. Unresolved questions
 
 - E0-D: report unfused attention as the headline comparison, or as a footnote to the fused one?
