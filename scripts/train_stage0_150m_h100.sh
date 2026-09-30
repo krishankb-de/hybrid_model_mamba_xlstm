@@ -15,7 +15,7 @@
 #
 # Override at submit time, e.g.:  BATCH_SIZE=24 ACCUM=2 sbatch scripts/train_stage0_150m_h100.sh
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --gpus=1
 #SBATCH --exclude=ga03,gx17v1,gx13v1   # gx13v1: faulty GPU (cudaErrorContained, 2026-07-19)

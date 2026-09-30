@@ -28,7 +28,7 @@
 # ENV: CHECKPOINT, MODEL_CONFIG, PARQUET, NUM_SAMPLES, CHUNK_SIZE, REF_DUMP,
 #      DUMP_DIR, SWEEP_ARM, SCRATCH_ROOT, VENV_ACTIVATE.
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
 #SBATCH --gpus=1

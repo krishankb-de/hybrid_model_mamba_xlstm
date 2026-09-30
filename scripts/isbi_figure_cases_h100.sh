@@ -10,7 +10,7 @@
 #
 # Output (DUA-covered, never commit): results/isbi_fig1_q<QUERY_INDEX>/
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --gpus=1
 #SBATCH --exclude=ga03,gx17v1,gx13v1   # ga03: ARM node; gx13v1: faulty GPU

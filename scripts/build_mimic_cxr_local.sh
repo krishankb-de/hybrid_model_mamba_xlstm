@@ -60,7 +60,7 @@
 #     (that account/QOS combo has its own submit-limit policy on this cluster)
 # What actually ran (job 2457565, confirmed: auth succeeded, 3/4 small files
 # fetched before hitting an unrelated manual --time=00:10:00 override):
-#   sbatch --account=aisc --partition=aisc-batch --qos=aisc ...
+#   sbatch --account=aisc --partition=pot-hpi-aisc-batch --qos=aisc ...
 # Baked in below so no manual flags are needed at submit time. TRADEOFF, be
 # aware of it: aisc-batch is a GPU-capable partition (this job lands on a
 # node like gx17v1 without requesting/using its GPU) and per docs.sc.hpi.de
@@ -81,7 +81,7 @@
 # so a timeout at any --time value only costs the in-flight chunk, never
 # correctness -- this only changes how often you have to resubmit.
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
 # ga03 is a DIFFERENT CPU ARCHITECTURE (ARM/Grace) than the gx-series x86 nodes

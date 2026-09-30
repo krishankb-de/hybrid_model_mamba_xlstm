@@ -32,7 +32,7 @@
 # Usage:   sbatch scripts/setup_chexbert_venv_h100.sh
 # Watch:   squeue --me   ;   tail -f logs/setup_chexbert_venv_h100_<jobid>.log
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
 #SBATCH --exclude=ga03,gx17v1,gx13v1   # ga03: ARM node, x86 venv incompatible;

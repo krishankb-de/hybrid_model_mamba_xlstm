@@ -3153,7 +3153,7 @@ def test_build_mimic_cxr_local_slurm_wrapper_is_cpu_only_on_cpu_batch():
     CPU-only alternative before the long `fetch` stage.
     """
     sh = (REPO_ROOT / "scripts" / "build_mimic_cxr_local.sh").read_text()
-    assert "#SBATCH --partition=aisc-batch" in sh
+    assert "#SBATCH --partition=pot-hpi-aisc-batch" in sh
     assert "#SBATCH --gpus" not in sh
     assert "#SBATCH --account=aisc" in sh
     assert "#SBATCH --qos=aisc" in sh
@@ -3635,7 +3635,7 @@ def test_train_report_generation_h100_slurm_wrapper_conventions():
     existence check on the decoder checkpoint (mirrors STAGE0_CKPT in
     train_biomedclip_kd_h100.sh) rather than silently training from random init."""
     sh = (REPO_ROOT / "scripts" / "train_report_generation_h100.sh").read_text()
-    assert "#SBATCH --partition=aisc-batch" in sh
+    assert "#SBATCH --partition=pot-hpi-aisc-batch" in sh
     assert "#SBATCH --account=aisc" in sh
     assert "--exclude=ga03" in sh
     assert "DECODER_CKPT" in sh
@@ -3651,7 +3651,7 @@ def test_inspect_report_generation_h100_slurm_wrapper_conventions():
     follow-up). Same established conventions as the training wrapper, plus a
     fail-fast existence check on the checkpoint itself."""
     sh = (REPO_ROOT / "scripts" / "inspect_report_generation_h100.sh").read_text()
-    assert "#SBATCH --partition=aisc-batch" in sh
+    assert "#SBATCH --partition=pot-hpi-aisc-batch" in sh
     assert "#SBATCH --account=aisc" in sh
     assert "--exclude=ga03" in sh
     assert "CHECKPOINT" in sh
@@ -3673,7 +3673,7 @@ def test_retrieval_baseline_h100_slurm_wrapper_conventions():
     the sibling inspection wrapper; queries VALIDATION against the TRAIN
     gallery (never against itself)."""
     sh = (REPO_ROOT / "scripts" / "retrieval_baseline_h100.sh").read_text()
-    assert "#SBATCH --partition=aisc-batch" in sh
+    assert "#SBATCH --partition=pot-hpi-aisc-batch" in sh
     assert "#SBATCH --account=aisc" in sh
     assert "--exclude=ga03" in sh
     assert "TRAIN_PARQUET" in sh
@@ -4590,7 +4590,7 @@ def test_analyze_diversity_slurm_wrapper_exists_and_is_cpu_only():
     assert path.exists(), "Phase 14B needs a SLURM wrapper; bare python is refused on lx01"
     src = path.read_text()
 
-    assert "#SBATCH --partition=aisc-batch" in src
+    assert "#SBATCH --partition=pot-hpi-aisc-batch" in src
     assert "#SBATCH --account=aisc" in src
     assert "#SBATCH --qos=aisc" in src
     # Pure-stdlib text analysis: requesting a GPU would waste a scarce resource
@@ -5003,7 +5003,7 @@ def test_bootstrap_compare_slurm_wrapper_is_cpu_only():
     path = REPO_ROOT / "scripts" / "bootstrap_compare_h100.sh"
     assert path.exists()
     src = path.read_text()
-    assert "#SBATCH --partition=aisc-batch" in src
+    assert "#SBATCH --partition=pot-hpi-aisc-batch" in src
     assert not [l for l in src.splitlines() if l.startswith("#SBATCH") and "--gpus" in l]
     assert 'A="${A:?' in src and 'B="${B:?' in src
     assert "ERROR: required file not found" in src
@@ -5372,7 +5372,7 @@ def test_screen_arms_job_array_reads_the_shared_arm_ladder():
 
     assert "#SBATCH --gpus=1" in sh
     assert "--gres" not in sh, "aisc rejects --gres for GPUs -- use --gpus=N"
-    assert "#SBATCH --partition=aisc-batch" in sh and "#SBATCH --account=aisc" in sh
+    assert "#SBATCH --partition=pot-hpi-aisc-batch" in sh and "#SBATCH --account=aisc" in sh
     assert "#SBATCH --requeue" in sh, "aisc-batch is preemptible"
     assert "#SBATCH --open-mode=append" in sh, (
         "without append, a requeue TRUNCATES the log -- an arm silently restarts from step 0 "
@@ -5928,7 +5928,7 @@ def test_repair_wrapper_is_cpu_only_and_warns_that_every_arm_must_be_repaired():
         "repairing cached text needs no GPU; a prose mention of --gpus is fine, "
         "an actual allocation is not"
     )
-    assert "--partition=aisc-batch" in src and "--exclude=ga03" in src
+    assert "--partition=pot-hpi-aisc-batch" in src and "--exclude=ga03" in src
     assert "EVERY system being compared" in src or "EVERY arm" in src
     assert "score_chexbert_h100.sh" in src and "bootstrap_compare_h100.sh" in src
 
@@ -6143,7 +6143,7 @@ def test_layer_split_wrapper_follows_the_cluster_conventions():
     path = REPO_ROOT / "scripts" / "profile_layer_split_h100.sh"
     src = path.read_text()
     directives = [ln for ln in src.splitlines() if ln.startswith("#SBATCH")]
-    assert any("--partition=aisc-batch" in ln for ln in directives)
+    assert any("--partition=pot-hpi-aisc-batch" in ln for ln in directives)
     assert any("--account=aisc" in ln for ln in directives)
     assert any("--gpus=1" in ln for ln in directives)
     assert not any("--gres" in ln for ln in directives), "never --gres for GPUs on aisc"
@@ -6221,7 +6221,7 @@ def test_e1_wrapper_runs_the_gate_before_it_times_anything():
     assert gate_at < first_sweep, "the R1 gate must run before any timing arm"
 
     directives = [ln for ln in src.splitlines() if ln.startswith("#SBATCH")]
-    assert any("--partition=aisc-batch" in ln for ln in directives)
+    assert any("--partition=pot-hpi-aisc-batch" in ln for ln in directives)
     assert any("--gpus=1" in ln for ln in directives)
     assert not any("--gres" in ln for ln in directives)
     assert any("--exclude=ga03" in ln and "gx13v1" in ln for ln in directives)
@@ -6257,7 +6257,7 @@ def test_followup_wrapper_isolates_the_inductor_cache_per_arm():
     assert "inductor_cache_${name}" in src, "each arm needs its own Inductor cache"
     assert "rm -rf" in src, "a stale cache from a previous job would defeat the isolation"
     directives = [ln for ln in src.splitlines() if ln.startswith("#SBATCH")]
-    assert any("--partition=aisc-batch" in ln for ln in directives)
+    assert any("--partition=pot-hpi-aisc-batch" in ln for ln in directives)
     assert any("--gpus=1" in ln for ln in directives)
     assert not any("--gres" in ln for ln in directives)
     assert "--backward" in src, "the training path is the untested half of the efficiency claim"
@@ -6301,7 +6301,7 @@ def test_confirm_wrapper_measures_one_sequence_length_per_process():
     assert train_block.index("train_xfmr") < train_block.index("train_base")
     directives = [ln for ln in src.splitlines() if ln.startswith("#SBATCH")]
     assert not any("--gres" in ln for ln in directives)
-    assert any("--partition=aisc-batch" in ln for ln in directives)
+    assert any("--partition=pot-hpi-aisc-batch" in ln for ln in directives)
     hours = int([ln for ln in directives if "--time=" in ln][0].split("--time=")[1].split(":")[0])
     assert hours >= 3, "2h timed out in job 2582482"
 
@@ -6371,7 +6371,7 @@ def test_e6_wrapper_matches_the_v5a_protocol_it_must_pair_with():
     assert "DECODE=beam BEAM_SIZE=3 MAX_NEW_TOKENS=100" in src
     assert "tower13d" in src, "E6 must decode the same 13D checkpoint V5-A used"
     directives = [ln for ln in src.splitlines() if ln.startswith("#SBATCH")]
-    assert any("--partition=aisc-batch" in ln for ln in directives)
+    assert any("--partition=pot-hpi-aisc-batch" in ln for ln in directives)
     assert not any("--gres" in ln for ln in directives)
     # The pre-registered rule has to be in the wrapper, not only in the plan:
     # whoever reads the log is the person who will over-claim.
@@ -6512,3 +6512,14 @@ def test_e7_wrapper_runs_both_arms_and_times_the_canary_on_a_warm_cache():
 
     warm_at = src.index("WARM=$(run_canary 2)")
     assert warm_at < src.index("E4=$(run_canary 4)") < src.index("E20=$(run_canary 20)")
+
+
+def test_no_slurm_script_uses_the_retired_aisc_batch_partition():
+    """2026-09-30: the cluster renamed `aisc-batch` to `pot-hpi-aisc-batch`. sbatch now rejects the
+    old name outright ("Partition 'aisc-batch' has been renamed"), so any script still carrying it
+    fails at submission. Account and QOS are unchanged."""
+    offenders = [
+        p.name for p in sorted((REPO_ROOT / "scripts").glob("*.sh"))
+        if "--partition=aisc-batch" in p.read_text()
+    ]
+    assert not offenders, offenders

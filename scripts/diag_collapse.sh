@@ -8,7 +8,7 @@
 #     sbatch scripts/diag_collapse.sh
 #   cat logs/diag_collapse_<jobid>.log
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --exclude=ga03   # ARM/Grace node; x86 .venv python -> "cannot execute binary file: Exec format error" (2026-08-19)
 #SBATCH --account=aisc
 #SBATCH --mem=8G

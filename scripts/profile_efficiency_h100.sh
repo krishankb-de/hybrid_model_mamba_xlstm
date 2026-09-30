@@ -20,7 +20,7 @@
 # ENV: SCALE (70m|150m), SEQ_LENGTHS, BATCH_SIZE, DTYPE, ITERS, OUTPUT_DIR,
 #      SCRATCH_ROOT, VENV_ACTIVATE.
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --gpus=1
 #SBATCH --exclude=ga03,gx17v1,gx13v1   # gx13v1: faulty GPU (cudaErrorContained, 2026-07-19)

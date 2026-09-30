@@ -18,7 +18,7 @@
 # Embeds the WHOLE gallery (up to MAX_GALLERY) every run -- no caching yet.
 # For arm0 (~19881 images) this is a few minutes on H100; --time is generous.
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --gpus=1
 #SBATCH --exclude=ga03,gx17v1,gx13v1   # ga03: ARM node, x86 .venv incompatible;

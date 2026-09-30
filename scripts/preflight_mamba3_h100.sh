@@ -16,7 +16,7 @@
 # Note: the aisc login node refuses to execute anything, python included, so this cannot be run
 # as a one-liner on lx01. That is why it is an sbatch script rather than a paragraph of README.
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
 #SBATCH --exclude=ga03,gx17v1,gx13v1   # ga03: ARM/Grace node, the x86 .venv cannot exec there

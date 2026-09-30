@@ -24,7 +24,7 @@
 #   OUTPUT=analysis/bootstrap_hybrid_vs_transformer.md \
 #     sbatch scripts/bootstrap_compare_h100.sh
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
 #SBATCH --exclude=ga03,gx13v1   # ga03: ARM node, the x86 .venv cannot execute

@@ -48,7 +48,7 @@
 #   OUTPUT=analysis/generation_diversity_13d_n1433.md \
 #     sbatch scripts/analyze_diversity_h100.sh
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
 #SBATCH --exclude=ga03,gx13v1           # ga03: ARM node, x86 .venv incompatible

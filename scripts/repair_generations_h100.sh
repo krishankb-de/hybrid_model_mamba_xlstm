@@ -26,7 +26,7 @@
 #   DUMP_DIR=results/13d_default_operator_n400 \
 #     sbatch scripts/repair_generations_h100.sh
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
 #SBATCH --exclude=ga03,gx17v1,gx13v1   # ga03: ARM node, the x86 .venv cannot

@@ -29,7 +29,7 @@
 # trainer, which needs the still-unbuilt Phase 3 all_gather to get anything
 # beyond throughput out of extra GPUs (see h100_multi_ddp.yaml's header).
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --gpus=1
 #SBATCH --exclude=ga03,gx17v1,gx13v1   # ga03: ARM node, x86 .venv incompatible;

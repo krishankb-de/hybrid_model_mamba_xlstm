@@ -28,7 +28,7 @@
 #      TRAIN_ITERS, OUTPUT_DIR, SKIP_INFER, SKIP_TRAIN, SCRATCH_ROOT,
 #      VENV_ACTIVATE.
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
 #SBATCH --gpus=1

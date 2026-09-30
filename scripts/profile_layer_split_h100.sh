@@ -29,7 +29,7 @@
 # ENV: MODELS, SEQ_LENGTHS, BATCH_SIZE, DTYPE, ITERS, OUTPUT_DIR, CHUNK_SIZES,
 #      CHUNK_AT_LEN, CHUNK_ARM, COMPILE_ARM, SCRATCH_ROOT, VENV_ACTIVATE.
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
 #SBATCH --gpus=1

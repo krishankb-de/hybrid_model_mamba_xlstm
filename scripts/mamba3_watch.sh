@@ -11,7 +11,7 @@
 # intercepted, not any command inside. Three ways, cheapest first:
 #
 #     source scripts/mamba3_watch.sh          # no new bash process — may pass
-#     srun --partition=aisc-batch --account=aisc --cpus-per-task=2 --mem=4G \
+#     srun --partition=pot-hpi-aisc-batch --account=aisc --cpus-per-task=2 --mem=4G \
 #          --time=00:05:00 bash scripts/mamba3_watch.sh
 #     sbatch scripts/mamba3_watch.sh          # then: cat logs/mamba3_watch_<id>.log
 #
@@ -25,7 +25,7 @@
 # and is exactly the kind of thing the login-node guard exists to stop, so it is
 # only run when this script runs as a job.
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
 #SBATCH --exclude=ga03,gx17v1,gx13v1

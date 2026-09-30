@@ -9,7 +9,7 @@
 # SLURM wrapper for the same login-node-refuses-this-command reason as every
 # other eval wrapper in this repo.
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --qos=aisc
 #SBATCH --exclude=ga03,gx17v1,gx13v1   # ga03: ARM node, x86 venv incompatible;

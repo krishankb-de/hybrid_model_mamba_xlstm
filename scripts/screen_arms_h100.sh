@@ -24,7 +24,7 @@
 # checkpointing unnecessary for the mamba3 arms. An arm that trains faster because it
 # was allowed a different recipe is not a measurement.
 # ============================================================================
-#SBATCH --partition=aisc-batch
+#SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
 #SBATCH --gpus=1
 #SBATCH --exclude=ga03,gx17v1,gx13v1
