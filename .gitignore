@@ -90,6 +90,8 @@ multirun/
 !H100_SCALING_PLAN.md
 !MAMBA3_PLAN_V2.md
 !EFFICIENCY_PLAN.md
+!CHAT_UI_PLAN.md
+!docs/chat_ui/CHAT_UI_SPEC.md
 !CLAUDE.md
 !analysis/baseline_probe_report.md
 !analysis/h100_scaling_results.md
@@ -109,6 +111,7 @@ multirun/
 !hybrid_arch_refactor_state.json
 !h100_scaling_state.json
 !efficiency_state.json
+!chat_ui_state.json
 
 
 

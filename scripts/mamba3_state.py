@@ -2,7 +2,8 @@
 """Keep a plan-of-record's checkboxes and its state file in sync.
 
 Defaults to MAMBA3_PLAN_V2.md + mamba3_v2_state.json; `--plan efficiency` selects
-EFFICIENCY_PLAN.md + efficiency_state.json (see PLAN_SETS).
+EFFICIENCY_PLAN.md + efficiency_state.json and `--plan chat_ui` CHAT_UI_PLAN.md +
+chat_ui_state.json (see PLAN_SETS).
 
 The plan-of-record contract (MAMBA3_PLAN_V2.md, "State-tracking contract") requires ticking a
 checkbox AND updating the state file after every meaningful change. Doing that by hand twice
@@ -28,13 +29,14 @@ from typing import Dict, List, Optional, Tuple
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# Two plans-of-record live in this repo and share this helper. `mamba3` is the default so every
+# Three plans-of-record live in this repo and share this helper. `mamba3` is the default so every
 # command written in MAMBA3_PLAN_V2.md and CLAUDE.md keeps working verbatim; `efficiency` is the
-# inference-speed plan (EFFICIENCY_PLAN.md), which has its own phase ids (E0-A ...) and its own
-# state file. Adding a third is one line here.
+# inference-speed plan (EFFICIENCY_PLAN.md, phase ids E0-A ...); `chat_ui` is the chat front end
+# (CHAT_UI_PLAN.md, phase ids P0-A ...). Each has its own state file. Adding one is one line here.
 PLAN_SETS = {
     "mamba3": ("MAMBA3_PLAN_V2.md", "mamba3_v2_state.json"),
     "efficiency": ("EFFICIENCY_PLAN.md", "efficiency_state.json"),
+    "chat_ui": ("CHAT_UI_PLAN.md", "chat_ui_state.json"),
 }
 DEFAULT_PLAN_SET = "mamba3"
 
@@ -255,6 +257,15 @@ def main() -> int:
             if args.phase:
                 for cid, b in boxes.items():
                     print(f"      [{'x' if b['done'] else ' '}] {cid}  {b['desc']}")
+        # The first unticked box at or after current_phase: what a fresh session does next. Silent
+        # when current_phase is not a phase id (e.g. "COMPLETE"), so a closed plan with deliberately
+        # dropped boxes does not advertise them.
+        order = state["phase_order"]
+        if not args.phase and state.get("current_phase") in order:
+            start = order.index(state["current_phase"])
+            nxt = next(((cid, b["desc"]) for pid in order[start:]
+                        for cid, b in state["phases"][pid]["checkboxes"].items() if not b["done"]), None)
+            print("\nnext          : " + ("{}  {}".format(*nxt) if nxt else "every box from the current phase on is ticked"))
     return 0
 
 

@@ -1,0 +1,487 @@
+{
+  "plan_of_record": "CHAT_UI_PLAN.md",
+  "spec": "docs/chat_ui/CHAT_UI_SPEC.md",
+  "branch": "chat_ui",
+  "base": "h100_efficiency @ 5c45527 (2026-09-30, 'SLURM: partition aisc-batch renamed to pot-hpi-aisc-batch')",
+  "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
+  "current_phase": "P0",
+  "status": "P0 approved by the user 2026-10-01 (P0-F). Executing with subagent-driven development (fresh implementer + reviewer per task). P0-G (cluster workspace) is next; then P1.",
+  "next_action": "Dispatch the P0-G implementer (scripts/chat_remote.sh, .rsync-exclude-chat, chat_cluster.env(.example), scripts/chat_cluster_setup_h100.sh, tests). Then sync + submit the setup job, read it with chat_remote.sh summary only (R7). Then P1-A. SDD ledger: .superpowers/sdd/<plan>/progress.md.",
+  "resume_protocol": [
+    "git branch --show-current must print chat_ui",
+    "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
+    "read this file's status, next_action, decisions, open_questions; then the phase section in CHAT_UI_PLAN.md",
+    "work one task at a time with the task loop (CHAT_UI_PLAN.md section 8): failing test -> implement -> green -> bash scripts/validate.sh -> tick with evidence -> update next_action -> commit",
+    "cluster: one sbatch (or one 'ssh lx01 <command>') per step; the login node runs nothing scripted; record job ids as evidence",
+    "if this file is lost: venv/bin/python scripts/mamba3_state.py --plan chat_ui sync (rebuilds phases from the plan's checkboxes; evidence must be recovered from git log)"
+  ],
+  "scope": "Claude-style chat UI for the report-generation model: upload a chest X-ray, streamed stage timeline (preprocess, encode, retrieve, generate, label, score), similar training X-rays + matching reports (13D image and text encoders) with images, CheXbert labels, sessions stored/replayed/exported. Served from one CPU sbatch job, reached over an SSH tunnel, zero cost. Changes no published number: the only edit to thesis code is an additive on_step=None callback with parity tests. NO MERGE into h100_scaling or main without an explicit user instruction.",
+  "user_requirements_2026_10_01": {
+    "taking_an_image": "click, drag and drop, or paste an X-ray; preview before sending (P6-A)",
+    "image_in_chat": "X-ray stays in the conversation after reload or reopening a session; the card shows the 224x224 model input next to the original (P6-B)",
+    "similar_xrays": "grid of similar training X-rays with similarity score; under each, how many of the 14 finding labels agree with the generated report (P5, P6-C)",
+    "matching_reports": "reports that best match the X-ray, using the retrieval chapter's 13D image and text encoders; for a test-split study, where the patient's own report ranks (P5, P6-D)",
+    "viewer": "clicking any image opens a full-screen viewer, X-ray and selected match side by side; zoom, pan, brightness, contrast (P6-E)",
+    "process": "first phase = create the plan and its state file in the repo on a new chat UI branch; do NOT implement until the user says proceed"
+  },
+  "rules": {
+    "R1": "DUA by construction: app/redact.py shapes every event before it is stored and sent, and every export; public payloads never carry image_url, study_id, subject_id, gallery_row, group, MIMIC report text, reference, test_row, identical_to, true_report_rank.",
+    "R2": "Protocol fidelity on the same device: engine == evaluate_report_generation.py byte for byte on the same node/device (hard); GPU engine-uncached == published dump (hard); CPU-vs-GPU drift measured and shown on every card, never claimed zero.",
+    "R3": "Thesis code untouched except on_step=None on beam_search_cached and beam_search_decode, each with parity tests.",
+    "R4": "Predict first: every cluster job's prediction recorded here and in the plan before submission; wrong predictions recorded beside the number.",
+    "R5": "Evidence or no tick: test name, job id + log path, or metric.",
+    "R6": "No unauthenticated exposure: the server refuses a non-loopback bind without a token; public mode also needs --mode public, a token file and the rate limit; tunnels stopped after demos.",
+    "R7": "No MIMIC text in an agent's context: never cat/tail/pull dumps or raw logs; cluster scripts print summary lines only; agents read logs only via scripts/chat_remote.sh summary (fixed pattern list, 8-digit ids masked).",
+    "R8": "Additive only: no deletion and no major change to existing files, data, checkpoints, the cluster checkout or shared venvs without the user's go-ahead; new files/dirs, symlinks inside CLUSTER_REPO and scancel of own jobs are allowed."
+  },
+  "constraints": {
+    "slurm": "#SBATCH --partition=pot-hpi-aisc-batch, --account=aisc, --qos=aisc on CPU-only jobs, --exclude=ga03,gx17v1,gx13v1, GPUs via --gpus=N (never --gres), --requeue + --open-mode=append on long preemptible jobs, logs/%x_%j.log",
+    "login_node": "lx01 executes nothing scripted; every cluster step is one sbatch or one ssh command",
+    "offline": "HF_HOME=${SCRATCH_ROOT}/.hf, HF_HUB_OFFLINE=1, SCRATCH_ROOT=/sc/scratch/$USER/hybrid_xmamba_h100",
+    "published_protocol": "beam, beam_size=3, max_new_tokens=100, empty input_ids (no BOS), fp32, no autocast, prefix_k from run_metadata.json; transform Resize((224,224)) -> Grayscale(3) -> ToTensor -> Normalize(CLIP mean/std); report = decode(skip_special_tokens) whitespace-collapsed",
+    "option_bounds": "beam_size 1-8, max_new_tokens 16-200, k_images 0-12 (default 4), k_reports 0-10 (default 3), queue cap 4 accepted turns, upload <=20 MB, >=64x64 px, <=50 MP, PNG/JPEG/WEBP",
+    "retention_days": {
+      "private": 45,
+      "public": 7
+    },
+    "code_hygiene": "no PEP 604 / PEP 585 in runtime code; app/ joins SCAN_ROOTS in tests/test_willi_parity.py (P2-A)",
+    "gate": "bash scripts/validate.sh exits 0 before any tick or commit (plus node --test from P4-B)",
+    "commits": "one per task, '<ID>: <what>', short, with the Co-Authored-By line; never stage Colab_Distillation_E2E_Test.ipynb or 'ISBI Paper /'",
+    "cluster_workflow": "Modelled on ~/Desktop/Projects/leg_x_hybrid/legal_ai_hybrid_mamba_xlstm_model: host alias hpi-hpc (lx01, user krishankumar.bhushan, login shell bash). Chat-UI code rsync'd (never --delete) to CLUSTER_REPO=/sc/home/krishankumar.bhushan/hybrid_chat_ui; thesis checkout MAIN_REPO=/sc/home/krishankumar.bhushan/hybrid_mamba_xlstm (git, branch h100_efficiency, user's git pull) is never written except new results/chat_* dirs via symlink. Login-node commands: sbatch, squeue --me, sacct, scancel (own jobs), grep/cat/tail of summary lines, ls, du, df, mkdir. Web deps in pip --target overlays (.chat_deps, .chat_deps_chexbert) on PYTHONPATH; shared venvs untouched."
+  },
+  "paths": {
+    "dataset": "/sc/home/$USER/dataset/mimic_full/{train,validate,test}.parquet; columns image (abs path to a 320x320 JPEG, one frontal per study), findings, impression, study_id, subject_id, dicom_id, view, report_hash, split; 191,462 train / 2,663 test",
+    "decoder_default": "outputs/h100_report_gen_m3_tower13d_s42/checkpoints/last.ckpt + configs/model/hybrid_150m_m3_rrg.yaml (mamba3 x9 + mlstm x3, tfla_impl exact, scan_impl legacy, prefix_k 32; cached decode available)",
+    "decoder_13d": "outputs/h100_report_gen_full_ext_4gpu_tower13d/checkpoints/last.ckpt + configs/model/hybrid_150m_v2_rrg.yaml (Mamba-1, uncached only)",
+    "retrieval_13d_joint": "outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt (image tower + HybridTextEncoder; the tower every report-gen arm used)",
+    "published_dump_m3_s42": "results/report_gen_m3_test_split_s42/{hyps.txt, refs.txt, chexbert_labels.json} (n=2663, H100, uncached beam 3, aligned with test.parquet row order)",
+    "published_floor_dump": "results/retrieval_floor_test_split/hyps.txt (stock BiomedCLIP nearest train report)",
+    "isbi_gallery_cache": "${SCRATCH_ROOT}/isbi_gallery_adapted.pt (fp16 decoder-tower train embeddings from the ISBI Fig. 1 job; optional cross-check in P5-B)",
+    "chat_home": "/sc/home/$USER/chat_sessions/ (chat.db, uploads/, endpoint, app_token, gallery/<build_id>/, cache/, exports/)",
+    "chexbert_venv": ".venv_chexbert (transformers<5, scikit-learn<1.8; built by scripts/setup_chexbert_venv_h100.sh)",
+    "laptop_venv": "venv/ (Python 3.14.3, torch 2.11.0); no .venv locally; node v25.9.0; gpt2 and BiomedCLIP in the local HF cache"
+  },
+  "verified_facts": {
+    "slurm_partition_renamed": "commit 5c45527; tests/test_willi_parity.py::test_no_slurm_script_uses_the_retired_aisc_batch_partition",
+    "cpu_job_combo": "--account=aisc --partition=(pot-hpi-)aisc-batch --qos=aisc is the proven CPU-only combination (tests/test_willi_parity.py:3145-3159)",
+    "longest_wrapper_time": "36:00:00 (grep '#SBATCH --time' scripts/*.sh)",
+    "loader": "scripts/evaluate_report_generation.py:276 load_report_generation_module(checkpoint_path, model_config_name, device, prefix_k, scan_impl, tfla_impl, chunk_size); prefix_k from run_metadata.json (resolve_prefix_k:217); refuses >50% missing keys",
+    "decode_entry": "scripts/evaluate_report_generation.py:374 generate_from_patch_grid: empty input_ids (no BOS); cached path = module.decoder.beam_search_cached; uncached = beam_search_decode:151; greedy = generate(top_k=1)",
+    "cached_decode": "hybrid_xmamba/models/hybrid_lm.py:388 supports_cached_decode (all mixers need step); :510 beam_search_cached(input_ids, prefix_embeds, beam_size, max_new_tokens, length_penalty) -- no callback yet",
+    "cached_equals_uncached_test": "tests/test_mamba3_numerics.py:1971 test_cached_beam_search_is_token_identical_to_the_uncached_one on _cached_lm (:1925: vocab 97, dim 64, 4 layers [mamba3, mlstm], head_dim 16, num_heads 4, tfla_impl exact, mamba3_d_state 32, mamba3_head_dim 16, mamba3_chunk_size 8)",
+    "smoke_test_model": "scripts/evaluate_report_generation.py:819 run_smoke_test builds [mamba, mlstm], vocab 100, use_tfla False -- not cacheable (D2)",
+    "transform_published": "scripts/evaluate_report_generation.py run_checkpoint_inspection: Resize((224,224)), Grayscale(3), ToTensor, Normalize(CLIP mean/std); images opened with Image.open(path).convert('RGB')",
+    "transform_retrieval": "scripts/evaluate_cxr_retrieval.py:251 _img_transform: Resize((224,224)), CenterCrop(224), ToTensor, Normalize -- no Grayscale(3); identical tensors for grayscale-origin images (PIL L=(R*19595+G*38470+B*7471+0x8000)>>16 is exact when R=G=B)",
+    "patch_grid": "hybrid_xmamba/training/lightning_module.py:1610 _patch_grid = image_encoder.trunk.forward_features(px); open_clip TimmModel.forward = head(trunk(x)) (open_clip/timm_model.py:212)",
+    "tower_frozen": "configs/model/hybrid_150m_m3_rrg.yaml vit_unfreeze_blocks: 0; tower from IMAGE_ENCODER_CKPT=outputs/h100_kd_150m_v2_full_data_lr3e6 (H100_SCALING_PLAN.md 13D/14A-4)",
+    "no_img_proj": "scripts/evaluate_cxr_retrieval.py:220-229: Phase 8+ checkpoints have no img_proj; visual already outputs the 512-d joint embedding",
+    "retrieval_protocol": "scripts/evaluate_cxr_retrieval.py:460 compute_retrieval_metrics(img, txt, groups=None) is authoritative (strict paired index); groups = dedup-aware; group_ids_from_texts:445 normalises lower+whitespace; report text 'Findings: {f} Impression: {i}'.strip(); GPT-2 tokenizer, pad=eos, right padding, max_length 256",
+    "text_encoder_loader": "scripts/evaluate_cxr_retrieval.py:194 load_models(ckpt, device) -> (text_enc, img_proj, image_enc) with fine-tuned image_encoder.* loaded; :405 encode_dataset; :354 build_dataloader(local_parquet_dir, mimic_split)",
+    "isbi_neighbours": "scripts/isbi_figure_cases.py already does image->image top-k with the decoder's adapted tower (topk_neighbours:32), cached gallery at ${SCRATCH_ROOT}/isbi_gallery_adapted.pt",
+    "chexbert_api": "F1CheXbert().get_label(text) -> 14 ints; .target_names; .target_names_5_index (scripts/score_chexbert_standalone.py:96-108); published per-sample labels in <dump>/chexbert_labels.json {y_true, y_pred, label_names}",
+    "chexbert_f1": "scripts/bootstrap_compare.py:98 chexbert_f1(y_true, y_pred, average, cols)",
+    "metrics": "scripts/evaluate_report_generation.py:693 rouge_l_score(hyp_tokens, ref_tokens); :710 corpus_bleu(hyps, refs, max_n)",
+    "repair": "scripts/repair_generations.py:134 repair_report(text, dedup, truncate) -> (text, stats); stats['sentences_truncated']",
+    "dump_sanitisation": "scripts/evaluate_report_generation.py:414 write_hyps_refs: ' '.join(s.split()) per line",
+    "no_position_embeddings": "hybrid_xmamba/models/hybrid_lm.py:48 use_pos_embedding = False (max_position_embeddings does not bound decode length)",
+    "packed_images_320px": "scripts/build_mimic_cxr_local.py --size 320 (one frontal JPEG per study, WxW); analysis/ARCHIVE_MANIFEST.md 'the packed 320px corpus'",
+    "home_quota": "200 GiB; 115 GiB used, 86 GiB free (df on 2026-10-01)",
+    "nfs_home": "/sc/home is NFS ('uv venv --clear' unreliable there, H100_SCALING_PLAN.md 11B) -> SQLite WAL needs locking_mode=EXCLUSIVE (D22)",
+    "plan_helper_format": "scripts/mamba3_state.py: phases '### P<n> — <title>', boxes '- [ ] **P<n>-<X>** <desc>' (ids like P3b-A do NOT parse)",
+    "local_env": "venv/ has httpx 0.28.1 and pydantic 2.13.0 but NOT fastapi/uvicorn/python-multipart (install in P2-A); http.client.HTTPResponse.read1 available",
+    "prototype_zip": "cxr_chat_app.zip not found in the repo, ~/Desktop, ~/Downloads or via Spotlight (2026-10-01)",
+    "chexbert_env": "scripts/score_chexbert_h100.sh: CPU-only (4 CPUs, 16G, --qos=aisc), VENV .venv_chexbert, HF_HUB_OFFLINE default 0, no HF_HOME override (weights in the default HF cache)",
+    "chexbert_cpu_speed": "~0.16 s per report on 4 CPUs: job 2525606 labelled 2 x 2,663 reports in ~15 min (scripts/score_chexbert_standalone.py comment)",
+    "cluster_layout": "ssh hpi-hpc works non-interactively (BatchMode); MAIN_REPO=/sc/home/krishankumar.bhushan/hybrid_mamba_xlstm on h100_efficiency @ 5c45527 (user git pull from lx01); it holds outputs/, results/ (report_gen_m3_test_split_s42 present), .venv (python3.11), .venv_chexbert; dataset at /sc/home/krishankumar.bhushan/dataset/mimic_full; /sc/home 200G, 115G used, 86G free; /sc/scratch GPFS 311T free (2026-10-01)",
+    "legal_ai_workflow": "legal project: scripts/sync_to_cluster.sh (rsync -az --delete with .rsync-exclude; .sync_stamp provenance), sync_from_cluster.sh (logs/analysis only), ssh one-liners for sbatch/sacct; chat UI copies it WITHOUT --delete and WITHOUT pulling logs (R7, R8)"
+  },
+  "spec_deltas": [
+    "D1 partition aisc-batch -> pot-hpi-aisc-batch",
+    "D2 tiny engine = the M6-D cacheable config, not the --smoke-test model",
+    "D3 no thumbnail build: serve the stored 320x320 JPEGs",
+    "D4 one tower pass if the decoder tower == 13D tower (hash-checked in P5-B)",
+    "D5 own-report rank = chapter protocol: strict pairing among the 2,663 test reports (not 'of 194,125')",
+    "D6 byte identity is a same-device gate; CPU-vs-GPU drift measured (P1-C) and disclosed",
+    "D7 explicit cancel endpoint; a disconnect never cancels",
+    "D8 public sessions scoped by X-Client-Id",
+    "D9 non-loopback bind requires a token in every mode",
+    "D10 retrieval_k rejected; k_images + k_reports",
+    "D11 greedy = cached beam_size=1 (one hook)",
+    "D12 streamed, cached checkpoint SHA-256",
+    "D13 get_label verified; exact cross-check against published chexbert_labels.json",
+    "D14 'n/14 labels agree' plus the differing positives",
+    "D15 DICOM rejected with a message",
+    "D16 + composer.js, viewer.js",
+    "D17 --time 24:00:00 + requeue",
+    "D18 floor shown from results/retrieval_floor_test_split/hyps.txt",
+    "D19 prototype zip not found; build from the plan",
+    "D20 GET /v1/test-studies for the picker",
+    "D21 --engine mock dropped",
+    "D22 SQLite on NFS: locking_mode=EXCLUSIVE before WAL",
+    "D23 token guards every /v1 route; images fetched with headers into object URLs",
+    "D24 labeller starts with score_chexbert_h100.sh's env (env -u HF_HOME, HF_HUB_OFFLINE=0) on a free loopback port; CheXbert ~0.16 s/report on CPU sizes P5-C"
+  ],
+  "predictions": {
+    "P1-B": "loopback + ssh -J works (60%); node bind via lx01 works (70%); frames ~1.0 s apart; SQLite 1-20 ms per commit on /sc/home",
+    "P1-C": "cached CPU beam-3/100 tok 3-8 s per report @8 threads; uncached 30-120 s; cached_a vs cached_b 0/20 differ; cached vs uncached CPU 0/5; CPU vs published GPU 0-6/20 differ; peak RSS 3-5 GB",
+    "P2-E": "engine vs script same CPU node 0/20; GPU engine-uncached vs published 0/20; GPU engine-cached vs published 0/20; CPU encode 0.3-1 s",
+    "P5-B": "towers identical and no img_proj (85%); test-split R@1/5/10 equal to evaluate_cxr_retrieval.py to every digit (90%); 45-90 min on one H100",
+    "P5-C": "0 mismatches vs published y_true and refs.txt on 2,663 test rows (85%); f1chexbert stays on CPU (55%) -> 8 CPU shards of ~1 h (0.16 s/report x ~150-190k groups), else 15-45 min on one H100",
+    "P5-F": "50/50 self-retrieval at rank 1; live CPU own-rank == build rank on >=48/50; labeller == published labels 100/100"
+  },
+  "decisions": {
+    "branch": "chat_ui, cut from h100_efficiency @ 5c45527 (has cached decode, E6/E7 decode verification, ISBI neighbour code, partition rename)",
+    "retrieval_encoders": "13D image + text encoders from h100_kd_150m_v2_full_data_lr3e6 (user, 2026-10-01); stock BiomedCLIP appears only as the published floor line",
+    "default_decoder": "hybrid_150m_m3_rrg s42 (U5)",
+    "transport": "pending P1-B",
+    "bind_policy": "pending P1-B (prefer loopback + ssh -J)",
+    "serving_device": "pending P1-C/P1-D",
+    "default_cached_decode": "pending P1-D (expected true)",
+    "compile_offered": "pending P1-D (expected no on CPU)",
+    "drift_note": "pending P1-C",
+    "U1_prototype_zip": "not used; build from scratch",
+    "U2_public_mode": "similarity scores only (no neighbour/report labels, agreement, group sizes, images, ids, text)",
+    "U3_public_tunnel": "private demo now; public tunnel is a later stage, only on the user's word (P9-D deferred)",
+    "U4_commands_vs_drawer": "recommended settings: drawer + text commands; defaults = published protocol",
+    "U5_default_model": "Mamba-3 s42 (hybrid_150m_m3_rrg) default; 13D selectable; optional compare mode P9-F",
+    "U6_retention": "45 days private (public 7)",
+    "U7_cpu_too_slow": "target 8 s per turn; if CPU cannot meet it, serve from a GPU job automatically",
+    "U8_job_submission": "agents submit jobs themselves (ssh + rsync like the legal-AI project); no deletion or major change without go-ahead",
+    "U9_execution": "subagent-driven development with a review after every task",
+    "workspace": "work in place on branch chat_ui (user-declared branch; venv/ and the editable install live in this checkout)"
+  },
+  "open_questions": [],
+  "phase_order": [
+    "P0",
+    "P1",
+    "P2",
+    "P3",
+    "P4",
+    "P5",
+    "P6",
+    "P7",
+    "P8",
+    "P9"
+  ],
+  "phases": {
+    "P0": {
+      "title": "Plan-of-record bootstrap",
+      "status": "in_progress",
+      "checkboxes": {
+        "P0-A": {
+          "done": true,
+          "desc": "Spec saved verbatim as docs/chat_ui/CHAT_UI_SPEC.md (design doc 2026-09-30 + image additions 2026-10-01); allow-listed in .gitignore."
+        },
+        "P0-B": {
+          "done": true,
+          "desc": "This plan: phases P0–P9, contracts (§6), spec deltas D1–D24 verified against the code, Review Focus, pre-registered rules."
+        },
+        "P0-C": {
+          "done": true,
+          "desc": "chat_ui_state.json (resume protocol, paths, verified facts, predictions); --plan chat_ui registered in scripts/mamba3_state.py, whose show now prints the nex..."
+        },
+        "P0-D": {
+          "done": true,
+          "desc": "CLAUDE.md bootstrap paragraph for branch chat_ui."
+        },
+        "P0-E": {
+          "done": true,
+          "desc": "Parity test test_chat_ui_plan_set_is_registered_and_its_ids_parse added; bash scripts/validate.sh exits 0."
+        },
+        "P0-F": {
+          "done": true,
+          "desc": "User reviews this plan and says go. Then commit the P0 files on chat_ui and set current_phase to P1."
+        },
+        "P0-G": {
+          "done": false,
+          "desc": "Cluster workspace: scripts/chat_remote.sh (sync without --delete, submit, state, summary), .rsync-exclude-chat, scripts/chat_cluster.env.example, setup job; ..."
+        }
+      },
+      "evidence": {
+        "spec": "docs/chat_ui/CHAT_UI_SPEC.md",
+        "plan": "CHAT_UI_PLAN.md (10 phases, 54 boxes, deltas D1-D24)",
+        "state": "chat_ui_state.json",
+        "helper": "scripts/mamba3_state.py PLAN_SETS['chat_ui'] + show prints next box",
+        "test": "tests/test_willi_parity.py::test_chat_ui_plan_set_is_registered_and_its_ids_parse",
+        "validate": "scripts/validate.sh exit 0: 473 passed, 1 skipped, 21 xfailed (run after the last code edit; later plan/state edits re-checked by the chat_ui parity test)",
+        "approval": "user 2026-10-01: answered the 7 questions; 'the jobs can be submitted automatically ... no delete or major change until i give a go ahead ... do it through subagents and through subagents reviews'"
+      },
+      "verdict": null
+    },
+    "P1": {
+      "title": "Feasibility probes (cluster; measure before building)",
+      "status": "pending",
+      "checkboxes": {
+        "P1-A": {
+          "done": false,
+          "desc": "Stdlib streaming probe app/tunnel/probe_server.py + probe_client.py and the CPU wrapper scripts/chat_probe_h100.sh; local tests green."
+        },
+        "P1-B": {
+          "done": false,
+          "desc": "Tunnel drill from the laptop: which path streams, round-trip time, SQLite ms per commit on /sc/home; recorded as decisions."
+        },
+        "P1-C": {
+          "done": false,
+          "desc": "CPU decode probe job scripts/chat_cpu_decode_probe_h100.sh: seconds per report (cached, uncached), determinism, drift from the published GPU dump, peak RSS."
+        },
+        "P1-D": {
+          "done": false,
+          "desc": "Decision record in chat_ui_state.json[\"decisions\"]: transport, bind policy, serving device, default cached_decode, whether compile is offered, and the drift ..."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "P2": {
+      "title": "Engine (laptop first, then one golden job)",
+      "status": "pending",
+      "checkboxes": {
+        "P2-A": {
+          "done": false,
+          "desc": "app/requirements.txt, installed into venv/; app added to the PEP 604/585 scan roots."
+        },
+        "P2-B": {
+          "done": false,
+          "desc": "on_step callback on beam_search_cached and beam_search_decode, with parity tests; tiny decoder in app/tiny.py."
+        },
+        "P2-C": {
+          "done": false,
+          "desc": "app/imaging.py: upload sniffing and decoding (16-bit, EXIF, first frame, bounds), the published transform, the model-input image, thumbnails."
+        },
+        "P2-D": {
+          "done": false,
+          "desc": "app/engine.py: Engine stages (preprocess, encode, generate) and card; RealEngine; TinyEngine; one tower pass; streamed checkpoint hash."
+        },
+        "P2-E": {
+          "done": false,
+          "desc": "Golden job scripts/chat_engine_golden.py with CPU and GPU wrappers: engine vs script (same node) and vs the published GPU dump."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "P3": {
+      "title": "Store and streaming API (laptop, tiny engine)",
+      "status": "pending",
+      "checkboxes": {
+        "P3-A": {
+          "done": false,
+          "desc": "app/schemas.py (Options, error_body) and app/ids.py; bounds tests."
+        },
+        "P3-B": {
+          "done": false,
+          "desc": "app/store.py: schema §6.4, one transaction per event, restart recovery, uploads, client scoping, export, retention sweep."
+        },
+        "P3-C": {
+          "done": false,
+          "desc": "app/redact.py: the public field policy (R1), applied before an event is stored and sent; field-by-field and catch-all tests."
+        },
+        "P3-D": {
+          "done": false,
+          "desc": "app/pipeline.py, app/server.py, app/commands.py: routes, auth, bind refusal, single-worker runner, SSE bridge, polling, cancel, overload, text commands."
+        },
+        "P3-E": {
+          "done": false,
+          "desc": "OpenAPI summaries and examples for every route; app/README.md's curl walkthrough reproduced by a test."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "P4": {
+      "title": "Frontend shell (laptop, tiny engine)",
+      "status": "pending",
+      "checkboxes": {
+        "P4-A": {
+          "done": false,
+          "desc": "index.html and styles.css: layout grid, banner, light/dark tokens, 375 px; served at / and /static/*."
+        },
+        "P4-B": {
+          "done": false,
+          "desc": "api.js (SSE parser, stream, poll, cancel, image loader) and state.js (reducers, replay); node --test with a recorded fixture; validate.sh gains the node gate."
+        },
+        "P4-C": {
+          "done": false,
+          "desc": "render.js: stage timeline, report card, label chips, provenance footer; every update re-renders from the view."
+        },
+        "P4-D": {
+          "done": false,
+          "desc": "app.js: routing, sessions sidebar, minimal file picker, Stop (cancel then abort), settings drawer, exports, health strip, polling watchdog."
+        },
+        "P4-E": {
+          "done": false,
+          "desc": "Browser checklist on the tiny engine, with screenshots in the evidence."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "P5": {
+      "title": "Labels and retrieval backend",
+      "status": "pending",
+      "checkboxes": {
+        "P5-A": {
+          "done": false,
+          "desc": "app/labels.py (names, client, rule labeller, agreement) and the app/labeler.py service."
+        },
+        "P5-B": {
+          "done": false,
+          "desc": "scripts/build_retrieval_gallery.py (with --tiny) and _h100.sh: the §6.5 files through evaluate_cxr_retrieval's own loaders; tower hash; R@k gate inside the job."
+        },
+        "P5-C": {
+          "done": false,
+          "desc": "scripts/label_gallery_reports.py and _h100.sh (.venv_chexbert): labels.npy via group representatives; canary and projection; a 0-mismatch cross-check on the ..."
+        },
+        "P5-D": {
+          "done": false,
+          "desc": "app/gallery.py: load with the tower check, image→image, image→report over groups, own rank (chapter protocol), identical-image lookup, test studies."
+        },
+        "P5-E": {
+          "done": false,
+          "desc": "Pipeline stages retrieve, label, score (and app/scoring.py); POST /v1/retrieve, POST /v1/label, GET /v1/test-studies; skipped semantics; redaction of the new..."
+        },
+        "P5-F": {
+          "done": false,
+          "desc": "Live-path gates job scripts/chat_retrieval_gates.py with _h100.sh (CPU): self-retrieval, live own-rank vs the build's rank, labeller service vs the published..."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "P6": {
+      "title": "Image experience (the user's five additions)",
+      "status": "pending",
+      "checkboxes": {
+        "P6-A": {
+          "done": false,
+          "desc": "Taking an image: click, drag-drop and paste into the image well; a preview (thumbnail, name, pixel size, MB, remove) before sending; client-side checks."
+        },
+        "P6-B": {
+          "done": false,
+          "desc": "Your image in the chat: upload variants stored; GET /v1/messages/{id}/image; the thumbnail survives reload and reopen; the 224×224 model input beside the ori..."
+        },
+        "P6-C": {
+          "done": false,
+          "desc": "Similar X-rays: a neighbour grid with similarity and \"n/14 labels agree\" (with the differing positives); GET /v1/gallery/images/{row} private-only with no-st..."
+        },
+        "P6-D": {
+          "done": false,
+          "desc": "Matching reports: a ranked report list (13D encoders), the own-report rank badge for test studies, and the test-split picker (private)."
+        },
+        "P6-E": {
+          "done": false,
+          "desc": "Viewer: full screen, single or side by side (query and the selected match), zoom, pan, brightness, contrast, keyboard, focus trap."
+        },
+        "P6-F": {
+          "done": false,
+          "desc": "End-to-end check of the five features on the tiny stack, with screenshots; the cluster re-check is part of P7-D."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "P7": {
+      "title": "Cluster serving",
+      "status": "pending",
+      "checkboxes": {
+        "P7-A": {
+          "done": false,
+          "desc": "scripts/chat_app_smoke_h100.sh: on the cluster, app.server imports with the .chat_deps overlay and app.labeler with .chat_deps_chexbert (both installed by P0..."
+        },
+        "P7-B": {
+          "done": false,
+          "desc": "scripts/serve_chat_h100.sh and the python -m app.server CLI: labeller and API, free port, endpoint file, token file, SIGTERM handling, requeue."
+        },
+        "P7-C": {
+          "done": false,
+          "desc": "app/tunnel/tunnel.sh (a forward loop that re-discovers the node) and app/tunnel/public_demo.sh (cloudflared, public mode only)."
+        },
+        "P7-D": {
+          "done": false,
+          "desc": "Real-turn gate from the laptop, and the five image features on real data (private); timings against the targets."
+        },
+        "P7-E": {
+          "done": false,
+          "desc": "Requeue drill: scontrol requeue <job> mid-turn → the turn is stored error with server_restart; the job comes back; the tunnel re-attaches unattended."
+        },
+        "P7-F": {
+          "done": false,
+          "desc": "Parity tests for the new wrappers: partition, account and qos, ga03 exclusion, no --gres, requeue and append, HF offline, loopback labeller, token required f..."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "P8": {
+      "title": "Hardening",
+      "status": "pending",
+      "checkboxes": {
+        "P8-A": {
+          "done": false,
+          "desc": "Request limits (413 above 21 MB before parsing), structured request-id logs, the error envelope everywhere, a per-client rate limit in public mode."
+        },
+        "P8-B": {
+          "done": false,
+          "desc": "Retention: a sweep at start-up and daily; RETENTION_DAYS per mode; the banner states it."
+        },
+        "P8-C": {
+          "done": false,
+          "desc": "Load drill: 6 concurrent turns → 4 accepted, 2 × 429; all 4 complete with contiguous seq."
+        },
+        "P8-D": {
+          "done": false,
+          "desc": "Chaos checklist: API killed mid-turn, tunnel dropped mid-stream, oversize upload, wrong token, labeller down, gallery missing, disk quota error on upload."
+        },
+        "P8-E": {
+          "done": false,
+          "desc": "app/README.md runbook (start, tunnel, public demo, stop, retention, what is stored, the DUA rules); allow-listed in .gitignore."
+        },
+        "P8-F": {
+          "done": false,
+          "desc": "Non-functional targets measured: first byte ≤ 300 ms, full turn (P1-D target), 375 px, no external requests from the page, no EventSource in static/."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "P9": {
+      "title": "Demo and close",
+      "status": "pending",
+      "checkboxes": {
+        "P9-A": {
+          "done": false,
+          "desc": "scripts/check_no_restricted_files.sh and scripts/install_hooks.sh (pre-commit): refuse staged outputs/, results/, uploads/, chat_sessions/, *.ckpt, *.parquet..."
+        },
+        "P9-B": {
+          "done": false,
+          "desc": "(optional) GitHub Pages copy of app/static/ with a configurable API base; the CORS allow-list gains the Pages origin."
+        },
+        "P9-C": {
+          "done": false,
+          "desc": "Supervisor demo: five test studies (two normal, two with support devices, one pneumothorax) chosen from the published labels; generated vs reference vs floor..."
+        },
+        "P9-D": {
+          "done": false,
+          "desc": "(deferred: a later stage, only on the user's word, U3) Public quick-tunnel smoke: POST streaming through trycloudflare measured; the tunnel stopped afterwards."
+        },
+        "P9-E": {
+          "done": false,
+          "desc": "Close: state COMPLETE, final notes, CLAUDE.md paragraph updated."
+        },
+        "P9-F": {
+          "done": false,
+          "desc": "(optional, U5 \"a mix between the two\") Compare mode: one image decoded by both the Mamba-3 and the 13D decoders, the two reports and label sets side by side ..."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    }
+  },
+  "notes": [
+    "2026-10-01: plan created on branch chat_ui (from h100_efficiency @ 5c45527) from the user's 2026-09-30 design doc + 2026-10-01 image additions (spec saved verbatim at docs/chat_ui/CHAT_UI_SPEC.md). 24 spec deltas verified against the code (CHAT_UI_PLAN.md section 3). Phases renumbered P0-P9 because the helper cannot parse ids like P3b-A; P1 (feasibility probes) added before any app code. Execution gate: nothing past P0 until the user says go (P0-F).",
+    "2026-10-01: P0-A..E done on branch chat_ui. Plan, verbatim spec, state file, helper registration (+ show prints the next box), CLAUDE.md bootstrap, parity test; validate.sh green. P0-F (user go-ahead + commit) open.",
+    "2026-10-01: user answered all 7 questions (decisions U1-U9), approved the plan (P0-F), authorised autonomous job submission (no deletion/major change without go-ahead), chose subagent-driven execution. Added P0-G (cluster workspace), R7 (no MIMIC text in agent context), R8 (additive only), P9-F (optional compare mode); P1-D now routes >8 s/turn to a GPU serve job.",
+    "2026-10-01: P0-F user approval recorded; P0 files committed next."
+  ],
+  "last_updated": "2026-10-01T13:44:53+02:00"
+}

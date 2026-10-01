@@ -6523,3 +6523,28 @@ def test_no_slurm_script_uses_the_retired_aisc_batch_partition():
         if "--partition=aisc-batch" in p.read_text()
     ]
     assert not offenders, offenders
+
+
+def test_chat_ui_plan_set_is_registered_and_its_ids_parse():
+    """CHAT_UI_PLAN.md P0-E. The helper only tracks `- [ ] **P1-A**` boxes under `### P1 — ...`
+    headings. An id it cannot parse (the spec's `P3b-A`, say) would silently drop out of
+    chat_ui_state.json, which is what a new session reads to know what is done and what is next."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("mamba3_state_chat_ui", REPO_ROOT / "scripts" / "mamba3_state.py")
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    assert helper.PLAN_SETS["chat_ui"] == ("CHAT_UI_PLAN.md", "chat_ui_state.json")
+
+    helper.select_plan_set("chat_ui")
+    order, phases = helper.parse_plan()
+    assert order == ["P{}".format(i) for i in range(10)]
+    assert all(phases[p]["checkboxes"] for p in order), "a phase with no parseable checkbox"
+    plan_lines = (REPO_ROOT / "CHAT_UI_PLAN.md").read_text().splitlines()
+    stray = [l for l in plan_lines if re.match(r"^- \[[ x]\] \*\*P\d", l) and not helper.CHECKBOX_RE.match(l)]
+    assert not stray, stray
+
+    state = json.loads((REPO_ROOT / "chat_ui_state.json").read_text())
+    assert state["phase_order"] == order, "run: scripts/mamba3_state.py --plan chat_ui sync"
+    assert set(state["phases"]) == set(order)
+    for key in ("current_phase", "status", "next_action", "resume_protocol", "decisions", "open_questions"):
+        assert key in state, key
