@@ -6548,3 +6548,26 @@ def test_chat_ui_plan_set_is_registered_and_its_ids_parse():
     assert set(state["phases"]) == set(order)
     for key in ("current_phase", "status", "next_action", "resume_protocol", "decisions", "open_questions"):
         assert key in state, key
+
+
+def test_chat_cluster_setup_wrapper_is_cpu_only_and_additive():
+    """CHAT_UI_PLAN.md P0-G (R8: additive only). The setup job fills the chat UI's own cluster directory next to the
+    thesis checkout, so it may create symlinks that do not exist yet (`ln -s`, never `ln -sf`, which would replace
+    one), directories, and web-dependency overlays under `--target` (never into the shared venvs), and nothing
+    else: no deletion, no GPU. It executes the x86 venv's python, so it must exclude the ARM node ga03 even though
+    it never sources an activate script."""
+    src = (REPO_ROOT / "scripts" / "chat_cluster_setup_h100.sh").read_text()
+    directives = [l for l in src.splitlines() if l.startswith("#SBATCH")]
+    assert any("--partition=pot-hpi-aisc-batch" in l for l in directives)
+    assert any("--account=aisc" in l for l in directives)
+    assert any("--qos=aisc" in l for l in directives), "the proven CPU-only combination"
+    assert any("--exclude=ga03" in l for l in directives)
+    assert any("--output=logs/%x_%j.log" in l for l in directives)
+    assert not [l for l in directives if "--gpus" in l or "--gres" in l], "CPU-only job"
+
+    code = [l for l in src.splitlines() if not l.lstrip().startswith("#")]
+    assert "rm " not in src, "no deletion, anywhere in the file"
+    assert "ln -sf" not in src and any("ln -s " in l for l in code)
+    installs = [l for l in code if "pip install" in l]
+    assert len(installs) == 2, "one overlay per venv"
+    assert all("--target" in l for l in installs), "web deps go into overlays, never into the shared venvs"

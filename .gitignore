@@ -131,3 +131,7 @@ IMAGE_FILENAMES
 legacy_gallery_hashes.txt
 .physionet_session
 *.physionet_session
+
+# CHAT_UI_PLAN.md P0-G: the per-user cluster settings, and the stamp `chat_remote.sh sync` writes before each rsync.
+scripts/chat_cluster.env
+.sync_stamp

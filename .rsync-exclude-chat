@@ -1,0 +1,28 @@
+# rsync rules for scripts/chat_remote.sh sync. No --delete is ever used (R8).
+/.git/
+/venv/
+/.venv/
+/.venv_chexbert/
+/.chat_deps/
+/.chat_deps_chexbert/
+/outputs/
+/results/
+/logs/
+/data/
+/cluster/
+/output_willi_server/
+/hpi_results_logs/
+/ISBI Paper /
+/.superpowers/
+/scripts/chat_cluster.env
+__pycache__/
+.pytest_cache/
+*.egg-info/
+*.ckpt
+*.pt
+*.pth
+*.parquet
+*.npy
+*.npz
+*.db
+.DS_Store
