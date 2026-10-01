@@ -6,7 +6,7 @@
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P2",
   "status": "P0-P1 complete 2026-10-01: CPU serving decided (3.05 s/report, 0/20 drift). P2 engine in progress.",
-  "next_action": "P2-A (app requirements + install fastapi/uvicorn/python-multipart into venv; app/ joins SCAN_ROOTS) via implementer; then P2-B..P2-E.",
+  "next_action": "P2-B (on_step callback on beam_search_cached + beam_search_decode with parity tests; app/tiny.py tiny decoder) via implementer.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -261,10 +261,10 @@
     },
     "P2": {
       "title": "Engine (laptop first, then one golden job)",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "P2-A": {
-          "done": false,
+          "done": true,
           "desc": "app/requirements.txt, installed into venv/; app added to the PEP 604/585 scan roots."
         },
         "P2-B": {
@@ -284,7 +284,12 @@
           "desc": "Golden job scripts/chat_engine_golden.py with CPU and GPU wrappers: engine vs script (same node) and vs the published GPU dump."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "commits": "4845694..fdde511",
+        "installed": "fastapi 0.142.2, uvicorn 0.54.0, python-multipart 0.0.32, starlette 1.7.0, pydantic 2.13.0, httpx 0.28.1, httpx2 2.13.1",
+        "tests": "validate 575 passed, 1 skipped",
+        "review": "clean after 3 fix rounds (AST PEP 604 guard incl. nested unions)"
+      },
       "verdict": null
     },
     "P3": {
@@ -516,7 +521,8 @@
     "2026-10-01: P1-B complete: both transports stream; decision loopback + ssh -J (R6 token mandatory for any non-loopback bind).",
     "2026-10-01: P1-C complete; CPU reproduces the published decode on 20/20 and decodes at 3.05 s/report.",
     "2026-10-01: P1-D decision record: CPU serving (U7), loopback + ssh -J, cached decode default, compile off on CPU.",
-    "2026-10-01: current_phase -> P2"
+    "2026-10-01: current_phase -> P2",
+    "2026-10-01: P2-A complete; PEP 604 now enforced by an AST guard over hybrid_xmamba, scripts and app."
   ],
-  "last_updated": "2026-10-01T18:37:10+02:00"
+  "last_updated": "2026-10-01T22:49:45+02:00"
 }

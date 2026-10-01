@@ -1012,7 +1012,7 @@ Pre-registered decision tree (user decision U7: the target is 8 s per turn, and 
 
 Gate: `pytest tests/test_app_engine.py tests/test_app_imaging.py` green. Golden job: engine == script on the same CPU node (0/20 differ); on GPU, the engine's uncached output == the published dump (0/20 differ).
 
-- [ ] **P2-A** `app/requirements.txt`, installed into `venv/`; `app` added to the PEP 604/585 scan roots.
+- [x] **P2-A** `app/requirements.txt`, installed into `venv/`; `app` added to the PEP 604/585 scan roots.
 
 **Files:** create `app/requirements.txt`, `tests/test_app_deps.py`; modify `tests/test_willi_parity.py` (`SCAN_ROOTS`, currently `[REPO_ROOT / "hybrid_xmamba", REPO_ROOT / "scripts"]`).
 
