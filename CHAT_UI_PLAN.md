@@ -1762,7 +1762,8 @@ def test_chat_engine_golden_wrappers_compare_on_the_same_node():
     gpu = (REPO_ROOT / "scripts" / "chat_engine_golden_gpu_h100.sh").read_text()
     for src in (cpu, gpu):
         assert "#SBATCH --partition=pot-hpi-aisc-batch" in src and "--exclude=ga03" in src
-        assert "scripts/chat_engine_golden.py" in src and "scripts/evaluate_report_generation.py" in src
+        assert "scripts/chat_engine_golden.py" in src
+    assert "scripts/evaluate_report_generation.py" in cpu   # the GPU arm compares with the published dump instead
     assert not [l for l in cpu.splitlines() if l.startswith("#SBATCH") and "--gpus" in l]
     assert "#SBATCH --gpus=1" in gpu and "--uncached" in gpu
 ```
@@ -1970,7 +1971,10 @@ class Store:
     def recover_after_restart(self) -> int: ...
     def export(self, session_id: str, fmt: str, client_id: Optional[str]) -> Tuple[str, str, bytes]: ...
     def sweep(self, older_than_days: int) -> int: ...
+    def close(self) -> None: ...                              # releases the EXCLUSIVE lock (D22)
 ```
+
+The connection is `self._con` (tests use it to back-date rows). With `locking_mode=EXCLUSIVE`, a second `Store` on the same file can only open after the first is closed; the server's lifespan closes it at shutdown.
 
 Scoping rule: `client_id=None` (a private server) sees every session; otherwise only rows whose `client_id` matches. `get_message` resolves the session first, so the same rule applies to messages and images.
 
@@ -1994,6 +1998,7 @@ def test_events_get_contiguous_seq_and_survive_reopen(tmp_path):
     s = Store(tmp_path)
     _, _, mid = _turn(s)
     assert [s.append_event(mid, "stage_start", {"stage": "x"})["seq"] for _ in range(3)] == [1, 2, 3]
+    s.close()   # locking_mode=EXCLUSIVE (D22): one open connection owns the file
     reopened = Store(tmp_path)
     assert [e["seq"] for e in reopened.events_after(mid, 0)] == [1, 2, 3]
     assert [e["seq"] for e in reopened.events_after(mid, 2)] == [3]
@@ -2003,10 +2008,11 @@ def test_events_get_contiguous_seq_and_survive_reopen(tmp_path):
 def test_restart_marks_running_turns_as_error(tmp_path):
     s = Store(tmp_path)
     sess, _, mid = _turn(s)
-    del s
-    assert Store(tmp_path).recover_after_restart() == 1
-    msg = Store(tmp_path).get_message(mid, None)
-    assert msg["status"] == "error"
+    s.close()
+    restarted = Store(tmp_path)
+    assert restarted.recover_after_restart() == 1
+    assert restarted.get_message(mid, None)["status"] == "error"
+    restarted.close()
 
 
 def test_public_sessions_are_scoped_to_their_client(tmp_path):   # Review Focus 3
@@ -2148,6 +2154,8 @@ Behaviour that the tests pin:
 - D7: a client disconnect only stops forwarding. `POST /v1/messages/{id}/cancel` sets the turn's `threading.Event`; the engine raises `Cancelled` at the next step; the turn ends `aborted`.
 - Text-only turns: no image and no `test_row` → reuse `store.last_image(session)`; none → 422 `"Attach an X-ray first."`. With text, `parse_command` overrides the drawer options; a non-command text with no image produces a `warning` event `not_a_command` carrying `NOT_A_QA_BOT`, and the turn ends `done` with no report. Text sent with an image is stored as a note (and applied if it is a command).
 - `message_start.image.urls` point at `/v1/messages/<user_message_id>/image?variant=…` (served from P6-B).
+- The pipeline stores every upload at `preprocess` with `store.save_upload` (original bytes, `thumbnail_jpeg`, the model-input PNG), once per session and hash. A text-only turn re-reads `original` through `store.upload_path`. (P6-B only adds the image endpoint and the UI.)
+- Until P5-E, the last three stages end skipped with fixed reasons: `retrieve` → `gallery_unavailable` (no gallery), `label` → `label_off` when `options.label` is false, else `labeler_unavailable` (no labeller), `score` → `no_reference`. P5-E keeps these reasons when it adds the real stages.
 
 Core of the bridge:
 
@@ -2422,7 +2430,7 @@ The Markdown export starts with `# Session <id>` and has one `## Turn <n> — <U
 
 - [ ] **P3-E** OpenAPI summaries and examples for every route; `app/README.md`'s curl walkthrough reproduced by a test.
 
-**Files:** modify `app/server.py`; create `tests/test_app_openapi.py`.
+**Files:** modify `app/server.py`; create `tests/test_app_openapi.py` (with its own `client` fixture, identical to the one in `tests/test_app_api.py`).
 
 1. Failing tests:
 
@@ -2491,7 +2499,7 @@ Gate: in a browser on `--engine tiny`, a full turn streams; reload replays an id
 </html>
 ```
 
-`styles.css`: colour tokens on `:root` (`--bg`, `--fg`, `--muted`, `--accent`, `--card`, `--border`, `--ok`, `--warn`, `--bad`), redefined in `@media (prefers-color-scheme: dark)`; `body` sets an explicit background; grid `sidebar 260px | conversation 1fr | drawer 320px`, collapsing below 800 px (sidebar becomes a toggle) and to one column at 375 px with a 16 px gutter and no horizontal scroll; the banner is sticky.
+`styles.css`: colour tokens on `:root` (`--bg`, `--fg`, `--muted`, `--accent`, `--card`, `--border`, `--ok`, `--warn`, `--bad`), redefined in `@media (prefers-color-scheme: dark)`; `body` sets an explicit background; bars and icons are CSS or Unicode, never SVG (the no-external-requests test forbids any `http://`/`https://` string in `app/static/`, including SVG namespaces); grid `sidebar 260px | conversation 1fr | drawer 320px`, collapsing below 800 px (sidebar becomes a toggle) and to one column at 375 px with a 16 px gutter and no horizontal scroll; the banner is sticky.
 
 Tests:
 
@@ -3134,6 +3142,7 @@ Stage behaviour:
 - `retrieve`: skipped `gallery_unavailable` when no gallery; skipped `k_zero` when both k are 0. Queries with `Encoded.pooled` (D4). The own rank is added when the turn has a `test_row` (picker) or the upload's file hash matches a test image; `identical_to` goes into the preprocess detail on a hash match.
 - `label`: skipped `label_off` or `labeler_unavailable` (the turn still ends `done`). Labels the generated report; adds `neighbor_agreement` for every image neighbour that has labels.
 - `score`: runs only with a reference — `options.reference` (private only; public sends a `warning` `reference_ignored_public` and skips) or the test row's own reference. CheXbert parts need the reference labelled too (one more labeller call). For test rows in private mode, `published` carries the published model line and the floor line from the dumps, plus `live_equals_published`.
+- `PublishedDumps` (in `app/pipeline.py`): `@dataclass class PublishedDumps: model_hyps: List[str]; floor_hyps: List[str]` with `@classmethod load(cls, model_dir: Path, floor_dir: Path)` reading each `hyps.txt` (lines aligned with `test.parquet` rows) and `line(kind: str, row: int) -> Optional[str]`. `create_app(published_dirs={"model": …, "floor": …})` builds it; `None` (laptop) means no `published` key. Only the default engine (`hybrid_150m_m3_rrg`) gets a `model_report` line, since the dump is that model's.
 - `POST /v1/retrieve` (multipart image, `k_images`, `k_reports`): runs preprocess, encode and retrieve on the same single worker; returns the redacted detail. `POST /v1/label {"text"}` → `{"chexbert_14": {...}}`; 503 if the labeller is down. `GET /v1/test-studies?q=&limit=` (private only; 403 public).
 
 Tests (tiny engine + tiny gallery + `RuleLabeler`): a turn's `retrieve` detail has `k_images` neighbours and `k_reports` groups with labels; `label` has one agreement per neighbour whose counts match `label_agreement`; a `test_row` turn has `true_report_rank` equal to `Gallery.own_report_rank` and a `score` stage with `reference_source: "test_split"`; `score_pair` equals `bootstrap_compare.per_sample_rouge_l` on the same pair; labeller down → `label` skipped `labeler_unavailable` and status `done`; no gallery → `retrieve` skipped `gallery_unavailable`; public mode: `report_matches[].report` absent, `test_row` option → 403, `reference` → warning and no `score` event.
@@ -3265,7 +3274,7 @@ Commit `"P6-A: image intake (click/drag/paste) with preview"`.
 
 **Files:** modify `app/pipeline.py` (store variants during preprocess), `app/server.py`, `app/static/render.js`, `app/static/state.js`; create `tests/test_app_images.py`.
 
-- During `preprocess`, an upload is stored once per session and hash: `original.<ext>` (the bytes as uploaded), `thumb.jpg` (`thumbnail_jpeg`, 512 px), `model_input.png` (`Prepared.model_input`).
+- Uploads are already stored at `preprocess` since P3-D: `original.<ext>` (the bytes as uploaded), `thumb.jpg` (`thumbnail_jpeg`, 512 px), `model_input.png` (`Prepared.model_input`). This task serves them.
 - `GET /v1/messages/{id}/image?variant=original|thumb|model_input` accepts the user or the assistant message id of a turn. Uploads: `Cache-Control: private, max-age=3600`. Test-split turns (private only; 403 in public): the original is the 320 px dataset JPEG, the thumbnail is that same file, the model input is generated in memory; all with `Cache-Control: no-store`. Unknown variant → 422; another client's message (public) → 404.
 - Render: the user turn shows the thumbnail (through `loadImage`, D23). The assistant card gets an "Images" row: "Your X-ray" (thumbnail, labelled with the original pixel size from the preprocess detail) and "What the model saw (224×224)". Each opens the viewer (P6-E).
 
@@ -3538,7 +3547,7 @@ def test_startup_sweep_removes_expired_sessions_and_health_reports_the_policy(tm
     old = s.create_session("public", "a")
     s._con.execute("UPDATE sessions SET created_at='2000-01-01T00:00:00+00:00' WHERE id=?", (old["id"],))
     s._con.commit()
-    del s
+    s.close()
     with TestClient(create_app(engine="tiny", home=str(tmp_path), mode="public", token="t")) as c:
         assert c.get("/healthz").json()["retention_days"] == 7
         h = {"Authorization": "Bearer t", "X-Client-Id": "a"}
