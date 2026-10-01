@@ -90,57 +90,33 @@ def test_no_pep604_union_in_runtime_imports():
 
 
 def pep604_hits(source: str, filename: str = "<snippet>") -> List[str]:
-    """Helper: scan source for PEP 604 (X | Y) in all annotation positions.
-    Walks nested annotations to catch violations like Optional[int | str], List[int | None], etc.
-    Returns list of error strings in format: filename:lineno: <unparsed binop> — use Union/Optional.
-    """
-    hits: List[str] = []
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return hits
-
-    def check_annotations_in_node(node: ast.AST) -> None:
-        """Visit all annotation positions in a single node."""
-        annotations_to_check = []
-
-        # Variable annotation: x: int | str (or nested like x: List[int | None])
-        if isinstance(node, ast.AnnAssign):
-            annotations_to_check.append((node.annotation, node.lineno))
-
-        # Function annotations: def f(x: ...) -> ...:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.returns:
-                annotations_to_check.append((node.returns, node.lineno))
-            for arg in (
-                node.args.args
-                + node.args.posonlyargs
-                + node.args.kwonlyargs
-                + ([node.args.vararg] if node.args.vararg else [])
-                + ([node.args.kwarg] if node.args.kwarg else [])
-            ):
-                if arg.annotation:
-                    annotations_to_check.append((arg.annotation, node.lineno))
-
-        # For each annotation, walk its entire subtree and flag BinOp with BitOr
-        for annotation, lineno in annotations_to_check:
-            for subnode in ast.walk(annotation):
-                if isinstance(subnode, ast.BinOp) and isinstance(subnode.op, ast.BitOr):
-                    unparsed = ast.unparse(subnode)
-                    hits.append(
-                        f"{filename}:{lineno}: {unparsed} — use Union[...] or Optional[...] for Python 3.9"
-                    )
-
+    """One hit per annotation that contains an `X | Y` union anywhere in its subtree."""
+    tree = ast.parse(source, filename=filename)
+    annotations = []
     for node in ast.walk(tree):
-        check_annotations_in_node(node)
-
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            a = node.args
+            extra = [x for x in (a.vararg, a.kwarg) if x is not None]
+            for arg in a.posonlyargs + a.args + a.kwonlyargs + extra:
+                if arg.annotation is not None:
+                    annotations.append(arg.annotation)
+            if node.returns is not None:
+                annotations.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            annotations.append(node.annotation)
+    hits = []
+    for ann in annotations:
+        binop = next((n for n in ast.walk(ann)
+                      if isinstance(n, ast.BinOp) and isinstance(n.op, ast.BitOr)), None)
+        if binop is not None:
+            hits.append("{}:{}: {}".format(filename, ann.lineno, ast.unparse(binop)))
     return hits
 
 
 @pytest.mark.willi_parity
 def test_no_pep604_union_in_annotations_ast():
     """Scan all SCAN_ROOTS for X | Y (BinOp with BitOr) in annotation positions using AST.
-    Walks nested annotations to catch violations like Optional[int | str], Dict[str, int | None], etc.
+    Catches violations including nested unions like Optional[int | str], Dict[str, int | None], etc.
     """
     all_hits: List[str] = []
 
@@ -150,60 +126,79 @@ def test_no_pep604_union_in_annotations_ast():
         all_hits.extend(hits)
 
     assert not all_hits, (
-        "PEP 604 X | Y syntax found in annotations — use Union[X, Y] or Optional[X] for py3.9:\n"
+        "PEP 604 X | Y syntax found in annotations — use Union[X, Y] or Optional[X] for Python 3.9:\n"
         + "\n".join(all_hits[:20])
     )
 
 
 @pytest.mark.willi_parity
 def test_pep604_helper_catches_all_root_and_nested_forms():
-    """Self-test: pep604_hits catches all 12 root forms and all 7 nested forms,
-    and ignores bitwise-or outside annotations."""
-    # 12 root-level forms: 6 arg types × 2 (arg vs return)
+    """Self-test: pep604_hits catches exactly 12 root forms, 7 nested forms,
+    and ignores bitwise-or outside annotations (6 silent cases)."""
+    # 12 root-level forms
     root_tests = [
-        ("def f(x: int | str) -> None: pass", "int | str"),  # arg
-        ("def f() -> int | str: pass", "int | str"),  # return
-        ("x: int | str = 1", "int | str"),  # AnnAssign
-        ("def f(*, x: int | str) -> None: pass", "int | str"),  # kwonly
-        ("def f(x: int | str, /) -> None: pass", "int | str"),  # posonly
-        ("def f(*a: int | str) -> None: pass", "int | str"),  # vararg
-        ("def f(**kw: int | str) -> None: pass", "int | str"),  # kwarg
+        ("def f(a: int | None): pass", ": int | None"),
+        ("def f() -> int | None: pass", ": int | None"),
+        ("x: int | None = None", ": int | None"),
+        ("def f(*, a: int | None): pass", ": int | None"),
+        ("def f(a: int | None, /): pass", ": int | None"),
+        ("def f(*a: int | None): pass", ": int | None"),
+        ("def f(**k: int | None): pass", ": int | None"),
+        ("async def f(a: int | None): pass", ": int | None"),
+        ("async def f() -> int | None: pass", ": int | None"),
+        ("class C:\n    x: int | None = None", ": int | None"),
+        ("def f():\n    x: int | None = None", ": int | None"),
+        ("class C:\n    def m(self, a: int | None): pass", ": int | None"),
     ]
 
-    # 7 nested forms: generics and complex types with embedded unions
+    # 7 nested forms
     nested_tests = [
-        ("x: Optional[int | str]", "int | str"),  # Optional + union
-        ("x: List[int | None]", "int | None"),  # List + union
-        ("def f() -> Dict[str, int | None]: pass", "int | None"),  # Dict return
-        ("def f(x: Callable[[int | None], None]) -> None: pass", "int | None"),  # Callable args
-        ("x: List[str | None]", "str | None"),  # List with union
-        ("x: Optional[Path | str]", "Path | str"),  # complex union in Optional
-        ("def f(*a: Tuple[int | None, ...]) -> None: pass", "int | None"),  # Tuple varargs
+        ("x: Optional[int | str]", "int | str"),
+        ("x: List[int | None]", "int | None"),
+        ("def f() -> Dict[str, int | None]: pass", "int | None"),
+        ("def f(x: Callable[[int | None], None]) -> None: pass", "int | None"),
+        ("x: List[str | None]", "str | None"),
+        ("x: Optional[Path | str]", "Path | str"),
+        ("def f(*a: Tuple[int | None, ...]) -> None: pass", "int | None"),
     ]
 
-    # Test all root forms
-    for code, expected_expr in root_tests:
+    # Test all root forms: exactly one hit each
+    for code, expected_substr in root_tests:
         hits = pep604_hits(code)
-        assert len(hits) > 0, f"Failed to catch root form: {code}"
-        assert expected_expr in hits[0], f"Expected '{expected_expr}' in: {hits[0]}"
+        assert len(hits) == 1, f"Expected exactly 1 hit for: {code}, got {len(hits)}"
+        assert expected_substr in hits[0], f"Expected '{expected_substr}' in: {hits[0]}"
 
-    # Test all nested forms
+    # Test all nested forms: exactly one hit each
     for code, expected_expr in nested_tests:
         hits = pep604_hits(code)
-        assert len(hits) > 0, f"Failed to catch nested form: {code}"
+        assert len(hits) == 1, f"Expected exactly 1 hit for: {code}, got {len(hits)}"
         assert expected_expr in hits[0], f"Expected '{expected_expr}' in: {hits[0]}"
 
-    # Test that bitwise-or OUTSIDE annotations is ignored
-    outside_tests = [
-        "x = 1 | 2",  # bitwise-or in value
-        "def f(): return 1 | 2",  # bitwise-or in body
-        "f = lambda: 1 | 2",  # bitwise-or in lambda body
+    # Line number case: annotation on line 3
+    line_case = "def f(\n    a: int,\n    b: int | None,\n): pass"
+    hits = pep604_hits(line_case)
+    assert len(hits) == 1, f"Line number case failed: got {len(hits)} hits"
+    assert ":3: int | None" in hits[0], f"Expected ':3: int | None' in: {hits[0]}"
+
+    # Chained case: exactly one hit for `int | str | None`
+    chained = "x: int | str | None = None"
+    hits = pep604_hits(chained)
+    assert len(hits) == 1, f"Chained case failed: got {len(hits)} hits"
+    assert "int | str | None" in hits[0], f"Expected 'int | str | None' in: {hits[0]}"
+
+    # Silent cases: bitwise-or outside annotations (0 hits each)
+    silent_cases = [
+        "x = 1 | 2",  # value
+        "def f(): return 1 | 2",  # body
+        "f = lambda: 1 | 2",  # lambda body
         "FLAGS = A | B",  # module-level flag
+        "def f(a: int = 1 | 2): pass",  # default value
+        "g = lambda x=1 | 2: x",  # lambda default
     ]
 
-    for code in outside_tests:
+    for code in silent_cases:
         hits = pep604_hits(code)
-        assert len(hits) == 0, f"Should ignore bitwise-or outside annotations in: {code}"
+        assert len(hits) == 0, f"Expected 0 hits for silent case: {code}, got {len(hits)}: {hits}"
 
 
 # ── 3. PEP 585 guard (dict[...] etc. in annotations) ─────────────────────────
