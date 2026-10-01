@@ -6575,3 +6575,14 @@ def test_chat_cluster_setup_wrapper_is_cpu_only_and_additive():
     # after a passing import check, never by `[ -d overlay ]` (behaviour: tests/test_chat_remote.py).
     assert ".chat_deps/.setup_ok" in src and ".chat_deps_chexbert/.setup_ok" in src
     assert "-d .chat_deps" not in src
+
+
+def test_chat_probe_wrapper_is_cpu_only_on_the_renamed_partition():
+    """CHAT_UI_PLAN.md P1-A. CPU-only: a GPU job would hold an accelerator idle for a port check."""
+    src = (REPO_ROOT / "scripts" / "chat_probe_h100.sh").read_text()
+    directives = [l for l in src.splitlines() if l.startswith("#SBATCH")]
+    assert "#SBATCH --partition=pot-hpi-aisc-batch" in directives
+    assert "#SBATCH --account=aisc" in directives and "#SBATCH --qos=aisc" in directives
+    assert not [l for l in directives if "--gpus" in l or "--gres" in l]
+    assert any(l.startswith("#SBATCH --exclude=ga03") for l in directives)
+    assert "app/tunnel/probe_server.py" in src and "--sqlite-probe" in src
