@@ -10,7 +10,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
-from typing import Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 from dataclasses import dataclass
 
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
@@ -514,6 +514,7 @@ class HybridLanguageModel(nn.Module):
         beam_size: int = 3,
         max_new_tokens: int = 100,
         length_penalty: float = 1.0,
+        on_step: Optional[Callable[[int, List[int]], None]] = None,
     ) -> torch.Tensor:
         """Beam search over the recurrent cache, one sample at a time.
 
@@ -524,6 +525,10 @@ class HybridLanguageModel(nn.Module):
 
         Same tie-breaking and length-penalty convention as the uncached version, so the two
         return identical token sequences (asserted in tests/test_mamba3_numerics.py).
+
+        `on_step(step, best_ids)` is called once per step with the current best beam's ids, before
+        that step's forward. It only observes. Raising from it stops decoding, which is how the chat
+        app cancels a turn. The default `None` leaves this method unchanged.
         """
         if input_ids.shape[0] != 1:
             raise ValueError(
@@ -553,7 +558,7 @@ class HybridLanguageModel(nn.Module):
             scores = torch.full((beam_size,), float("-inf"), device=device)
             scores[0] = 0.0
 
-            for _ in range(max_new_tokens):
+            for step in range(max_new_tokens):
                 log_probs = torch.log_softmax(logits.float(), dim=-1)     # (beam, vocab)
                 total = scores.unsqueeze(-1) + log_probs
                 length = tokens.shape[1] + 1
@@ -566,6 +571,10 @@ class HybridLanguageModel(nn.Module):
                 tokens = torch.cat([tokens.index_select(0, beam_idx),
                                     token_idx.unsqueeze(-1)], dim=1)
                 caches = self.reorder_cache(caches, beam_idx)
+                if on_step is not None:
+                    # CHAT_UI_PLAN.md P2-B: observe only. All beams have the same length here, so
+                    # argmax(scores) is also the length-penalised best. Raising stops decoding.
+                    on_step(step, tokens[int(torch.argmax(scores))].tolist())
                 logits = self.step_logits(self.embeddings(token_idx.unsqueeze(-1))[:, 0], caches)
 
             best = int(torch.argmax(scores / (tokens.shape[1] ** length_penalty)))

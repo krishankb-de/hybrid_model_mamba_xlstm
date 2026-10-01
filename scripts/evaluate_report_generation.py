@@ -155,6 +155,7 @@ def beam_search_decode(
     beam_size: int = 3,
     max_new_tokens: int = 100,
     length_penalty: float = 1.0,
+    on_step=None,
 ) -> torch.Tensor:
     """Standard beam search. Operates on ONE sample at a time (input_ids/
     prefix_embeds batch dim must be 1) — model.generate() has no beam-search
@@ -176,7 +177,7 @@ def beam_search_decode(
     # Each beam: (hidden_states, token_ids, cumulative_log_prob)
     beams = [(base_hidden, input_ids, 0.0)]
 
-    for _ in range(max_new_tokens):
+    for step in range(max_new_tokens):
         candidates = []
         for hidden_states, token_ids, score in beams:
             logits = model.forward(inputs_embeds=hidden_states, return_dict=True).logits
@@ -193,6 +194,8 @@ def beam_search_decode(
 
         candidates.sort(key=_ranked, reverse=True)
         beams = candidates[:beam_size]
+        if on_step is not None:   # CHAT_UI_PLAN.md P2-B: observe only; beams[0] is the current best
+            on_step(step, beams[0][1][0].tolist())
 
     best = max(beams, key=lambda c: c[2] / (c[1].shape[1] ** length_penalty))
     return best[1]
