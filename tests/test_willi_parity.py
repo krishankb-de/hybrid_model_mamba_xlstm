@@ -6586,3 +6586,16 @@ def test_chat_probe_wrapper_is_cpu_only_on_the_renamed_partition():
     assert not [l for l in directives if "--gpus" in l or "--gres" in l]
     assert any(l.startswith("#SBATCH --exclude=ga03") for l in directives)
     assert "app/tunnel/probe_server.py" in src and "--sqlite-probe" in src
+
+
+def test_chat_cpu_decode_probe_is_cpu_only_and_decodes_the_published_protocol():
+    """CHAT_UI_PLAN.md P1-C. Same protocol as the published dump, on CPU, compared line by line."""
+    src = (REPO_ROOT / "scripts" / "chat_cpu_decode_probe_h100.sh").read_text()
+    directives = [l for l in src.splitlines() if l.startswith("#SBATCH")]
+    assert "#SBATCH --partition=pot-hpi-aisc-batch" in directives and "#SBATCH --qos=aisc" in directives
+    assert not [l for l in directives if "--gpus" in l or "--gres" in l]
+    assert any(l.startswith("#SBATCH --exclude=ga03") for l in directives)
+    for needle in ("--model-config hybrid_150m_m3_rrg", "--decode beam", "--beam-size 3",
+                   "--max-new-tokens 100", "--cached-decode", "report_gen_m3_test_split_s42/hyps.txt",
+                   "OMP_NUM_THREADS", "HF_HUB_OFFLINE", "cached_vs_published_gpu_differ"):
+        assert needle in src, needle

@@ -2,8 +2,9 @@
 
 Nothing here touches the real cluster. Every test that runs chat_remote.sh runs a COPY of it inside a throwaway
 git tree, with `ssh` and `rsync` replaced by stub executables that record their argv and CHAT_CLUSTER_ENV
-pointing at a fake env file; the assertions are on what the stubs recorded. The setup wrapper is run for real in
-a temp tree (fake thesis checkout, stub `uv`, stub venv pythons). Synthetic data only (R7).
+pointing at a fake env file; the assertions are on what the stubs recorded (the summary-filter tests make the ssh
+stub run the command it is sent against a synthetic log instead, to reach the fixed grep and the mask). The setup
+wrapper is run for real in a temp tree (fake thesis checkout, stub `uv`, stub venv pythons). Synthetic data only (R7).
 """
 import os
 import re
@@ -26,9 +27,10 @@ WRAPPER = "scripts/chat_cluster_setup_h100.sh"
 BASH = "/bin/bash" if os.path.exists("/bin/bash") else "bash"
 
 # The fixed list of lines `summary` may show (R7). Pinned here on purpose: widening it is a decision.
+# P1-C widened the exception shape from an undotted `<Name>Error:` to a dotted class name ending in Error or Exception.
 SUMMARY_PATTERN = (
     r"^(RESULT |\[(probe|golden|gallery|labels|gates|server|setup|compile)\]|=== |ERROR|Traceback"
-    r"|[A-Za-z]*Error:|[[:space:]]*(Elapsed \(wall|Maximum resident)|  Missing keys|  prefix_k =)"
+    r"|([A-Za-z_][A-Za-z0-9_.]*)?(Error|Exception):|[[:space:]]*(Elapsed \(wall|Maximum resident)|  Missing keys|  prefix_k =)"
 )
 
 
@@ -573,6 +575,65 @@ def test_summary_is_capped_at_the_last_200_matching_lines(tmp_path):
     assert box.run("summary", "logs/x.log").returncode == 0
     shown = subprocess.run([BASH, "-c", _remote_command(box)], capture_output=True, text=True).stdout.splitlines()
     assert shown == ["[probe] %d" % i for i in range(50, 250)]
+
+
+RUNNING_SSH = """#!/bin/bash
+# stands in for ssh: $1 is the host, $2 the command line the script sends. Run that line here, so `summary` reaches
+# its fixed grep and its mask end to end instead of leaving a recorded argv behind.
+exec bash -c "$2"
+"""
+
+
+def _summary_of(tmp_path: Path, log_lines: List[str]) -> List[str]:
+    """`summary` end to end over a synthetic log: the script's own grep pattern, then its own mask (R7: synthetic data only)."""
+    cluster = tmp_path / "cluster"
+    (cluster / "logs").mkdir(parents=True)
+    (cluster / "logs" / "x.log").write_text("\n".join(log_lines) + "\n")
+    box = Sandbox(tmp_path / "box", env_text=fake_env(CLUSTER_REPO=str(cluster)))
+    (box.bin / "ssh").write_text(RUNNING_SSH)
+    done = box.run("summary", "logs/x.log")
+    assert done.returncode == 0, done.stderr
+    return done.stdout.splitlines()
+
+
+def test_summary_keeps_dotted_exception_names_and_blanks_their_text(tmp_path):
+    """A failed job has to show WHICH exception it died of. The filter used to keep an exception line only when the class
+    name was undotted at the start of the line, so `sqlite3.OperationalError:` and `urllib.error.URLError:` were dropped
+    and the summary showed a bare `Traceback`. Dotted names pass now; the mask still blanks everything after the marker,
+    because the message can echo report text."""
+    shown = _summary_of(tmp_path, [
+        "Traceback (most recent call last):",
+        "sqlite3.OperationalError: database is locked SYNTHETIC",
+        "urllib.error.URLError: <urlopen error x> SYNTHETIC",
+        "torch.cuda.OutOfMemoryError: SYNTHETIC findings",
+        "app.errors.ChatException: SYNTHETIC findings",
+        "ValueError: SYNTHETIC findings",           # undotted: kept before and after
+        "HTTPException: SYNTHETIC findings",
+        "Exception: SYNTHETIC findings",
+        "Error: SYNTHETIC findings",
+    ])
+    assert shown == [
+        "Traceback (most recent call last):",
+        "sqlite3.OperationalError: <msg>",
+        "urllib.error.URLError: <msg>",
+        "torch.cuda.OutOfMemoryError: <msg>",
+        "app.errors.ChatException: <msg>",
+        "ValueError: <msg>",
+        "HTTPException: <msg>",
+        "Exception: <msg>",
+        "Error: <msg>",
+    ]
+
+
+@pytest.mark.parametrize("line", [
+    "os.path.join: something",                      # dotted, but not an exception name
+    "module.error_handler: SYNTHETIC findings",     # `error` in lower case
+    "sqlite3.OperationalErrors: SYNTHETIC",         # a plural is not an exception class
+    "see urllib.error.URLError: SYNTHETIC",         # not at the start of the line
+    "Study s12345678.Error x: SYNTHETIC",           # a space inside the name
+])
+def test_summary_still_drops_dotted_lines_that_are_not_exception_names(tmp_path, line):
+    assert _summary_of(tmp_path, ["[probe] before", line, "[probe] after"]) == ["[probe] before", "[probe] after"]
 
 
 # ── the exclude file under a real rsync ───────────────────────────────────────

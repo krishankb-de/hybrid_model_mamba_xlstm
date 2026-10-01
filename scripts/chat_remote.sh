@@ -37,8 +37,9 @@ if [[ "$cr" != /* || "$mr" != /* || "$cr/" == */./* || "$mr/" == */./* || "$cr/"
   exit 1
 fi
 
-# Lines a summary may show (R7). Everything else in a log stays on the cluster.
-SUMMARY_PATTERN='^(RESULT |\[(probe|golden|gallery|labels|gates|server|setup|compile)\]|=== |ERROR|Traceback|[A-Za-z]*Error:|[[:space:]]*(Elapsed \(wall|Maximum resident)|  Missing keys|  prefix_k =)'
+# Lines a summary may show (R7). Everything else in a log stays on the cluster. An exception line starts with its class
+# name, dotted or not (sqlite3.OperationalError:, urllib.error.URLError:, HTTPException:); mask() blanks the message.
+SUMMARY_PATTERN='^(RESULT |\[(probe|golden|gallery|labels|gates|server|setup|compile)\]|=== |ERROR|Traceback|([A-Za-z_][A-Za-z0-9_.]*)?(Error|Exception):|[[:space:]]*(Elapsed \(wall|Maximum resident)|  Missing keys|  prefix_k =)'
 
 # Always call quote as the right-hand side of an assignment (x="$(quote ...)"): its `exit 2` happens in a subshell, and
 # inside a larger word, such as the ssh command string, errexit would not see it and an empty argument would be sent.
