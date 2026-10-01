@@ -93,7 +93,8 @@
     "chexbert_env": "scripts/score_chexbert_h100.sh: CPU-only (4 CPUs, 16G, --qos=aisc), VENV .venv_chexbert, HF_HUB_OFFLINE default 0, no HF_HOME override (weights in the default HF cache)",
     "chexbert_cpu_speed": "~0.16 s per report on 4 CPUs: job 2525606 labelled 2 x 2,663 reports in ~15 min (scripts/score_chexbert_standalone.py comment)",
     "cluster_layout": "ssh hpi-hpc works non-interactively (BatchMode); MAIN_REPO=/sc/home/krishankumar.bhushan/hybrid_mamba_xlstm on h100_efficiency @ 5c45527 (user git pull from lx01); it holds outputs/, results/ (report_gen_m3_test_split_s42 present), .venv (python3.11), .venv_chexbert; dataset at /sc/home/krishankumar.bhushan/dataset/mimic_full; /sc/home 200G, 115G used, 86G free; /sc/scratch GPFS 311T free (2026-10-01)",
-    "legal_ai_workflow": "legal project: scripts/sync_to_cluster.sh (rsync -az --delete with .rsync-exclude; .sync_stamp provenance), sync_from_cluster.sh (logs/analysis only), ssh one-liners for sbatch/sacct; chat UI copies it WITHOUT --delete and WITHOUT pulling logs (R7, R8)"
+    "legal_ai_workflow": "legal project: scripts/sync_to_cluster.sh (rsync -az --delete with .rsync-exclude; .sync_stamp provenance), sync_from_cluster.sh (logs/analysis only), ssh one-liners for sbatch/sacct; chat UI copies it WITHOUT --delete and WITHOUT pulling logs (R7, R8)",
+    "sqlite_on_sc_home": "0.007 ms per single-row commit with locking_mode=EXCLUSIVE + WAL + synchronous=NORMAL (job 2590141)"
   },
   "spec_deltas": [
     "D1 partition aisc-batch -> pot-hpi-aisc-batch",
@@ -133,8 +134,8 @@
     "branch": "chat_ui, cut from h100_efficiency @ 5c45527 (has cached decode, E6/E7 decode verification, ISBI neighbour code, partition rename)",
     "retrieval_encoders": "13D image + text encoders from h100_kd_150m_v2_full_data_lr3e6 (user, 2026-10-01); stock BiomedCLIP appears only as the published floor line",
     "default_decoder": "hybrid_150m_m3_rrg s42 (U5)",
-    "transport": "pending P1-B",
-    "bind_policy": "pending P1-B (prefer loopback + ssh -J)",
+    "transport": "P1-B 2026-10-01: path (b) loopback bind + `ssh -N -J hpi-hpc -L <local>:127.0.0.1:<port> krishankumar.bhushan@<node>` STREAMED (job 2590141: frames 1.0 s apart, first at 0.09 s; healthz RTT ~60 ms). Compute-node host keys are unknown to the Mac: use -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=~/.ssh/known_hosts_hpi_nodes (keeps ~/.ssh/known_hosts untouched).",
+    "bind_policy": "loopback (127.0.0.1) by default. Path (a) node bind 0.0.0.0 + `ssh -L <local>:<node>:<port> hpi-hpc` also STREAMED (job 2590142), which proves a non-loopback server is reachable from lx01 (other users) -> R6 token mandatory if ever bound non-loopback.",
     "serving_device": "pending P1-C/P1-D",
     "default_cached_decode": "pending P1-D (expected true)",
     "compile_offered": "pending P1-D (expected no on CPU)",
@@ -215,14 +216,14 @@
     },
     "P1": {
       "title": "Feasibility probes (cluster; measure before building)",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "P1-A": {
-          "done": false,
+          "done": true,
           "desc": "Stdlib streaming probe app/tunnel/probe_server.py + probe_client.py and the CPU wrapper scripts/chat_probe_h100.sh; local tests green."
         },
         "P1-B": {
-          "done": false,
+          "done": true,
           "desc": "Tunnel drill from the laptop: which path streams, round-trip time, SQLite ms per commit on /sc/home; recorded as decisions."
         },
         "P1-C": {
@@ -234,7 +235,16 @@
           "desc": "Decision record in chat_ui_state.json[\"decisions\"]: transport, bind policy, serving device, default cached_decode, whether compile is offered, and the drift ..."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "commit": "673ff88",
+        "tests": "test_app_probe 3 passed + parity; validate 540 passed",
+        "review": "spec ok; plan-mandated Important parked (probe already used)",
+        "jobs": "2590141,2590142",
+        "path_b": "loopback + ssh -J: STREAMED, frames 1.0 s apart, first 0.09 s",
+        "path_a": "node bind via lx01: STREAMED",
+        "rtt_ms": "60",
+        "sqlite_commit_ms": "0.007"
+      },
       "verdict": null
     },
     "P2": {
@@ -488,7 +498,10 @@
     "2026-10-01: user answered all 7 questions (decisions U1-U9), approved the plan (P0-F), authorised autonomous job submission (no deletion/major change without go-ahead), chose subagent-driven execution. Added P0-G (cluster workspace), R7 (no MIMIC text in agent context), R8 (additive only), P9-F (optional compare mode); P1-D now routes >8 s/turn to a GPU serve job.",
     "2026-10-01: P0-F user approval recorded; P0 files committed next.",
     "2026-10-01: P0-G complete. Cluster workspace /sc/home/krishankumar.bhushan/hybrid_chat_ui live; sync without --delete; summary-only logs (R7). Leftover hybrid_chat_ui/.claude/ from the first sync needs the user's go-ahead to remove (R8).",
-    "2026-10-01: current_phase -> P1"
+    "2026-10-01: current_phase -> P1",
+    "2026-10-01: P1-B drill done by the controller: both transports stream (jobs 2590141 loopback/ssh -J, 2590142 node bind/lx01 forward; both scancelled). Decision: loopback + ssh -J. SQLite 0.007 ms/commit on /sc/home.",
+    "2026-10-01: P1-A complete (673ff88).",
+    "2026-10-01: P1-B complete: both transports stream; decision loopback + ssh -J (R6 token mandatory for any non-loopback bind)."
   ],
-  "last_updated": "2026-10-01T17:24:21+02:00"
+  "last_updated": "2026-10-01T17:43:38+02:00"
 }

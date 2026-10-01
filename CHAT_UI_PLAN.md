@@ -628,7 +628,7 @@ Predictions (R4, written before submission):
 - P1-B: loopback bind with `ssh -J lx01 NODE` works (60%); node bind with `ssh -L 8000:NODE:PORT lx01` works (70%). Frames arrive about 1.0 s apart on whichever works. SQLite on `/sc/home`: 1–20 ms per commit.
 - P1-C: cached CPU beam-3 for 100 tokens takes 3–8 s per report at 8 threads; uncached takes 30–120 s. `cached_a` vs `cached_b`: 0/20 differ. Cached vs uncached on CPU: 0/5 differ. CPU vs published GPU: 0–6 of 20 differ. Peak RSS 3–5 GB.
 
-- [ ] **P1-A** Stdlib streaming probe `app/tunnel/probe_server.py` + `probe_client.py` and the CPU wrapper `scripts/chat_probe_h100.sh`; local tests green.
+- [x] **P1-A** Stdlib streaming probe `app/tunnel/probe_server.py` + `probe_client.py` and the CPU wrapper `scripts/chat_probe_h100.sh`; local tests green.
 
 **Files:** create `app/__init__.py`, `app/tunnel/__init__.py`, `app/tunnel/probe_server.py`, `app/tunnel/probe_client.py`, `scripts/chat_probe_h100.sh`, `tests/test_app_probe.py`; modify `tests/test_willi_parity.py`.
 **Produces:** `serve(bind: str, port: int, n_frames: int = 5, interval_s: float = 1.0) -> ThreadingHTTPServer`; `sqlite_commit_ms(path: str, n: int = 200) -> float`; `measure(url: str, timeout: float = 30.0) -> List[float]` (frame arrival times in seconds since the request).
@@ -877,7 +877,7 @@ python3 app/tunnel/probe_server.py --bind "${BIND}" --endpoint-file "${ENDPOINT_
 4. Run `venv/bin/python -m pytest tests/test_app_probe.py tests/test_willi_parity.py -k "probe" -v`. Expected: PASS.
 5–7. Task loop. Commit: `"P1-A: stdlib streaming probe + CPU wrapper"`.
 
-- [ ] **P1-B** Tunnel drill from the laptop: which path streams, round-trip time, SQLite ms per commit on `/sc/home`; recorded as decisions.
+- [x] **P1-B** Tunnel drill from the laptop: which path streams, round-trip time, SQLite ms per commit on `/sc/home`; recorded as decisions.
 
 1. `bash scripts/chat_remote.sh sync`, then `bash scripts/chat_remote.sh submit scripts/chat_probe_h100.sh BIND=127.0.0.1`. Wait for RUNNING (`bash scripts/chat_remote.sh queue`).
 2. Laptop: `EP=$(ssh hpi-hpc cat chat_sessions/probe_endpoint); NODE=${EP%%:*}; PORT=${EP##*:}`.
@@ -3452,15 +3452,18 @@ kill -TERM ${LABELER_PID} 2>/dev/null || true
 # CHAT_UI_PLAN.md P7-C — keep http://localhost:${LOCAL_PORT:-8000} pointed at the chat server,
 # wherever SLURM has (re)started it. Runs on the laptop. Ctrl-C to stop.
 set -u
-LOGIN="${LOGIN:-lx01}"; LOCAL_PORT="${LOCAL_PORT:-8000}"; VIA="${VIA:-jump}"   # jump (loopback bind) | login
+LOGIN="${LOGIN:-hpi-hpc}"; LOCAL_PORT="${LOCAL_PORT:-8000}"; VIA="${VIA:-jump}"   # jump (loopback bind, P1-B) | login
 while true; do
   EP=$(ssh -o BatchMode=yes "${LOGIN}" cat chat_sessions/endpoint 2>/dev/null) || EP=""
   if [ -z "${EP}" ]; then echo "$(date +%T) no endpoint yet; is the job running? (ssh ${LOGIN} squeue --me)"; sleep 15; continue; fi
   NODE="${EP%%:*}"; PORT="${EP##*:}"
   echo "$(date +%T) forwarding localhost:${LOCAL_PORT} -> ${NODE}:${PORT} via ${VIA}"
   if [ "${VIA}" = "jump" ]; then
-    ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -J "${LOGIN}" \
-        -L "${LOCAL_PORT}:127.0.0.1:${PORT}" "${NODE}"
+    # Compute-node host keys are not in ~/.ssh/known_hosts and BatchMode cannot prompt (P1-B: "Host key
+    # verification failed"); accept-new into a separate file, reached only through the login node.
+    ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile="${HOME}/.ssh/known_hosts_hpi_nodes" -J "${LOGIN}" \
+        -L "${LOCAL_PORT}:127.0.0.1:${PORT}" "${CLUSTER_USER:-krishankumar.bhushan}@${NODE}"
   else
     ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L "${LOCAL_PORT}:${NODE}:${PORT}" "${LOGIN}"
   fi
