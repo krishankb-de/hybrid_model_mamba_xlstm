@@ -89,6 +89,56 @@ def test_no_pep604_union_in_runtime_imports():
     )
 
 
+@pytest.mark.willi_parity
+def test_no_pep604_union_in_annotations_ast():
+    """Scan all SCAN_ROOTS for X | Y (BinOp with BitOr) in annotation positions using AST.
+    This catches violations that don't fire at runtime on Python >=3.10 but fail on 3.9."""
+    hits: List[str] = []
+
+    def check_binop(node: ast.AST, filepath: Path) -> None:
+        """Flag ast.BinOp with ast.BitOr in annotation contexts."""
+        annotation_contexts = []
+
+        # Variable annotations: x: int | str
+        if isinstance(node, ast.AnnAssign) and isinstance(node.annotation, ast.BinOp):
+            if isinstance(node.annotation.op, ast.BitOr):
+                annotation_contexts.append((node.annotation, node.lineno))
+
+        # Function argument annotations and return annotations
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.returns and isinstance(node.returns, ast.BinOp) and isinstance(node.returns.op, ast.BitOr):
+                annotation_contexts.append((node.returns, node.lineno))
+            for arg in (
+                node.args.args
+                + node.args.posonlyargs
+                + node.args.kwonlyargs
+                + ([node.args.vararg] if node.args.vararg else [])
+                + ([node.args.kwarg] if node.args.kwarg else [])
+            ):
+                if arg.annotation and isinstance(arg.annotation, ast.BinOp) and isinstance(arg.annotation.op, ast.BitOr):
+                    annotation_contexts.append((arg.annotation, node.lineno))
+
+        for binop, lineno in annotation_contexts:
+            left = getattr(binop.left, 'id', str(binop.left))
+            right = getattr(binop.right, 'id', str(binop.right))
+            hits.append(
+                f"{filepath}:{lineno}: {left} | {right} — use Optional[...] or Union[...] for Python 3.9"
+            )
+
+    for filepath in iter_py_files():
+        try:
+            tree = ast.parse(filepath.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            check_binop(node, filepath)
+
+    assert not hits, (
+        "PEP 604 X | Y syntax found in annotations — use Union[X, Y] or Optional[X] for py3.9:\n"
+        + "\n".join(hits[:20])
+    )
+
+
 # ── 3. PEP 585 guard (dict[...] etc. in annotations) ─────────────────────────
 
 @pytest.mark.willi_parity
