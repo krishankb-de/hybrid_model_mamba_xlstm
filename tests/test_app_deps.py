@@ -1,6 +1,4 @@
 """CHAT_UI_PLAN.md P2-A: the app's runtime deps are importable in this interpreter."""
-import importlib.util
-from pathlib import Path
 
 
 def test_app_dependencies_import():
