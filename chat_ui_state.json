@@ -4,9 +4,9 @@
   "branch": "chat_ui",
   "base": "h100_efficiency @ 5c45527 (2026-09-30, 'SLURM: partition aisc-batch renamed to pot-hpi-aisc-batch')",
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
-  "current_phase": "P1",
-  "status": "P0 complete 2026-10-01. P1 feasibility probes in progress (subagent-driven).",
-  "next_action": "P1-A (stdlib probe server/client + wrapper) via implementer subagent; then the controller runs the P1-B tunnel drill; P1-C (CPU decode probe wrapper) via implementer, job submitted; P1-D decision record by the controller.",
+  "current_phase": "P2",
+  "status": "P0-P1 complete 2026-10-01: CPU serving decided (3.05 s/report, 0/20 drift). P2 engine in progress.",
+  "next_action": "P2-A (app requirements + install fastapi/uvicorn/python-multipart into venv; app/ joins SCAN_ROOTS) via implementer; then P2-B..P2-E.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -94,7 +94,8 @@
     "chexbert_cpu_speed": "~0.16 s per report on 4 CPUs: job 2525606 labelled 2 x 2,663 reports in ~15 min (scripts/score_chexbert_standalone.py comment)",
     "cluster_layout": "ssh hpi-hpc works non-interactively (BatchMode); MAIN_REPO=/sc/home/krishankumar.bhushan/hybrid_mamba_xlstm on h100_efficiency @ 5c45527 (user git pull from lx01); it holds outputs/, results/ (report_gen_m3_test_split_s42 present), .venv (python3.11), .venv_chexbert; dataset at /sc/home/krishankumar.bhushan/dataset/mimic_full; /sc/home 200G, 115G used, 86G free; /sc/scratch GPFS 311T free (2026-10-01)",
     "legal_ai_workflow": "legal project: scripts/sync_to_cluster.sh (rsync -az --delete with .rsync-exclude; .sync_stamp provenance), sync_from_cluster.sh (logs/analysis only), ssh one-liners for sbatch/sacct; chat UI copies it WITHOUT --delete and WITHOUT pulling logs (R7, R8)",
-    "sqlite_on_sc_home": "0.007 ms per single-row commit with locking_mode=EXCLUSIVE + WAL + synchronous=NORMAL (job 2590141)"
+    "sqlite_on_sc_home": "0.007 ms per single-row commit with locking_mode=EXCLUSIVE + WAL + synchronous=NORMAL (job 2590141)",
+    "cpu_decode": "job 2590151: cached_vs_published_gpu 0/20, uncached_vs_published 0/5, cached run-to-run 0/20; job 2590184: cached 3.05 s/report, CPU model load ~117 s, peak RSS 4.5 GB (Xeon Platinum 8480CL, 8 threads)"
   },
   "spec_deltas": [
     "D1 partition aisc-batch -> pot-hpi-aisc-batch",
@@ -136,10 +137,10 @@
     "default_decoder": "hybrid_150m_m3_rrg s42 (U5)",
     "transport": "P1-B 2026-10-01: path (b) loopback bind + `ssh -N -J hpi-hpc -L <local>:127.0.0.1:<port> krishankumar.bhushan@<node>` STREAMED (job 2590141: frames 1.0 s apart, first at 0.09 s; healthz RTT ~60 ms). Compute-node host keys are unknown to the Mac: use -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=~/.ssh/known_hosts_hpi_nodes (keeps ~/.ssh/known_hosts untouched).",
     "bind_policy": "loopback (127.0.0.1) by default. Path (a) node bind 0.0.0.0 + `ssh -L <local>:<node>:<port> hpi-hpc` also STREAMED (job 2590142), which proves a non-loopback server is reachable from lx01 (other users) -> R6 token mandatory if ever bound non-loopback.",
-    "serving_device": "pending P1-C/P1-D",
-    "default_cached_decode": "pending P1-D (expected true)",
-    "compile_offered": "pending P1-D (expected no on CPU)",
-    "drift_note": "pending P1-C",
+    "serving_device": "CPU (U7 rule): cached beam-3/100 tok = 3.05 s per report on 8 Xeon 8480CL threads (job 2590184, warm-corrected) + ~1 s encode/retrieve/label = ~4 s per turn <= 8 s. GPU wrapper not needed.",
+    "default_cached_decode": "true: cached == uncached on CPU (5/5) and cached == published GPU dump (20/20), job 2590151",
+    "compile_offered": "no on CPU (--allow-compile off): E7 verified compile on GPU only; CPU Inductor build unmeasured; 3 s/report needs no speed-up",
+    "drift_note": "CPU decode; matched the published GPU decode on 20/20 probe studies (job 2590151)",
     "U1_prototype_zip": "not used; build from scratch",
     "U2_public_mode": "similarity scores only (no neighbour/report labels, agreement, group sizes, images, ids, text)",
     "U3_public_tunnel": "private demo now; public tunnel is a later stage, only on the user's word (P9-D deferred)",
@@ -216,7 +217,7 @@
     },
     "P1": {
       "title": "Feasibility probes (cluster; measure before building)",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "P1-A": {
           "done": true,
@@ -227,11 +228,11 @@
           "desc": "Tunnel drill from the laptop: which path streams, round-trip time, SQLite ms per commit on /sc/home; recorded as decisions."
         },
         "P1-C": {
-          "done": false,
+          "done": true,
           "desc": "CPU decode probe job scripts/chat_cpu_decode_probe_h100.sh: seconds per report (cached, uncached), determinism, drift from the published GPU dump, peak RSS."
         },
         "P1-D": {
-          "done": false,
+          "done": true,
           "desc": "Decision record in chat_ui_state.json[\"decisions\"]: transport, bind policy, serving device, default cached_decode, whether compile is offered, and the drift ..."
         }
       },
@@ -239,11 +240,22 @@
         "commit": "673ff88",
         "tests": "test_app_probe 3 passed + parity; validate 540 passed",
         "review": "spec ok; plan-mandated Important parked (probe already used)",
-        "jobs": "2590141,2590142",
+        "jobs": "2590151,2590184",
         "path_b": "loopback + ssh -J: STREAMED, frames 1.0 s apart, first 0.09 s",
         "path_a": "node bind via lx01: STREAMED",
         "rtt_ms": "60",
-        "sqlite_commit_ms": "0.007"
+        "sqlite_commit_ms": "0.007",
+        "commits": "69944cb,25419d5",
+        "drift": "cached vs published GPU 0/20; uncached 0/5; run-to-run 0/20",
+        "cached_s_per_report": "3.05",
+        "cpu_load_s": "117",
+        "peak_rss_gb": "4.5",
+        "prediction": "3-8 s: CONFIRMED (low end)",
+        "serving": "CPU",
+        "turn_estimate_s": "4.0",
+        "cached_default": "true",
+        "compile": "off",
+        "drift_note": "matched published GPU decode 20/20"
       },
       "verdict": null
     },
@@ -501,7 +513,10 @@
     "2026-10-01: current_phase -> P1",
     "2026-10-01: P1-B drill done by the controller: both transports stream (jobs 2590141 loopback/ssh -J, 2590142 node bind/lx01 forward; both scancelled). Decision: loopback + ssh -J. SQLite 0.007 ms/commit on /sc/home.",
     "2026-10-01: P1-A complete (673ff88).",
-    "2026-10-01: P1-B complete: both transports stream; decision loopback + ssh -J (R6 token mandatory for any non-loopback bind)."
+    "2026-10-01: P1-B complete: both transports stream; decision loopback + ssh -J (R6 token mandatory for any non-loopback bind).",
+    "2026-10-01: P1-C complete; CPU reproduces the published decode on 20/20 and decodes at 3.05 s/report.",
+    "2026-10-01: P1-D decision record: CPU serving (U7), loopback + ssh -J, cached decode default, compile off on CPU.",
+    "2026-10-01: current_phase -> P2"
   ],
-  "last_updated": "2026-10-01T17:43:38+02:00"
+  "last_updated": "2026-10-01T18:37:10+02:00"
 }

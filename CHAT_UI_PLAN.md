@@ -615,6 +615,8 @@ echo "=== END chat setup ==="
 
 Tests (`tests/test_chat_remote.py`, laptop): `bash -n` passes on both scripts; `chat_remote.sh` contains no `--delete` and no `rm`; `sync` refuses without the env file (`CHAT_CLUSTER_ENV=/nonexistent` → exit 1); `quote` refuses a single quote (`submit x.sh "A=it's"` → exit 2, run with a fake env file and `PATH` where `ssh` is a stub script that records its argv into a temp file); a stubbed `submit scripts/chat_cluster_setup_h100.sh MAIN_REPO=/x -- --time=00:05:00` sends exactly `cd '<repo>' && env 'MAIN_REPO=/x' sbatch --parsable '--time=00:05:00' 'scripts/chat_cluster_setup_h100.sh'`; `mask` turns `s50414267` into `s<num>` and leaves a 7-digit job id alone; `.rsync-exclude-chat` lists `/outputs/`, `/results/`, `/.venv/`, `/venv/`, `/logs/`, `/data/`, `/.git/`, `/ISBI Paper /` and `*.parquet`. Parity test: the setup wrapper is CPU-only on `pot-hpi-aisc-batch` with `--qos=aisc`, excludes ga03, contains no `rm ` and no `ln -sf`, installs only with `--target`.
 
+**As built (4a786cb, d77debd, 69944cb):** the committed `scripts/chat_remote.sh` and `scripts/chat_cluster_setup_h100.sh` are authoritative where they differ from the code above: `SUMMARY_PATTERN` also keeps dotted exception names, `mask` blanks every exception message to `<Name>: <msg>` and masks only digit runs not preceded by `.`; `env` arguments must be `NAME=value`; `CLUSTER_REPO` and `MAIN_REPO` may not overlap; `.sync_stamp` is sent last and alone; the setup job installs with `uv pip install --target` (the shared venvs have no pip), guards on `.setup_ok` sentinels and exits 1 on any `[setup] ERROR`.
+
 Then: `cp scripts/chat_cluster.env.example scripts/chat_cluster.env`; `bash scripts/chat_remote.sh sync`; `bash scripts/chat_remote.sh submit scripts/chat_cluster_setup_h100.sh MAIN_REPO=/sc/home/krishankumar.bhushan/hybrid_mamba_xlstm`; when it ends, `state <id>` and `summary logs/chat_setup_<id>.log`. Gate: every `[setup]` line is `ok`/`linked`/`present`, no `ERROR`, both venv lines print. Tick with the job id and the versions. Commit `"P0-G: cluster workspace (rsync without delete, summary-only logs)"`.
 
 ### P1 — Feasibility probes (cluster; measure before building)
@@ -888,7 +890,7 @@ python3 app/tunnel/probe_server.py --bind "${BIND}" --endpoint-file "${ENDPOINT_
 
 Decision rule: prefer (b), because it never exposes a port on the cluster network. If only (a) works, R6 makes the token mandatory in every mode. If neither works, stop and ask the user: the transport design must change before P7.
 
-- [ ] **P1-C** CPU decode probe job `scripts/chat_cpu_decode_probe_h100.sh`: seconds per report (cached, uncached), determinism, drift from the published GPU dump, peak RSS.
+- [x] **P1-C** CPU decode probe job `scripts/chat_cpu_decode_probe_h100.sh`: seconds per report (cached, uncached), determinism, drift from the published GPU dump, peak RSS.
 
 **Files:** create `scripts/chat_cpu_decode_probe_h100.sh`; modify `tests/test_willi_parity.py`.
 
@@ -995,7 +997,9 @@ echo "=== seconds per report: (wall(cached_a) - wall(cached_1)) / (N - 1); uncac
 4. Parity test passes locally. Task loop steps 5–7, commit `"P1-C: CPU decode probe wrapper"`.
 5. `bash scripts/chat_remote.sh sync && bash scripts/chat_remote.sh submit scripts/chat_cpu_decode_probe_h100.sh`. When it ends, `summary logs/chat_cpu_decode_probe_<id>.log` gives the `RESULT` line, wall times, RSS (and `lscpu`'s model line, which the wrapper prints as `[probe] cpu …`). Record: `tick P1-C --evidence job=<id> log=logs/chat_cpu_decode_probe_<id>.log s_per_report_cached=<…> s_per_report_uncached=<…> cpu_vs_gpu_differ=<k>/20 rss_gb=<…>`, and compare with the P1 predictions.
 
-- [ ] **P1-D** Decision record in `chat_ui_state.json["decisions"]`: transport, bind policy, serving device, default `cached_decode`, whether `compile` is offered, and the drift note every card will show.
+**As built (69944cb, 25419d5):** the committed wrapper runs a throwaway `warm` arm first, requires `/usr/bin/time`, prints peak RSS as `peak_rss_mb=`, masks exception messages in its failure path, emits RESULT as two lines (run health with observed counts, then drift) over the arms that finished, and exits 1 if any arm failed. **Results:** job 2590151 — CPU cached vs published GPU decode 0/20 differ, uncached 0/5, cached run-to-run 0/20; job 2590184 (warm) — cached 3.05 s per report ((177.76 − 119.86)/19), model load on CPU ≈ 117 s, peak RSS 4.5 GB, Xeon Platinum 8480CL, 8 threads.
+
+- [x] **P1-D** Decision record in `chat_ui_state.json["decisions"]`: transport, bind policy, serving device, default `cached_decode`, whether `compile` is offered, and the drift note every card will show.
 
 Pre-registered decision tree (user decision U7: the target is 8 s per turn, and a GPU job takes over automatically when CPU cannot meet it):
 
