@@ -15,6 +15,10 @@
 /ISBI Paper /
 /.superpowers/
 /scripts/chat_cluster.env
+# local tool settings and PhysioNet session cookies are credentials: never ship them
+/.claude/
+.physionet_session
+*.physionet_session
 __pycache__/
 .pytest_cache/
 *.egg-info/

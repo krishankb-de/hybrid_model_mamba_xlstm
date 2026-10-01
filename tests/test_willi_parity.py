@@ -6571,3 +6571,7 @@ def test_chat_cluster_setup_wrapper_is_cpu_only_and_additive():
     installs = [l for l in code if "pip install" in l]
     assert len(installs) == 2, "one overlay per venv"
     assert all("--target" in l for l in installs), "web deps go into overlays, never into the shared venvs"
+    # A failed `uv pip install --target` leaves its directory behind, so a re-run is guarded by a sentinel written
+    # after a passing import check, never by `[ -d overlay ]` (behaviour: tests/test_chat_remote.py).
+    assert ".chat_deps/.setup_ok" in src and ".chat_deps_chexbert/.setup_ok" in src
+    assert "-d .chat_deps" not in src
