@@ -6599,3 +6599,9 @@ def test_chat_cpu_decode_probe_is_cpu_only_and_decodes_the_published_protocol():
                    "--max-new-tokens 100", "--cached-decode", "report_gen_m3_test_split_s42/hyps.txt",
                    "OMP_NUM_THREADS", "HF_HUB_OFFLINE", "cached_vs_published_gpu_differ"):
         assert needle in src, needle
+    # fix round 1 (behaviour: tests/test_chat_cpu_probe.py). A throwaway warm-up arm pays the cold page-cache read before
+    # the one-study arm that is subtracted as load cost; GNU time is required, never an untimed fallback.
+    order = [src.index(arm) for arm in ("run warm --num-samples 1 --cached-decode", "run cached_1 --num-samples 1",
+                                        "run cached_a ", "run cached_b ", "run uncached ")]
+    assert order == sorted(order), "warm, cached_1, cached_a, cached_b, uncached"
+    assert 'echo "ERROR: /usr/bin/time missing"' in src and "TIME_V" not in src

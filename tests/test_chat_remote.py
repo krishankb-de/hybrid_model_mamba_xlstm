@@ -630,7 +630,7 @@ def test_summary_keeps_dotted_exception_names_and_blanks_their_text(tmp_path):
     "module.error_handler: SYNTHETIC findings",     # `error` in lower case
     "sqlite3.OperationalErrors: SYNTHETIC",         # a plural is not an exception class
     "see urllib.error.URLError: SYNTHETIC",         # not at the start of the line
-    "Study s12345678.Error x: SYNTHETIC",           # a space inside the name
+    "Study s12345678.Error: SYNTHETIC",             # a space inside the name (the marker itself is right)
 ])
 def test_summary_still_drops_dotted_lines_that_are_not_exception_names(tmp_path, line):
     assert _summary_of(tmp_path, ["[probe] before", line, "[probe] after"]) == ["[probe] before", "[probe] after"]
