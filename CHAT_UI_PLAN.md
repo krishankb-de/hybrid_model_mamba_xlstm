@@ -428,7 +428,7 @@ git commit -m "P0: chat UI plan-of-record, state file, helper registration"
 venv/bin/python scripts/mamba3_state.py --plan chat_ui tick P0-F --note "<date>: user approved; P0 committed"
 ```
 
-- [ ] **P0-G** Cluster workspace: `scripts/chat_remote.sh` (sync without `--delete`, submit, state, summary), `.rsync-exclude-chat`, `scripts/chat_cluster.env.example`, setup job; first sync and setup job green.
+- [x] **P0-G** Cluster workspace: `scripts/chat_remote.sh` (sync without `--delete`, submit, state, summary), `.rsync-exclude-chat`, `scripts/chat_cluster.env.example`, setup job; first sync and setup job green.
 
 **Files:** create `scripts/chat_remote.sh`, `scripts/chat_cluster.env.example`, `.rsync-exclude-chat`, `scripts/chat_cluster_setup_h100.sh`, `tests/test_chat_remote.py`; create the local, gitignored `scripts/chat_cluster.env`; modify `.gitignore` (`scripts/chat_cluster.env`, `.sync_stamp`), `tests/test_willi_parity.py`.
 **Produces:** the four `chat_remote.sh` subcommands every later cluster step uses; `.sync_stamp` (`<UTC time> <git HEAD sha> <clean|dirty>`) in `CLUSTER_REPO`, which the engine's provenance reads where there is no `.git` (P2-D); on the cluster, `CLUSTER_REPO/{outputs,results,.venv,.venv_chexbert}` symlinks into `MAIN_REPO`, and the overlay directories `CLUSTER_REPO/.chat_deps` (for `.venv`) and `CLUSTER_REPO/.chat_deps_chexbert` (for `.venv_chexbert`) holding `fastapi>=0.115 uvicorn>=0.30 python-multipart>=0.0.9 httpx>=0.27` (the second without `python-multipart`/`httpx`).
