@@ -30,7 +30,7 @@ import torch
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCAN_ROOTS = [REPO_ROOT / "hybrid_xmamba", REPO_ROOT / "scripts"]
+SCAN_ROOTS = [REPO_ROOT / "hybrid_xmamba", REPO_ROOT / "scripts", REPO_ROOT / "app"]
 BUILTIN_GENERICS = {"dict", "list", "tuple", "set", "type", "frozenset"}
 
 
