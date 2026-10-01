@@ -1052,7 +1052,7 @@ Run `venv/bin/pip install -r app/requirements.txt` and record the installed vers
 4. `venv/bin/python -m pytest tests/test_app_deps.py tests/test_willi_parity.py -q` → PASS.
 5–7. Task loop. Commit `"P2-A: app deps; app/ scanned for PEP 604/585"`.
 
-- [ ] **P2-B** `on_step` callback on `beam_search_cached` and `beam_search_decode`, with parity tests; tiny decoder in `app/tiny.py`.
+- [x] **P2-B** `on_step` callback on `beam_search_cached` and `beam_search_decode`, with parity tests; tiny decoder in `app/tiny.py`.
 
 **Files:** create `app/tiny.py`, `tests/test_app_engine.py`; modify `hybrid_xmamba/models/hybrid_lm.py` (`beam_search_cached`, lines 510–570; typing import at line 13), `scripts/evaluate_report_generation.py` (`beam_search_decode`, lines 151–206).
 **Produces:** `beam_search_cached(..., on_step: Optional[Callable[[int, List[int]], None]] = None)` and the same keyword on `beam_search_decode`. `app.tiny.TINY_VOCAB` (exactly 97 entries), `tiny_decoder_config() -> HybridConfig`, `tiny_decoder(seed: int = 0) -> HybridLanguageModel`, `TinyTokenizer.decode(ids, skip_special_tokens=True) -> str`.

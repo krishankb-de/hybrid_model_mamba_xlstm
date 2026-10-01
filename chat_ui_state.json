@@ -6,7 +6,7 @@
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P2",
   "status": "P0-P1 complete 2026-10-01: CPU serving decided (3.05 s/report, 0/20 drift). P2 engine in progress.",
-  "next_action": "P2-B (on_step callback on beam_search_cached + beam_search_decode with parity tests; app/tiny.py tiny decoder) via implementer.",
+  "next_action": "P2-C (app/imaging.py: upload sniffing, 16-bit, EXIF, published transform, model-input image, thumbnails; tests/app_helpers.py) via implementer.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -268,7 +268,7 @@
           "desc": "app/requirements.txt, installed into venv/; app added to the PEP 604/585 scan roots."
         },
         "P2-B": {
-          "done": false,
+          "done": true,
           "desc": "on_step callback on beam_search_cached and beam_search_decode, with parity tests; tiny decoder in app/tiny.py."
         },
         "P2-C": {
@@ -288,7 +288,10 @@
         "commits": "4845694..fdde511",
         "installed": "fastapi 0.142.2, uvicorn 0.54.0, python-multipart 0.0.32, starlette 1.7.0, pydantic 2.13.0, httpx 0.28.1, httpx2 2.13.1",
         "tests": "validate 575 passed, 1 skipped",
-        "review": "clean after 3 fix rounds (AST PEP 604 guard incl. nested unions)"
+        "review": "clean after 3 fix rounds (AST PEP 604 guard incl. nested unions)",
+        "commit": "ea64c56",
+        "test": "tests/test_app_engine.py::test_on_step_leaves_cached_beam_output_unchanged (+4); test_mamba3_numerics cached==uncached",
+        "r3": "thesis diff 15+/3-, callback guarded by if on_step is not None; reviewer sweep 48/48 identical snapshots"
       },
       "verdict": null
     },
@@ -522,7 +525,8 @@
     "2026-10-01: P1-C complete; CPU reproduces the published decode on 20/20 and decodes at 3.05 s/report.",
     "2026-10-01: P1-D decision record: CPU serving (U7), loopback + ssh -J, cached decode default, compile off on CPU.",
     "2026-10-01: current_phase -> P2",
-    "2026-10-01: P2-A complete; PEP 604 now enforced by an AST guard over hybrid_xmamba, scripts and app."
+    "2026-10-01: P2-A complete; PEP 604 now enforced by an AST guard over hybrid_xmamba, scripts and app.",
+    "2026-10-01: P2-B complete; on_step on both beam searches, parity-tested."
   ],
-  "last_updated": "2026-10-01T22:49:45+02:00"
+  "last_updated": "2026-10-01T23:05:47+02:00"
 }
