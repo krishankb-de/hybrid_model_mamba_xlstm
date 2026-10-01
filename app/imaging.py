@@ -5,6 +5,9 @@ ToTensor -> Normalize(CLIP mean/std), the transform in run_checkpoint_inspection
 MIMIC JPEGs, so two things happen first that MIMIC never needed: EXIF orientation is applied (the
 model must see what the user sees) and 16-bit grayscale is rescaled to 8-bit (PIL's convert would
 clip it to white). For an 8-bit, EXIF-free grayscale JPEG, both are no-ops.
+
+Only UploadError leaves load_upload, and its message is plain text for the user: the bounds are checked
+from the header before any pixel is decoded, and unreadable metadata never escapes as a Python exception.
 """
 import io
 from typing import Any, Callable, Dict, Tuple
@@ -18,6 +21,13 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MIN_SIDE = 64
 MAX_PIXELS = 50_000_000
 FORMATS_MSG = "Use a PNG, JPEG or WEBP image."
+TOO_LARGE_MSG = "Image is larger than {} MB.".format(MAX_UPLOAD_BYTES // (1024 * 1024))
+TOO_MANY_PIXELS_MSG = "Image is larger than {} megapixels.".format(MAX_PIXELS // 1_000_000)
+TOO_SMALL_MSG = "Each side must be at least {} pixels.".format(MIN_SIDE)
+UNREADABLE_MSG = "Could not read the image. The file may be damaged or incomplete."
+ORIENTATION_MSG = "Could not read the image's orientation data. Re-export it as PNG or JPEG."
+EXIF_ORIENTATION = 0x0112
+TRANSPOSING_ORIENTATIONS = (2, 3, 4, 5, 6, 7, 8)   # the values ImageOps.exif_transpose acts on
 
 
 class UploadError(ValueError):
@@ -37,37 +47,56 @@ def sniff_format(data: bytes) -> str:
 
 
 def _to_8bit(img: Image.Image) -> Image.Image:
+    """16-bit grayscale -> 8-bit by min-max rescale (PIL's own convert clips it to white).
+
+    Known limit: Pillow decodes 16-bit RGB, RGBA and gray+alpha PNGs straight to 8-bit and keeps only the high
+    byte, so those never reach this function and are not rescaled (a 12-bit RGB export comes out near black).
+    """
     if img.mode in ("I;16", "I;16B", "I;16L", "I", "F"):
-        arr = np.asarray(img, dtype=np.float64)
+        arr = np.array(img, dtype=np.float32)          # float32 and in place: one float64 copy of 49 MP is 392 MB
         lo, hi = float(arr.min()), float(arr.max())
-        arr = (arr - lo) / max(hi - lo, 1.0) * 255.0
-        return Image.fromarray(np.clip(np.rint(arr), 0, 255).astype(np.uint8))
+        arr -= lo
+        arr *= 255.0 / max(hi - lo, 1.0)
+        np.rint(arr, out=arr)
+        return Image.fromarray(np.clip(arr, 0, 255, out=arr).astype(np.uint8))
     return img
 
 
 def load_upload(data: bytes) -> Tuple[Image.Image, Dict[str, Any]]:
     """bytes -> the 8-bit RGB image the model and the viewer both use, plus facts for the stage detail."""
     if len(data) > MAX_UPLOAD_BYTES:
-        raise UploadError("Image is larger than 20 MB.")
+        raise UploadError(TOO_LARGE_MSG)
     fmt = sniff_format(data)
     try:
-        img = Image.open(io.BytesIO(data))
-        if img.width * img.height > MAX_PIXELS:
-            raise UploadError("Image is larger than 50 megapixels.")
-        img.seek(0)
-        img.load()
-    except UploadError:
-        raise
-    except Exception as exc:   # truncated or corrupt file, decompression bomb
-        raise UploadError("Could not read the image ({}).".format(type(exc).__name__))
-    mode_in = img.mode
-    # exif_transpose returns a copy even when it does nothing, so only the tag says whether it acted
-    # (2-8 are the orientations it handles; 1, no tag, or a junk value leaves the pixels alone)
-    exif_transposed = img.getexif().get(0x0112, 1) in (2, 3, 4, 5, 6, 7, 8)
-    img = _to_8bit(ImageOps.exif_transpose(img)).convert("RGB")
+        img = Image.open(io.BytesIO(data))             # reads the header only
+        img.seek(0)                                    # an animated file contributes its first frame
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning):
+        raise UploadError(TOO_MANY_PIXELS_MSG) from None
+    except Exception:   # not a readable image of the sniffed format
+        raise UploadError(UNREADABLE_MSG) from None
+    # the bounds come from the header, before a pixel is decoded (EXIF orientation swaps the sides, not the minimum)
+    if img.width * img.height > MAX_PIXELS:
+        raise UploadError(TOO_MANY_PIXELS_MSG)
     if min(img.size) < MIN_SIDE:
-        raise UploadError("Image is smaller than 64×64 pixels.")
-    return img, {"format": fmt, "mode": mode_in, "input_px": list(img.size), "exif_transposed": bool(exif_transposed)}
+        raise UploadError(TOO_SMALL_MSG)
+    try:
+        img.load()
+    except Exception:   # truncated or corrupt pixel data
+        raise UploadError(UNREADABLE_MSG) from None
+    mode_in = img.mode
+    try:
+        orientation = img.getexif().get(EXIF_ORIENTATION, 1)
+    except Exception:   # unreadable EXIF (bad TIFF header, bad hex in a PNG text chunk): treat it as upright
+        orientation = 1
+    # exif_transpose returns a copy even when it does nothing, so only the tag says whether it acted
+    exif_transposed = orientation in TRANSPOSING_ORIENTATIONS
+    if exif_transposed:
+        try:
+            img = ImageOps.exif_transpose(img)
+        except Exception:   # it rewrites the metadata after rotating and trips on malformed entries
+            raise UploadError(ORIENTATION_MSG) from None
+    img = _to_8bit(img).convert("RGB")
+    return img, {"format": fmt, "mode": mode_in, "input_px": list(img.size), "exif_transposed": exif_transposed}
 
 
 def model_transform() -> Callable:
