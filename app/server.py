@@ -5,6 +5,8 @@ Server-Sent Events. Every check that can refuse a turn runs before the stream op
 the stream is open, a failure is an error event. A client that disconnects only stops the forwarding: the turn keeps
 running and storing its events, and GET /v1/messages/{id}?after=<seq> picks them up (D7).
 
+Every route carries its own OpenAPI summary, description and refusals (P3-E), so /docs is the API reference.
+
 Development server until P7-B adds the CLI: venv/bin/uvicorn --factory app.server:create_app
 """
 import asyncio
@@ -33,9 +35,10 @@ from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
 
-from app.commands import parse_command
+from app.commands import COMMAND_HELP, parse_command
 from app.engine import REPO_ROOT, Engine, build_engine
-from app.imaging import MAX_UPLOAD_BYTES, TOO_LARGE_MSG, UploadError, load_upload, model_input_image, thumbnail_jpeg
+from app.imaging import (MAX_UPLOAD_BYTES, MIN_SIDE, TOO_LARGE_MSG, UploadError, load_upload, model_input_image,
+                         thumbnail_jpeg)
 from app.pipeline import Pipeline, TurnJob, Worker
 from app.redact import redact_card
 from app.schemas import DISCLAIMER, Options, error_body
@@ -61,6 +64,80 @@ NO_TOKEN_MSG = "This server has no token; connect through loopback."
 PLACEHOLDER = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>CXR Report Chat</title></head>"
                "<body><p>{}</p><p>The chat page is not built yet. The API is under <code>/v1/</code>, and its "
                "reference is at <a href=\"/docs\">/docs</a>.</p></body></html>")
+
+# ---- the OpenAPI reference (P3-E): what /docs and /openapi.json say. Metadata only: no route reads any of it. ------
+UPLOAD_MB = MAX_UPLOAD_BYTES // (1024 * 1024)
+# The published protocol as the options form field's string. FastAPI drops Form(openapi_examples=...) from the spec (a
+# form's fields become one body model), so it is the field's own `examples`; P8-E's README walkthrough copies it.
+OPTIONS_EXAMPLE = ('{"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "cached_decode": true, "compile": false, '
+                   '"k_images": 4, "k_reports": 3, "label": true, "reference": null, "display_repair": false}')
+
+
+def _option_ranges() -> str:
+    """"beam_size 1-8, max_new_tokens 16-200, ...", read from Options so the reference cannot drift from it."""
+    props = Options.model_json_schema()["properties"]
+    return ", ".join("{} {}-{}".format(name, p["minimum"], p["maximum"]) for name, p in props.items() if "maximum" in p)
+
+
+API_DESCRIPTION = (
+    DISCLAIMER + " Attach a chest X-ray to a session: the turn streams its stages and the generated report as "
+    "Server-Sent Events, and sessions are stored, replayed and exported.\n\n"
+    "**Access.** When the server has a token, every `/v1` route needs `Authorization: Bearer <token>` (401 without "
+    "it); `/healthz` stays open. A server with no token answers loopback connections only (403 from anywhere else). "
+    "In public mode the session and message routes also need an `X-Client-Id` header (400 without it) and show only "
+    "that client's data.\n\n"
+    "**Errors.** A refusal is JSON, `{\"type\": \"error\", \"error\": {\"type\": kind, \"message\": text}}`, with the "
+    "kind of its status: " + ", ".join("{} {}".format(status, kind) for status, kind in ERROR_KINDS.items()) + ".")
+CLIENT_ID_DOC = ("Public mode only: names the caller, 1 to 128 visible ASCII characters, and scopes its sessions and "
+                 "messages. A private server ignores it.")
+IMAGE_DOC = ("The chest X-ray: PNG, JPEG or WEBP, at most {} MB, each side at least {} px. Leave it out to run the "
+             "session's latest image again.".format(UPLOAD_MB, MIN_SIDE))
+TEXT_DOC = ("A command that changes this turn's options, or a note kept with the turn. " + COMMAND_HELP + " With no "
+            "image, any other text is answered with the command list and no model runs.")
+OPTIONS_DOC = ("The turn's options as a JSON object with the keys " + ", ".join(Options.model_fields) + ". A key left "
+               "out takes its default, the published protocol; the ranges are " + _option_ranges() + ". An unknown "
+               "key or a value out of range is a 422, and anything that is not a JSON object a 400. `reference` and "
+               "`test_row` work in private mode only. A command in `text` is applied on top.")
+REFUSALS = {   # what a status means in the reference; a route that can answer it declares it with _refusals()
+    400: "The request is malformed: `options` is not a JSON object, or in public mode `X-Client-Id` is missing or "
+         "invalid.",
+    403: "A test-split study was asked for in public mode.",
+    404: "The session or message does not exist or was deleted, or in public mode it belongs to another client.",
+    413: "The image is over the {} MB upload limit.".format(UPLOAD_MB),
+    422: "The request failed validation: a parameter, an option, the model or the image cannot be used.",
+    429: "The server is busy: its queue of accepted turns is full.",
+    500: "The server could not store the image.",
+}
+DEFAULT_REFUSAL = {   # every route's `default`: what the guard and the client id answer before any route runs
+    "description": "Any other refusal, in the same envelope: 401 when the server has a token and the request lacks it, "
+                   "400 in public mode without a valid `X-Client-Id`, 403 from a tokenless server to a connection "
+                   "that is not loopback.",
+    "content": {"application/json": {"example": error_body(
+        ERROR_KINDS[401], "Missing or wrong token: send Authorization: Bearer <token>.")}}}
+STREAM_RESPONSE = {200: {   # the turn is Server-Sent Events, not JSON
+    "description": "The turn's events, one frame each (`event: <name>`, then `data: <one-line JSON>`), from "
+                   "`message_start` to `message_stop`; a `: ping` comment goes out every {:g} s while no event "
+                   "comes.".format(PING_S),
+    "headers": {"X-Message-Id": {"description": "The new message's id, sent before the first event.",
+                                 "schema": {"type": "string"}}},
+    "content": {"text/event-stream": {"schema": {"type": "string"}}}}}
+EXPORT_RESPONSE = {200: {   # JSON is FastAPI's default; Markdown is the other format
+    "description": "The session as a file: JSON (the default) or Markdown.",
+    "headers": {"Content-Disposition": {"description": "An attachment named session-<id>.json or session-<id>.md.",
+                                        "schema": {"type": "string"}}},
+    "content": {"text/markdown": {"schema": {"type": "string"}}}}}
+
+
+def _refusals(messages: Dict[int, str]) -> Dict[Any, Dict[str, Any]]:
+    """responses= for a route: each status it refuses with, as the error envelope carrying the message it really sends,
+    and the default every route shares. A route that declares a default (or its own 422) is not given FastAPI's own
+    422, whose HTTPValidationError body this API never sends."""
+    out: Dict[Any, Dict[str, Any]] = {
+        status: {"description": "{}: {}".format(ERROR_KINDS[status], REFUSALS[status]),
+                 "content": {"application/json": {"example": error_body(ERROR_KINDS[status], message)}}}
+        for status, message in messages.items()}
+    out["default"] = DEFAULT_REFUSAL
+    return out
 
 
 class NewSession(BaseModel):
@@ -304,7 +381,7 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         await run_in_threadpool(worker.shutdown)
         store.close()
 
-    app = FastAPI(title="CXR report chat", lifespan=lifespan)
+    app = FastAPI(title="CXR report chat", description=API_DESCRIPTION, lifespan=lifespan)
     app.state.store, app.state.engines, app.state.worker = store, engines, worker
     app.state.mode, app.state.default_model = mode, default_model
     app.state.gallery_dir, app.state.labeler_url, app.state.published_dirs = gallery_dir, labeler_url, published_dirs
@@ -322,7 +399,7 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     async def invalid_request(_: Request, exc: RequestValidationError) -> JSONResponse:
         return _error(422, "Invalid request: " + _readable(exc.errors()))
 
-    def client_scope(x_client_id: Optional[str] = Header(None)) -> Optional[str]:
+    def client_scope(x_client_id: Optional[str] = Header(None, description=CLIENT_ID_DOC)) -> Optional[str]:
         """D8: the X-Client-Id that scopes sessions and messages in public mode; None (every session) in private."""
         if mode == "private":
             return None
@@ -351,39 +428,76 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
 
     app.mount("/static", _StaticFiles(directory=str(static_dir), check_dir=False), name="static")
 
-    @app.get("/healthz")
+    @app.get("/healthz", summary="Check the server",
+             description="The server's mode, default model, turns in flight and queue cap. It needs no token.")
     def healthz():
         return {"status": "ok", "mode": mode, "default_model": default_model, "turns_in_flight": worker.in_flight,
                 "queue_cap": queue_cap}
 
-    @app.get("/v1/models")
+    @app.get("/v1/models", summary="List models", responses=_refusals({}),
+             description="The models this server can run, each with its card (checkpoint, device, architecture "
+                         "settings, whether decoding can be cached), and the default model, the mode and whether "
+                         "`compile` is allowed. In public mode a card names its checkpoint by file name only.")
     def list_models():
         return {"default_model": default_model, "mode": mode, "allow_compile": allow_compile,
                 "models": [redact_card(e.card(), mode) for e in engines.values()]}
 
-    @app.post("/v1/sessions")
+    @app.post("/v1/sessions", summary="Create a session",
+              description="Starts an empty session in the server's mode; `title` is optional, and an untitled session "
+                          "is named by its first turn. Answers 422 for an unknown body field.",
+              responses=_refusals({422: "Invalid request: nope: Extra inputs are not permitted"}))
     def create_session(body: Optional[NewSession] = None, client_id: Optional[str] = Depends(client_scope)):
         return store.create_session(mode, client_id, body.title if body else "")
 
-    @app.get("/v1/sessions")
+    @app.get("/v1/sessions", summary="List sessions",
+             description="The sessions you can see, newest first, `limit` at a time (1 to 200, default 50): pass a "
+                         "page's `next_cursor` as `cursor` to get the next page, and a null `next_cursor` ends the "
+                         "list. Answers 422 for a `limit` outside 1 to 200.",
+             responses=_refusals({422: "Invalid request: limit: Input should be greater than or equal to 1"}))
     def list_sessions(limit: int = Query(50, ge=1, le=200), cursor: Optional[str] = None,
                       client_id: Optional[str] = Depends(client_scope)):
         sessions, next_cursor = store.list_sessions(client_id, limit, cursor)
         return {"sessions": sessions, "next_cursor": next_cursor}
 
-    @app.get("/v1/sessions/{session_id}")
+    @app.get("/v1/sessions/{session_id}", summary="Get a session",
+             description="One session with its messages in order, user and assistant turns alike; a message's events "
+                         "come from `GET /v1/messages/{message_id}`. Answers 404 for an unknown or deleted session, "
+                         "or in public mode another client's.",
+             responses=_refusals({404: "Session not found."}))
     def get_session(session_id: str, client_id: Optional[str] = Depends(client_scope)):
         return visible_session(session_id, client_id)
 
-    @app.delete("/v1/sessions/{session_id}", status_code=204)
+    @app.delete("/v1/sessions/{session_id}", status_code=204, summary="Delete a session",
+                description="Hides the session from every route and removes its uploaded images at once; its stored "
+                            "rows stay until the retention sweep purges them. Answers 204, or 404 for an unknown, "
+                            "already deleted or (public mode) another client's session.",
+                responses=_refusals({404: "Session not found."}))
     def delete_session(session_id: str, client_id: Optional[str] = Depends(client_scope)) -> Response:
         if not store.delete_session(session_id, client_id):
             raise HTTPException(404, "Session not found.")
         return Response(status_code=204)
 
-    @app.post("/v1/sessions/{session_id}/messages")
-    async def post_message(session_id: str, image: Optional[UploadFile] = File(None), text: str = Form(""),
-                           options: str = Form("{}"), client_id: Optional[str] = Depends(client_scope)) -> Response:
+    @app.post("/v1/sessions/{session_id}/messages", summary="Run a turn (streamed)", response_class=StreamingResponse,
+              description="Runs one turn on the attached X-ray, or on the session's latest image when none is "
+                          "attached, and streams it as Server-Sent Events (`text/event-stream`): `message_start`, "
+                          "the stage events, `content_block_delta` snapshots of the growing report, then "
+                          "`message_stop`, as CHAT_UI_PLAN.md §6.2 specifies. The `X-Message-Id` response header "
+                          "carries the new message's id before the first event, so a client can cancel the turn or "
+                          "poll `GET /v1/messages/{message_id}` at once. Every refusal comes before the stream opens, "
+                          "as the JSON error envelope: 400 for `options` that is not a JSON object, 403 for a "
+                          "test-split study in public mode, 404 for an unknown session, 413 for an upload over "
+                          "the size limit, 422 for an option, model or image that cannot be used (or no image to "
+                          "run), 429 when the server is busy and 500 when the image cannot be stored.",
+              responses={**STREAM_RESPONSE, **_refusals({
+                  400: "options must be a JSON object.", 403: "Test-split studies are not available in public mode.",
+                  404: "Session not found.", 413: TOO_LARGE_MSG,
+                  422: "Invalid options: beam_size: Input should be less than or equal to 8",
+                  429: "The server is busy with {} turns; try again shortly.".format(queue_cap),
+                  500: "Could not store the image."})})
+    async def post_message(session_id: str, image: Optional[UploadFile] = File(None, description=IMAGE_DOC),
+                           text: str = Form("", description=TEXT_DOC),
+                           options: str = Form("{}", description=OPTIONS_DOC, examples=[OPTIONS_EXAMPLE]),
+                           client_id: Optional[str] = Depends(client_scope)) -> Response:
         """One turn, streamed as Server-Sent Events. Every refusal comes before the stream opens (ruling 3)."""
         session = await run_in_threadpool(visible_session, session_id, client_id)
         opts = _turn_options(options, text)
@@ -440,11 +554,21 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         return StreamingResponse(_frames(queue), media_type="text/event-stream",
                                  headers=dict(SSE_HEADERS, **{"X-Message-Id": message_id}))
 
-    @app.get("/v1/messages/{message_id}")
+    @app.get("/v1/messages/{message_id}", summary="Get a message and its events",
+             description="The stored message (its status is running, done, error or aborted, and its report is set "
+                         "once it is done) with its events whose `seq` is above `after`, so a client whose stream "
+                         "dropped replays the turn from the last `seq` it saw. Answers 404 for an unknown or hidden "
+                         "message and 422 for a negative or non-integer `after`.",
+             responses=_refusals({404: "Message not found.",
+                                  422: "Invalid request: after: Input should be greater than or equal to 0"}))
     def get_message(message_id: str, after: int = Query(0, ge=0), client_id: Optional[str] = Depends(client_scope)):
         return dict(visible_message(message_id, client_id), events=store.events_after(message_id, after))
 
-    @app.post("/v1/messages/{message_id}/cancel")
+    @app.post("/v1/messages/{message_id}/cancel", summary="Cancel a turn",
+              description="Stops a queued or running turn at its next step, so it ends `aborted`; the call is "
+                          "idempotent, and a turn that already finished answers its final `status` with "
+                          "`cancel_requested` false. Answers 404 for an unknown or hidden message.",
+              responses=_refusals({404: "Message not found."}))
     def cancel_message(message_id: str, client_id: Optional[str] = Depends(client_scope)):
         """Idempotent (ruling 10): a finished turn answers its final status with cancel_requested false."""
         message = visible_message(message_id, client_id)
@@ -452,7 +576,11 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         status = (store.get_message(message_id, client_id) or message)["status"]   # it may have ended meanwhile
         return {"id": message_id, "status": status, "cancel_requested": requested}
 
-    @app.get("/v1/sessions/{session_id}/export")
+    @app.get("/v1/sessions/{session_id}/export", summary="Export a session",
+             description="The whole session with every message and its events, as a download: `format=json` (the "
+                         "default) is the stored event log, `format=md` a readable record. Answers 404 for an "
+                         "unknown or hidden session and 422 for any other `format`.",
+             responses={**EXPORT_RESPONSE, **_refusals({404: "Session not found.", 422: "format must be json or md."})})
     def export_session(session_id: str, fmt: str = Query("json", alias="format"),
                        client_id: Optional[str] = Depends(client_scope)) -> Response:
         try:
