@@ -4,9 +4,9 @@
   "branch": "chat_ui",
   "base": "h100_efficiency @ 5c45527 (2026-09-30, 'SLURM: partition aisc-batch renamed to pot-hpi-aisc-batch')",
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
-  "current_phase": "P2",
-  "status": "P0-P1 complete 2026-10-01: CPU serving decided (3.05 s/report, 0/20 drift). P2 engine in progress.",
-  "next_action": "P2-E (golden driver + CPU/GPU wrappers; submit both jobs; R2 gate: engine == script same node, GPU uncached == published) via implementer.",
+  "current_phase": "P3",
+  "status": "P0-P2 complete 2026-10-02: engine reproduces the published decode (CPU 20/20 vs script, GPU 20/20 vs dump). P3 store + streaming API in progress.",
+  "next_action": "P3-A (app/schemas.py error_body + app/ids.py + tests) via implementer; then P3-B store, P3-C redact, P3-D server/pipeline/commands, P3-E OpenAPI.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -95,7 +95,8 @@
     "cluster_layout": "ssh hpi-hpc works non-interactively (BatchMode); MAIN_REPO=/sc/home/krishankumar.bhushan/hybrid_mamba_xlstm on h100_efficiency @ 5c45527 (user git pull from lx01); it holds outputs/, results/ (report_gen_m3_test_split_s42 present), .venv (python3.11), .venv_chexbert; dataset at /sc/home/krishankumar.bhushan/dataset/mimic_full; /sc/home 200G, 115G used, 86G free; /sc/scratch GPFS 311T free (2026-10-01)",
     "legal_ai_workflow": "legal project: scripts/sync_to_cluster.sh (rsync -az --delete with .rsync-exclude; .sync_stamp provenance), sync_from_cluster.sh (logs/analysis only), ssh one-liners for sbatch/sacct; chat UI copies it WITHOUT --delete and WITHOUT pulling logs (R7, R8)",
     "sqlite_on_sc_home": "0.007 ms per single-row commit with locking_mode=EXCLUSIVE + WAL + synchronous=NORMAL (job 2590141)",
-    "cpu_decode": "job 2590151: cached_vs_published_gpu 0/20, uncached_vs_published 0/5, cached run-to-run 0/20; job 2590184: cached 3.05 s/report, CPU model load ~117 s, peak RSS 4.5 GB (Xeon Platinum 8480CL, 8 threads)"
+    "cpu_decode": "job 2590151: cached_vs_published_gpu 0/20, uncached_vs_published 0/5, cached run-to-run 0/20; job 2590184: cached 3.05 s/report, CPU model load ~117 s, peak RSS 4.5 GB (Xeon Platinum 8480CL, 8 threads)",
+    "golden": "job 2593311 (CPU gx14): engine == script 20/20, vs published 0/20, generate median 2.93 s; job 2593313 (H100 gx08): uncached vs published 0/20, cached vs published 0/20, cached vs uncached 0/20, cached generate 0.83 s"
   },
   "spec_deltas": [
     "D1 partition aisc-batch -> pot-hpi-aisc-batch",
@@ -140,7 +141,7 @@
     "serving_device": "CPU (U7 rule): cached beam-3/100 tok = 3.05 s per report on 8 Xeon 8480CL threads (job 2590184, warm-corrected) + ~1 s encode/retrieve/label = ~4 s per turn <= 8 s. GPU wrapper not needed.",
     "default_cached_decode": "true: cached == uncached on CPU (5/5) and cached == published GPU dump (20/20), job 2590151",
     "compile_offered": "no on CPU (--allow-compile off): E7 verified compile on GPU only; CPU Inductor build unmeasured; 3 s/report needs no speed-up",
-    "drift_note": "CPU decode; matched the published GPU decode on 20/20 probe studies (job 2590151)",
+    "drift_note": "CPU decode; matched the published GPU decode on 20/20 probe studies (jobs 2590151, 2593311); the engine reproduces the eval script byte for byte on the same node (job 2593311)",
     "U1_prototype_zip": "not used; build from scratch",
     "U2_public_mode": "similarity scores only (no neighbour/report labels, agreement, group sizes, images, ids, text)",
     "U3_public_tunnel": "private demo now; public tunnel is a later stage, only on the user's word (P9-D deferred)",
@@ -261,7 +262,7 @@
     },
     "P2": {
       "title": "Engine (laptop first, then one golden job)",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "P2-A": {
           "done": true,
@@ -280,7 +281,7 @@
           "desc": "app/engine.py: Engine stages (preprocess, encode, generate) and card; RealEngine; TinyEngine; one tower pass; streamed checkpoint hash."
         },
         "P2-E": {
-          "done": false,
+          "done": true,
           "desc": "Golden job scripts/chat_engine_golden.py with CPU and GPU wrappers: engine vs script (same node) and vs the published GPU dump."
         }
       },
@@ -289,9 +290,12 @@
         "installed": "fastapi 0.142.2, uvicorn 0.54.0, python-multipart 0.0.32, starlette 1.7.0, pydantic 2.13.0, httpx 0.28.1, httpx2 2.13.1",
         "tests": "test_app_engine.py 49 passed incl. real-BiomedCLIP RealEngine e2e vs generate_from_patch_grid; validate 663 passed",
         "review": "approved; 7 deviations justified",
-        "commit": "d54895a",
+        "commit": "93968b2",
         "test": "tests/test_app_engine.py::test_on_step_leaves_cached_beam_output_unchanged (+4); test_mamba3_numerics cached==uncached",
-        "r3": "thesis diff 15+/3-, callback guarded by if on_step is not None; reviewer sweep 48/48 identical snapshots"
+        "r3": "thesis diff 15+/3-, callback guarded by if on_step is not None; reviewer sweep 48/48 identical snapshots",
+        "jobs": "2593311,2593313",
+        "cpu": "engine==script 20/20 byte-identical; vs published GPU 0/20; generate 2.93 s, prefill 664 ms, per_token 22.9 ms, encode 70 ms",
+        "gpu": "H100: uncached vs published 0/20 (gate); cached vs published 0/20; cached vs uncached 0/20; cached generate 0.83 s"
       },
       "verdict": null
     },
@@ -529,7 +533,9 @@
     "2026-10-01: P2-B complete; on_step on both beam searches, parity-tested.",
     "2026-10-02: P2-C complete; upload intake + published transform, fuzzed (0 leaks).",
     "2026-10-02: P2-D complete; engine stages over the published loaders.",
-    "2026-10-02: P2-D as built differs from the plan code in 7 justified places (see the plan's P2-D 'As built' note); later briefs follow the code."
+    "2026-10-02: P2-D as built differs from the plan code in 7 justified places (see the plan's P2-D 'As built' note); later briefs follow the code.",
+    "2026-10-02: P2-E complete: R2 satisfied on CPU and GPU.",
+    "2026-10-02: current_phase -> P3"
   ],
-  "last_updated": "2026-10-02T04:06:34+02:00"
+  "last_updated": "2026-10-02T08:31:18+02:00"
 }

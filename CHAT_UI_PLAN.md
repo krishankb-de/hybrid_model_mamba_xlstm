@@ -1753,7 +1753,7 @@ On the cluster, `CLUSTER_REPO` has no `.git` (P0-G keeps it out of the rsync). W
 
 **As built (d54895a):** the committed `app/engine.py` and `app/tiny.py` are authoritative where they differ from the code above: `TinyTower` mean-pools its patch tokens (the CLS slot is a zero parameter, so `feats[:, 0]` gave every image the same vector); the experiment name is read from `run_metadata.json["resolved_config"]["experiment_name"]`; `truncated_mid_sentence` also counts `repair_report`'s no-complete-sentence fallback; provenance comes from `git_provenance(root)` (git at the repo toplevel only, else `.sync_stamp`, unknown stays `None`) and the card carries `git_source`; `generate` raises `Cancelled` before the prefill when the event is already set; tiny models are built inside `torch.random.fork_rng(devices=[])` so the caller's RNG is untouched.
 
-- [ ] **P2-E** Golden job `scripts/chat_engine_golden.py` with CPU and GPU wrappers: engine vs script (same node) and vs the published GPU dump.
+- [x] **P2-E** Golden job `scripts/chat_engine_golden.py` with CPU and GPU wrappers: engine vs script (same node) and vs the published GPU dump.
 
 **Files:** create `scripts/chat_engine_golden.py`, `scripts/chat_engine_golden_h100.sh` (CPU), `scripts/chat_engine_golden_gpu_h100.sh` (GPU); modify `tests/test_willi_parity.py`.
 
