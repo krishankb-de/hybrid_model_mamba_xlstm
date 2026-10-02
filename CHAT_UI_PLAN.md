@@ -2063,7 +2063,7 @@ def test_sweep_deletes_only_old_sessions(tmp_path):
 
 2. Run: FAIL. 3. Implement: one `sqlite3.connect(home / "chat.db", check_same_thread=False, isolation_level=None)` guarded by a `threading.Lock`; the §6.4 pragmas and DDL at start-up; `append_event` does `BEGIN IMMEDIATE` → `SELECT COALESCE(MAX(seq), 0) + 1` → `INSERT` → `COMMIT` and returns `dict(data, seq=seq)` (the stored `data_json` includes `seq`); timestamps are UTC ISO-8601; `delete_session` soft-deletes the row and removes `uploads/<sid>` with `shutil.rmtree(ignore_errors=True)`; `export("md")` renders per turn a heading (time, filename or `test row N`), the report, a 14-row label table if a `label` stage exists, neighbours only if the session's mode is private, and one provenance line. 4. PASS. 5–7. Commit `"P3-B: SQLite store (NFS-safe pragmas), uploads, export, sweep"`.
 
-- [ ] **P3-C** `app/redact.py`: the public field policy (R1), applied before an event is stored and sent; field-by-field and catch-all tests.
+- [x] **P3-C** `app/redact.py`: the public field policy (R1), applied before an event is stored and sent; field-by-field and catch-all tests.
 
 **Files:** create `app/redact.py`, `tests/test_app_redact.py`.
 **Produces:** `redact_event(event: str, data: Dict[str, Any], mode: str) -> Optional[Dict[str, Any]]` (`None` drops the event); `PUBLIC_DROP: Dict[str, List[str]]`.
