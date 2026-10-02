@@ -1434,7 +1434,7 @@ Check during implementation: `ImageOps.exif_transpose` returns a copy whenever E
 4. `venv/bin/python -m pytest tests/test_app_imaging.py -v` → PASS.
 5–7. Task loop. Commit `"P2-C: upload intake + published transform (16-bit, EXIF handled)"`.
 
-- [ ] **P2-D** `app/engine.py`: `Engine` stages (preprocess, encode, generate) and card; `RealEngine`; `TinyEngine`; one tower pass; streamed checkpoint hash.
+- [x] **P2-D** `app/engine.py`: `Engine` stages (preprocess, encode, generate) and card; `RealEngine`; `TinyEngine`; one tower pass; streamed checkpoint hash.
 
 **Files:** create `app/engine.py`, `app/schemas.py` (only `Options` from §6.1 for now; P3-A adds the rest); extend `app/tiny.py` (`TinyTower`) and `tests/test_app_engine.py`.
 **Consumes:** `app.imaging.*`, `app.tiny.*`, `scripts.evaluate_report_generation.load_report_generation_module`, `beam_search_decode`, `scripts.repair_generations.repair_report`.
@@ -1750,6 +1750,8 @@ On the cluster, `CLUSTER_REPO` has no `.git` (P0-G keeps it out of the rsync). W
 
 4. `venv/bin/python -m pytest tests/test_app_engine.py -v` → PASS (the BiomedCLIP test passes from the local HF cache, or skips).
 5–7. Task loop. Commit `"P2-D: engine stages over the published loaders; tiny engine"`.
+
+**As built (d54895a):** the committed `app/engine.py` and `app/tiny.py` are authoritative where they differ from the code above: `TinyTower` mean-pools its patch tokens (the CLS slot is a zero parameter, so `feats[:, 0]` gave every image the same vector); the experiment name is read from `run_metadata.json["resolved_config"]["experiment_name"]`; `truncated_mid_sentence` also counts `repair_report`'s no-complete-sentence fallback; provenance comes from `git_provenance(root)` (git at the repo toplevel only, else `.sync_stamp`, unknown stays `None`) and the card carries `git_source`; `generate` raises `Cancelled` before the prefill when the event is already set; tiny models are built inside `torch.random.fork_rng(devices=[])` so the caller's RNG is untouched.
 
 - [ ] **P2-E** Golden job `scripts/chat_engine_golden.py` with CPU and GPU wrappers: engine vs script (same node) and vs the published GPU dump.
 
