@@ -1,4 +1,4 @@
-"""Schemas for the chat app (CHAT_UI_PLAN.md section 6). Only Options so far; P3-A adds the rest."""
+"""Schemas for the chat app (CHAT_UI_PLAN.md section 6): Options and error_body."""
 from typing import Annotated, Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -21,13 +21,5 @@ class Options(BaseModel):
 
 
 def error_body(kind: str, message: str) -> Dict[str, Any]:
-    """Format an error response envelope.
-
-    Args:
-        kind: Error type (e.g., "validation_error", "model_error", "overloaded_error")
-        message: Human-readable error message
-
-    Returns:
-        Dictionary with structure: {"type": "error", "error": {"type": kind, "message": message}}
-    """
+    """Return error envelope: {"type": "error", "error": {"type": kind, "message": message}}."""
     return {"type": "error", "error": {"type": kind, "message": message}}
