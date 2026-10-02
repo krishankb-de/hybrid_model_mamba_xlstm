@@ -160,7 +160,9 @@ class Pipeline:
             data = job.upload
         else:
             path = self.store.upload_path(job.session_id, job.previous_sha256, "original")
-            if path is None:   # the session was alive a moment ago (_check): the file went missing from disk
+            if path is None:   # alive at _check(): the session was deleted since, or the file went missing from disk
+                if self.store.get_message(job.message_id, None) is None:   # resolved through its session
+                    raise _Gone()
                 raise FileNotFoundError("the turn's image is no longer stored")
             data = path.read_bytes()
         result, prepared = engine.preprocess(data)

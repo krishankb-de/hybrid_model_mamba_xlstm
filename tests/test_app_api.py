@@ -857,6 +857,31 @@ def test_a_text_only_turn_whose_session_was_deleted_ends_quietly(client, caplog)
     assert any("deleted" in r.getMessage() for r in caplog.records if r.name == "app.pipeline")
 
 
+def test_a_text_only_turn_whose_session_is_deleted_during_preprocess_ends_quietly(client, monkeypatch, caplog):
+    # P3-D follow-up: a delete that lands after _check() is a quiet abort like every other deleted-session path
+    sid = client.post("/v1/sessions", json={}).json()["id"]
+    sha = _turn(client, sid)[0]["data"]["image"]["sha256"]
+    store, pipeline = client.app.state.store, client.app.state.worker.pipeline
+    uid, mid = store.start_turn(sid, "greedy", "private", {}, sha, "x.png")   # alive when the stage starts
+    real, calls = store.upload_path, []
+
+    def deleting(session_id, sha256, variant):   # the session goes between _check() and the read of its image
+        calls.append(variant)
+        assert store.delete_session(sid, None)
+        return real(session_id, sha256, variant)
+
+    monkeypatch.setattr(store, "upload_path", deleting)
+    sent = []
+    job = TurnJob(sid, uid, mid, "greedy", None, "x.png", Options(decode="greedy"), mode="private",
+                  previous_sha256=sha)
+    pipeline.run(job, lambda event, data: sent.append((event, data)), threading.Event())
+    assert calls == ["original"]
+    assert [e for e, _ in sent] == ["message_start", "stage_start", "message_stop"]   # aborted, with no error event
+    assert sent[-1][1]["status"] == "aborted"
+    assert [e["event"] for e in store.events_after(mid)] == ["message_start", "stage_start", "message_stop"]
+    assert any("deleted" in r.getMessage() for r in caplog.records if r.name == "app.pipeline")
+
+
 def test_a_text_only_turn_whose_image_left_the_disk_is_an_error_not_a_quiet_end(client, tmp_path):   # fix-1
     sid = client.post("/v1/sessions", json={}).json()["id"]
     sha = _turn(client, sid)[0]["data"]["image"]["sha256"]
