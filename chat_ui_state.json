@@ -6,7 +6,7 @@
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P3",
   "status": "P0-P2 complete 2026-10-02: engine reproduces the published decode (CPU 20/20 vs script, GPU 20/20 vs dump). P3 store + streaming API in progress.",
-  "next_action": "P3-D (app/pipeline.py, app/server.py, app/commands.py; streaming API) via implementer with .superpowers/sdd/CHAT_UI_PLAN/task-P3-D-rulings.md; then P3-E OpenAPI.",
+  "next_action": "P3-E (OpenAPI summaries/examples; tests/test_app_openapi.py) via implementer, plus the carried P3-D deleted-session minor as its own commit; then P4 (UI).",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -316,7 +316,7 @@
           "desc": "app/redact.py: the public field policy (R1), applied before an event is stored and sent; field-by-field and catch-all tests."
         },
         "P3-D": {
-          "done": false,
+          "done": true,
           "desc": "app/pipeline.py, app/server.py, app/commands.py: routes, auth, bind refusal, single-worker runner, SSE bridge, polling, cancel, overload, text commands."
         },
         "P3-E": {
@@ -325,9 +325,9 @@
         }
       },
       "evidence": {
-        "commits": "0667a32,63e3ce0",
-        "tests": "test_app_redact.py 191 passed; validate 1013 passed; 97 mutants killed",
-        "review": "clean after fix round 1 (public error messages allow-listed, U2 invariant, no dangling score stage, redact_card at any depth)"
+        "commits": "a028feb,e177105,1d36ef1",
+        "tests": "test_app_api.py + test_app_commands.py 83 passed; repeated, concurrent and stress runs clean; validate 1096 passed",
+        "review": "clean after fix round 1 (pre-stream upload save; shutdown as server_restart; loopback guard; CHAT_HOME guard for checkouts of this project; exact held-worker tests)"
       },
       "verdict": null
     },
@@ -542,7 +542,8 @@
     "2026-10-02: current_phase -> P3",
     "2026-10-02: P3-A complete.",
     "2026-10-02: P3-B complete; journal_mode exposed and tested 'wal' locally (NFS drill is P7-E).",
-    "2026-10-02: P3-C complete; R1 policy + catch-all + U2 invariant."
+    "2026-10-02: P3-C complete; R1 policy + catch-all + U2 invariant.",
+    "2026-10-03: P3-D complete; streaming API on the tiny engine."
   ],
-  "last_updated": "2026-10-02T14:24:42+02:00"
+  "last_updated": "2026-10-02T23:56:50+02:00"
 }

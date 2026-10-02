@@ -2142,7 +2142,7 @@ def test_generated_report_is_not_redacted():   # model output is not MIMIC data
 
 2. Run: FAIL. 3. Implement a small dotted-path deleter (`_drop(obj, path)` that handles `a.b`, `a[].b`); key the policy by `event` or `event:stage`. 4. PASS. 5–7. Commit `"P3-C: public-mode redaction policy (R1)"`.
 
-- [ ] **P3-D** `app/pipeline.py`, `app/server.py`, `app/commands.py`: routes, auth, bind refusal, single-worker runner, SSE bridge, polling, cancel, overload, text commands.
+- [x] **P3-D** `app/pipeline.py`, `app/server.py`, `app/commands.py`: routes, auth, bind refusal, single-worker runner, SSE bridge, polling, cancel, overload, text commands.
 
 **Files:** create `app/pipeline.py`, `app/server.py`, `app/commands.py`, `tests/test_app_api.py`, `tests/test_app_commands.py`; extend `tests/app_helpers.py`.
 **Consumes:** `Engine`, `Store`, `redact_event`, `Options`, `error_body`, `new_id`.
