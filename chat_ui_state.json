@@ -6,7 +6,7 @@
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P3",
   "status": "P0-P2 complete 2026-10-02: engine reproduces the published decode (CPU 20/20 vs script, GPU 20/20 vs dump). P3 store + streaming API in progress.",
-  "next_action": "P3-B (app/store.py SQLite store) via implementer; then P3-C redact, P3-D server/pipeline/commands, P3-E OpenAPI.",
+  "next_action": "P3-C (app/redact.py public field policy, R1) via implementer; then P3-D server/pipeline/commands, P3-E OpenAPI.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -308,7 +308,7 @@
           "desc": "app/schemas.py (Options, error_body) and app/ids.py; bounds tests."
         },
         "P3-B": {
-          "done": false,
+          "done": true,
           "desc": "app/store.py: schema §6.4, one transaction per event, restart recovery, uploads, client scoping, export, retention sweep."
         },
         "P3-C": {
@@ -325,9 +325,9 @@
         }
       },
       "evidence": {
-        "commits": "7d62da0,4ce454f",
-        "tests": "test_app_schemas.py 24 passed; validate 749 passed",
-        "review": "clean after fix round 1 (monotonic ids across clock step-back/overflow)"
+        "commits": "50295c8,f7353eb",
+        "tests": "test_app_store.py 73 passed; validate 822 passed; 33/34 mutants killed",
+        "review": "clean after fix round 1 (sweep reclaims orphaned uploads; mode-scoped sweep; R1 options guard)"
       },
       "verdict": null
     },
@@ -540,7 +540,8 @@
     "2026-10-02: P2-D as built differs from the plan code in 7 justified places (see the plan's P2-D 'As built' note); later briefs follow the code.",
     "2026-10-02: P2-E complete: R2 satisfied on CPU and GPU.",
     "2026-10-02: current_phase -> P3",
-    "2026-10-02: P3-A complete."
+    "2026-10-02: P3-A complete.",
+    "2026-10-02: P3-B complete; journal_mode exposed and tested 'wal' locally (NFS drill is P7-E)."
   ],
-  "last_updated": "2026-10-02T08:56:43+02:00"
+  "last_updated": "2026-10-02T13:28:05+02:00"
 }

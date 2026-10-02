@@ -1948,7 +1948,7 @@ def test_error_envelope_shape():
 
 2. Run: FAIL. 3. Implement the §6.1 class (with `from typing import Optional` and `from typing_extensions import Annotated, Literal` only if `typing` lacks them; Python ≥ 3.9 has both in `typing`). `new_id`: `"{}_{:012x}{}".format(prefix, int(time.time() * 1000), secrets.token_hex(5))`. Within the same millisecond the random suffix decides the order, so the sort test makes the id monotonic with a module-level `(last_ms, counter)` guard under a lock. 4. PASS. 5–7. Commit `"P3-A: options schema, error envelope, sortable ids"`.
 
-- [ ] **P3-B** `app/store.py`: schema §6.4, one transaction per event, restart recovery, uploads, client scoping, export, retention sweep.
+- [x] **P3-B** `app/store.py`: schema §6.4, one transaction per event, restart recovery, uploads, client scoping, export, retention sweep.
 
 **Files:** create `app/store.py`, `tests/test_app_store.py`.
 **Produces:**
