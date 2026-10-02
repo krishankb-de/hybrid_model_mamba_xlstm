@@ -8,7 +8,7 @@ from pathlib import PurePosixPath
 import pytest
 
 from app import redact
-from app.redact import PUBLIC_DROP, redact_card, redact_event
+from app.redact import PUBLIC_DROP, PUBLIC_ERROR_MESSAGE, redact_card, redact_event
 
 PRIVATE_RETRIEVE = {"stage": "retrieve", "ms": 4.0, "detail": {
     "image_neighbors": [{"rank": 1, "similarity": 0.91, "gallery_row": 1843, "image_url": "/v1/gallery/images/1843",
@@ -81,19 +81,24 @@ def _redactions(caplog):
 
 # ---- the policy: one test per path, built from the policy itself -------------------------------------------------
 
-def test_public_drop_is_the_plans_policy():
-    assert PUBLIC_DROP == {
-        "message_start": ["options.reference", "options.test_row", "image.urls.original"],
-        "stage_end:preprocess": ["detail.test_row", "detail.identical_to"],
-        "stage_end:retrieve": ["detail.image_neighbors[].image_url", "detail.image_neighbors[].study_id",
-                               "detail.image_neighbors[].gallery_row", "detail.image_neighbors[].txt_row",
-                               "detail.image_neighbors[].labels", "detail.report_matches[].report",
-                               "detail.report_matches[].group", "detail.report_matches[].group_size",
-                               "detail.report_matches[].txt_row", "detail.report_matches[].labels",
-                               "detail.true_report_rank", "detail.gallery.build_id"],
-        "stage_end:label": ["detail.neighbor_agreement"],
-        "stage_end:score": "*",
-    }
+PLAN_POLICY = {
+    "message_start": ["options.reference", "options.test_row", "image.urls.original"],
+    "stage_end:preprocess": ["detail.test_row", "detail.identical_to"],
+    "stage_end:retrieve": ["detail.image_neighbors[].image_url", "detail.image_neighbors[].study_id",
+                           "detail.image_neighbors[].gallery_row", "detail.image_neighbors[].txt_row",
+                           "detail.image_neighbors[].labels", "detail.report_matches[].report",
+                           "detail.report_matches[].group", "detail.report_matches[].group_size",
+                           "detail.report_matches[].txt_row", "detail.report_matches[].labels",
+                           "detail.true_report_rank", "detail.gallery.build_id"],
+    "stage_end:label": ["detail.neighbor_agreement"],
+    "stage_end:score": "*",
+}
+
+
+def test_public_drop_is_the_plans_policy_plus_the_one_ruled_entry():
+    # M3 (ruling): public score is always skipped and a skipped stage emits only stage_end, so a public stream must
+    # never show stage_start(score) either
+    assert PUBLIC_DROP == {**PLAN_POLICY, "stage_start:score": "*"}
 
 
 def test_policy_paths_are_dotted_names_that_end_on_a_plain_key():
@@ -119,7 +124,8 @@ POLICY_PATHS = [(key, path) for key, rule in PUBLIC_DROP.items() if rule != "*" 
 
 @pytest.mark.parametrize("policy_key, path", POLICY_PATHS, ids=["{} {}".format(k, p) for k, p in POLICY_PATHS])
 def test_each_policy_path_drops_its_field_without_the_catch_all(monkeypatch, policy_key, path):
-    monkeypatch.setattr(redact, "CATCH_ALL_KEYS", frozenset())   # the explicit policy has to do this on its own
+    monkeypatch.setattr(redact, "CATCH_ALL_KEYS", frozenset())   # the explicit policy has to do this on its own,
+    monkeypatch.setattr(redact, "U2_LISTS", frozenset())         # without either invariant behind it
     event, _, stage = policy_key.partition(":")
     data = dict(_payload_at(path), **({"stage": stage} if stage else {}))
     dumped = json.dumps(redact_event(event, data, "public"))
@@ -174,9 +180,15 @@ def test_public_preprocess_drops_test_row_and_identical_to_only():
         "stage": "preprocess", "ms": 2.0, "detail": {"format": "PNG", "source": "upload"}}
 
 
-def test_a_skipped_score_is_dropped_too_but_no_other_score_or_stage_event_is():
-    assert redact_event("stage_end", {"stage": "score", "skipped": "no_reference"}, "public") is None
-    for event, data in (("stage_start", {"stage": "score", "index": 5}), ("stage_end", {"stage": "label", "ms": 1.0})):
+def test_a_public_stream_never_shows_the_score_stage_start_or_end_but_every_other_stage_is_shown():   # M3
+    start, end = {"stage": "score", "index": 5}, {"stage": "score", "ms": 1.0, "detail": {"rouge_l": 0.2}}
+    skipped = {"stage": "score", "skipped": "no_reference"}
+    for event, data in (("stage_start", start), ("stage_end", end), ("stage_end", skipped)):
+        assert redact_event(event, dict(data), "public") is None
+        assert redact_event(event, dict(data), "private") == data   # private mode keeps the whole stage
+    shown = [("stage_start", {"stage": "generate", "index": 3}), ("stage_start", {"stage": "label", "index": 4}),
+             ("stage_end", {"stage": "label", "ms": 1.0}), ("stage_end", {"stage": "generate", "ms": 9.0})]
+    for event, data in shown:
         assert redact_event(event, dict(data), "public") == data
 
 
@@ -197,6 +209,38 @@ def test_card_without_a_checkpoint_path_is_left_alone():
 def test_a_path_object_checkpoint_is_cut_to_its_file_name_too():
     card = dict(MODEL_CARD, checkpoint=PurePosixPath("/sc/home/SECRET-USER/outputs/run/last.ckpt"))
     assert redact_card(card, "public")["checkpoint"] == "last.ckpt"
+
+
+NESTED_CARD = dict(MODEL_CARD, retrieval={"name": "13D", "checkpoint": "/sc/home/SECRET-USER/kd/x.ckpt",
+                                          "towers": [{"checkpoint": "/sc/home/SECRET-USER/kd/y.ckpt", "dim": 512},
+                                                     {"checkpoint": None}]},
+                   extra=({"deeper": {"checkpoint": PurePosixPath("/sc/home/SECRET-USER/z.ckpt")}},))
+
+
+def test_redact_card_cuts_every_checkpoint_key_at_any_depth():   # M4
+    out = redact_card(copy.deepcopy(NESTED_CARD), "public")
+    assert out["checkpoint"] == "last.ckpt"
+    assert out["retrieval"] == {"name": "13D", "checkpoint": "x.ckpt",
+                                "towers": [{"checkpoint": "y.ckpt", "dim": 512}, {"checkpoint": None}]}
+    assert out["extra"][0]["deeper"]["checkpoint"] == "z.ckpt"
+    assert "SECRET-USER" not in json.dumps(out)
+    assert {k: v for k, v in out.items() if k not in ("checkpoint", "retrieval", "extra")} == \
+        {k: v for k, v in MODEL_CARD.items() if k != "checkpoint"}
+
+
+def test_the_nested_card_is_unchanged_in_private_mode_and_never_mutated():
+    card = copy.deepcopy(NESTED_CARD)
+    assert redact_card(card, "private") == NESTED_CARD
+    redact_card(card, "public")
+    assert card == NESTED_CARD
+
+
+def test_the_model_block_of_message_start_is_cut_at_any_depth_too():
+    data = dict(MESSAGE_START, model=copy.deepcopy(NESTED_CARD))
+    out = redact_event("message_start", data, "public")
+    assert out["model"]["retrieval"]["checkpoint"] == "x.ckpt"
+    assert out["model"]["retrieval"]["towers"][0]["checkpoint"] == "y.ckpt"
+    assert "SECRET-USER" not in json.dumps(out)
 
 
 def test_private_card_is_unchanged():
@@ -261,7 +305,8 @@ def test_report_and_labels_stay_in_unknown_events_because_only_their_policy_path
     assert redact_event("stage_end", copy.deepcopy(staged), "public") == staged
 
 
-def test_the_catch_all_walks_tuples_and_the_policy_paths_walk_them_too():
+def test_the_catch_all_walks_tuples_and_the_policy_paths_walk_them_too(monkeypatch):
+    monkeypatch.setattr(redact, "U2_LISTS", frozenset())   # so the explicit path alone has to reach into the tuple
     data = {"stage": "retrieve", "detail": {"image_neighbors": ({"rank": 1, "labels": {"Edema": 1}},),
                                             "other": ({"keep": 2, "group": 1},)}}
     out = redact_event("stage_end", data, "public")
@@ -302,6 +347,121 @@ def test_private_mode_keeps_unknown_events_unchanged_and_logs_nothing(caplog):
     assert _redactions(caplog) == []
 
 
+# ---- free text in error events (I1) ------------------------------------------------------------------------------
+
+LEAKY = "Findings: SECRET MIMIC TEXT; /sc/home/krishankumar.bhushan/chat_sessions/gallery/g1/labels.npy"
+AUTHORED_KINDS = ["validation_error", "overloaded_error", "server_restart"]
+
+
+def _error(block, **top):
+    return dict({"type": "error", "error": block}, **top)
+
+
+def test_the_fixed_error_message_and_the_authored_kinds_are_the_rulings():
+    assert PUBLIC_ERROR_MESSAGE == "The model could not finish this turn."
+    assert redact.AUTHORED_ERROR_KINDS == frozenset(AUTHORED_KINDS)
+
+
+def test_a_model_error_with_report_text_and_a_path_becomes_exactly_the_fixed_message():
+    out = redact_event("error", _error({"type": "model_error", "message": LEAKY}), "public")
+    assert out == _error({"type": "model_error", "message": PUBLIC_ERROR_MESSAGE})
+    assert "SECRET" not in json.dumps(out) and "/sc/home" not in json.dumps(out)
+
+
+@pytest.mark.parametrize("block", [{"type": "weird_error", "message": LEAKY}, {"message": LEAKY},
+                                   {"type": None, "message": LEAKY}, {"type": "", "message": LEAKY},
+                                   {"type": "Validation_Error", "message": LEAKY},   # kinds are compared exactly
+                                   {"type": ["validation_error"], "message": LEAKY},  # unhashable: must not raise
+                                   {"type": {"k": 1}, "message": LEAKY}, {"type": 7, "message": LEAKY}])
+def test_an_unknown_or_missing_error_kind_gets_the_fixed_message(block):
+    out = redact_event("error", _error(copy.deepcopy(block), seq=9), "public")
+    assert out == _error(dict(block, message=PUBLIC_ERROR_MESSAGE), seq=9)   # only the message changed
+
+
+@pytest.mark.parametrize("kind", AUTHORED_KINDS)
+def test_an_authored_error_kind_keeps_its_message_in_public_mode(kind):
+    data = _error({"type": kind, "message": "k_images must be at most 12."}, seq=3)
+    assert redact_event("error", copy.deepcopy(data), "public") == data
+
+
+@pytest.mark.parametrize("kind", AUTHORED_KINDS + ["model_error", "weird_error", None])
+def test_private_mode_keeps_every_error_message(kind):
+    block = {"message": LEAKY} if kind is None else {"type": kind, "message": LEAKY}
+    data = _error(block, seq=3)
+    assert redact_event("error", copy.deepcopy(data), "private") == data
+
+
+@pytest.mark.parametrize("data", [{"type": "error"}, _error(None), _error({"type": "model_error"}), _error({})])
+def test_an_error_event_with_no_message_to_scrub_passes_through(data):
+    assert redact_event("error", copy.deepcopy(data), "public") == data
+
+
+def test_warning_messages_are_left_alone_because_the_server_authors_them():
+    data = {"code": "reference_ignored_public", "message": "A reference is not used in public mode.", "seq": 4}
+    assert redact_event("warning", copy.deepcopy(data), "public") == data
+
+
+# ---- U2: retrieval is rank and similarity only, wherever the lists sit (M2) -------------------------------------
+
+def _neighbour(**extra):
+    return dict({"rank": 1, "similarity": 0.9, "dicom_id": "SECRET-dicom", "view": "SECRET-view",
+                 "report": "SECRET-report", "labels": {"Edema": 1}, "meta": {"study": "SECRET-study"}}, **extra)
+
+
+U2_SITES = [   # (event, wrap(name, items)): the plan's place, outside detail, another stage, another event, deep
+    ("stage_end", lambda n, v: {"stage": "retrieve", "ms": 1.0, "detail": {n: v}}),
+    ("stage_end", lambda n, v: {"stage": "retrieve", "ms": 1.0, n: v}),
+    ("stage_end", lambda n, v: {"stage": "label", "ms": 1.0, "detail": {n: v}}),
+    ("stage_end", lambda n, v: {"stage": "mystery", "detail": {"deeper": [{"x": {n: v}}]}}),
+    ("brand_new_event", lambda n, v: {"payload": {n: v}}),
+    ("message_stop", lambda n, v: {"status": "done", n: v}),
+    ("message_start", lambda n, v: {"message_id": "msg_2", "image": {"urls": {}}, "options": {n: v}}),
+]
+
+
+@pytest.mark.parametrize("name", ["image_neighbors", "report_matches"])
+@pytest.mark.parametrize("event, wrap", U2_SITES, ids=["plan", "outside_detail", "label_stage", "deep", "unknown_event",
+                                                       "message_stop", "message_start"])
+def test_retrieval_list_elements_are_reduced_to_rank_and_similarity_wherever_the_list_sits(event, wrap, name):
+    items = [_neighbour(), "stray", None, 5, [{"rank": 9}], _neighbour(rank=2, similarity=0.5), {"unknown": 1},
+             {"similarity": 0.3, "x": 2}, {}]
+    out = redact_event(event, wrap(name, items), "public")
+    reduced = [{"rank": 1, "similarity": 0.9}, {"rank": 2, "similarity": 0.5}, {}, {"similarity": 0.3}, {}]
+    assert out == wrap(name, reduced)
+    assert "SECRET" not in json.dumps(out)
+
+
+def test_u2_names_exactly_the_two_retrieval_lists_and_the_two_kept_keys():
+    assert redact.U2_LISTS == frozenset({"image_neighbors", "report_matches"})
+    assert redact.U2_KEYS == ("rank", "similarity")
+
+
+def test_u2_leaves_other_lists_and_empty_or_missing_retrieval_values_alone():
+    data = {"neighbors": [{"report": "kept"}], "image_neighbors": [], "report_matches": None}
+    assert redact_event("brand_new_event", copy.deepcopy(data), "public") == data
+
+
+def test_u2_reduces_a_lone_dict_and_a_tuple_in_place_of_a_list():
+    out = redact_event("brand_new_event", {"image_neighbors": {"rank": 1, "report": "SECRET"},
+                                           "report_matches": ({"rank": 2, "labels": {"A": 1}}, "stray")}, "public")
+    assert out == {"image_neighbors": {"rank": 1}, "report_matches": [{"rank": 2}]}
+
+
+def test_private_mode_keeps_the_retrieval_lists_whole():
+    data = {"stage": "retrieve", "image_neighbors": [_neighbour()], "report_matches": [_neighbour(), "stray"]}
+    assert redact_event("stage_end", copy.deepcopy(data), "private") == data
+
+
+def test_each_u2_removal_is_logged_with_key_and_event_but_never_the_value(caplog):
+    data = {"stage": "mystery", "image_neighbors": [{"rank": 1, "dicom_id": "SECRET-D"}, "SECRET-stray"]}
+    with caplog.at_level(logging.WARNING, logger="app.redact"):
+        redact_event("stage_end", data, "public")
+    messages = [r.getMessage() for r in _redactions(caplog)]
+    assert len(messages) == 2 and all("stage_end" in m for m in messages)
+    assert any("dicom_id" in m for m in messages)
+    assert "SECRET" not in caplog.text
+
+
 # ---- dotted paths (ruling 5) -------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("obj, path, expected", [
@@ -327,13 +487,15 @@ def test_drop_walks_dotted_paths_and_skips_what_is_not_there(obj, path, expected
 @pytest.mark.parametrize("detail", [None, "text", 7, [], {}, {"image_neighbors": None}, {"image_neighbors": "x"},
                                     {"image_neighbors": {"rank": 1}}, {"image_neighbors": [None, 3, "x", []]},
                                     {"gallery": None}, {"gallery": "g"}, {"gallery": [1]}])
-def test_a_missing_or_non_container_path_is_skipped_silently_through_redact_event(detail):
+def test_a_missing_or_non_container_path_is_skipped_silently_through_redact_event(monkeypatch, detail):
+    monkeypatch.setattr(redact, "U2_LISTS", frozenset())   # the explicit paths alone: U2 would rewrite these shapes
     data = {"stage": "retrieve", "ms": 1.0, "detail": detail}
     assert redact_event("stage_end", copy.deepcopy(data), "public") == data
     assert redact_event("stage_end", {"stage": "retrieve", "ms": 1.0}, "public") == {"stage": "retrieve", "ms": 1.0}
 
 
-def test_list_elements_that_are_not_dicts_are_skipped_and_the_others_still_walked():
+def test_list_elements_that_are_not_dicts_are_skipped_and_the_others_still_walked(monkeypatch):
+    monkeypatch.setattr(redact, "U2_LISTS", frozenset())   # the explicit paths alone: U2 would drop the stray elements
     data = {"stage": "retrieve", "detail": {"image_neighbors": [1, None, {"rank": 2, "labels": {"A": 1}}, "x"]}}
     assert redact_event("stage_end", data, "public")["detail"]["image_neighbors"] == [1, None, {"rank": 2}, "x"]
 
@@ -367,16 +529,72 @@ PRIVATE_TURN = [
     ("stage_end", {"stage": "label", "ms": 3.0, "seq": 11, "detail": {
         "chexbert_14": {"Edema": 1}, "positives": ["Edema"],
         "neighbor_agreement": [{"rank": 1, "agree": 13, "of": 14, "both_positive": ["Edema"]}]}}),
-    ("stage_end", {"stage": "score", "ms": 1.0, "seq": 12, "detail": {"rouge_l": 0.2, "reference_source": "user"}}),
+    ("stage_start", {"stage": "score", "index": 5, "seq": 12}),
+    ("stage_end", {"stage": "score", "ms": 1.0, "seq": 13, "detail": {"rouge_l": 0.2, "reference_source": "user"}}),
     ("message_stop", {"message_id": "msg_2", "status": "done", "total_ms": 5000.0, "report": "Heart size is normal.",
                       "display_report": "Heart size is normal.", "truncated_mid_sentence": False, "disclaimer": "d",
-                      "seq": 13}),
+                      "seq": 14}),
 ]
+EXTRA_EVENTS = [   # outside a successful turn
+    ("warning", {"code": "reference_ignored_public", "message": "A reference is not used in public mode.", "seq": 15}),
+    ("error", _error({"type": "validation_error", "message": "k_images must be at most 12."}, seq=16)),
+    ("error", _error({"type": "model_error", "message": LEAKY}, seq=17)),
+]
+ALL_EVENTS = PRIVATE_TURN + EXTRA_EVENTS
+
+
+def _event_id(event, data):
+    return "{}:{}".format(event, data.get("stage") or (data.get("error") or {}).get("type") or "")
+
+
+def _inject(data):
+    """The event's data plus every R1 key at its top level and inside a dict inside a list inside a dict."""
+    out = copy.deepcopy(data)
+    out.update({key: "SECRET-top-" + key for key in R1_KEYS})
+    out["nest"] = [dict({"keep": 1}, **{key: "SECRET-nested-" + key for key in R1_KEYS})]
+    return out
+
+
+@pytest.mark.parametrize("event, data", ALL_EVENTS, ids=[_event_id(e, d) for e, d in ALL_EVENTS])
+def test_every_r1_key_is_removed_from_every_event_at_the_top_level_and_nested(event, data):   # M1
+    injected = _inject(data)
+    clean = redact_event(event, copy.deepcopy(data), "public")
+    out = redact_event(event, copy.deepcopy(injected), "public")
+    if clean is None:   # the score stage is dropped whole
+        assert out is None
+    else:
+        assert not _keys_anywhere(out) & set(R1_KEYS) and "SECRET" not in json.dumps(out)
+        assert out == dict(clean, nest=[{"keep": 1}])   # and nothing else about the event changed
+    assert redact_event(event, copy.deepcopy(injected), "private") == injected
+
+
+def _inject_u2(data):
+    """The event's data plus both retrieval lists, with extra fields and stray elements, at its top level and inside
+    a dict inside a list inside a dict."""
+    out = copy.deepcopy(data)
+    out.update(image_neighbors=[_neighbour(), "stray"], report_matches=[_neighbour(rank=2)])
+    out["nest"] = [{"keep": 1, "image_neighbors": [_neighbour()], "report_matches": [_neighbour(rank=2), None]}]
+    return out
+
+
+@pytest.mark.parametrize("event, data", ALL_EVENTS, ids=[_event_id(e, d) for e, d in ALL_EVENTS])
+def test_every_retrieval_list_is_reduced_in_every_event_at_the_top_level_and_nested(event, data):   # M2
+    injected = _inject_u2(data)
+    clean = redact_event(event, copy.deepcopy(data), "public")
+    out = redact_event(event, copy.deepcopy(injected), "public")
+    if clean is None:
+        assert out is None
+    else:
+        one, two = [{"rank": 1, "similarity": 0.9}], [{"rank": 2, "similarity": 0.9}]
+        nest = [{"keep": 1, "image_neighbors": one, "report_matches": two}]
+        assert out == dict(clean, image_neighbors=one, report_matches=two, nest=nest)
+        assert "SECRET" not in json.dumps(out)
+    assert redact_event(event, copy.deepcopy(injected), "private") == injected
 
 
 @pytest.mark.parametrize("mode", ["public", "private"])
 def test_redact_event_never_mutates_its_input_and_returns_a_copy(mode):
-    for event, original in PRIVATE_TURN:
+    for event, original in ALL_EVENTS:
         data = copy.deepcopy(original)   # a module-level fixture is never handed over, so one failure cannot spread
         out = redact_event(event, data, mode)
         assert data == original
@@ -403,7 +621,8 @@ def test_a_whole_private_turn_is_clean_in_public_mode_and_equal_in_private_mode(
     with caplog.at_level(logging.DEBUG, logger="app.redact"):
         public = [redact_event(e, copy.deepcopy(d), "public") for e, d in PRIVATE_TURN]
     assert _redactions(caplog) == []   # PUBLIC_DROP alone covers every shape in the contract: no catch-all hit
-    assert [d["stage"] for (_, d), out in zip(PRIVATE_TURN, public) if out is None] == ["score"]   # the only drop
+    assert [(e, d["stage"]) for (e, d), out in zip(PRIVATE_TURN, public) if out is None] == [
+        ("stage_start", "score"), ("stage_end", "score")]   # the only drops: a public stream never shows score
     dumped = json.dumps([out for out in public if out is not None])
     assert "SECRET" not in dumped and "rouge_l" not in dumped
     assert not _keys_anywhere(json.loads(dumped)) & (redact.CATCH_ALL_KEYS | {"labels", "build_id"})
