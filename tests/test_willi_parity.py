@@ -6717,3 +6717,15 @@ def test_chat_cpu_decode_probe_is_cpu_only_and_decodes_the_published_protocol():
                                         "run cached_a ", "run cached_b ", "run uncached ")]
     assert order == sorted(order), "warm, cached_1, cached_a, cached_b, uncached"
     assert 'echo "ERROR: /usr/bin/time missing"' in src and "TIME_V" not in src
+
+
+def test_chat_engine_golden_wrappers_compare_on_the_same_node():
+    """CHAT_UI_PLAN.md P2-E. R2: byte identity is only meaningful on the same node and device."""
+    cpu = (REPO_ROOT / "scripts" / "chat_engine_golden_h100.sh").read_text()
+    gpu = (REPO_ROOT / "scripts" / "chat_engine_golden_gpu_h100.sh").read_text()
+    for src in (cpu, gpu):
+        assert "#SBATCH --partition=pot-hpi-aisc-batch" in src and "--exclude=ga03" in src
+        assert "scripts/chat_engine_golden.py" in src
+    assert "scripts/evaluate_report_generation.py" in cpu   # the GPU arm compares with the published dump instead
+    assert not [l for l in cpu.splitlines() if l.startswith("#SBATCH") and "--gpus" in l]
+    assert "#SBATCH --gpus=1" in gpu and "--uncached" in gpu
