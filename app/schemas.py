@@ -1,5 +1,5 @@
 """Schemas for the chat app (CHAT_UI_PLAN.md section 6). Only Options so far; P3-A adds the rest."""
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,3 +18,16 @@ class Options(BaseModel):
     reference: Optional[str] = Field(default=None, max_length=20000)   # private mode only
     display_repair: bool = False
     test_row: Optional[Annotated[int, Field(ge=0)]] = None             # private mode only (picker)
+
+
+def error_body(kind: str, message: str) -> Dict[str, Any]:
+    """Format an error response envelope.
+
+    Args:
+        kind: Error type (e.g., "validation_error", "model_error", "overloaded_error")
+        message: Human-readable error message
+
+    Returns:
+        Dictionary with structure: {"type": "error", "error": {"type": kind, "message": message}}
+    """
+    return {"type": "error", "error": {"type": kind, "message": message}}
