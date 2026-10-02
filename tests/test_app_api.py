@@ -1,12 +1,14 @@
 """CHAT_UI_PLAN.md P3-D: the streaming API on the tiny engine."""
 import asyncio
+import hashlib
 import http.client
-import io
+import ipaddress
 import json
 import shutil
 import socket
 import threading
 import time
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -15,14 +17,14 @@ from PIL import Image
 
 from app import server
 from app.commands import NOT_A_QA_BOT
-from app.engine import REPO_ROOT, build_engine
+from app.engine import REPO_ROOT, TinyEngine, build_engine
 from app.imaging import FORMATS_MSG, MAX_UPLOAD_BYTES, TOO_LARGE_MSG, TOO_SMALL_MSG, UNREADABLE_MSG, UploadError
 from app.pipeline import REFERENCE_IGNORED_PUBLIC, Pipeline, TurnJob, Worker
 from app.redact import PUBLIC_ERROR_MESSAGE
 from app.schemas import Options
 from app.server import create_app
-from app.store import Store
-from tests.app_helpers import iter_sse, png_bytes, wait_until
+from app.store import RESTART_MESSAGE, Store
+from tests.app_helpers import iter_sse, png_bytes, start_live_server, wait_until
 
 STAGES = ["preprocess", "encode", "retrieve", "generate", "label", "score"]
 
@@ -255,6 +257,66 @@ def _fake_real_engines(monkeypatch, cacheless=()):
     return calls
 
 
+@pytest.fixture
+def live_app(tmp_path):
+    """A live server with its app at hand, for tests that hold the worker or read the store."""
+    app = create_app(engine="tiny", home=str(tmp_path), queue_cap=4)
+    base, stop = start_live_server(app)
+    yield base, app
+    stop()
+
+
+@pytest.fixture
+def held(monkeypatch):
+    """Every turn waits inside generate until the test sets `release` (or the turn's Stop is set), so the turns queued
+    behind it wait exactly as long as the test needs, with no timing (fix-1 M5)."""
+    entered, release = threading.Event(), threading.Event()
+    real = TinyEngine.generate
+
+    def generate(engine, enc, opts, on_snapshot, cancel):
+        entered.set()
+        deadline = time.monotonic() + 30
+        while not (release.is_set() or cancel.is_set()):
+            assert time.monotonic() < deadline, "a held turn was never released"
+            release.wait(0.01)
+        return real(engine, enc, opts, on_snapshot, cancel)
+
+    monkeypatch.setattr(TinyEngine, "generate", generate)
+    yield SimpleNamespace(entered=entered, release=release)
+    release.set()   # never leave a turn waiting at teardown
+
+
+class _Stream(threading.Thread):
+    """One turn POSTed on its own thread: its status and X-Message-Id once it is accepted, then every frame."""
+
+    def __init__(self, base, sid, image=None, text="", options=None):
+        super().__init__(daemon=True)
+        self.url = base + "/v1/sessions/{}/messages".format(sid)
+        self.files = None if image is None else {"image": ("x.png", image, "image/png")}
+        self.data = {"text": text, "options": json.dumps(options or {"max_new_tokens": 16})}
+        self.accepted, self.status, self.message_id, self.frames = threading.Event(), None, None, []
+        self.start()
+
+    def run(self):
+        try:
+            with httpx.stream("POST", self.url, files=self.files, data=self.data, timeout=60) as r:
+                self.status, self.message_id = r.status_code, r.headers.get("X-Message-Id")
+                self.accepted.set()
+                for frame in iter_sse(r.iter_text()):
+                    self.frames.append(frame)
+        finally:
+            self.accepted.set()
+
+    def finish(self):
+        self.join(30)
+        assert not self.is_alive(), "the turn's stream never ended"
+        return self.frames
+
+
+def _cancel(base, message_id):
+    return httpx.post(base + "/v1/messages/{}/cancel".format(message_id)).json()
+
+
 # ---- R6/D9, D23, D8: bind refusal, token, client scoping ------------------------------------------------------------
 
 def test_loopback_binds_need_no_token_but_any_other_host_does(tmp_path):
@@ -267,14 +329,63 @@ def test_loopback_binds_need_no_token_but_any_other_host_does(tmp_path):
         create_app(engine="tiny", home=str(tmp_path / "y"), mode="demo")
 
 
-def test_chat_home_must_live_outside_the_repository():   # DUA: the session database never sits in the repo tree
+def test_chat_home_must_live_outside_the_repository(tmp_path, monkeypatch):   # DUA: never in the repo tree
     home = REPO_ROOT / "chat_home_guard_test"
     try:
-        with pytest.raises(RuntimeError, match="outside the repository"):
+        with pytest.raises(RuntimeError, match="outside"):
             create_app(engine="tiny", home=str(home))
         assert not home.exists()   # refused before anything was created
     finally:
         shutil.rmtree(home, ignore_errors=True)   # only a broken guard leaves it behind
+    cluster = tmp_path / "hybrid_chat_ui"   # as CLUSTER_REPO: the code, rsynced without its .git
+    cluster.mkdir()
+    monkeypatch.setattr(server, "REPO_ROOT", cluster)
+    with pytest.raises(RuntimeError, match="outside the repository"):
+        create_app(engine="tiny", home=str(cluster / "chat_sessions"))
+
+
+def test_chat_home_must_live_outside_any_git_checkout_even_through_a_symlink(tmp_path):   # fix-1 M4
+    main = tmp_path / "main_repo"   # as MAIN_REPO on the cluster: a git checkout
+    (main / ".git").mkdir(parents=True)
+    (main / "results").mkdir()
+    cluster = tmp_path / "cluster_repo"   # as CLUSTER_REPO: its results/ is a symlink into MAIN_REPO
+    cluster.mkdir()
+    (cluster / "results").symlink_to(main / "results")
+    with pytest.raises(RuntimeError, match="git checkout"):
+        create_app(engine="tiny", home=str(cluster / "results" / "chat"))
+    assert not (main / "results" / "chat").exists()
+    worktree = tmp_path / "worktree"   # a worktree's .git is a file, not a directory
+    worktree.mkdir()
+    (worktree / ".git").write_text("gitdir: /elsewhere\n")
+    with pytest.raises(RuntimeError, match="git checkout"):
+        create_app(engine="tiny", home=str(worktree / "deep" / "chat"))
+    create_app(engine="tiny", home=str(cluster / "chat")).state.store.close()   # beside a checkout is fine
+
+
+def test_without_a_token_only_connections_that_arrive_on_loopback_are_served(tmp_path):   # fix-1 M3, R6
+    # `uvicorn --factory --host 0.0.0.0` never passes host to create_app: the address a request arrived on decides.
+    refused = {"type": "error", "error": {"type": "permission_error",
+                                          "message": "This server has no token; connect through loopback."}}
+    with TestClient(create_app(engine="tiny", home=str(tmp_path / "open"))) as c:
+        for base in ("http://10.1.2.3:8000", "http://[2001:db8::1]:8000", "http://0.0.0.0:8000"):
+            for path in ("/healthz", "/", "/static/app.js", "/v1/sessions"):
+                r = c.get(base + path)
+                assert r.status_code == 403 and r.json() == refused, (base, path)
+        for base in ("http://127.0.0.1:8000", "http://127.9.9.9:8000", "http://[::1]:8000",
+                     "http://[::ffff:127.0.0.1]:8000", "http://localhost:8000"):
+            assert c.get(base + "/healthz").status_code == 200 and c.get(base + "/v1/sessions").status_code == 200
+    with TestClient(create_app(engine="tiny", home=str(tmp_path / "tok"), host="0.0.0.0", token="t")) as c:
+        assert c.get("http://10.1.2.3:8000/healthz").status_code == 200   # with a token: the token decides
+        assert c.get("http://10.1.2.3:8000/v1/sessions").status_code == 401
+        assert c.get("http://10.1.2.3:8000/v1/sessions", headers={"Authorization": "Bearer t"}).status_code == 200
+
+
+def test_an_ipv4_mapped_loopback_is_loopback_on_every_python():   # fix-1 M3: the cluster's Python 3.11 says it is not
+    as_on_python_3_11 = SimpleNamespace(is_loopback=False, ipv4_mapped=ipaddress.ip_address("127.0.0.1"))
+    assert server._loopback_ip(as_on_python_3_11) is True
+    elsewhere = SimpleNamespace(is_loopback=False, ipv4_mapped=ipaddress.ip_address("10.0.0.1"))
+    assert server._loopback_ip(elsewhere) is False
+    assert server._loopback_ip(SimpleNamespace(is_loopback=False, ipv4_mapped=None)) is False
 
 
 def test_the_token_guards_every_v1_path_and_its_errors_use_the_envelope(tmp_path):
@@ -410,6 +521,16 @@ def test_malformed_options_are_a_400_and_invalid_ones_a_readable_422(client):
     assert client.get("/v1/sessions/{}".format(sid)).json()["messages"] == []   # nothing was stored
 
 
+def test_deeply_nested_options_are_a_400_not_a_crash(client):   # fix-1 M1: json.loads raises RecursionError
+    sid = client.post("/v1/sessions", json={}).json()["id"]
+    for raw in ("[" * 100000, '{"a":' * 100000):
+        r = client.post("/v1/sessions/{}/messages".format(sid), files={"image": ("x.png", png_bytes(), "image/png")},
+                        data={"text": "", "options": raw})
+        assert r.status_code == 400 and r.json()["error"] == {"type": "invalid_request_error",
+                                                              "message": "options must be a JSON object."}
+    assert client.get("/healthz").json()["turns_in_flight"] == 0
+
+
 def test_unknown_sessions_and_messages_are_404s_in_the_envelope(client):
     for path in ("/v1/sessions/s_missing", "/v1/messages/m_missing", "/v1/sessions/s_missing/export?format=md",
                  "/v1/no/such/route"):
@@ -455,34 +576,43 @@ def test_a_test_row_is_refused_in_public_mode_and_without_a_gallery(tmp_path):
         assert r.status_code == 422 and "gallery" in r.json()["error"]["message"]
     with TestClient(create_app(engine="tiny", home=str(tmp_path / "b"), mode="public", token="t")) as c:
         sid = c.post("/v1/sessions", json={}, headers=PUBLIC).json()["id"]
-        r = _post(c, sid, options={"test_row": 0}, image=False, headers=PUBLIC)
-        assert r.status_code == 422 and "public" in r.json()["error"]["message"]
+        r = _post(c, sid, options={"test_row": 0}, image=False, headers=PUBLIC)   # fix-1 (b): as every public
+        assert r.status_code == 403 and r.json()["error"] == {                     # test-split access
+            "type": "permission_error", "message": "Test-split studies are not available in public mode."}
 
 
 def test_pre_stream_checks_refuse_in_the_ruled_order(tmp_path, monkeypatch):
     """auth, client id, session, options, model, cached_decode, compile, test_row, image, previous image, overload."""
     with TestClient(create_app(engine="tiny", home=str(tmp_path), mode="public", token="t")) as c:
         sid = c.post("/v1/sessions", json={}, headers=PUBLIC).json()["id"]
-        bad_options = {"retrieval_k": 3}
         gif = {"image": ("x.gif", b"GIF89a" + bytes(64), "image/gif")}
 
-        def code(headers=PUBLIC, session=sid, options=None, files=None, image=False):
-            return _post(c, session, options=bad_options if options is None else options, headers=headers,
-                         files=files, image=image).status_code
+        def refusal(options, headers=PUBLIC, session=sid, files=None):
+            r = _post(c, session, options=options, headers=headers, files=files, image=False)
+            return r.status_code, r.json()["error"]["type"], r.json()["error"]["message"]
 
-        assert code(headers={}) == 401
-        assert code(headers={"Authorization": "Bearer t"}) == 400
-        assert code(session="s_not_this_clients") == 404
-        assert code() == 422                                                   # options
+        bad_options = {"retrieval_k": 3}
+        assert refusal(bad_options, headers={})[0] == 401
+        assert refusal(bad_options, headers={"Authorization": "Bearer t"})[0] == 400
+        assert refusal(bad_options, session="s_not_this_clients")[0] == 404
+        assert refusal(bad_options)[:2] == (422, "validation_error")
         monkeypatch.setattr(c.app.state.worker, "reserve", lambda: False)    # as if queue_cap turns were in flight
-        assert code(options={"model": "nope"}, files=gif) == 422              # model, before the image
-        assert code(options={"compile": True}, files=gif) == 422              # compile, before the image
-        assert code(options={"test_row": 1}, files=gif) == 422                # test_row, before the image
-        r = _post(c, sid, options={}, files=gif, headers=PUBLIC)               # the image, before overload
-        assert r.status_code == 422 and r.json()["error"]["message"] == FORMATS_MSG
-        r = _post(c, sid, options={}, image=False, headers=PUBLIC)             # no image anywhere, before overload
-        assert r.status_code == 422 and r.json()["error"]["message"] == "Attach an X-ray first."
-        r = _post(c, sid, options={}, headers=PUBLIC)                          # a valid turn: overload is last
+        monkeypatch.setitem(c.app.state.engines["tiny"]._card, "cached_decode_available", False)   # no decode cache
+        # fix-1 M6: each later check fails too, so the message shows which one answered first
+        failing = {"model": "nope", "compile": True, "test_row": 1}           # cached_decode defaults to true
+        assert refusal(dict(failing), files=gif) == (422, "validation_error", "Unknown model; this server has tiny.")
+        del failing["model"]
+        assert refusal(dict(failing), files=gif) == (
+            422, "validation_error", "tiny has no O(1) decode cache; set cached_decode=false.")
+        failing["cached_decode"] = False
+        assert refusal(dict(failing), files=gif) == (422, "validation_error", "compile is not enabled on this server.")
+        del failing["compile"]
+        assert refusal(dict(failing), files=gif) == (
+            403, "permission_error", "Test-split studies are not available in public mode.")
+        del failing["test_row"]
+        assert refusal(dict(failing), files=gif) == (422, "validation_error", FORMATS_MSG)   # the image
+        assert refusal(dict(failing)) == (422, "validation_error", "Attach an X-ray first.")    # no image anywhere
+        r = _post(c, sid, options=dict(failing), headers=PUBLIC)               # a valid turn: overload is last
         assert r.status_code == 429 and r.json()["error"]["type"] == "overloaded_error"
         assert c.get("/v1/sessions/{}".format(sid), headers=PUBLIC).json()["messages"] == []
 
@@ -492,7 +622,7 @@ def test_pre_stream_checks_refuse_in_the_ruled_order(tmp_path, monkeypatch):
 def test_an_image_over_the_limit_is_a_413_and_an_unusable_one_a_422_before_streaming(client):
     sid = client.post("/v1/sessions", json={}).json()["id"]
     r = _post(client, sid, files={"image": ("x.png", bytes(MAX_UPLOAD_BYTES + 1), "image/png")})
-    assert r.status_code == 413 and r.json()["error"] == {"type": "request_too_large", "message": TOO_LARGE_MSG}
+    assert r.status_code == 413 and r.json()["error"] == {"type": "validation_error", "message": TOO_LARGE_MSG}
     r = _post(client, sid, files={"image": ("x.png", png_bytes(32, 32), "image/png")})
     assert r.status_code == 422 and r.json()["error"] == {"type": "validation_error", "message": TOO_SMALL_MSG}
     r = _post(client, sid, files={"image": ("x.dcm", bytes(128) + b"DICM" + bytes(64), "application/dicom")})
@@ -510,7 +640,7 @@ def test_a_body_without_content_length_is_capped_as_it_arrives(client):
     r = client.post("/v1/sessions/{}/messages".format(sid), content=body(),
                     headers={"Content-Type": "multipart/form-data; boundary=zzz"})
     assert "content-length" not in r.request.headers
-    assert r.status_code == 413 and r.json()["error"]["type"] == "request_too_large"
+    assert r.status_code == 413 and r.json()["error"] == {"type": "validation_error", "message": TOO_LARGE_MSG}
 
 
 def test_a_content_length_over_the_cap_is_refused_before_the_body_is_read(live):
@@ -524,7 +654,7 @@ def test_a_content_length_over_the_cap_is_refused_before_the_body_is_read(live):
         reply = http.client.HTTPResponse(sock)
         reply.begin()
         body = json.loads(reply.read())
-    assert reply.status == 413 and body["error"] == {"type": "request_too_large", "message": TOO_LARGE_MSG}
+    assert reply.status == 413 and body["error"] == {"type": "validation_error", "message": TOO_LARGE_MSG}   # fix-1 (a)
     assert server.MAX_REQUEST_BYTES == MAX_UPLOAD_BYTES + 1024 * 1024
 
 
@@ -567,9 +697,12 @@ def test_the_last_three_stages_end_skipped_with_their_fixed_reasons(tmp_path):
 # ---- ruling 7: every event is redacted before it is stored and sent -------------------------------------------------
 
 def test_a_public_turn_is_redacted_before_it_is_stored_and_sent(tmp_path):
+    """A public reference, from the drawer or typed as a command, is never used: it is absent from the turn's options,
+    its events (as sent and as stored) and the exports' structured fields. Typed, it stays in the user message's text
+    and the session title, which are the visitor's own words, not MIMIC data (fix-1 M7)."""
     with TestClient(create_app(engine="tiny", home=str(tmp_path), mode="public", token="t")) as c:
         sid = c.post("/v1/sessions", json={}, headers=PUBLIC).json()["id"]
-        frames = _public_turn(c, sid, options={"max_new_tokens": 16, "reference": "Findings: my own secret line."})
+        frames = _public_turn(c, sid, options={"max_new_tokens": 16, "reference": "Findings: from the drawer."})
         assert [f["data"]["seq"] for f in frames] == list(range(1, len(frames) + 1))   # a dropped event takes no seq
         assert [f["data"]["stage"] for f in frames if f["event"] == "stage_end"] == STAGES[:-1]   # no score in public
         start = frames[0]["data"]
@@ -580,10 +713,21 @@ def test_a_public_turn_is_redacted_before_it_is_stored_and_sent(tmp_path):
         assert frames[-1]["data"]["status"] == "done"
         stored = c.get("/v1/messages/{}".format(start["message_id"]), headers=PUBLIC).json()
         assert [(e["event"], e["data"]) for e in stored["events"]] == [(f["event"], f["data"]) for f in frames]
-        everything = [json.dumps(frames), json.dumps(stored), c.get("/v1/sessions/{}".format(sid), headers=PUBLIC).text]
-        everything += [c.get("/v1/sessions/{}/export?format={}".format(sid, f), headers=PUBLIC).text
-                       for f in ("json", "md")]
-        assert not [text for text in everything if "my own secret line" in text]
+        typed_sid = c.post("/v1/sessions", json={}, headers=PUBLIC).json()["id"]
+        typed = _public_turn(c, typed_sid, text="reference: Findings: typed by the visitor.")
+        assert [f["data"]["code"] for f in typed if f["event"] == "warning"] == ["reference_ignored_public"]
+        sessions = [c.get("/v1/sessions/{}".format(s), headers=PUBLIC).json() for s in (sid, typed_sid)]
+        exports = [c.get("/v1/sessions/{}/export?format=json".format(s), headers=PUBLIC).json()
+                   for s in (sid, typed_sid)]
+        for line in ("from the drawer", "typed by the visitor"):
+            assert line not in json.dumps(frames + typed)   # the events, which are also what is stored
+            for message in [m for s in sessions + exports for m in s["messages"]]:
+                assert line not in json.dumps([message["options"], message["provenance"], message.get("events", [])])
+        everything = json.dumps(sessions[0]) + json.dumps(exports[0])
+        everything += c.get("/v1/sessions/{}/export?format=md".format(sid), headers=PUBLIC).text
+        assert "from the drawer" not in everything   # never typed, so nowhere at all
+        user = sessions[1]["messages"][0]
+        assert user["text"] == sessions[1]["title"] == "reference: Findings: typed by the visitor."
 
 
 def test_public_cards_and_provenance_carry_the_checkpoint_file_name_only(tmp_path, monkeypatch):
@@ -665,40 +809,22 @@ def test_public_engine_failure_is_a_bare_error_body_with_the_public_message(tmp_
         assert _public_turn(c, sid)[-1]["data"]["status"] == "done"   # the worker serves the next turn
 
 
-def test_a_session_deleted_before_its_turn_runs_ends_that_turn_quietly(live, caplog):
-    sid_a, sid_b = _new_session(live), _new_session(live)
-    a_generating, b_opened, frames = threading.Event(), [], {"a": [], "b": []}
-
-    def run(name, sid, tokens):
-        with httpx.stream("POST", live + "/v1/sessions/{}/messages".format(sid), timeout=60,
-                          files={"image": ("x.png", png_bytes(), "image/png")},
-                          data={"text": "", "options": json.dumps({"max_new_tokens": tokens})}) as r:
-            if name == "b":
-                b_opened.append(r.status_code)
-            for frame in iter_sse(r.iter_text()):
-                frames[name].append(frame)
-                if frame["event"] == "content_block_delta":
-                    a_generating.set()
-
-    a = threading.Thread(target=run, args=("a", sid_a, 150))
-    a.start()
-    assert a_generating.wait(10)                  # A holds the one worker, so B can only wait in the queue
-    b = threading.Thread(target=run, args=("b", sid_b, 16))
-    b.start()
-    assert wait_until(lambda: b_opened) == [200]  # B is accepted
-    assert httpx.delete(live + "/v1/sessions/{}".format(sid_b)).status_code == 204
-    httpx.post(live + "/v1/messages/{}/cancel".format(frames["a"][0]["data"]["message_id"]))
-    a.join(30)
-    b.join(30)
-    assert [f["event"] for f in frames["b"]] == ["message_start", "stage_start", "message_stop"]
-    assert frames["b"][-1]["data"]["status"] == "aborted"   # its upload could not be stored: no error event
+def test_a_session_deleted_before_its_turn_runs_ends_that_turn_quietly(live_app, held, caplog):   # fix-1 M5
+    base, _ = live_app
+    a = _Stream(base, _new_session(base), image=png_bytes())
+    assert held.entered.wait(10)                     # A holds the one worker, so B can only wait in the queue
+    sid_b = _new_session(base)
+    b = _Stream(base, sid_b, image=png_bytes())
+    assert b.accepted.wait(10) and b.status == 200
+    assert httpx.delete(base + "/v1/sessions/{}".format(sid_b)).status_code == 204
+    held.release.set()
+    assert a.finish()[-1]["data"]["status"] == "done"
+    frames = b.finish()
+    assert [f["event"] for f in frames] == ["message_start", "message_stop"]   # it stops before its first stage
+    assert frames[-1]["data"]["status"] == "aborted"   # quietly: no error event
     assert any("deleted" in r.getMessage() for r in caplog.records if r.name == "app.pipeline")
-    assert httpx.get(live + "/healthz").json()["turns_in_flight"] == 0
-    sid_c = _new_session(live)
-    with httpx.stream("POST", live + "/v1/sessions/{}/messages".format(sid_c), timeout=30,
-                      files={"image": ("x.png", png_bytes(), "image/png")},
-                      data={"text": "", "options": json.dumps({"max_new_tokens": 16})}) as r:
-        assert list(iter_sse(r.iter_text()))[-1]["data"]["status"] == "done"
+    assert httpx.get(base + "/healthz").json()["turns_in_flight"] == 0
+    assert _Stream(base, _new_session(base), image=png_bytes()).finish()[-1]["data"]["status"] == "done"
 
 
 def test_a_text_only_turn_whose_session_was_deleted_ends_quietly(client, caplog):
@@ -711,10 +837,25 @@ def test_a_text_only_turn_whose_session_was_deleted_ends_quietly(client, caplog)
     job = TurnJob(sid, uid, mid, "greedy", None, "x.png", Options(decode="greedy"), mode="private",
                   previous_sha256=sha)
     pipeline.run(job, lambda event, data: sent.append((event, data)), threading.Event())
-    assert [e for e, _ in sent] == ["message_start", "stage_start", "message_stop"]
+    assert [e for e, _ in sent] == ["message_start", "message_stop"]   # it stops before its first stage
     assert sent[-1][1]["status"] == "aborted" and sent[0][1]["image"]["source"] == "previous"
-    assert [e["event"] for e in store.events_after(mid)] == ["message_start", "stage_start", "message_stop"]
+    assert [e["event"] for e in store.events_after(mid)] == ["message_start", "message_stop"]
     assert any("deleted" in r.getMessage() for r in caplog.records if r.name == "app.pipeline")
+
+
+def test_a_text_only_turn_whose_image_left_the_disk_is_an_error_not_a_quiet_end(client, tmp_path):   # fix-1
+    sid = client.post("/v1/sessions", json={}).json()["id"]
+    sha = _turn(client, sid)[0]["data"]["image"]["sha256"]
+    store, pipeline = client.app.state.store, client.app.state.worker.pipeline
+    uid, mid = store.start_turn(sid, "greedy", "private", {}, sha, "x.png")   # accepted while the file was there
+    shutil.rmtree(tmp_path / "uploads" / sid / sha)                          # the session itself stays alive
+    sent = []
+    job = TurnJob(sid, uid, mid, "greedy", None, "x.png", Options(decode="greedy"), mode="private",
+                  previous_sha256=sha)
+    pipeline.run(job, lambda event, data: sent.append((event, data)), threading.Event())
+    assert [e for e, _ in sent] == ["message_start", "stage_start", "error", "message_stop"]
+    assert sent[2][1]["error"] == {"type": "model_error", "message": "Internal error (FileNotFoundError)"}
+    assert sent[-1][1]["status"] == "error"
 
 
 def test_the_runner_never_raises_even_when_the_store_is_gone(tmp_path, caplog):
@@ -776,35 +917,99 @@ def test_cancel_is_scoped_and_idempotent(tmp_path):
         assert c.post("/v1/messages/{}/cancel".format(uid), headers=PUBLIC).json()["cancel_requested"] is False
 
 
-def test_a_queued_turn_can_be_cancelled_by_the_id_its_response_header_carries(live):
-    sid = _new_session(live)
-    a_generating, ids, frames = threading.Event(), {}, {"a": [], "b": []}
+def test_a_queued_turn_can_be_cancelled_by_the_id_its_response_header_carries(live_app, held):   # fix-1 M5
+    base, _ = live_app
+    sid = _new_session(base)
+    a = _Stream(base, sid, image=png_bytes())
+    assert held.entered.wait(10)
+    b = _Stream(base, sid, image=png_bytes())
+    assert b.accepted.wait(10) and b.status == 200   # the id is known before the worker reaches the turn
+    assert _cancel(base, b.message_id) == {"id": b.message_id, "status": "running", "cancel_requested": True}
+    held.release.set()
+    assert a.finish()[-1]["data"]["status"] == "done"
+    frames = b.finish()
+    assert frames[0]["data"]["message_id"] == b.message_id
+    assert [f["event"] for f in frames] == ["message_start", "message_stop"]   # no stage ran
+    assert frames[-1]["data"]["status"] == "aborted"
+    assert httpx.get(base + "/v1/messages/{}".format(b.message_id)).json()["status"] == "aborted"
 
-    def run(name, tokens):
-        with httpx.stream("POST", live + "/v1/sessions/{}/messages".format(sid), timeout=60,
-                          files={"image": ("x.png", png_bytes(), "image/png")},
-                          data={"text": "", "options": json.dumps({"max_new_tokens": tokens})}) as r:
-            ids[name] = r.headers["X-Message-Id"]   # known before the turn reaches the worker
-            for frame in iter_sse(r.iter_text()):
-                frames[name].append(frame)
-                if frame["event"] == "content_block_delta":
-                    a_generating.set()
 
-    a = threading.Thread(target=run, args=("a", 150))
-    a.start()
-    assert a_generating.wait(10)
-    b = threading.Thread(target=run, args=("b", 16))
-    b.start()
-    b_id = wait_until(lambda: ids.get("b"))
-    r = httpx.post(live + "/v1/messages/{}/cancel".format(b_id))
-    assert r.json() == {"id": b_id, "status": "running", "cancel_requested": True}
-    httpx.post(live + "/v1/messages/{}/cancel".format(ids["a"]))
-    a.join(30)
-    b.join(30)
-    assert frames["a"][0]["data"]["message_id"] == ids["a"] and frames["b"][0]["data"]["message_id"] == b_id
-    assert [f["event"] for f in frames["b"]] == ["message_start", "message_stop"]   # no stage ran
-    assert frames["b"][-1]["data"]["status"] == "aborted"
-    assert httpx.get(live + "/v1/messages/{}".format(b_id)).json()["status"] == "aborted"
+def test_a_question_stopped_in_the_queue_ends_aborted(live_app, held):   # fix-1 M2
+    base, _ = live_app
+    sid = _new_session(base)
+    a = _Stream(base, sid, image=png_bytes())
+    assert held.entered.wait(10)
+    question = _Stream(base, sid, text="is this pneumonia?")
+    assert question.accepted.wait(10) and question.status == 200
+    assert _cancel(base, question.message_id)["cancel_requested"] is True
+    held.release.set()
+    a.finish()
+    frames = question.finish()
+    assert [f["event"] for f in frames] == ["message_start", "message_stop"]   # no fixed answer after a Stop
+    assert frames[-1]["data"]["status"] == "aborted"
+
+
+def test_shutdown_ends_turns_like_a_restart_but_a_stop_pressed_earlier_still_aborts(live_app, held):   # fix-1 (c)
+    base, app = live_app
+    sid = _new_session(base)
+    running = _Stream(base, sid, image=png_bytes())
+    assert held.entered.wait(10)
+    queued = _Stream(base, sid, image=png_bytes(256, 256))
+    stopped = _Stream(base, sid, image=png_bytes(288, 288))
+    assert queued.accepted.wait(10) and stopped.accepted.wait(10)
+    assert _cancel(base, stopped.message_id)["cancel_requested"] is True   # the user's Stop lands first
+    closing = threading.Thread(target=app.state.worker.shutdown, daemon=True)   # what the lifespan runs
+    closing.start()
+    closing.join(30)
+    assert not closing.is_alive()
+    restart = {"type": "error", "error": {"type": "server_restart", "message": RESTART_MESSAGE}}
+    for turn in (running, queued):
+        frames = turn.finish()
+        assert [dict(f["data"], seq=0) for f in frames if f["event"] == "error"] == [dict(restart, seq=0)]
+        assert frames[-1]["event"] == "message_stop" and frames[-1]["data"]["status"] == "error"
+    frames = stopped.finish()
+    assert [f["event"] for f in frames] == ["message_start", "message_stop"]
+    assert frames[-1]["data"]["status"] == "aborted"
+    messages = httpx.get(base + "/v1/sessions/{}".format(sid)).json()["messages"]
+    stored = {m["id"]: m["status"] for m in messages if m["role"] == "assistant"}   # the two queued POSTs race
+    assert stored == {running.message_id: "error", queued.message_id: "error", stopped.message_id: "aborted"}
+
+
+def test_a_shutdown_stop_wins_over_a_later_one_and_public_mode_keeps_the_restart_message(tmp_path):   # fix-1 (c)
+    from app.pipeline import Stop
+    store = Store(tmp_path)
+    pipeline = Pipeline({"tiny": build_engine("tiny")}, "tiny", store, "public")
+    session = store.create_session("public", "a")
+    uid, mid = store.start_turn(session["id"], "", "public", {})
+    stop = Stop()
+    stop.stop("shutdown")
+    stop.stop("user")   # pressed after the shutdown began: the first reason stands
+    sent = []
+    job = TurnJob(session["id"], uid, mid, "", png_bytes(), "x.png", Options(max_new_tokens=16), mode="public")
+    pipeline.run(job, lambda event, data: sent.append((event, data)), stop)
+    assert [e for e, _ in sent] == ["message_start", "error", "message_stop"]
+    assert sent[1][1]["error"] == {"type": "server_restart", "message": RESTART_MESSAGE}   # authored: kept in public
+    assert sent[2][1]["status"] == "error" and store.get_message(mid, "a")["status"] == "error"
+    store.close()
+
+
+def test_the_lifespan_waits_for_the_worker_off_the_event_loop(tmp_path, monkeypatch):   # fix-1 (c)
+    app = create_app(engine="tiny", home=str(tmp_path))
+    worker, seen = app.state.worker, []
+    real = worker.shutdown
+
+    def shutdown():
+        try:
+            asyncio.get_running_loop()
+            seen.append("on the event loop")
+        except RuntimeError:
+            seen.append("off the event loop")
+        real()
+
+    monkeypatch.setattr(worker, "shutdown", shutdown)
+    with TestClient(app):
+        pass
+    assert seen == ["off the event loop"]
 
 
 # ---- ruling 11: reading a message; ruling 13: message_stop's fields -------------------------------------------------
@@ -870,7 +1075,7 @@ def test_message_start_names_the_turn_and_points_at_the_user_messages_image(clie
     assert assistant["options"] == start["options"]
 
 
-def test_preprocess_stores_the_upload_once_per_session_and_hash(client):
+def test_an_upload_is_stored_once_per_session_and_hash(client):
     sid = client.post("/v1/sessions", json={}).json()["id"]
     sha = _turn(client, sid)[0]["data"]["image"]["sha256"]
     store = client.app.state.store
@@ -881,6 +1086,72 @@ def test_preprocess_stores_the_upload_once_per_session_and_hash(client):
     stamps = [store.upload_path(sid, sha, v).stat().st_mtime_ns for v in URL_VARIANTS]
     _turn(client, sid)   # the same bytes again: the first copy stands
     assert [store.upload_path(sid, sha, v).stat().st_mtime_ns for v in URL_VARIANTS] == stamps
+
+
+def test_a_stopped_queued_upload_is_on_disk_and_a_command_reruns_it(live_app, held):   # fix-1 I1
+    base, app = live_app
+    store, sid = app.state.store, _new_session(base)
+    a = _Stream(base, sid, image=png_bytes())
+    assert held.entered.wait(10)                    # A holds the one worker
+    upload = png_bytes(256, 256)
+    b = _Stream(base, sid, image=upload)
+    assert b.accepted.wait(10) and b.status == 200  # B waits in the queue and never reaches preprocess
+    sha = hashlib.sha256(upload).hexdigest()
+    assert httpx.get(base + "/v1/sessions/{}".format(sid)).json()["messages"][2]["image_sha256"] == sha
+    # stored before the record that names it: what B's image URLs will serve (P6-B), although B never runs
+    assert all(store.upload_path(sid, sha, v) is not None for v in URL_VARIANTS)
+    assert store.upload_path(sid, sha, "original").read_bytes() == upload
+    assert _cancel(base, b.message_id)["cancel_requested"] is True
+    held.release.set()
+    assert a.finish()[-1]["data"]["status"] == "done" and b.finish()[-1]["data"]["status"] == "aborted"
+    frames = _Stream(base, sid, text="greedy").finish()
+    assert frames[0]["data"]["image"]["sha256"] == sha and frames[0]["data"]["image"]["source"] == "previous"
+    assert frames[-1]["data"]["status"] == "done"
+
+
+def test_a_text_only_turn_queued_behind_an_unrun_upload_reruns_that_upload(live_app, held):   # fix-1 I1
+    base, _ = live_app
+    sid = _new_session(base)
+    a = _Stream(base, sid, image=png_bytes())
+    assert held.entered.wait(10)
+    upload = png_bytes(256, 256)
+    b = _Stream(base, sid, image=upload)
+    assert b.accepted.wait(10) and b.status == 200
+    c = _Stream(base, sid, text="greedy")           # accepted while B has not run
+    assert c.accepted.wait(10) and c.status == 200
+    held.release.set()
+    a.finish()
+    b.finish()
+    frames = c.finish()
+    assert frames[0]["data"]["image"]["sha256"] == hashlib.sha256(upload).hexdigest()
+    assert frames[-1]["data"]["status"] == "done"
+
+
+def test_a_text_only_turn_falls_back_to_the_newest_image_still_on_disk(client, tmp_path):   # fix-1 I1
+    sid = client.post("/v1/sessions", json={}).json()["id"]
+    first = _turn(client, sid)[0]["data"]["image"]
+    r = _post(client, sid, files={"image": ("y.png", png_bytes(256, 256), "image/png")})
+    newest = list(iter_sse([r.text]))[0]["data"]["image"]
+    shutil.rmtree(tmp_path / "uploads" / sid / newest["sha256"])   # the newest original is gone
+    start = _turn(client, sid, image=False, text="greedy")[0]["data"]
+    assert (start["image"]["sha256"], start["image"]["filename"]) == (first["sha256"], "x.png")
+
+
+def test_an_upload_that_cannot_be_stored_is_refused_and_frees_its_slot(client, monkeypatch):   # fix-1 I1
+    store, results = client.app.state.store, iter([OSError(28, "No space left on device"), KeyError("deleted")])
+
+    def failing_save(*args, **kwargs):
+        raise next(results)
+
+    monkeypatch.setattr(store, "save_upload", failing_save)
+    sid = client.post("/v1/sessions", json={}).json()["id"]
+    r = _post(client, sid)
+    assert r.status_code == 500 and r.json() == {"type": "error", "error": {
+        "type": "internal_error", "message": "Could not store the image."}}
+    r = _post(client, sid)   # the session was deleted between the check and the save
+    assert r.status_code == 404 and r.json()["error"]["type"] == "not_found_error"
+    assert client.get("/healthz").json()["turns_in_flight"] == 0
+    assert client.get("/v1/sessions/{}".format(sid)).json()["messages"] == []   # no record names an image
 
 
 def test_a_text_only_turn_reruns_the_stored_original_under_its_own_message(client):

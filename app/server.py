@@ -11,19 +11,22 @@ import asyncio
 import hashlib
 import hmac
 import html
+import io
 import ipaddress
 import json
+import logging
 import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence
+from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Tuple
 
 from fastapi import Depends, FastAPI, File, Form, Header, Query, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from PIL import Image
 from pydantic import BaseModel, ConfigDict, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
@@ -32,11 +35,13 @@ from starlette.requests import Request
 
 from app.commands import parse_command
 from app.engine import REPO_ROOT, Engine, build_engine
-from app.imaging import MAX_UPLOAD_BYTES, TOO_LARGE_MSG, UploadError, load_upload
+from app.imaging import MAX_UPLOAD_BYTES, TOO_LARGE_MSG, UploadError, load_upload, model_input_image, thumbnail_jpeg
 from app.pipeline import Pipeline, TurnJob, Worker
 from app.redact import redact_card
 from app.schemas import DISCLAIMER, Options, error_body
 from app.store import Store
+
+log = logging.getLogger("app.server")
 
 MODEL_CHECKPOINTS = {   # resolved against the repo root (ruling 1)
     "hybrid_150m_m3_rrg": "outputs/h100_report_gen_m3_tower13d_s42/checkpoints/last.ckpt",
@@ -46,11 +51,13 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"   # the page; P4 builds 
 MAX_REQUEST_BYTES = MAX_UPLOAD_BYTES + 1024 * 1024        # the image and room for the form's other fields
 PING_S = 15.0                                             # a keep-alive comment while no event comes
 CLIENT_ID = re.compile(r"[\x21-\x7e]{1,128}")             # visible ASCII: it scopes by equality only
-ERROR_KINDS = {400: "invalid_request_error", 401: "authentication_error", 404: "not_found_error",
-               413: "request_too_large", 422: "validation_error", 429: "overloaded_error"}
+ERROR_KINDS = {400: "invalid_request_error", 401: "authentication_error", 403: "permission_error",
+               404: "not_found_error", 413: "validation_error", 422: "validation_error", 429: "overloaded_error",
+               500: "internal_error"}   # 413 as P8-A's test expects; 403 as every public test-split refusal (fix-1)
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 NO_IMAGE_MSG = "Attach an X-ray first."
 NO_CACHE_MSG = "{} has no O(1) decode cache; set cached_decode=false."   # the engine's own wording (P2-D)
+NO_TOKEN_MSG = "This server has no token; connect through loopback."
 PLACEHOLDER = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>CXR Report Chat</title></head>"
                "<body><p>{}</p><p>The chat page is not built yet. The API is under <code>/v1/</code>, and its "
                "reference is at <a href=\"/docs\">/docs</a>.</p></body></html>")
@@ -111,8 +118,10 @@ def _capped(receive: Callable) -> Callable:
 class _Guard:
     """ASGI middleware ahead of routing and of any body parsing (FastAPI parses a form before its dependencies).
 
-    D23: with a token set, every /v1 path needs Authorization: Bearer <token>. Ruling 4: a request whose Content-Length
-    exceeds MAX_REQUEST_BYTES is refused unread, and a body sent without a length is cut off as it arrives.
+    R6: with no token, only a connection that arrived on a loopback address is served, whatever host the process was
+    bound to (`uvicorn --factory --host 0.0.0.0` never tells create_app). D23: with a token set, every /v1 path needs
+    Authorization: Bearer <token>. Ruling 4: a request whose Content-Length exceeds MAX_REQUEST_BYTES is refused
+    unread, and a body sent without a length is cut off as it arrives.
     """
 
     def __init__(self, app: Callable, token: Optional[str]):
@@ -125,7 +134,9 @@ class _Guard:
         headers = Headers(scope=scope)
         path = scope["path"]
         length = headers.get("content-length", "")
-        if self.token and (path == "/v1" or path.startswith("/v1/")) and not self._authorized(headers):
+        if not self.token and _arrived_off_loopback(scope):
+            response = _error(403, NO_TOKEN_MSG)
+        elif self.token and (path == "/v1" or path.startswith("/v1/")) and not self._authorized(headers):
             response = _error(401, "Missing or wrong token: send Authorization: Bearer <token>.",
                               {"WWW-Authenticate": "Bearer"})
         elif length.isdigit() and int(length) > MAX_REQUEST_BYTES:
@@ -147,20 +158,41 @@ class _StaticFiles(StaticFiles):
         return None
 
 
+def _loopback_ip(ip: Any) -> bool:
+    """Loopback, an IPv4-mapped one included (::ffff:127.0.0.1 is not loopback to Python 3.11's ipaddress)."""
+    return (getattr(ip, "ipv4_mapped", None) or ip).is_loopback
+
+
 def _is_loopback(host: str) -> bool:
     if host == "localhost":
         return True
     try:
-        return ipaddress.ip_address(host).is_loopback
+        return _loopback_ip(ipaddress.ip_address(host))
     except ValueError:   # a host name: it can resolve to anything
         return False
 
 
+def _arrived_off_loopback(scope: Dict[str, Any]) -> bool:
+    """The connection came in on a numeric address that is not loopback (uvicorn reports the socket's own address).
+    A host name, a unix socket or no address at all is not judged: only a test client sends a name."""
+    server = scope.get("server") or (None,)
+    try:
+        ip = ipaddress.ip_address(server[0])
+    except (TypeError, ValueError):
+        return False
+    return not _loopback_ip(ip)
+
+
 def _chat_home(home: Optional[str]) -> Path:
-    """CHAT_HOME: the argument, else $CHAT_HOME, else ~/chat_sessions. Never inside the repository (DUA)."""
+    """CHAT_HOME: the argument, else $CHAT_HOME, else ~/chat_sessions. Never inside this repository or any other git
+    checkout, symlinks resolved first: on the cluster, outputs/ and results/ link into the thesis checkout (DUA)."""
     path = Path(home or os.environ.get("CHAT_HOME") or Path.home() / "chat_sessions").expanduser().resolve()
     if path == REPO_ROOT or REPO_ROOT in path.parents:
         raise RuntimeError("CHAT_HOME must be outside the repository, got {}".format(path))
+    for directory in (path,) + tuple(path.parents):
+        if (directory / ".git").exists():   # a directory, or a worktree's file
+            raise RuntimeError("CHAT_HOME must be outside any git checkout, but {} has a .git; got {}".format(
+                directory, path))
     return path
 
 
@@ -185,7 +217,7 @@ def _turn_options(raw: str, text: str) -> Options:
     """The drawer's options with a text command on top (spec §4): malformed JSON is a 400, invalid options a 422."""
     try:
         drawer = json.loads(raw or "{}")
-    except ValueError:
+    except (ValueError, RecursionError):   # deep nesting overflows the decoder (fix-1 M1)
         drawer = None
     if not isinstance(drawer, dict):
         raise HTTPException(400, "options must be a JSON object.")
@@ -195,21 +227,31 @@ def _turn_options(raw: str, text: str) -> Options:
         raise HTTPException(422, "Invalid options: " + _readable(exc.errors(include_url=False, include_input=False)))
 
 
-def _checked_upload(data: bytes) -> str:
-    """load_upload before the stream opens (ruling 4); -> the upload's sha256. Its messages are written for users."""
+def _checked_upload(data: bytes) -> Tuple[Image.Image, str, str]:
+    """load_upload before the stream opens (ruling 4); -> (the image, its file extension, the upload's sha256).
+    Its messages are written for users."""
     try:
-        load_upload(data)
+        img, facts = load_upload(data)
     except UploadError as exc:
         raise HTTPException(422, str(exc)) from None
-    return hashlib.sha256(data).hexdigest()
+    return img, facts["format"].lower(), hashlib.sha256(data).hexdigest()
 
 
-def _previous_image(store: Store, session_id: str) -> Optional[Dict[str, Any]]:
-    """The session's last image while its upload is on disk: what a text-only turn reruns."""
-    last = store.last_image(session_id)
-    if last is None or not last["sha256"] or store.upload_path(session_id, last["sha256"], "original") is None:
-        return None
-    return last
+def _save_upload(store: Store, session_id: str, sha256: str, data: bytes, img: Image.Image, ext: str) -> None:
+    """The bytes as sent, the thumbnail and the 224x224 model input, stored before any record names the image: a
+    turn stopped while queued never reaches preprocess, and its image must still exist (fix-1 I1)."""
+    png = io.BytesIO()
+    model_input_image(img).save(png, "PNG")   # exactly Prepared.model_input
+    store.save_upload(session_id, sha256, data, ext, thumbnail_jpeg(img), png.getvalue())
+
+
+def _previous_image(store: Store, session: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The newest image of the session whose original is still on disk: what a text-only turn reruns."""
+    for message in reversed(session["messages"]):
+        sha256 = message["image_sha256"]
+        if message["role"] == "user" and sha256 and store.upload_path(session["id"], sha256, "original") is not None:
+            return {"sha256": sha256, "filename": message["image_filename"]}
+    return None
 
 
 def _clean_filename(name: Optional[str]) -> Optional[str]:
@@ -254,7 +296,10 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
-        worker.shutdown()   # running and queued turns stop at their next step and store their ending
+        # Queued and running turns stop at their next step and end as a server restart. The wait runs off the event
+        # loop. uvicorn reaches this only once open connections close: the serving wrapper sets
+        # timeout_graceful_shutdown (P7-B).
+        await run_in_threadpool(worker.shutdown)
         store.close()
 
     app = FastAPI(title="CXR report chat", lifespan=lifespan)
@@ -348,18 +393,18 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         if opts.compile and not allow_compile:
             raise HTTPException(422, "compile is not enabled on this server.")
         if opts.test_row is not None:   # R1: test-split studies are private-mode data
-            raise HTTPException(422, "Test-split studies are not available in public mode."
-                                if "public" in (mode, session["mode"]) else
-                                "Test-split studies need the gallery, which this server has not loaded.")
-        upload = sha256 = filename = None
+            if "public" in (mode, session["mode"]):   # 403, as every public test-split access (fix-1 (b))
+                raise HTTPException(403, "Test-split studies are not available in public mode.")
+            raise HTTPException(422, "Test-split studies need the gallery, which this server has not loaded.")
+        upload = sha256 = filename = checked = None
         if image is not None:
             upload = await image.read(MAX_UPLOAD_BYTES + 1)
             if len(upload) > MAX_UPLOAD_BYTES:
                 raise HTTPException(413, TOO_LARGE_MSG)
-            sha256 = await run_in_threadpool(_checked_upload, upload)
-            filename = _clean_filename(image.filename)
-        else:   # a text-only turn reruns the session's last image
-            previous = await run_in_threadpool(_previous_image, store, session_id)
+            checked = await run_in_threadpool(_checked_upload, upload)
+            sha256, filename = checked[2], _clean_filename(image.filename)
+        else:   # a text-only turn reruns the session's newest image still on disk
+            previous = await run_in_threadpool(_previous_image, store, session)
             if previous is None:
                 raise HTTPException(422, NO_IMAGE_MSG)
             question = bool(text.strip()) and parse_command(text) is None
@@ -368,12 +413,18 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         if not worker.reserve():
             raise HTTPException(429, "The server is busy with {} turns; try again shortly.".format(queue_cap))
         try:
+            if checked is not None:   # stored before start_turn records it (fix-1 I1)
+                await run_in_threadpool(_save_upload, store, session_id, sha256, upload, checked[0], checked[1])
             user_message_id, message_id = await run_in_threadpool(
                 store.start_turn, session_id, text, session["mode"], dict(opts.model_dump(), model=model),
                 sha256, filename)
         except KeyError:   # deleted since it was looked up
             worker.release()
             raise HTTPException(404, "Session not found.") from None
+        except OSError as exc:   # a full or failing disk: nothing names the image yet
+            worker.release()
+            log.warning("could not store an upload in session %s: %s", session_id, type(exc).__name__)
+            raise HTTPException(500, "Could not store the image.") from None
         except BaseException:
             worker.release()
             raise

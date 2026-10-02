@@ -3,12 +3,12 @@
 Every event is redacted for the turn's mode, stored, then handed on, in that order, so the stored log is exactly what
 was streamed: a reload replays it, and a client whose stream dropped polls it (D7). The worker never dies. Every turn
 ends with a stored message_stop (done, error or aborted), and an error event carries only text the server wrote: an
-UploadError's message, or "Internal error (<class>)" with the traceback in the server log.
+UploadError's message, the store's restart message, or "Internal error (<class>)" with the traceback in the server log.
 
-Until P5-E the last three stages end skipped with fixed reasons (P5-E keeps them when it adds the real stages).
+The server stores an upload before it accepts the turn (fix-1 I1), so preprocess only reads it. Until P5-E the last
+three stages end skipped with fixed reasons (P5-E keeps them when it adds the real stages).
 """
 import hashlib
-import io
 import logging
 import threading
 import time
@@ -18,10 +18,10 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from app.commands import NOT_A_QA_BOT
 from app.engine import Cancelled, Encoded, Engine, Generated, Prepared, StageResult
-from app.imaging import UploadError, thumbnail_jpeg
+from app.imaging import UploadError
 from app.redact import redact_card, redact_event
 from app.schemas import DISCLAIMER, Options, error_body
-from app.store import Store
+from app.store import RESTART_MESSAGE, Store
 
 log = logging.getLogger("app.pipeline")
 
@@ -51,7 +51,23 @@ def image_urls(user_message_id: str) -> Dict[str, str]:
 
 
 class _Gone(Exception):
-    """The turn's session was deleted mid-turn, so its upload or its rows can no longer be stored."""
+    """The turn's session was deleted mid-turn: the turn ends quietly, without a result."""
+
+
+class Stop(threading.Event):
+    """A turn's stop flag, which the engine checks at every step, and who set it first: "user" (a Stop: the turn ends
+    aborted) or "shutdown" (the server is stopping: it ends like crash recovery, error with server_restart)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._by_lock = threading.Lock()
+        self.by: Optional[str] = None
+
+    def stop(self, by: str) -> None:
+        with self._by_lock:
+            if self.by is None:   # the first reason stands: a Stop pressed before a shutdown still ends aborted
+                self.by = by
+        self.set()
 
 
 @dataclass
@@ -82,7 +98,10 @@ class Pipeline:
         try:
             gen = self._stages(turn)
         except Cancelled:
-            status = "aborted"
+            if isinstance(cancel, Stop) and cancel.by == "shutdown":   # ends as crash recovery would end it
+                status, error = "error", error_body("server_restart", RESTART_MESSAGE)
+            else:
+                status = "aborted"
         except UploadError as exc:   # its messages are written for the user
             status, error = "error", error_body("validation_error", str(exc))
         except _Gone:
@@ -109,6 +128,7 @@ class Pipeline:
             "mode": turn.mode, "model": turn.card, "options": dict(opts.model_dump(), model=name), "image": image})
         if image is None:   # a question and no image: the one fixed answer (spec §4); no model runs
             turn.card = None
+            self._check(turn)
             self._send(turn, "warning", {"code": "not_a_command", "message": NOT_A_QA_BOT})
             return None
         prepared = self._stage(turn, "preprocess", lambda: self._preprocess(turn, engine, image["source"]))
@@ -132,26 +152,18 @@ class Pipeline:
         return {"sha256": sha256, "filename": job.filename, "source": source, "urls": image_urls(job.user_message_id)}
 
     def _preprocess(self, turn: _Turn, engine: Engine, source: str) -> Tuple[StageResult, Prepared]:
-        """The engine's preprocess. An upload is stored here, once per session and hash: the bytes as sent, the
-        thumbnail and the 224x224 model input (P6-B serves them). A text-only turn reads its original back."""
+        """The engine's preprocess, on the uploaded bytes or, for a text-only turn, on its original read back. The
+        server stored the upload before it accepted the turn (fix-1 I1)."""
         t0 = time.perf_counter()
         job = turn.job
         if source == "upload":
             data = job.upload
         else:
             path = self.store.upload_path(job.session_id, job.previous_sha256, "original")
-            if path is None:   # the server saw the file when it accepted the turn: the session was deleted since
-                raise _Gone()
+            if path is None:   # the session was alive a moment ago (_check): the file went missing from disk
+                raise FileNotFoundError("the turn's image is no longer stored")
             data = path.read_bytes()
         result, prepared = engine.preprocess(data)
-        if source == "upload":
-            png = io.BytesIO()
-            prepared.model_input.save(png, "PNG")
-            try:
-                self.store.save_upload(job.session_id, prepared.sha256, data, result.detail["format"].lower(),
-                                       thumbnail_jpeg(prepared.image), png.getvalue())
-            except KeyError:   # the session was deleted
-                raise _Gone() from None
         detail = dict(result.detail, source=source)
         return StageResult(detail, round((time.perf_counter() - t0) * 1000.0, 1)), prepared
 
@@ -166,9 +178,16 @@ class Pipeline:
         self._send(turn, "content_block_stop", {"index": 0})
         return result, gen
 
-    def _stage(self, turn: _Turn, name: str, run: Callable[[], Tuple[StageResult, Any]]) -> Any:
-        if turn.cancel.is_set():   # stopped during an earlier stage, or while the turn waited in the queue
+    def _check(self, turn: _Turn) -> None:
+        """Before each stage: a Stop or a shutdown (pressed in an earlier stage, or while the turn waited in the queue)
+        ends the turn, and so does the deletion of its session."""
+        if turn.cancel.is_set():
             raise Cancelled()
+        if self.store.get_message(turn.job.message_id, None) is None:   # resolved through its session
+            raise _Gone()
+
+    def _stage(self, turn: _Turn, name: str, run: Callable[[], Tuple[StageResult, Any]]) -> Any:
+        self._check(turn)
         self._send(turn, "stage_start", {"stage": name, "index": STAGES.index(name)})
         result, value = run()
         self._send(turn, "stage_end", {"stage": name, "ms": result.ms, "detail": result.detail})
@@ -211,14 +230,16 @@ class Worker:
     """The server's one worker thread (ThreadPoolExecutor, max_workers=1) and its admission count.
 
     At most `cap` turns are accepted and unfinished at once: reserve() counts a turn in (False means refuse it with
-    429), and the worker's finally counts it out once its ending is stored, before done() ends its stream.
+    429), and the worker's finally counts it out once its ending is stored, before done() ends its stream. Each turn
+    has a Stop that records who stopped it first, so a turn shutdown() stops ends as a server restart while a Stop
+    the user pressed earlier still ends its turn aborted (fix-1 (c)).
     """
 
     def __init__(self, pipeline: Optional[Pipeline], cap: int):
         self.pipeline, self.cap = pipeline, int(cap)
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="turn")
         self._lock = threading.Lock()
-        self._cancels: Dict[str, threading.Event] = {}
+        self._stops: Dict[str, Stop] = {}
         self._count = 0
 
     @property
@@ -240,41 +261,42 @@ class Worker:
 
     def submit(self, job: TurnJob, emit: Emit, done: Callable[[], None]) -> None:
         """Queue a reserved turn; done() runs on the worker after the turn has ended, however it ended."""
-        cancel = threading.Event()
+        stop = Stop()
         with self._lock:
-            self._cancels[job.message_id] = cancel
+            self._stops[job.message_id] = stop
         try:
-            self._pool.submit(self._run, job, emit, cancel, done)
+            self._pool.submit(self._run, job, emit, stop, done)
         except RuntimeError:   # the pool is shut down: the server is stopping
             with self._lock:
-                self._cancels.pop(job.message_id, None)
+                self._stops.pop(job.message_id, None)
                 self._count -= 1
             raise
 
-    def _run(self, job: TurnJob, emit: Emit, cancel: threading.Event, done: Callable[[], None]) -> None:
+    def _run(self, job: TurnJob, emit: Emit, stop: Stop, done: Callable[[], None]) -> None:
         try:
-            self.pipeline.run(job, emit, cancel)
+            self.pipeline.run(job, emit, stop)
         except Exception:   # run() handles everything itself; this only keeps the count right
             log.exception("turn %s: the runner raised", job.message_id)
         finally:
             with self._lock:
-                self._cancels.pop(job.message_id, None)
+                self._stops.pop(job.message_id, None)
                 self._count -= 1
             done()
 
     def cancel(self, message_id: str) -> bool:
-        """Stop a queued or running turn at its next step (D7); False if the worker no longer has it."""
+        """The user's Stop for a queued or running turn: it ends aborted at its next step (D7). False if the worker no
+        longer has the turn."""
         with self._lock:
-            event = self._cancels.get(message_id)
-        if event is None:
+            stop = self._stops.get(message_id)
+        if stop is None:
             return False
-        event.set()
+        stop.stop("user")
         return True
 
     def shutdown(self) -> None:
-        """Stop every turn at its next step, then wait for the worker: each one stores its ending as aborted."""
+        """Stop every queued and running turn at its next step, as a server restart, then wait for the worker."""
         with self._lock:
-            events = list(self._cancels.values())
-        for event in events:
-            event.set()
+            stops = list(self._stops.values())
+        for stop in stops:
+            stop.stop("shutdown")
         self._pool.shutdown(wait=True)

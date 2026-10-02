@@ -41,6 +41,30 @@ def iter_sse(chunks: Iterable[str]) -> Iterator[Dict]:
                 yield {"event": event, "data": json.loads("\n".join(data))}
 
 
+def start_live_server(app):
+    """A real uvicorn on an ephemeral port (TestClient buffers whole responses). -> (base_url, stop)."""
+    import socket
+    import threading
+    import time
+    import uvicorn
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+    deadline = time.time() + 10
+    while not server.started and time.time() < deadline:
+        time.sleep(0.02)
+
+    def stop():
+        server.should_exit = True
+        t.join(5)
+
+    return "http://127.0.0.1:{}".format(port), stop
+
+
 def wait_until(predicate: Callable[[], Any], timeout: float = 10.0, interval: float = 0.02) -> Any:
     """Poll until predicate() is truthy; -> that value. A bounded wait: AssertionError after `timeout` seconds."""
     deadline = time.monotonic() + timeout
