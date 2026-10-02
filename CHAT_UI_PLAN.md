@@ -1194,7 +1194,7 @@ Add to its docstring: "`on_step(step, best_ids)` is called once per step with th
 4. `venv/bin/python -m pytest tests/test_app_engine.py tests/test_mamba3_numerics.py -k "beam or on_step or tiny" -v` → PASS, including the existing `test_cached_beam_search_is_token_identical_to_the_uncached_one`.
 5–7. Task loop. Commit `"P2-B: on_step callback on both beam searches (parity-tested); tiny decoder"`.
 
-- [ ] **P2-C** `app/imaging.py`: upload sniffing and decoding (16-bit, EXIF, first frame, bounds), the published transform, the model-input image, thumbnails.
+- [x] **P2-C** `app/imaging.py`: upload sniffing and decoding (16-bit, EXIF, first frame, bounds), the published transform, the model-input image, thumbnails.
 
 **Files:** create `app/imaging.py`, `tests/test_app_imaging.py`, `tests/app_helpers.py`.
 **Produces:** `UploadError(ValueError)` (its message is shown to the user verbatim); `sniff_format(data: bytes) -> str` (`"PNG"|"JPEG"|"WEBP"`); `load_upload(data: bytes) -> Tuple[Image.Image, Dict[str, Any]]`; `model_transform() -> Callable`; `model_input_image(img) -> Image.Image`; `thumbnail_jpeg(img, max_side: int = 512) -> bytes`; constants `CLIP_MEAN`, `CLIP_STD`, `MAX_UPLOAD_BYTES`, `MIN_SIDE`, `MAX_PIXELS`.
