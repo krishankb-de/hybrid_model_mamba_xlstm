@@ -13,9 +13,12 @@ guarded by one lock. Public methods take the lock once; the underscore helpers a
 
 client_id=None (a private server) sees every session; otherwise only that client's. Messages and images are resolved
 through their session, so the same rule covers them. delete_session soft-deletes, so a turn that is still running
-keeps storing its events; sweep purges rows and files for good, deleted sessions included.
+keeps storing its events; sweep purges rows and files for good, deleted sessions included. It removes a session's
+upload directory before it commits the deletion of the rows, skips a session whose turn is still running, can be
+limited to one mode, and removes upload directories that no live session owns, so uploads cannot outlive retention.
 """
 import json
+import logging
 import os
 import re
 import secrets
@@ -28,8 +31,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from app.ids import new_id
+from app.schemas import DISCLAIMER   # the one copy of the message_stop.disclaimer text
 
-DISCLAIMER = "Research prototype; not for clinical use."   # message_stop.disclaimer (Global Constraints, Copy)
+log = logging.getLogger(__name__)
+
 RESTART_MESSAGE = "The server restarted while this turn was running."
 MODES = ("private", "public")
 FINAL_STATUSES = ("done", "error", "aborted")
@@ -39,6 +44,7 @@ SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")   # what new_id produces; no dot or
 SHA256 = re.compile(r"[0-9a-f]{64}")
 MAX_TITLE = 80
 MAX_PAGE = 200
+PRIVATE_OPTION_KEYS = ("reference", "test_row")   # Options fields that exist only in private mode (R1)
 
 DDL = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -65,6 +71,14 @@ _SESSION_SELECT = ("SELECT s.id, s.created_at, s.updated_at, s.title, s.mode, "
                    "(SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id AND m.role = 'user') AS turns "
                    "FROM sessions s ")
 _IN_SCOPE = "(? IS NULL OR s.client_id = ?)"   # bound twice with client_id
+_EXPIRED = ("created_at < ? AND (? IS NULL OR mode = ?) AND NOT EXISTS "   # bound with (cutoff, mode, mode)
+            "(SELECT 1 FROM messages m WHERE m.session_id = sessions.id AND m.status = 'running')")
+_PURGE_SQL = (   # one session, in foreign-key order
+    "DELETE FROM events WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?)",
+    "DELETE FROM artifacts WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?)",
+    "DELETE FROM messages WHERE session_id = ?",
+    "DELETE FROM sessions WHERE id = ?",
+)
 
 
 def _now() -> str:
@@ -114,6 +128,20 @@ def _message_dict(row: sqlite3.Row) -> Dict[str, Any]:
     out["options"] = _loads(out.pop("options_json"))
     out["provenance"] = _loads(out.pop("provenance_json"))
     return out
+
+
+def _remove_tree(path: Path) -> None:
+    """Remove a session's upload directory without following symlinks (a link or file in its place is unlinked).
+
+    A missing path is fine; any other failure raises OSError, which sweep treats as "leave the rows for next time".
+    """
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        else:
+            shutil.rmtree(path)
+    except FileNotFoundError:
+        pass
 
 
 def _rmdir_quietly(path: Path) -> None:
@@ -214,8 +242,9 @@ class Store:
         """Store the user message (done) and the assistant message (running); -> (user_message_id, message_id).
 
         The user message carries the text and the image; the assistant message carries the options and, later, the
-        result. The first turn also titles the session: the text, else the filename, else the test row. A test row
-        is MIMIC-derived (R1): a public session never stores it, and never puts it in a title.
+        result. The first turn also titles the session: the text, else the filename, else the test row. ``mode`` must
+        be the session's own (ValueError otherwise). A test row and a reference are private-mode data (R1): a public
+        session stores neither, not as a column and not inside the options JSON, and titles itself with neither.
         """
         _check_mode(mode)
         if image_sha256 is not None and not _is_sha256(image_sha256):
@@ -226,8 +255,11 @@ class Store:
                               (session_id,)).fetchone()
             if row is None:
                 raise KeyError(session_id)
+            if mode != row["mode"]:
+                raise ValueError("mode {!r} is not the session's mode {!r}".format(mode, row["mode"]))
             if row["mode"] != "private":
                 test_row = None
+                options = {k: v for k, v in (options or {}).items() if k not in PRIVATE_OPTION_KEYS}
             title = (row["title"] or _clean_title(text) or _clean_title(image_filename)
                      or ("test row {}".format(test_row) if test_row is not None else ""))
             last = con.execute("SELECT COALESCE(MAX(seq_in_session), 0) FROM messages WHERE session_id = ?",
@@ -301,8 +333,13 @@ class Store:
         return next((p for p in candidates if p.is_file()), None)
 
     def append_event(self, message_id: str, event: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Store one event in its own transaction; -> data plus its seq (1, 2, ... per message, no gaps)."""
+        """Store one event in its own transaction; -> data plus its seq (1, 2, ... per message, no gaps).
+
+        Raises KeyError for a message that does not exist (a deleted session's messages still do).
+        """
         with self._tx() as con:
+            if con.execute("SELECT 1 FROM messages WHERE id = ?", (message_id,)).fetchone() is None:
+                raise KeyError(message_id)
             return self._insert_event(con, message_id, event, data)
 
     def events_after(self, message_id: str, after: int = 0) -> List[Dict[str, Any]]:
@@ -395,32 +432,78 @@ class Store:
         return ("session-{}.md".format(session_id), "text/markdown; charset=utf-8",
                 _markdown(session, docs).encode("utf-8"))
 
-    def sweep(self, older_than_days: int) -> int:
-        """Purge sessions created more than ``older_than_days`` ago (deleted ones too): rows, events, uploads.
+    def sweep(self, older_than_days: int, mode: Optional[str] = None) -> int:
+        """Purge sessions created more than ``older_than_days`` ago; -> how many.
 
-        Keyed on creation time, so "sessions are deleted after N days" holds even for one that is still in use.
-        -> the number of sessions purged.
+        ``mode`` limits it to sessions created in that mode (the server keeps 45 days for private, 7 for public).
+        Keyed on creation time, so "sessions are deleted after N days" holds even for one still in use. Deleted
+        sessions are purged too; a session whose turn is still running waits for the next sweep (run
+        recover_after_restart first at start-up). Per session the upload directory is removed first and the rows
+        are deleted and committed after, so a crash or a failed removal (it is logged) leaves the rows for the
+        next sweep to redo. Last, upload directories that no live session owns (a crash, or a save_upload that
+        raced a delete) are removed, whatever ``mode`` is.
         """
         if older_than_days < 0:
             raise ValueError("older_than_days must not be negative")
+        if mode is not None:
+            _check_mode(mode)
         try:
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat(timespec="microseconds")
+            cutoff: Optional[str] = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat(
+                timespec="microseconds")
         except OverflowError:   # nothing is that old
+            cutoff = None
+        purged = 0
+        if cutoff is not None:
+            with self._lock:
+                ids = [r[0] for r in self._con.execute(
+                    "SELECT id FROM sessions WHERE " + _EXPIRED + " ORDER BY id", (cutoff, mode, mode))]
+            purged = sum(self._purge(session_id, cutoff, mode) for session_id in ids)
+        self._reclaim_orphan_uploads()
+        return purged
+
+    # The two steps of sweep. Each takes the lock itself, one session at a time, so event writes are not held up long.
+    def _purge(self, session_id: str, cutoff: str, mode: Optional[str]) -> int:
+        """Remove one expired session in one transaction, its upload directory before its rows; -> 1, or 0 if skipped.
+
+        Still expired and still idle is checked again here: a turn may have started since sweep chose the session.
+        If the directory cannot be removed the transaction rolls back, so the rows stay and the next sweep retries.
+        """
+        try:
+            with self._tx() as con:
+                if con.execute("SELECT 1 FROM sessions WHERE id = ? AND " + _EXPIRED,
+                               (session_id, cutoff, mode, mode)).fetchone() is None:
+                    return 0
+                if _safe_id(session_id):
+                    _remove_tree(self._uploads / session_id)
+                for sql in _PURGE_SQL:
+                    con.execute(sql, (session_id,))
+            return 1
+        except OSError as exc:
+            log.warning("sweep: could not remove uploads/%s (%s); its rows stay for the next sweep", session_id, exc)
             return 0
-        old = "SELECT id FROM sessions WHERE created_at < ?"
-        with self._tx() as con:
-            ids = [r[0] for r in con.execute(old, (cutoff,))]
-            if ids:
-                con.execute("DELETE FROM events WHERE message_id IN (SELECT id FROM messages WHERE session_id IN ({}))"
-                            .format(old), (cutoff,))
-                con.execute("DELETE FROM artifacts WHERE message_id IN "
-                            "(SELECT id FROM messages WHERE session_id IN ({}))".format(old), (cutoff,))
-                con.execute("DELETE FROM messages WHERE session_id IN ({})".format(old), (cutoff,))
-                con.execute("DELETE FROM sessions WHERE created_at < ?", (cutoff,))
-        for session_id in ids:
-            if _safe_id(session_id):
-                shutil.rmtree(self._uploads / session_id, ignore_errors=True)
-        return len(ids)
+
+    def _reclaim_orphan_uploads(self) -> None:
+        """Remove uploads/<name> directories that no live session owns (one scandir, symlinks never followed).
+
+        Only names that look like ids and real directories qualify. The listing is taken before the sessions are
+        read, so a session created meanwhile is never mistaken for an orphan: its directory can only appear after
+        its row. A deleted session counts as not live, which is what reclaims what a save_upload left after a delete.
+        """
+        try:
+            with os.scandir(str(self._uploads)) as entries:
+                names = [e.name for e in entries if _safe_id(e.name) and e.is_dir(follow_symlinks=False)]
+        except OSError:
+            return
+        if not names:
+            return
+        with self._lock:
+            live = {r[0] for r in self._con.execute("SELECT id FROM sessions WHERE deleted_at IS NULL")}
+        for name in names:
+            if name not in live:
+                try:
+                    shutil.rmtree(self._uploads / name)
+                except OSError as exc:
+                    log.warning("sweep: could not remove orphaned uploads/%s (%s); the next sweep retries", name, exc)
 
     def close(self) -> None:
         """Release the EXCLUSIVE lock (D22); the server's lifespan calls this at shutdown."""

@@ -1,7 +1,10 @@
-"""Schemas for the chat app (CHAT_UI_PLAN.md section 6): Options and error_body."""
+"""Schemas for the chat app (CHAT_UI_PLAN.md section 6): Options, error_body and the disclaimer copy."""
 from typing import Annotated, Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+
+# message_stop.disclaimer and the export header: the one copy (app/engine.py and app/store.py import it).
+DISCLAIMER = "Research prototype; not for clinical use."
 
 
 class Options(BaseModel):

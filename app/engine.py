@@ -21,12 +21,12 @@ import torch.nn.functional as F
 from PIL import Image
 
 from app.imaging import load_upload, model_input_image, model_transform
+from app.schemas import DISCLAIMER  # noqa: F401  (the one copy lives in app.schemas; engine keeps the name)
 from app.tiny import TinyTokenizer, TinyTower, tiny_decoder, tiny_prefix_mapper
 
 if TYPE_CHECKING:
     from app.schemas import Options
 
-DISCLAIMER = "Research prototype; not for clinical use."
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # What `chat_remote.sh sync` judges clean or dirty by, so "dirty" means the same with and without a .git.
 CODE_PATHS = ("app", "scripts", "hybrid_xmamba", "configs", "tests")

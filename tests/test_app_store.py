@@ -1,7 +1,9 @@
 """CHAT_UI_PLAN.md P3-B: the event log is the source of truth and survives restarts."""
 import json
+import logging
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -12,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from app import store as store_module
+from app.schemas import DISCLAIMER
 from app.store import Store
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -234,8 +238,9 @@ def test_append_event_returns_what_it_stored_and_a_failure_leaves_no_gap(tmp_pat
     assert s.events_after(mid) == [{"seq": 1, "event": "content_block_delta", "data": out}]
     raw = s._con.execute("SELECT data_json FROM events").fetchone()[0]
     assert raw == '{"index":0,"delta":{"text":"caf\u00e9"},"seq":1}'   # the SSE data line, compact and UTF-8
-    with pytest.raises(sqlite3.IntegrityError):   # no such message
+    with pytest.raises(KeyError):   # no such message: a KeyError like start_turn, save_upload and finish_turn
         s.append_event("m_missing", "stage_start", {})
+    assert s._con.execute("SELECT COUNT(*) FROM events WHERE message_id = 'm_missing'").fetchone()[0] == 0
     with pytest.raises(TypeError):   # not JSON: nothing stored, the next seq is still 2
         s.append_event(mid, "stage_start", {"x": object()})
     assert s.append_event(mid, "stage_end", {})["seq"] == 2
@@ -388,6 +393,7 @@ def test_recovery_closes_the_log_of_an_interrupted_turn_and_is_idempotent(tmp_pa
     assert [(e["seq"], e["event"]) for e in tail] == [(2, "error"), (3, "message_stop")]
     assert tail[0]["data"]["type"] == "error" and tail[0]["data"]["error"]["type"] == "server_restart"
     assert (tail[1]["data"]["status"], tail[1]["data"]["message_id"], tail[1]["data"]["report"]) == ("error", mid, None)
+    assert tail[1]["data"]["disclaimer"] == DISCLAIMER
     assert s.get_message(mid, None)["status"] == "error" and s.get_message(finished, None)["status"] == "done"
     assert s.recover_after_restart() == 0 and len(s.events_after(mid)) == 3
 
@@ -503,17 +509,28 @@ def test_export_is_scoped_validated_and_the_json_is_the_event_log(tmp_path):
         s.export(sess["id"], "md", "a")
 
 
+def _age(s, session_id):
+    s._con.execute("UPDATE sessions SET created_at='2000-01-01T00:00:00+00:00' WHERE id=?", (session_id,))
+
+
+def _finished(s, mode="private", client=None):
+    """A session whose one turn has ended, so a sweep may take it once it is old."""
+    sess, _, mid = _turn(s, mode, client)
+    s.finish_turn(mid, "done", report="r")
+    return sess, mid
+
+
 def test_sweep_purges_rows_and_files_of_old_sessions_including_deleted_ones(tmp_path):
     s = Store(tmp_path)
-    old, _, mid = _turn(s)
+    old, mid = _finished(s)
     s.append_event(mid, "stage_start", {})
     s.save_upload(old["id"], "ab" * 32, b"o", "png", b"t", b"m")
     s._con.execute("INSERT INTO artifacts (message_id, kind, path) VALUES (?, 'x', 'p')", (mid,))
-    deleted, _, _ = _turn(s)
+    deleted, _ = _finished(s)
     s.delete_session(deleted["id"], None)
     keep, _, _ = _turn(s)
     for sid in (old["id"], deleted["id"]):
-        s._con.execute("UPDATE sessions SET created_at='2000-01-01T00:00:00+00:00' WHERE id=?", (sid,))
+        _age(s, sid)
     assert s.sweep(older_than_days=30) == 2
     counts = {t: s._con.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
               for t in ("sessions", "messages", "events", "artifacts")}
@@ -530,6 +547,222 @@ def test_sweep_keys_on_creation_time_and_refuses_a_negative_age(tmp_path):
                    ((datetime.now(timezone.utc) - timedelta(days=10)).isoformat(),
                     datetime.now(timezone.utc).isoformat(), sess["id"]))
     assert s.sweep(older_than_days=30) == 0
+    assert s.sweep(older_than_days=10**9) == 0   # nothing is that old (the date arithmetic overflows)
     with pytest.raises(ValueError):
         s.sweep(older_than_days=-1)   # a negative age would purge everything
     assert s.sweep(older_than_days=7) == 1   # a session still being used is deleted N days after it was created
+
+
+# --- fix round 1: sweep reclaims orphaned uploads, sweep per mode, R1 in the stored options, one disclaimer ----------
+
+def _put_upload(tmp_path, session_id, sha="ab" * 32):
+    """Files where save_upload puts them, for a session directory the store may not own (any more)."""
+    base = tmp_path / "uploads" / session_id / sha
+    base.mkdir(parents=True)
+    for name in ("original.png", "thumb.jpg", "model_input.png"):
+        (base / name).write_bytes(b"x")
+    return base
+
+
+def test_a_failed_upload_removal_keeps_the_rows_for_the_next_sweep(tmp_path, monkeypatch, caplog):
+    s = Store(tmp_path)
+    stuck, _ = _finished(s)
+    fine, _ = _finished(s)
+    for sess in (stuck, fine):
+        s.save_upload(sess["id"], "ab" * 32, b"o", "png", b"t", b"m")
+        _age(s, sess["id"])
+    real = shutil.rmtree
+
+    def rmtree(path, *args, **kwargs):
+        if stuck["id"] in str(path):
+            raise OSError(13, "Permission denied")
+        return real(path, *args, **kwargs)
+
+    with monkeypatch.context() as m, caplog.at_level(logging.WARNING, logger="app.store"):
+        m.setattr(shutil, "rmtree", rmtree)
+        assert s.sweep(30) == 1   # the other session is still purged
+    assert "could not remove" in caplog.text and stuck["id"] in caplog.text
+    assert s.get_session(fine["id"], None) is None and not (tmp_path / "uploads" / fine["id"]).exists()
+    assert s.get_session(stuck["id"], None) is not None   # nothing is deleted before its files are gone
+    assert s.upload_path(stuck["id"], "ab" * 32, "original") is not None
+    assert s.sweep(30) == 1   # the next sweep retries and succeeds
+    assert s.get_session(stuck["id"], None) is None and not (tmp_path / "uploads" / stuck["id"]).exists()
+
+
+def test_the_uploads_go_before_the_rows_so_a_crash_leaves_rows_to_redo(tmp_path, monkeypatch):
+    s = Store(tmp_path)
+    sess, _ = _finished(s)
+    s.save_upload(sess["id"], "ab" * 32, b"o", "png", b"t", b"m")
+    _age(s, sess["id"])
+    real = store_module._remove_tree
+
+    def die_after_removing(path):
+        real(path)
+        raise RuntimeError("the process died before the commit")
+
+    with monkeypatch.context() as m:
+        m.setattr(store_module, "_remove_tree", die_after_removing)
+        with pytest.raises(RuntimeError):
+            s.sweep(30)
+    assert not (tmp_path / "uploads" / sess["id"]).exists()   # the files went first ...
+    assert s.get_session(sess["id"], None) is not None   # ... and the rows were not deleted
+    assert s.sweep(30) == 1   # so the next sweep redoes it
+    assert s.get_session(sess["id"], None) is None
+
+
+def test_sweep_removes_upload_directories_no_live_session_owns(tmp_path):
+    s = Store(tmp_path)
+    live, _, _ = _turn(s)
+    kept = _put_upload(tmp_path, live["id"])   # owned by a live session
+    stray = _put_upload(tmp_path, "s_0000000000000000000000")   # owned by nobody: what a crash left behind
+    uploads = tmp_path / "uploads"
+    others = [uploads / ".hidden", uploads / "not an id"]   # not id-shaped, so not ours to remove
+    for d in others:
+        d.mkdir()
+        (d / "f").write_bytes(b"x")
+    (uploads / "notes.txt").write_bytes(b"x")   # a file, not a session directory
+    assert s.sweep(30) == 0   # no session is old: only the stray directory goes
+    assert not stray.parent.exists()
+    assert kept.exists() and all(d.exists() for d in others) and (uploads / "notes.txt").exists()
+
+
+def test_the_leftover_of_a_save_that_raced_a_delete_is_reclaimed_by_the_next_sweep(tmp_path, monkeypatch):
+    s = Store(tmp_path)
+    sess, _, _ = _turn(s)
+    real_mkdir, deletes = Path.mkdir, []
+
+    def mkdir_after_the_delete(self, *args, **kwargs):
+        if self.name.endswith(".tmp") and not deletes:   # save_upload has checked the session is alive, starts writing
+            deletes.append(s.delete_session(sess["id"], None))
+        return real_mkdir(self, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "mkdir", mkdir_after_the_delete)
+        s.save_upload(sess["id"], "ab" * 32, b"o", "png", b"t", b"m")
+    assert deletes == [True]
+    leftover = tmp_path / "uploads" / sess["id"] / ("ab" * 32) / "original.png"
+    assert leftover.exists()   # the race: files on disk for a deleted session
+    assert s.upload_path(sess["id"], "ab" * 32, "original") is None   # never served
+    assert s.sweep(30) == 0   # the session is young, so it is not purged by age ...
+    assert not (tmp_path / "uploads" / sess["id"]).exists()   # ... but its files are reclaimed
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+def test_sweep_never_follows_a_symlink(tmp_path):
+    s = Store(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "precious").write_bytes(b"x")
+    uploads = tmp_path / "uploads"
+    (uploads / "s_0000000000000000000001").symlink_to(outside, target_is_directory=True)   # id-shaped, owned by nobody
+    sess, _ = _finished(s)
+    (uploads / sess["id"]).symlink_to(outside, target_is_directory=True)   # an expired session's directory is a link
+    _age(s, sess["id"])
+    assert s.sweep(30) == 1
+    assert (outside / "precious").exists()   # the target was never entered
+    assert not (uploads / sess["id"]).exists() and not (uploads / sess["id"]).is_symlink()   # only the link went
+    assert (uploads / "s_0000000000000000000001").is_symlink()   # a stray link is left alone
+
+
+def test_sweep_skips_a_session_whose_turn_is_still_running(tmp_path):
+    s = Store(tmp_path)
+    sess, _, mid = _turn(s)   # the assistant message is running
+    s.save_upload(sess["id"], "ab" * 32, b"o", "png", b"t", b"m")
+    _age(s, sess["id"])
+    assert s.sweep(30) == 0
+    assert s.get_session(sess["id"], None) is not None and s.upload_path(sess["id"], "ab" * 32, "original")
+    s.delete_session(sess["id"], None)   # a deleted session waits for its running turn too
+    assert s.sweep(30) == 0 and s._con.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+    s.finish_turn(mid, "done")
+    assert s.sweep(30) == 1
+
+
+def test_a_turn_that_starts_after_the_selection_is_not_purged(tmp_path, monkeypatch):
+    s = Store(tmp_path)
+    sess, _ = _finished(s)
+    s.save_upload(sess["id"], "ab" * 32, b"o", "png", b"t", b"m")
+    _age(s, sess["id"])
+    real = Store._purge
+
+    def purge_after_a_new_turn(self, session_id, cutoff, mode):
+        self.start_turn(session_id, "one more", "private", {})
+        return real(self, session_id, cutoff, mode)
+
+    with monkeypatch.context() as m:
+        m.setattr(Store, "_purge", purge_after_a_new_turn)
+        assert s.sweep(30) == 0
+    assert s.get_session(sess["id"], None)["turns"] == 2
+    assert s.upload_path(sess["id"], "ab" * 32, "original") is not None   # its files are untouched too
+
+
+@pytest.mark.parametrize("mode, other", [("private", "public"), ("public", "private")])
+def test_sweep_limited_to_a_mode_purges_only_that_mode(tmp_path, mode, other):
+    s = Store(tmp_path)
+    ids = {}
+    for m in ("private", "public"):
+        sess, _ = _finished(s, m, "c" if m == "public" else None)
+        _age(s, sess["id"])
+        ids[m] = sess["id"]
+    assert s.sweep(30, mode=mode) == 1
+    assert s.get_session(ids[mode], None) is None and s.get_session(ids[other], None) is not None
+    assert s.sweep(30, mode) == 0   # positional works too
+    assert s.sweep(30, mode=other) == 1
+    with pytest.raises(ValueError):
+        s.sweep(30, mode="elsewhere")
+
+
+def test_sweep_without_a_mode_purges_every_mode(tmp_path):
+    s = Store(tmp_path)
+    for m in ("private", "public"):
+        sess, _ = _finished(s, m, "c" if m == "public" else None)
+        _age(s, sess["id"])
+    assert s.sweep(30) == 2
+
+
+def test_a_deleted_session_is_not_listed(tmp_path):
+    s = Store(tmp_path)
+    keep, gone = s.create_session("private"), s.create_session("private")
+    assert s.delete_session(gone["id"], None) is True
+    assert [x["id"] for x in s.list_sessions(None)[0]] == [keep["id"]]
+
+
+def test_sequence_numbers_are_unique_per_message_and_per_session(tmp_path):
+    s = Store(tmp_path)
+    sess, _, mid = _turn(s)
+    s.append_event(mid, "stage_start", {})
+    with pytest.raises(sqlite3.IntegrityError):   # PRIMARY KEY (message_id, seq)
+        s._con.execute("INSERT INTO events (message_id, seq, ts, event, data_json) "
+                       "VALUES (?, 1, 't', 'e', '{}')", (mid,))
+    with pytest.raises(sqlite3.IntegrityError):   # UNIQUE (session_id, seq_in_session)
+        s._con.execute("INSERT INTO messages (id, session_id, seq_in_session, role, created_at, mode, status) "
+                       "VALUES ('m_dup', ?, 1, 'user', 't', 'private', 'done')", (sess["id"],))
+
+
+def test_a_public_session_drops_the_private_options_from_the_stored_options(tmp_path):
+    s = Store(tmp_path)   # R1 is column-deep: the options JSON must not carry what the columns do not
+    options = {"beam_size": 5, "reference": "Findings: MIMIC TEXT", "test_row": 12}
+    public = s.create_session("public", "a")
+    _, mid = s.start_turn(public["id"], "", "public", options)
+    assert s.get_message(mid, "a")["options"] == {"beam_size": 5}
+    body = s.export(public["id"], "json", "a")[2].decode("utf-8")
+    assert "MIMIC TEXT" not in body and '"test_row": 12' not in body
+    assert set(options) == {"beam_size", "reference", "test_row"}   # the caller's dict is intact
+    private = s.create_session("private")
+    _, private_mid = s.start_turn(private["id"], "", "private", options)
+    assert s.get_message(private_mid, None)["options"] == options   # a private session keeps them
+
+
+@pytest.mark.parametrize("session_mode, turn_mode", [("private", "public"), ("public", "private")])
+def test_start_turn_rejects_a_mode_that_differs_from_the_sessions(tmp_path, session_mode, turn_mode):
+    s = Store(tmp_path)
+    sess = s.create_session(session_mode)
+    with pytest.raises(ValueError, match="mode"):
+        s.start_turn(sess["id"], "x", turn_mode, {})
+    assert s.get_session(sess["id"], None)["messages"] == []   # nothing was stored
+
+
+def test_the_disclaimer_has_one_copy():
+    from app import schemas
+    assert store_module.DISCLAIMER is schemas.DISCLAIMER and DISCLAIMER == "Research prototype; not for clinical use."
+    holders = [p.name for p in sorted((REPO_ROOT / "app").glob("*.py")) if DISCLAIMER in p.read_text(encoding="utf-8")]
+    assert holders == ["schemas.py"]   # engine.py and store.py import it
