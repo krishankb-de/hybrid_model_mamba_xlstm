@@ -1,7 +1,8 @@
 """Shared helpers for the chat-app tests (CHAT_UI_PLAN.md §8)."""
 import io
 import json
-from typing import Dict, Iterable, Iterator
+import time
+from typing import Any, Callable, Dict, Iterable, Iterator
 
 import numpy as np
 from PIL import Image
@@ -38,3 +39,15 @@ def iter_sse(chunks: Iterable[str]) -> Iterator[Dict]:
                     data.append(line[5:][1:] if line[5:].startswith(" ") else line[5:])
             if data:
                 yield {"event": event, "data": json.loads("\n".join(data))}
+
+
+def wait_until(predicate: Callable[[], Any], timeout: float = 10.0, interval: float = 0.02) -> Any:
+    """Poll until predicate() is truthy; -> that value. A bounded wait: AssertionError after `timeout` seconds."""
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value:
+            return value
+        if time.monotonic() >= deadline:
+            raise AssertionError("condition not met within {} s".format(timeout))
+        time.sleep(interval)
