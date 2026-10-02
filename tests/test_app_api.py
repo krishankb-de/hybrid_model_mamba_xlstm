@@ -344,22 +344,36 @@ def test_chat_home_must_live_outside_the_repository(tmp_path, monkeypatch):   # 
         create_app(engine="tiny", home=str(cluster / "chat_sessions"))
 
 
-def test_chat_home_must_live_outside_any_git_checkout_even_through_a_symlink(tmp_path):   # fix-1 M4
-    main = tmp_path / "main_repo"   # as MAIN_REPO on the cluster: a git checkout
+def test_chat_home_must_live_outside_any_checkout_of_this_project_even_through_a_symlink(tmp_path):   # fix-1 M4
+    main = tmp_path / "main_repo"   # as MAIN_REPO on the cluster: a git checkout of this project
     (main / ".git").mkdir(parents=True)
+    (main / "hybrid_xmamba").mkdir()
     (main / "results").mkdir()
     cluster = tmp_path / "cluster_repo"   # as CLUSTER_REPO: its results/ is a symlink into MAIN_REPO
     cluster.mkdir()
     (cluster / "results").symlink_to(main / "results")
-    with pytest.raises(RuntimeError, match="git checkout"):
-        create_app(engine="tiny", home=str(cluster / "results" / "chat"))
+    for home in (main / "results" / "chat", cluster / "results" / "chat"):   # directly, and through the symlink
+        with pytest.raises(RuntimeError, match="checkout"):
+            create_app(engine="tiny", home=str(home))
     assert not (main / "results" / "chat").exists()
     worktree = tmp_path / "worktree"   # a worktree's .git is a file, not a directory
-    worktree.mkdir()
+    (worktree / "hybrid_xmamba").mkdir(parents=True)
     (worktree / ".git").write_text("gitdir: /elsewhere\n")
-    with pytest.raises(RuntimeError, match="git checkout"):
+    with pytest.raises(RuntimeError, match="checkout"):
         create_app(engine="tiny", home=str(worktree / "deep" / "chat"))
     create_app(engine="tiny", home=str(cluster / "chat")).state.store.close()   # beside a checkout is fine
+
+
+def test_chat_home_may_live_in_a_git_repository_that_is_not_this_project(tmp_path, monkeypatch):   # fix-1 addendum
+    dotfiles = tmp_path / "home"   # a home directory kept as a dotfiles repository: a .git and nothing of ours
+    (dotfiles / ".git").mkdir(parents=True)
+    create_app(engine="tiny", home=str(dotfiles / "chat_sessions")).state.store.close()
+    monkeypatch.setenv("HOME", str(dotfiles))   # the default, ~/chat_sessions, in such a home
+    monkeypatch.delenv("CHAT_HOME", raising=False)
+    assert server._chat_home(None) == (dotfiles / "chat_sessions").resolve()
+    copy = tmp_path / "code_copy"   # this project's code without a .git: not a checkout
+    (copy / "hybrid_xmamba").mkdir(parents=True)
+    create_app(engine="tiny", home=str(copy / "chat_sessions")).state.store.close()
 
 
 def test_without_a_token_only_connections_that_arrive_on_loopback_are_served(tmp_path):   # fix-1 M3, R6

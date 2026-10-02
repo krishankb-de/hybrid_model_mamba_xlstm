@@ -184,14 +184,16 @@ def _arrived_off_loopback(scope: Dict[str, Any]) -> bool:
 
 
 def _chat_home(home: Optional[str]) -> Path:
-    """CHAT_HOME: the argument, else $CHAT_HOME, else ~/chat_sessions. Never inside this repository or any other git
-    checkout, symlinks resolved first: on the cluster, outputs/ and results/ link into the thesis checkout (DUA)."""
+    """CHAT_HOME: the argument, else $CHAT_HOME, else ~/chat_sessions. Never inside this repository, nor inside any
+    other checkout of this project (a .git beside hybrid_xmamba/), symlinks resolved first: on the cluster, outputs/
+    and results/ link into the thesis checkout (DUA). A home directory that is only a git repository (dotfiles) is
+    fine."""
     path = Path(home or os.environ.get("CHAT_HOME") or Path.home() / "chat_sessions").expanduser().resolve()
     if path == REPO_ROOT or REPO_ROOT in path.parents:
         raise RuntimeError("CHAT_HOME must be outside the repository, got {}".format(path))
     for directory in (path,) + tuple(path.parents):
-        if (directory / ".git").exists():   # a directory, or a worktree's file
-            raise RuntimeError("CHAT_HOME must be outside any git checkout, but {} has a .git; got {}".format(
+        if (directory / ".git").exists() and (directory / "hybrid_xmamba").is_dir():   # .git: a dir or a file
+            raise RuntimeError("CHAT_HOME must be outside any checkout of this project, but {} is one; got {}".format(
                 directory, path))
     return path
 
