@@ -1906,7 +1906,7 @@ EOF
 
 Gate: `pytest tests/test_app_store.py tests/test_app_redact.py tests/test_app_api.py` green: stream framing and `seq` continuity, replay identity, resume, cancel, dropped stream, overload, auth, bind refusal, export, delete, public scoping.
 
-- [ ] **P3-A** `app/schemas.py` (`Options`, `error_body`) and `app/ids.py`; bounds tests.
+- [x] **P3-A** `app/schemas.py` (`Options`, `error_body`) and `app/ids.py`; bounds tests.
 
 **Files:** extend `app/schemas.py`; create `app/ids.py`, `tests/test_app_schemas.py`.
 **Produces:** `error_body(kind: str, message: str) -> Dict` → `{"type": "error", "error": {"type": kind, "message": message}}`; `new_id(prefix: str) -> str` → `"<prefix>_" + 12 hex chars of ms time + 10 random hex chars` (sortable by creation time).

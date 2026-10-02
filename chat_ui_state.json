@@ -6,7 +6,7 @@
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P3",
   "status": "P0-P2 complete 2026-10-02: engine reproduces the published decode (CPU 20/20 vs script, GPU 20/20 vs dump). P3 store + streaming API in progress.",
-  "next_action": "P3-A (app/schemas.py error_body + app/ids.py + tests) via implementer; then P3-B store, P3-C redact, P3-D server/pipeline/commands, P3-E OpenAPI.",
+  "next_action": "P3-B (app/store.py SQLite store) via implementer; then P3-C redact, P3-D server/pipeline/commands, P3-E OpenAPI.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -301,10 +301,10 @@
     },
     "P3": {
       "title": "Store and streaming API (laptop, tiny engine)",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "P3-A": {
-          "done": false,
+          "done": true,
           "desc": "app/schemas.py (Options, error_body) and app/ids.py; bounds tests."
         },
         "P3-B": {
@@ -324,7 +324,11 @@
           "desc": "OpenAPI summaries and examples for every route; app/README.md's curl walkthrough reproduced by a test."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "commits": "7d62da0,4ce454f",
+        "tests": "test_app_schemas.py 24 passed; validate 749 passed",
+        "review": "clean after fix round 1 (monotonic ids across clock step-back/overflow)"
+      },
       "verdict": null
     },
     "P4": {
@@ -535,7 +539,8 @@
     "2026-10-02: P2-D complete; engine stages over the published loaders.",
     "2026-10-02: P2-D as built differs from the plan code in 7 justified places (see the plan's P2-D 'As built' note); later briefs follow the code.",
     "2026-10-02: P2-E complete: R2 satisfied on CPU and GPU.",
-    "2026-10-02: current_phase -> P3"
+    "2026-10-02: current_phase -> P3",
+    "2026-10-02: P3-A complete."
   ],
-  "last_updated": "2026-10-02T08:31:18+02:00"
+  "last_updated": "2026-10-02T08:56:43+02:00"
 }
