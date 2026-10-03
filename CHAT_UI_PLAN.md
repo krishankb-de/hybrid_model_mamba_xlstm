@@ -2542,7 +2542,7 @@ Commit `"P4-A: page shell + styles"`.
 - **Caching.** `/` and `/static/*` send `Cache-Control: no-cache`.
 - **Geometry check.** `scripts/chat_ui_layout_check.py` is a CDP geometry check: 88 cases, run locally, not by `validate.sh`.
 
-- [ ] **P4-B** `api.js` (SSE parser, stream, poll, cancel, image loader) and `state.js` (reducers, replay); `node --test` with a recorded fixture; `validate.sh` gains the node gate.
+- [x] **P4-B** `api.js` (SSE parser, stream, poll, cancel, image loader) and `state.js` (reducers, replay); `node --test` with a recorded fixture; `validate.sh` gains the node gate.
 
 **Files:** create `app/static/api.js`, `app/static/state.js`, `tests/frontend/parsers.test.mjs`, `tests/frontend/fixtures/turn_tiny.json`, `tests/test_app_frontend_fixture.py`; modify `scripts/validate.sh`.
 **Produces (JS):** `parseSSE(buffer) -> {events, rest}`, `streamTurn({base, sessionId, form, token, clientId, signal})` (async generator), `pollMessage({base, messageId, after, token, clientId, signal})` (async generator, 500 ms), `cancelMessage(...)`, `loadImage(url, auth) -> Promise<objectURL>` (fetch with headers, cached per URL; D23), `authHeaders(token, clientId)`; `initialView(messageId)`, `applyEvent(view, {event, data})`, `replay(events)`.
@@ -2697,6 +2697,17 @@ fi
 ```
 
 Run `node --test tests/frontend/*.test.mjs` (FAIL first, then PASS). Commit `"P4-B: SSE parser, reducers, node tests in validate.sh"`.
+
+*As built (P4-B, commits 1a1beca, 50ed940; the code is authoritative where it differs from the listings above):*
+- **Selectors.** `state.js` adds the pure selectors `stageState(view, name)` (keyed on `view.status`), `labelsPending(view)` and `STAGES`.
+  - When the turn is aborted, stages left running or pending show as skipped/`stopped`.
+  - When the turn errored, a running stage shows as `error` and a pending one as skipped/`not_run`.
+  - A skipped stage leaves its derived fields at `null`/`[]`.
+- **Polling.** `pollMessage` retries a network `TypeError` and 429/502/503/504 with backoff from 500 ms to 5 s, and gives up after 20 consecutive failures. Any other non-2xx is terminal.
+- **Streaming.** `streamTurn` takes `onMessageId` and cancels its reader in a `finally`.
+- **Parsing.** `parseSSE` skips malformed frames.
+- **Images.** `loadImage` accepts same-origin relative URLs only.
+- **Node gate.** Gate 2b runs with `--test-timeout=30000`, behind a version guard (node ≥ 22.7, or 20.19+). When skipped, it still adds a SUMMARY line. `tests/test_validate_node_gate.py` tests the gate itself.
 
 - [ ] **P4-C** `render.js`: stage timeline, report card, label chips, provenance footer; every update re-renders from the view.
 

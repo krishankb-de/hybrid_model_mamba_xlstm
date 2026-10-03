@@ -6,7 +6,7 @@
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P4",
   "status": "P0-P3 complete 2026-10-03 (store, redaction, streaming API, OpenAPI on the tiny engine). P4 frontend next; P3-E doc follow-up first.",
-  "next_action": "P4-B (app/static/api.js + state.js; node --test with a recorded fixture; validate.sh node gate) via implementer; then P4-C render.js, P4-D app.js, P4-E browser checklist.",
+  "next_action": "P4-C (app/static/render.js + node DOM-shim tests; P4-B follow-up commit first) via implementer with task-P4-C-rulings.md; then P4-D app.js, P4-E browser checklist.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -340,7 +340,7 @@
           "desc": "index.html and styles.css: layout grid, banner, light/dark tokens, 375 px; served at / and /static/*."
         },
         "P4-B": {
-          "done": false,
+          "done": true,
           "desc": "api.js (SSE parser, stream, poll, cancel, image loader) and state.js (reducers, replay); node --test with a recorded fixture; validate.sh gains the node gate."
         },
         "P4-C": {
@@ -357,9 +357,9 @@
         }
       },
       "evidence": {
-        "commits": "d98f4cb,8fa8ecc",
-        "tests": "test_app_static.py 24 passed; layout check RESULT 88 cases, 0 failures (old page: 180); validate 1134 passed",
-        "review": "clean after fix round 1 (narrow drawer, composer at tablet widths, a11y markup, no-cache, geometry check)"
+        "commits": "1a1beca,50ed940",
+        "tests": "node 42/42 (Gate 2b); pytest fixture+static+gate 46 passed; 90 mutants 0 survivors",
+        "review": "clean after fix round 1 (stage selector, skipped-stage fields, resilient polling, safer parser/images, node gate guard)"
       },
       "verdict": null
     },
@@ -551,7 +551,8 @@
     "2026-10-03: P3 complete. Paused by the weekly usage limit (resets 2026-10-08 13:00).",
     "2026-10-03: current_phase -> P4",
     "2026-10-03: 2026-10-03: P3-E follow-up a3db46d (doc accuracy + preprocess read race) clean on re-review; P4 started.",
-    "2026-10-04: P4-A complete."
+    "2026-10-04: P4-A complete.",
+    "2026-10-04: P4-B complete."
   ],
-  "last_updated": "2026-10-03T09:34:19+02:00"
+  "last_updated": "2026-10-03T14:34:46+02:00"
 }
