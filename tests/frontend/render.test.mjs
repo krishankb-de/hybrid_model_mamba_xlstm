@@ -107,11 +107,13 @@ const labelling = () => viewOf([
   stageEnd('generate', 9, GENERATE), stageStart('label', 4),
 ]);
 
-// A finished turn whose retrieve stage carries three strings long enough to be clipped (a private turn's matched reports).
+// A finished turn with strings long enough to be clipped: three in the retrieve stage (a private turn's matched reports and
+// a note) and one in generate (its drift note). Each stage's first clipped string is its number 0, so a show-more key that
+// forgot the stage would take the two for one.
 const withClips = () => viewOf([
   START, stageStart('retrieve', 2),
   stageEnd('retrieve', 8, { report_matches: [{ report: 'x'.repeat(300) }, { report: 'y'.repeat(300) }], note: 'z'.repeat(300) }),
-  stageStart('generate', 3), snapshot('Findings: ok'), stageEnd('generate', 9, GENERATE),
+  stageStart('generate', 3), snapshot('Findings: ok'), stageEnd('generate', 9, { ...GENERATE, drift_note: 'd'.repeat(300) }),
   stopOf('done', { report: 'Findings: ok', display_report: 'Findings: ok' }),
 ]);
 
@@ -197,28 +199,35 @@ test('the timeline is an ordered list of the six stages in contract order', () =
   assert.equal(qa(ol, '[tabindex]').length, 0);   // no item is made a tab stop by hand
 });
 
-test('a pending stage shows its bare name, a running one its name, a done one its time; the spoken label says the state', () => {
+// A plain item (a stage with no detail) says its state in text the eye does not see, after the visible label: browse mode
+// reads the text of a list item and not its aria-label. visibleText is what is shown, textContent what is read.
+const hiddenText = (li) => q(li, '.visually-hidden')?.textContent ?? null;
+
+test('a pending stage shows its bare name, a running one its name, a done one its time; hidden text after it says the state', () => {
   const pending = renderTimeline(initialView('m1'));
-  assert.deepEqual(qa(pending, 'li').map((li) => [li.getAttribute('data-state'), li.textContent, li.getAttribute('aria-label')]),
-                   STAGES.map((s) => ['pending', s, `${s}, pending`]));
+  assert.deepEqual(qa(pending, 'li').map((li) => [li.getAttribute('data-state'), visibleText(li), li.textContent, li.hasAttribute('aria-label')]),
+                   STAGES.map((s) => ['pending', s, `${s}, pending`, false]));
+  assert.deepEqual(qa(pending, 'li').map(hiddenText), STAGES.map(() => ', pending'));
 
   const mid = renderTimeline(viewOf([START, stageStart('preprocess', 0), stageEnd('preprocess', 1.6, {}), stageStart('encode', 1),
                                      stageEnd('encode', 611.6, { device: 'cpu' }), skipped('retrieve', 'gallery_unavailable'),
                                      stageStart('generate', 3)]));
   const encode = stageButton(mid, 'encode');   // a stage with a detail: its label is on the button that opens it
   assert.deepEqual([stageItem(mid, 'encode').getAttribute('data-state'), encode.textContent, encode.getAttribute('aria-label')],
-                   ['done', 'encode · 612 ms', 'encode, done, 612 milliseconds']);   // the brief's own example
+                   ['done', 'encode · 612 ms', 'encode · 612 ms, done']);   // the name starts with the visible text (WCAG 2.5.3)
   const preprocess = stageItem(mid, 'preprocess');   // one without: plain text on the item
-  assert.deepEqual([preprocess.textContent, preprocess.getAttribute('aria-label')], ['preprocess · 2 ms', 'preprocess, done, 2 milliseconds']);   // rounded
-  assert.deepEqual([stageItem(mid, 'generate').getAttribute('data-state'), stageItem(mid, 'generate').textContent,
-                    stageItem(mid, 'generate').getAttribute('aria-label')], ['running', 'generate', 'generate, running']);
+  assert.deepEqual([visibleText(preprocess), preprocess.textContent, hiddenText(preprocess), preprocess.hasAttribute('aria-label')],
+                   ['preprocess · 2 ms', 'preprocess · 2 ms, done', ', done', false]);   // rounded
+  const generate = stageItem(mid, 'generate');
+  assert.deepEqual([generate.getAttribute('data-state'), visibleText(generate), generate.textContent, hiddenText(generate)],
+                   ['running', 'generate', 'generate, running', ', running']);
 });
 
-test('a skipped stage says so, with its reason in the spoken label', () => {
+test('a skipped stage says so, with its reason in the hidden text', () => {
   const view = finished();
   const retrieve = stageItem(renderTimeline(view), 'retrieve');
-  assert.deepEqual([retrieve.getAttribute('data-state'), retrieve.textContent, retrieve.getAttribute('aria-label')],
-                   ['skipped', 'retrieve · skipped', 'retrieve, skipped: gallery_unavailable']);
+  assert.deepEqual([retrieve.getAttribute('data-state'), visibleText(retrieve), retrieve.textContent, hiddenText(retrieve), retrieve.hasAttribute('aria-label')],
+                   ['skipped', 'retrieve · skipped', 'retrieve · skipped: gallery_unavailable', ': gallery_unavailable', false]);
 });
 
 test('after a stop no stage stays running: the stage and the ones not reached read "skipped (stopped)"', () => {
@@ -228,8 +237,9 @@ test('after a stop no stage stays running: the stage and the ones not reached re
   assert.equal(items.preprocess.getAttribute('data-state'), 'done');
   for (const stage of ['encode', 'retrieve', 'generate', 'label', 'score']) {   // encode never started; generate was running
     assert.equal(items[stage].getAttribute('data-state'), 'skipped', stage);
-    assert.equal(items[stage].textContent, `${stage} · skipped (stopped)`, stage);
-    assert.equal(items[stage].getAttribute('aria-label'), `${stage}, skipped: stopped`, stage);
+    assert.equal(items[stage].textContent, `${stage} · skipped (stopped)`, stage);   // the label says why: nothing is added to it
+    assert.equal(hiddenText(items[stage]), null, stage);
+    assert.equal(items[stage].hasAttribute('aria-label'), false, stage);
   }
   assert.equal(qa(renderTimeline(view), 'li[data-state="running"]').length, 0);
 });
@@ -239,18 +249,18 @@ test('after an error the failed stage reads error and the ones not reached read 
                        step('error', { type: 'error', error: { type: 'model_error', message: 'Internal error (RuntimeError)' } }),
                        stopOf('error')]);
   const ol = renderTimeline(view);
-  assert.deepEqual([stageItem(ol, 'generate').getAttribute('data-state'), stageItem(ol, 'generate').textContent,
-                    stageItem(ol, 'generate').getAttribute('aria-label')], ['error', 'generate', 'generate, error']);
-  assert.deepEqual([stageItem(ol, 'label').getAttribute('data-state'), stageItem(ol, 'label').getAttribute('aria-label')],
-                   ['skipped', 'label, skipped: not_run']);
+  assert.deepEqual([stageItem(ol, 'generate').getAttribute('data-state'), visibleText(stageItem(ol, 'generate')),
+                    stageItem(ol, 'generate').textContent], ['error', 'generate', 'generate, error']);
+  assert.deepEqual([stageItem(ol, 'label').getAttribute('data-state'), stageItem(ol, 'label').textContent],
+                   ['skipped', 'label · skipped: not_run']);
   assert.equal(qa(ol, 'li[data-state="running"]').length, 0);
 });
 
 test('a time that is missing or not a number never prints NaN', () => {
   const view = viewOf([START, step('stage_end', { stage: 'encode', detail: {} }), step('stage_end', { stage: 'preprocess', ms: 'soon', detail: {} })]);
   const ol = renderTimeline(view);
-  assert.equal(stageItem(ol, 'encode').getAttribute('aria-label'), 'encode, done');
-  assert.equal(stageItem(ol, 'preprocess').getAttribute('aria-label'), 'preprocess, done');
+  assert.equal(stageItem(ol, 'encode').textContent, 'encode · done');   // the label already says it: nothing is added
+  assert.equal(stageItem(ol, 'preprocess').textContent, 'preprocess · done');
   assert.doesNotMatch(serialize(ol), /NaN|undefined/);
 });
 
@@ -268,7 +278,7 @@ test('a stage with a detail is a disclosure button: aria-expanded and aria-contr
   assert.equal(toggle.getAttribute('aria-controls'), table.getAttribute('id'));
   assert.equal(toggle.getAttribute('aria-expanded'), 'false');
   assert.equal(toggle.textContent, 'encode · 612 ms');   // the visible label
-  assert.equal(toggle.getAttribute('aria-label'), 'encode, done, 612 milliseconds');   // the spoken one
+  assert.equal(toggle.getAttribute('aria-label'), 'encode · 612 ms, done');   // the spoken one starts with the visible one
   assert.deepEqual([li.getAttribute('data-stage'), li.getAttribute('data-state')], ['encode', 'done']);   // the hooks stay on the item
   assert.equal(li.hasAttribute('aria-label') || li.hasAttribute('tabindex'), false);   // the name and the focus are the button's
   assert.equal(li.classList.contains('open'), false);   // styles.css shows the table only while li.open
@@ -503,7 +513,7 @@ test('while the label stage has not ended the chips are a "labelling…" placeho
 });
 
 test('a skipped label stage says "labels unavailable" with its reason', () => {
-  for (const reason of ['labeler_unavailable', 'label_off']) {
+  for (const reason of ['labeler_unavailable', 'some_other_reason']) {
     const view = viewOf([START, skipped('label', reason), stopOf('done')]);
     const labels = renderLabels(view, { labelNames: LABEL_NAMES });
     assert.equal(labels.textContent, `labels unavailable (${reason})`, reason);
@@ -600,10 +610,38 @@ test('with labels off the card says "labels off" from the start instead of "labe
   assert.equal(renderLabels(off(stageStart('preprocess', 0))).textContent, 'labels off');
   assert.equal(renderLabels(off(stageStart('generate', 3), snapshot('Findings: x'), stageEnd('generate', 9, GENERATE), stageStart('label', 4))).textContent,
                'labels off');
-  assert.equal(renderLabels(off(skipped('label', 'label_off'), stopOf('done'))).textContent, 'labels unavailable (label_off)');   // settled: ruling 4's words
+  assert.equal(renderLabels(off(skipped('label', 'label_off'), stopOf('done'))).textContent, 'labels off');   // settled: still "off", never "unavailable (label_off)"
   assert.equal(renderLabels(labelling()).textContent, 'labelling…');   // labels on: as before
   assert.equal(renderLabels({ ...labelling(), options: null }).textContent, 'labelling…');
   assert.equal(renderLabels({ ...labelling(), options: { label: true } }).textContent, 'labelling…');
+});
+
+test('a label stage that ends skipped as label_off keeps saying "labels off", with or without the options in the view', () => {
+  const off = (...steps) => viewOf([step('message_start', { ...START.data, options: { ...START.data.options, label: false } }), ...steps]);
+  const settled = [stageStart('preprocess', 0), stageEnd('preprocess', 1, {}), stageStart('generate', 3), snapshot('Findings: x'),
+                   stageEnd('generate', 9, GENERATE), skipped('label', 'label_off'), skipped('score', 'no_reference')];
+  const text = (view) => renderLabels(view, { labelNames: LABEL_NAMES }).textContent;
+  assert.equal(text(off(...settled)), 'labels off');   // still running: the label stage has ended (skipped), the turn has not
+  assert.equal(text(off(...settled, stopOf('done'))), 'labels off');
+  assert.equal(text(viewOf([START, skipped('label', 'label_off'), stopOf('done')])), 'labels off');   // options say label on, the stage says off: the stage wins
+  assert.equal(text({ ...viewOf([START, skipped('label', 'label_off'), stopOf('done')]), options: null }), 'labels off');   // a view with no options
+  assert.equal(text(off(stageStart('generate', 3), stopOf('aborted'))), 'labels off');   // stopped before the stage: it was off all along
+  assert.equal(text(off(stageStart('generate', 3), step('error', { type: 'error', error: { type: 'model_error', message: 'x' } }), stopOf('error'))), 'labels off');
+  assert.equal(text(viewOf([START, stageStart('generate', 3), stopOf('aborted')])), 'labels unavailable (stopped)');   // labels on: a stop is still a stop
+  const card = renderAssistantCard(off(...settled, stopOf('done')), { labelNames: LABEL_NAMES });
+  assert.equal(q(card, '.labels').textContent, 'labels off');
+  assert.doesNotMatch(q(card, '.labels').textContent, /label_off|unavailable/);
+  assert.equal(q(stageItem(card, 'label'), '.visually-hidden').textContent, ': label_off');   // the timeline item still says why it was skipped
+});
+
+test('the timeline, the label chips and the option chips are lists to a screen reader even where the style drops the bullets', () => {
+  assert.equal(renderTimeline(initialView('m1')).getAttribute('role'), 'list');   // Safari removes list semantics from list-style: none
+  const chips = q(renderLabels(finished({ labels: labelled(['Edema']) }), { labelNames: LABEL_NAMES }), 'ul.label-chips');
+  assert.equal(chips.getAttribute('role'), 'list');
+  const user = renderUserTurn({ text: 'a', options: tinyView().options }, {});
+  assert.equal(q(user, 'ul.options').getAttribute('role'), 'list');
+  assert.ok(qa(user, 'ul.options > li').length >= 1);
+  assert.equal(qa(renderAssistantCard(finished({ labels: labelled([]) }), { labelNames: LABEL_NAMES }), '[role="list"]').length, 2);   // the timeline and the chips
 });
 
 test('a score without per-label reference labels shows its numbers and no agree marks; no score, no numbers', () => {
@@ -769,7 +807,7 @@ test('a public-mode turn, as app/redact.py sends it, renders without errors or s
   // The finished turn is settled all the way down: the stage the public log never sent is skipped, not pending forever.
   assert.deepEqual(qa(built.timeline, 'li').map((li) => li.getAttribute('data-state')), ['done', 'done', 'done', 'done', 'done', 'skipped']);
   const score = stageItem(built.timeline, 'score');
-  assert.deepEqual([score.textContent, score.getAttribute('aria-label')], ['score · skipped', 'score, skipped: not_run']);
+  assert.deepEqual([visibleText(score), score.textContent], ['score · skipped', 'score · skipped: not_run']);
   assert.equal(qa(built.card, '[data-state="pending"]').length, 0);
   assert.equal(statusText(pub), 'Report ready');
 });
@@ -1061,6 +1099,70 @@ test('with ctx.ui the open stages and the raw toggle survive the whole-card repl
   assert.equal(stageItem(bare, 'encode').classList.contains('open'), false);
 });
 
+test('with ctx.ui an expanded "show more" survives the whole-card replace, and belongs to its stage', () => {
+  const view = withClips();   // retrieve has three clipped strings (0, 1, 2), generate one (its own 0)
+  const ui = new Map();
+  const ctx = { ui, copy() {} };
+  const moreOf = (card) => qa(card, 'button.more');
+  const state = (card) => moreOf(card).map((b) => [b.textContent, b.getAttribute('aria-expanded')].join('/'));
+  const shown = (card) => qa(card, '.clip-text').map((n) => n.textContent.length);
+  let card = renderAssistantCard(view, ctx);
+  assert.deepEqual(state(card), ['show more/false', 'show more/false', 'show more/false', 'show more/false']);
+  assert.deepEqual(shown(card), [201, 201, 201, 201]);   // 200 characters and the ellipsis
+
+  moreOf(card)[1].click();   // retrieve's second string
+  moreOf(card)[3].click();   // and generate's only one
+  card = renderAssistantCard(view, ctx);   // the next frame of a streaming turn rebuilds the whole card
+  assert.deepEqual(state(card), ['show more/false', 'show less/true', 'show more/false', 'show less/true']);
+  assert.deepEqual(shown(card), [201, 300, 201, 300]);   // the strings are shown in full again
+  assert.deepEqual(moreOf(card).map((b) => b.getAttribute('aria-label')), [
+    'show more of retrieve report_matches 1 report', 'show less of retrieve report_matches 2 report',
+    'show more of retrieve note', 'show less of generate drift_note']);   // and the names say what the buttons now do
+
+  moreOf(card)[1].click();   // collapse one of them: the next frame keeps that too
+  card = renderAssistantCard(view, ctx);
+  assert.deepEqual(state(card), ['show more/false', 'show more/false', 'show more/false', 'show less/true']);
+  moreOf(card)[3].click();
+  card = renderAssistantCard(view, ctx);
+  assert.deepEqual(state(card), ['show more/false', 'show more/false', 'show more/false', 'show more/false']);
+
+  // The stage is part of the key: generate's number 0 must not open retrieve's number 0, nor the reverse.
+  const generateOnly = new Map();
+  let g = renderAssistantCard(view, { ui: generateOnly });
+  moreOf(g)[3].click();
+  g = renderAssistantCard(view, { ui: generateOnly });
+  assert.deepEqual(state(g), ['show more/false', 'show more/false', 'show more/false', 'show less/true']);
+  const retrieveOnly = new Map();
+  let r = renderAssistantCard(view, { ui: retrieveOnly });
+  moreOf(r)[0].click();
+  r = renderAssistantCard(view, { ui: retrieveOnly });
+  assert.deepEqual(state(r), ['show less/true', 'show more/false', 'show more/false', 'show more/false']);
+
+  const other = renderAssistantCard({ ...view, id: 'm_other' }, { ui: generateOnly });   // another message has its own state
+  assert.deepEqual(state(other), ['show more/false', 'show more/false', 'show more/false', 'show more/false']);
+  moreOf(g)[3].click();   // and a click after the rebuild still works, in both directions
+  assert.deepEqual(state(g), ['show more/false', 'show more/false', 'show more/false', 'show more/false']);
+  const bare = renderAssistantCard(view, { copy() {} });   // no store: nothing remembered
+  moreOf(bare)[0].click();
+  assert.deepEqual(state(renderAssistantCard(view, { copy() {} })), ['show more/false', 'show more/false', 'show more/false', 'show more/false']);
+});
+
+test('detailTable keeps no show-more state of its own: without a store it starts clipped, and a store it is handed is the one it writes to', () => {
+  const long = 'q'.repeat(300);
+  const table = detailTable({ a: long, b: long }, 'x details', { name: 'encode' });
+  const [first] = qa(table, 'button.more');
+  first.click();
+  assert.deepEqual(qa(detailTable({ a: long, b: long }, 'x details', { name: 'encode' }), 'button.more').map((b) => b.textContent), ['show more', 'show more']);
+  const store = new Set();
+  const withStore = detailTable({ a: long, b: long }, 'x details', { name: 'encode', more: store });
+  qa(withStore, 'button.more')[1].click();
+  assert.deepEqual([...store], ['encode:1']);   // the stage, then the string's number in the table
+  assert.deepEqual(qa(detailTable({ a: long, b: long }, 'x details', { name: 'encode', more: store }), 'button.more').map((b) => b.textContent),
+                   ['show more', 'show less']);
+  qa(withStore, 'button.more')[1].click();
+  assert.deepEqual([...store], []);
+});
+
 // ---- focus hooks for the whole-card replace (M2) ---------------------------------------------------------------------
 
 test('Copy, Show raw, model details and show more carry a stable data-action, and a stage button its stage', () => {
@@ -1069,7 +1171,7 @@ test('Copy, Show raw, model details and show more carry a stable data-action, an
   assert.equal(button(card, 'Show raw').getAttribute('data-action'), 'raw');
   assert.equal(button(card, 'model details').getAttribute('data-action'), 'models');
   const more = qa(card, 'button.more');
-  assert.equal(more.length, 3);
+  assert.equal(more.length, 4);   // three in retrieve, one in generate
   assert.ok(more.every((b) => b.getAttribute('data-action') === 'more'));
   assert.deepEqual(qa(card, 'li > button').map((b) => [b.getAttribute('data-action'), b.getAttribute('data-stage')]),
                    [['stage', 'retrieve'], ['stage', 'generate']]);   // only the stages that have a detail
@@ -1080,11 +1182,13 @@ test('focusKey names the focused control and restoreFocus puts focus on its twin
   const ctx = { copy() {}, showModels() {}, ui: new Map() };
   let card = renderAssistantCard(view, ctx);
   document.body.replaceChildren(card);
-  stageButton(card, 'retrieve').click();   // open, so that its show-more buttons are on screen and can take focus
+  stageButton(card, 'retrieve').click();   // open, so that their show-more buttons are on screen and can take focus
+  stageButton(card, 'generate').click();
   const controls = (c) => ({
     'stage:retrieve': stageButton(c, 'retrieve'), 'stage:generate': stageButton(c, 'generate'),
     copy: button(c, 'Copy'), raw: button(c, 'Show raw'), models: button(c, 'model details'),
     'more:retrieve:0': qa(c, 'button.more')[0], 'more:retrieve:2': qa(c, 'button.more')[2],
+    'more:generate:0': qa(c, 'button.more')[3],   // the second stage's first string is its number 0, not 3
   });
   for (const key of Object.keys(controls(card))) {
     const control = controls(card)[key];
@@ -1137,6 +1241,51 @@ test('restoreFocus says whether focus really moved, and never scrolls the pane t
   document.body.replaceChildren();
 });
 
+test('the shim gives focus to nothing inside a hidden subtree, and takes it away from what becomes hidden', () => {
+  const inner = el('button', { type: 'button' }, 'inner');
+  const section = el('section', {}, inner);
+  const wrap = el('div', {}, section);
+  document.body.replaceChildren(wrap);
+  inner.focus();
+  assert.equal(document.activeElement, inner);   // shown: it takes focus
+  section.setAttribute('hidden', '');   // a browser blurs what it hides
+  assert.equal(document.activeElement, document.body);
+  section.removeAttribute('hidden');
+  assert.equal(document.activeElement, document.body);   // and does not give it back when the subtree is shown again
+
+  for (const hide of [wrap, section]) {   // hidden on the element's own parent or further up: refused either way
+    hide.setAttribute('hidden', '');
+    inner.focus();
+    assert.equal(document.activeElement, document.body, `${hide.localName} is hidden`);
+    hide.removeAttribute('hidden');
+  }
+  inner.setAttribute('hidden', '');   // the control itself
+  inner.focus();
+  assert.equal(document.activeElement, document.body);
+  inner.removeAttribute('hidden');
+  inner.focus();
+  assert.equal(document.activeElement, inner);   // and takes it once nothing above it is hidden
+  document.body.replaceChildren();
+});
+
+test('a hidden footer keeps its "model details" button out of reach: it cannot take focus, and restoreFocus says so', () => {
+  const view = viewOf([START, stopOf('done')]);   // finished and no stage run: the card hides its timeline and its footer
+  const card = renderAssistantCard(view, { showModels() {} });
+  document.body.replaceChildren(card);
+  const footer = q(card, 'footer.provenance');
+  assert.ok(footer.hasAttribute('hidden'));
+  const models = button(card, 'model details');
+  assert.ok(models && footer.contains(models), 'the button is built, inside the hidden footer');
+  models.focus();
+  assert.equal(document.activeElement, document.body);
+  assert.equal(restoreFocus(card, 'models'), false);   // the control exists but cannot take focus, so the page is told it failed
+  assert.equal(document.activeElement, document.body);
+  footer.removeAttribute('hidden');
+  assert.equal(restoreFocus(card, 'models'), true);   // the same call works once the footer is shown
+  assert.equal(document.activeElement, models);
+  document.body.replaceChildren();
+});
+
 // ---- names of repeated controls (M3) ----------------------------------------------------------------------------------
 
 test('repeated controls have distinct names that contain their visible text, and the turn number tells the cards apart', () => {
@@ -1150,9 +1299,9 @@ test('repeated controls have distinct names that contain their visible text, and
   assert.equal(nameOf(three, 'model details'), 'model details, turn 3');
   assert.deepEqual(qa(three, 'button.more').map((b) => b.getAttribute('aria-label')), [
     'show more of retrieve report_matches 1 report, turn 3', 'show more of retrieve report_matches 2 report, turn 3',
-    'show more of retrieve note, turn 3',
+    'show more of retrieve note, turn 3', 'show more of generate drift_note, turn 3',
   ]);   // the stage and the path to the string, so no two of them sound alike
-  assert.equal(stageButton(three, 'generate').getAttribute('aria-label'), 'generate, done, 9 milliseconds, turn 3');
+  assert.equal(stageButton(three, 'generate').getAttribute('aria-label'), 'generate · 9 ms, done, turn 3');
   qa(three, 'button.more')[2].click();
   assert.equal(qa(three, 'button.more')[2].getAttribute('aria-label'), 'show less of retrieve note, turn 3');
 
@@ -1160,7 +1309,7 @@ test('repeated controls have distinct names that contain their visible text, and
   assert.equal(unnumbered.getAttribute('aria-label'), 'Assistant report');
   assert.deepEqual([nameOf(unnumbered, 'Copy'), nameOf(unnumbered, 'Show raw'), nameOf(unnumbered, 'model details')],
                    ['Copy report', 'Show raw report', 'model details']);
-  assert.equal(stageButton(unnumbered, 'generate').getAttribute('aria-label'), 'generate, done, 9 milliseconds');   // the brief's wording
+  assert.equal(stageButton(unnumbered, 'generate').getAttribute('aria-label'), 'generate · 9 ms, done');
 
   const names = (card) => qa(card, 'button').map((b) => b.getAttribute('aria-label'));
   const seven = renderAssistantCard(view, ctxOf(7));
@@ -1168,10 +1317,13 @@ test('repeated controls have distinct names that contain their visible text, and
   assert.equal(new Set(a).size, a.length);   // distinct within a card
   assert.deepEqual(a.filter((n) => b.includes(n)), []);   // and between two cards
 
-  for (const control of qa(three, 'button[data-action]').filter((c) => c.getAttribute('data-action') !== 'stage')) {
+  for (const control of qa(three, 'button[data-action]')) {   // the stage buttons too: their text is "encode · 612 ms", and so is the start of the name
     const [name, text] = [control.getAttribute('aria-label').toLowerCase(), control.textContent.toLowerCase()];
     assert.ok(name.includes(text), `"${control.getAttribute('aria-label')}" should contain "${control.textContent}"`);   // WCAG 2.5.3, label in name
+    if (control.getAttribute('data-action') === 'stage') assert.ok(name.startsWith(text), `"${name}" should start with "${text}"`);
   }
+  assert.deepEqual(qa(three, 'button[data-action="stage"]').map((b) => b.getAttribute('aria-label')),
+                   ['retrieve · 8 ms, done, turn 3', 'generate · 9 ms, done, turn 3']);
 
   const user = renderUserTurn({ text: 'hi', image: { url: 'blob:x/1', filename: 'a.png' } }, ctxOf(3));
   assert.equal(user.getAttribute('aria-label'), 'Your message, turn 3');

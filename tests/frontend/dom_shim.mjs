@@ -6,7 +6,8 @@
 // to the parents; querySelector and querySelectorAll over tag, #id, .class, [attr], [attr=value] and the descendant
 // and child combinators; focus, blur and document.activeElement, with a browser's rules for what can be focused: a
 // button, an input, an enabled select or textarea, a link with an href, or anything with a tabindex, and only while
-// it is in the document (the body of the installed document), so a card that was replaced has lost its focus.
+// it is in the document (the body of the installed document) and neither it nor anything above it has the hidden
+// attribute: a card that was replaced has lost its focus, and so has a control that is hidden under a focus holder.
 // It follows the DOM where a test could tell: append turns a string into a text node and never parses it (so a report
 // that contains markup stays text), and a value that is not a node is made a string, so an `undefined` or `false`
 // that slips into a card shows up as that word.
@@ -22,6 +23,8 @@ const FOCUSABLE_TAGS = new Set(['button', 'input', 'select', 'textarea']);
 let documentBody = null;   // the body of the document installed last: focus works inside it only
 let focused = null;        // the element that has focus, if it is still in that body
 const tripwire = (name) => { throw new Error(`the DOM shim has no ${name}: a renderer must build nodes, not parse strings`); };
+// The element or an ancestor has the hidden attribute: nothing in it is rendered, so nothing in it can have focus.
+const inHiddenSubtree = (node) => { for (let n = node; n && n.nodeType === 1; n = n.parentNode) if (n.hasAttribute('hidden')) return true; return false; };
 
 export class ShimEvent {
   constructor(type, init = {}) {
@@ -198,7 +201,7 @@ class ShimElement extends ShimNode {
   focus() {
     const focusable = this.hasAttribute('tabindex') || (FOCUSABLE_TAGS.has(this.localName) && !this.hasAttribute('disabled'))
       || (this.localName === 'a' && this.hasAttribute('href'));
-    if (focusable && documentBody && documentBody.contains(this)) focused = this;
+    if (focusable && documentBody && documentBody.contains(this) && !inHiddenSubtree(this)) focused = this;
   }
   blur() { if (focused === this) focused = null; }
   get id() { return this.getAttribute('id') ?? ''; }
@@ -274,7 +277,10 @@ export function createDocument() {
   documentBody = body;
   focused = null;
   return {
-    get activeElement() { return focused && body.contains(focused) ? focused : body; },
+    get activeElement() {
+      if (focused && (!body.contains(focused) || inHiddenSubtree(focused))) focused = null;   // a browser blurs what leaves the page or is hidden, for good
+      return focused ?? body;
+    },
     createElement: (tag) => new ShimElement(tag),
     createTextNode: (data) => new ShimText(data),
     body,

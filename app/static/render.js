@@ -66,11 +66,11 @@ function whole(view) {
 
 const noticesOf = (v) => (Array.isArray(v.notices) ? v.notices.filter((n) => isObject(n) && (str(n.message) || str(n.code))) : []);
 
-// What outlives a re-render: the stage details that are open and Show raw. ctx.ui keeps it per message id; without
-// a store the record lives and dies with the card.
+// What outlives a re-render: the stage details that are open, the show-more buttons that are expanded ("<stage>:<n>")
+// and Show raw. ctx.ui keeps it per message id; without a store the record lives and dies with the card.
 function uiOf(view, ctx) {
   const store = ctx?.ui;
-  const fresh = () => ({ open: new Set(), raw: false });
+  const fresh = () => ({ open: new Set(), more: new Set(), raw: false });
   if (!store || typeof store.get !== 'function' || typeof store.set !== 'function') return fresh();
   let record = store.get(view.id);
   if (!record) {
@@ -85,29 +85,32 @@ function uiOf(view, ctx) {
 // A stage with a detail is a disclosure: a <button aria-expanded aria-controls> inside its item carries the label and
 // opens the table, and Enter and Space come with the button. A stage without a detail is plain text: nothing to open,
 // so nothing to focus. The item keeps data-stage, data-state and .open for the stylesheet.
+// What a screen reader gets beyond the visible label is its `said` part, and the name is the label and then that
+// ("encode · 612 ms, done, turn 2"), so the visible text is the start of it (WCAG 2.5.3). A button carries it in its
+// aria-label; a plain item as text the eye does not see, because browse mode reads a list item's text, not its label.
 export function renderTimeline(view, ctx) {
   const v = whole(view);
   const cx = ctx ?? {};
   const ui = uiOf(v, cx);
-  return el('ol', { class: 'timeline', 'aria-label': 'Pipeline stages' }, ...STAGES.map((s) => {
+  return el('ol', { class: 'timeline', role: 'list', 'aria-label': 'Pipeline stages' }, ...STAGES.map((s) => {
     const st = stageState(v, s);
     const state = typeof st.state === 'string' ? st.state : 'pending';
     const ms = isNum(st.ms) ? Math.round(st.ms) : null;
     const why = str(st.skipped);
-    // A stop is the user's own doing, so it is said on screen; every other skip reason is in the spoken label.
+    // A stop is the user's own doing, so it is said on screen; every other skip reason is said to a screen reader only.
     const label = state === 'done' ? (ms == null ? `${s} · done` : `${s} · ${ms} ms`)
                 : state === 'skipped' ? `${s} · skipped${why === 'stopped' ? ' (stopped)' : ''}` : s;
-    const spoken = state === 'done' ? (ms == null ? `${s}, done` : `${s}, done, ${ms} milliseconds`)
-                 : state === 'skipped' ? `${s}, skipped${why ? `: ${why}` : ''}` : `${s}, ${state}`;
+    const said = state === 'done' ? (ms == null ? '' : ', done')   // the glyph is a shape, so the state is also said in words
+               : state === 'skipped' ? (why && why !== 'stopped' ? `: ${why}` : '') : `, ${state}`;
     if (!(isObject(st.detail) && Object.keys(st.detail).length)) {
-      return el('li', { 'data-stage': s, 'data-state': state, 'aria-label': spoken }, label);
+      return el('li', { 'data-stage': s, 'data-state': state }, label, said ? el('span', { class: 'visually-hidden' }, said) : null);
     }
     const id = `detail-${str(v.id).replace(/[^\w-]/g, '_') || 'turn'}-${s}`;   // unique per message, and a usable id reference
-    const table = detailTable(st.detail, `${s} details`, { id, name: s, turn: turnOf(cx) });
+    const table = detailTable(st.detail, `${s} details`, { id, name: s, turn: turnOf(cx), more: ui.more });
     const open = ui.open.has(s);
     const toggle = el('button', {
       type: 'button', 'data-action': 'stage', 'data-stage': s, 'aria-expanded': String(open), 'aria-controls': id,
-      'aria-label': named(spoken, cx),
+      'aria-label': named(`${label}${said}`, cx),
     }, label);
     const li = el('li', { 'data-stage': s, 'data-state': state, class: open ? 'open' : null }, toggle, table);
     toggle.addEventListener('click', () => {
@@ -122,11 +125,13 @@ export function renderTimeline(view, ctx) {
 // A stage's detail as a table: a row per key; an array of objects as a nested table with a row per object and a column
 // per key; an object as a table of its own; a long string clipped with "show more". label names the table. options:
 // { id } for the table (what a button's aria-controls names), { name } the stage, and { turn }, which together name each
-// show-more button so no two sound alike ("show more of retrieve report_matches 2 report, turn 3").
+// show-more button so no two sound alike ("show more of retrieve report_matches 2 report, turn 3"). { more } is a Set the
+// table reads and writes the expanded strings to, as "<stage>:<n>" with n the string's number in this table in document
+// order (the n of focusKey's more:<stage>:<n>): the page keeps it across rebuilds. Without it a table starts clipped.
 export function detailTable(detail, label, options) {
   const o = isObject(options) ? options : {};
   const entries = isObject(detail) ? Object.entries(detail) : [];
-  const env = { turn: turnOf(o) };
+  const env = { turn: turnOf(o), stage: str(o.name), more: o.more instanceof Set ? o.more : null, count: 0 };
   return el('table', { id: str(o.id) || null, 'aria-label': label },
     el('tbody', {}, ...entries.map(([key, value]) => row(key, value, 1, env, str(o.name)))));
 }
@@ -169,23 +174,28 @@ function recordsTable(items, depth, name, env) {
       (c) => el('td', {}, valueNode(Object.hasOwn(item, c) ? item[c] : undefined, depth + 1, path(name, i + 1, c), env)))))));
 }
 
-// The first CLIP characters and a button that shows the rest, and hides it again. name says which string it is.
+// The first CLIP characters and a button that shows the rest, and hides it again. name says which string it is. env.more,
+// when there is one, remembers that it is expanded: the next frame builds it expanded again.
 function clipped(text, name, env) {
   let end = CLIP;
   const last = text.charCodeAt(end - 1);
   if (last >= 0xd800 && last <= 0xdbff) end -= 1;   // not between the halves of a surrogate pair
   const head = `${text.slice(0, end)}…`;
-  const shown = el('span', { class: 'clip-text' }, head);
+  const key = `${env.stage}:${env.count++}`;   // built in document order, so the nth call of a table is its nth show-more button
+  let open = !!env.more?.has(key);
+  const shown = el('span', { class: 'clip-text' }, open ? text : head);
   const of = name ? ` of ${name}` : '';
+  const verb = () => (open ? 'show less' : 'show more');
   const more = el('button', {
-    type: 'button', class: 'more', 'data-action': 'more', 'aria-expanded': 'false', 'aria-label': named(`show more${of}`, env),
-  }, 'show more');
+    type: 'button', class: 'more', 'data-action': 'more', 'aria-expanded': String(open), 'aria-label': named(`${verb()}${of}`, env),
+  }, verb());
   more.addEventListener('click', () => {
-    const open = more.getAttribute('aria-expanded') !== 'true';
+    open = !open;
     shown.textContent = open ? text : head;
-    more.textContent = open ? 'show less' : 'show more';
+    more.textContent = verb();
     more.setAttribute('aria-expanded', String(open));
-    more.setAttribute('aria-label', named(`${open ? 'show less' : 'show more'}${of}`, env));
+    more.setAttribute('aria-label', named(`${verb()}${of}`, env));
+    if (open) env.more?.add(key); else env.more?.delete(key);
   });
   return el('span', { class: 'clip' }, shown, ' ', more);
 }
@@ -290,16 +300,17 @@ export function renderLabels(view, ctx) {
   const v = whole(view);
   const cx = ctx ?? {};
   const note = (text) => el('p', { class: 'note' }, text);
+  const off = isObject(v.options) && v.options.label === false;   // the user's own setting: said as that, never as "unavailable"
   let body = null;
   let marked = false;
   if (isObject(v.labels)) {
     ({ node: body, marked } = chipList(v, cx));
   } else if (labelsPending(v)) {
-    body = note(isObject(v.options) && v.options.label === false ? 'labels off' : 'labelling…');   // off: say so now, not at the end
+    body = note(off ? 'labels off' : 'labelling…');   // off: say so now, not at the end
   } else {
     const st = stageState(v, 'label');   // a stop or an error settles it; a settled turn that never got here shows nothing
     const why = str(st.skipped);
-    if (st.state === 'skipped') body = note(`labels unavailable${why ? ` (${why})` : ''}`);
+    if (st.state === 'skipped') body = note(off || why === 'label_off' ? 'labels off' : `labels unavailable${why ? ` (${why})` : ''}`);
     else if (st.state === 'error') body = note('labels unavailable (error)');
     else if (st.state === 'done') body = note('labels unavailable');
   }
@@ -331,7 +342,7 @@ function chipList(v, cx) {
     }, name, el('span', { class: 'visually-hidden' }, spoken),
     agrees === null ? null : el('span', { class: 'mark', 'aria-hidden': 'true' }, agrees ? '✓' : '✗'));
   });
-  return { node: el('ul', { class: 'label-chips', 'aria-label': 'CheXbert-14 labels of the generated report' }, ...chips), marked };
+  return { node: el('ul', { class: 'label-chips', role: 'list', 'aria-label': 'CheXbert-14 labels of the generated report' }, ...chips), marked };
 }
 
 function scoreBlock(score, marked) {
@@ -416,7 +427,7 @@ export function renderUserTurn(msg, ctx) {
   const picture = isObject(m.image) ? thumbnail(m.image, cx) : null;
   return el('article', { class: 'turn user', 'aria-label': named('Your message', cx), hidden: !picture && !text && !chips.length },
     el('div', { class: 'bubble' }, picture, text ? el('p', { class: 'user-text' }, text) : null,
-      chips.length ? el('ul', { class: 'options', 'aria-label': 'Settings used' }, ...chips.map((c) => el('li', { class: 'chip' }, c))) : null));
+      chips.length ? el('ul', { class: 'options', role: 'list', 'aria-label': 'Settings used' }, ...chips.map((c) => el('li', { class: 'chip' }, c))) : null));
 }
 
 function thumbnail(image, cx) {
