@@ -6,7 +6,7 @@
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P4",
   "status": "P0-P3 complete 2026-10-03 (store, redaction, streaming API, OpenAPI on the tiny engine). P4 frontend next; P3-E doc follow-up first.",
-  "next_action": "P4-C (app/static/render.js + node DOM-shim tests; P4-B follow-up commit first) via implementer with task-P4-C-rulings.md; then P4-D app.js, P4-E browser checklist.",
+  "next_action": "P4-D (app/static/app.js wiring; P4-C follow-up commit first) via implementer with task-P4-D-rulings.md; then P4-E browser checklist (extend scripts/chat_ui_layout_check.py).",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -344,7 +344,7 @@
           "desc": "api.js (SSE parser, stream, poll, cancel, image loader) and state.js (reducers, replay); node --test with a recorded fixture; validate.sh gains the node gate."
         },
         "P4-C": {
-          "done": false,
+          "done": true,
           "desc": "render.js: stage timeline, report card, label chips, provenance footer; every update re-renders from the view."
         },
         "P4-D": {
@@ -357,9 +357,9 @@
         }
       },
       "evidence": {
-        "commits": "1a1beca,50ed940",
-        "tests": "node 42/42 (Gate 2b); pytest fixture+static+gate 46 passed; 90 mutants 0 survivors",
-        "review": "clean after fix round 1 (stage selector, skipped-stage fields, resilient polling, safer parser/images, node gate guard)"
+        "commits": "1cb6c1b,45aca96,0157ed1",
+        "tests": "node 120/120; validate 1159 + Gate 2b; layout 88/0; 125/125 mutants; Chrome a11y-tree check",
+        "review": "clean after fix round 1 (disclosure buttons, spoken chip state, settled public stages, focus hooks, names)"
       },
       "verdict": null
     },
@@ -552,7 +552,8 @@
     "2026-10-03: current_phase -> P4",
     "2026-10-03: 2026-10-03: P3-E follow-up a3db46d (doc accuracy + preprocess read race) clean on re-review; P4 started.",
     "2026-10-04: P4-A complete.",
-    "2026-10-04: P4-B complete."
+    "2026-10-04: P4-B complete.",
+    "2026-10-04: P4-C complete."
   ],
-  "last_updated": "2026-10-03T14:34:46+02:00"
+  "last_updated": "2026-10-03T19:54:53+02:00"
 }

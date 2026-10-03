@@ -241,8 +241,11 @@ generate    {"decode","beam_size","tokens","stopped":"budget","cached_decode","c
 label       {"chexbert_14":{name:0|1},"positives":[…],
              "neighbor_agreement":[{"rank","agree","of":14,"both_positive","neighbor_only","generated_only"}]}
 score       {"rouge_l","bleu_1","bleu_4","chexbert_14_micro_f1"?,"exact_match_14"?,"reference_source":"user"|"test_split",
+             "reference_chexbert_14"?:{name:0|1},
              "published"?:{"model_report","floor_report","live_equals_published"}}   (published: test rows, private)
 ```
+
+*Added at P4-C (2026-10-04):* `score.reference_chexbert_14` holds the reference's own 14 labels (P5-E already labels the reference for the CheXbert parts). The UI uses it to mark agree/disagree on each label chip; without it, the chips show no marks. It is private-mode only, because public mode drops the whole score event.
 
 ### 6.4 Store (`CHAT_HOME/chat.db`)
 
@@ -2709,7 +2712,7 @@ Run `node --test tests/frontend/*.test.mjs` (FAIL first, then PASS). Commit `"P4
 - **Images.** `loadImage` accepts same-origin relative URLs only.
 - **Node gate.** Gate 2b runs with `--test-timeout=30000`, behind a version guard (node ≥ 22.7, or 20.19+). When skipped, it still adds a SUMMARY line. `tests/test_validate_node_gate.py` tests the gate itself.
 
-- [ ] **P4-C** `render.js`: stage timeline, report card, label chips, provenance footer; every update re-renders from the view.
+- [x] **P4-C** `render.js`: stage timeline, report card, label chips, provenance footer; every update re-renders from the view.
 
 **Files:** create `app/static/render.js`.
 **Produces:** `renderUserTurn(msg, ctx)`, `renderAssistantCard(view, ctx) -> HTMLElement` composed of `renderTimeline`, `renderReport`, `renderLabels`, `renderProvenance` (P6 adds `renderImages`, `renderNeighbors`, `renderMatches`). `ctx` carries `{loadImage, openViewer, copy}`.
@@ -2752,6 +2755,23 @@ export function renderTimeline(view) {
 - Rendering is throttled with `requestAnimationFrame`; the card is replaced as a whole (`old.replaceWith(renderAssistantCard(view, ctx))`).
 
 Verification is the P4-E browser checklist. Commit `"P4-C: card rendering"`.
+
+*As built (P4-C, commits 45aca96 and 0157ed1; the code is authoritative where it differs from the text above):*
+- **Builders:**
+  - `renderUserTurn(msg, ctx)` takes `msg = {text, image: {url, filename}, options}`, where `url` is a `blob:`/`data:` URL or a `/v1` path that is fetched through `ctx.loadImage`.
+  - `renderAssistantCard(view, ctx)`, `statusText(view)`, `scheduleRender`.
+- **`ctx`:** `{loadImage, openViewer, copy, showModels, labelNames, ui, turn}`.
+  - `ctx.ui` is a Map that keeps each card's open details and raw-report toggle across whole-card replaces.
+  - `ctx.turn` names the card and its controls.
+- **Accessibility:**
+  - A stage that has a detail is a `<button aria-expanded aria-controls>` inside its `li`. Every other stage is plain text.
+  - Chip state is spoken through `.visually-hidden` text.
+  - Controls carry `data-action` focus hooks, and `focusKey`/`restoreFocus` keep focus across a re-render.
+- **Security:**
+  - Same-origin paths are checked by one predicate exported from `api.js`.
+  - A recursive test rejects HTML-sink APIs anywhere in `app/static/`.
+- **Stage settling:** a `done` turn with at least one recorded stage settles its pending stages as `skipped/not_run`, so a public turn has no pending score.
+- **Labels:** with labels off, "labels off" shows immediately.
 
 - [ ] **P4-D** `app.js`: routing, sessions sidebar, minimal file picker, Stop (cancel then abort), settings drawer, exports, health strip, polling watchdog.
 
