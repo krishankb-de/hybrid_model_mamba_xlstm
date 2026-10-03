@@ -13,6 +13,7 @@
 # Gates, in order:
 #   1. Hydra config invariants for the 70M models
 #   2. pytest -m "not cuda and not slow"
+#   2b. node --test tests/frontend (CHAT_UI_PLAN.md P4-B; skipped with a warning when node is missing)
 #   3. model import + CPU forward/backward over all five mixer types, every parameter gets a grad
 #
 # The interpreter is the first of: $PYTHON, ./.venv (cluster), ./venv (laptop), python3.
@@ -99,6 +100,16 @@ if "${PYTHON}" -m pytest "${REPO_ROOT}/tests/" -m "not cuda and not slow" --tb=s
   gate_pass "pytest: all non-CUDA tests passed"
 else
   gate_fail "pytest: one or more tests failed"
+fi
+
+# ── Gate 2b: frontend parsers (node --test) — CHAT_UI_PLAN.md P4-B ──────────
+echo ""
+echo "── Gate 2b: node --test tests/frontend ──"
+if command -v node >/dev/null 2>&1 && compgen -G "${REPO_ROOT}/tests/frontend/*.test.mjs" >/dev/null; then
+  if node --test "${REPO_ROOT}"/tests/frontend/*.test.mjs 2>&1; then gate_pass "node: frontend tests passed"
+  else gate_fail "node: frontend tests failed"; fi
+else
+  echo -e "${WARN_TAG} node not found or no tests/frontend/*.test.mjs — skipped"
 fi
 
 # ── Gate 3: model import + CPU forward/backward smoke ────────────────────────
