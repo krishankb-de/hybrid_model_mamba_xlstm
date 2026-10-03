@@ -4,11 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CXR Report Chat</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/styles.css">
   <script type="module" src="/static/app.js"></script>
 </head>
 <body>
-  <header class="banner" role="note"><button id="sidebar-toggle" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Sessions">☰</button>Research prototype — not for clinical use.
+  <header class="banner"><button id="sidebar-toggle" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Sessions">☰</button>
+    <p class="disclaimer">Research prototype — not for clinical use.</p>
     <span id="mode-badge"></span> <span id="health" aria-live="polite"></span></header>
   <div class="layout">
     <nav id="sidebar" aria-label="Sessions">
@@ -19,12 +21,12 @@
     <aside id="drawer" hidden aria-label="Settings"></aside>
   </div>
   <form id="composer" aria-label="New turn">
-    <div id="image-well" tabindex="0" role="button" aria-label="Attach an X-ray: click, drop or paste">
+    <div id="image-well" tabindex="0" role="button">
       Drop, paste or click to attach an X-ray (PNG, JPEG, WEBP)</div>
     <div id="preview" hidden></div>
-    <textarea id="prompt" rows="2" placeholder="Optional note, or a command: beam 5, greedy, tokens 150, reference: …"></textarea>
-    <div id="chips" aria-label="Current settings"></div>
-    <button id="settings" type="button" aria-controls="drawer">Settings</button>
+    <textarea id="prompt" rows="2" aria-label="Note or command" placeholder="Optional note, or a command: beam 5, greedy, tokens 150, reference: …"></textarea>
+    <div id="chips" role="group" aria-label="Current settings"></div>
+    <button id="settings" type="button" aria-controls="drawer" aria-expanded="false">Settings</button>
     <button id="send" type="submit">Send</button>
     <button id="stop" type="button" hidden>Stop</button>
     <input id="file" type="file" accept="image/png,image/jpeg,image/webp" hidden>

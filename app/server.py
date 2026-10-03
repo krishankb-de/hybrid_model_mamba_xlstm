@@ -58,6 +58,7 @@ ERROR_KINDS = {400: "invalid_request_error", 401: "authentication_error", 403: "
                404: "not_found_error", 413: "validation_error", 422: "validation_error", 429: "overloaded_error",
                500: "internal_error"}   # 413 as P8-A's test expects; 403 as every public test-split refusal (fix-1)
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+NO_CACHE = {"Cache-Control": "no-cache"}   # the page and its files: revalidate (ETag, Last-Modified) after a redeploy
 NO_IMAGE_MSG = "Attach an X-ray first."
 NO_CACHE_MSG = "{} has no O(1) decode cache; set cached_decode=false."   # the engine's own wording (P2-D)
 NO_TOKEN_MSG = "This server has no token; connect through loopback."
@@ -250,10 +251,17 @@ class _Guard:
 
 
 class _StaticFiles(StaticFiles):
-    """app/static/ arrives with P4. Until it exists every /static/ path is a 404, where StaticFiles would answer 500."""
+    """app/static/ arrives with P4. Until it exists every /static/ path is a 404, where StaticFiles would answer 500.
+    Every file goes out with Cache-Control: no-cache, so a browser asks again after an rsync redeploy and the ETag
+    answers 304 when nothing changed."""
 
     async def check_config(self) -> None:
         return None
+
+    async def get_response(self, path: str, scope: Dict[str, Any]) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers.update(NO_CACHE)
+        return response
 
 
 def _loopback_ip(ip: Any) -> bool:
@@ -444,8 +452,8 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     def index() -> Response:
         page = static_dir / "index.html"
         if page.is_file():
-            return FileResponse(page)
-        return HTMLResponse(PLACEHOLDER.format(html.escape(DISCLAIMER)))
+            return FileResponse(page, headers=NO_CACHE)
+        return HTMLResponse(PLACEHOLDER.format(html.escape(DISCLAIMER)), headers=NO_CACHE)
 
     app.mount("/static", _StaticFiles(directory=str(static_dir), check_dir=False), name="static")
 

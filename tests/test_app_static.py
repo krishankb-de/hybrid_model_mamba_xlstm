@@ -96,6 +96,25 @@ def _media(query):
     return [rule for head, body in _stylesheet() if re.fullmatch(query, head) for rule in _rules(body)]
 
 
+def _walk(rules, trail=()):
+    """Every style rule as (enclosing at-rules, selector, declarations), @media nesting included. @keyframes and other
+    at-rules without selectors of this page are skipped."""
+    for head, body in rules:
+        if head.startswith("@media"):
+            yield from _walk(_rules(body), trail + (head,))
+        elif not head.startswith("@"):
+            yield trail, head, body
+
+
+def _vertical_margins(declarations):
+    """The top and bottom margins that declarations give, as written ('0', '-4px', ...)."""
+    found = []
+    for prop, value in re.findall(r"(?<![\w-])(margin(?:-top|-bottom)?)\s*:\s*([^;]+);", declarations):
+        parts = value.split()
+        found += [parts[0], parts[2] if len(parts) > 2 else parts[0]] if prop == "margin" else [parts[0]]
+    return found
+
+
 def _declared(rules):
     """{custom property: value} over the :root rules among (selector, declarations) pairs."""
     return {k: v.strip() for head, body in rules if head == ":root" for k, v in re.findall(r"(--[\w-]+)\s*:\s*([^;]+);", body)}
@@ -108,6 +127,21 @@ def test_the_page_is_what_the_server_serves(client):
     assert page.content == (STATIC / "index.html").read_bytes()   # the file, not the placeholder
     assert css.status_code == 200 and css.headers["content-type"].startswith("text/css")
     assert css.content == (STATIC / "styles.css").read_bytes()
+
+
+def test_the_page_and_its_files_are_revalidated_after_a_redeploy(client):
+    for path in ("/", "/static/styles.css"):   # an rsync redeploy must show at once: no heuristic reuse
+        assert client.get(path).headers["cache-control"] == "no-cache", path
+    css = client.get("/static/styles.css")
+    assert css.headers["etag"] and css.headers["last-modified"]   # what the browser revalidates with
+    again = client.get("/static/styles.css", headers={"If-None-Match": css.headers["etag"]})
+    assert again.status_code == 304 and again.headers["cache-control"] == "no-cache"
+
+
+def test_the_placeholder_page_is_not_cached_either(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "STATIC_DIR", tmp_path / "not_built_yet")
+    with TestClient(create_app(engine="tiny", home=str(tmp_path / "home"))) as c:
+        assert c.get("/").headers["cache-control"] == "no-cache"
 
 
 def test_static_files_are_self_contained():
@@ -144,14 +178,26 @@ def test_initial_state_and_aria_the_scripts_rely_on():
     assert by_id["viewer"][1]["role"] == "dialog" and by_id["viewer"][1]["aria-modal"] == "true"
 
 
-def test_banner_is_one_string_with_the_sidebar_toggle_first():
+def test_banner_is_a_landmark_with_the_disclaimer_in_a_paragraph_and_the_toggle_first():
     html = _html()
-    banner = re.search(r'<header class="banner" role="note">(.*?)</header>', html, re.S).group(1)
-    assert banner.lstrip().startswith('<button id="sidebar-toggle"')
-    assert BANNER in banner   # one unbroken string, em dash included
+    header = re.search(r"<header([^>]*)>(.*?)</header>", html, re.S)
+    assert header.group(1).strip() == 'class="banner"'   # no role="note": a top-level header is the banner landmark
+    assert header.group(2).lstrip().startswith('<button id="sidebar-toggle"')
+    assert '<p class="disclaimer">' + BANNER + "</p>" in header.group(2)   # one unbroken string, em dash included
     assert _by_id()["sidebar-toggle"][1] == {"id": "sidebar-toggle", "type": "button", "aria-controls": "sidebar",
                                               "aria-expanded": "false", "aria-label": "Sessions"}
     assert re.search(r'id="sidebar-toggle"[^>]*>☰</button>', html)   # a Unicode glyph, never an SVG
+
+
+def test_composer_controls_have_names_and_states():
+    by_id = _by_id()
+    assert by_id["chips"][1].get("role") == "group" and by_id["chips"][1].get("aria-label")
+    assert by_id["prompt"][1].get("aria-label") == "Note or command"
+    assert by_id["settings"][1].get("aria-expanded") == "false"   # P4-D toggles it with the drawer
+    visible = " ".join(re.search(r'<div id="image-well"[^>]*>(.*?)</div>', _html(), re.S).group(1).split())
+    assert visible.startswith("Drop, paste or click to attach an X-ray")
+    label = by_id["image-well"][1].get("aria-label")
+    assert label is None or visible in label   # the accessible name contains the visible text (WCAG 2.5.3)
 
 
 def test_page_declares_a_viewport_and_loads_only_its_own_files():
@@ -159,10 +205,12 @@ def test_page_declares_a_viewport_and_loads_only_its_own_files():
     viewport = [a["content"] for t, a in tags if t == "meta" and a.get("name") == "viewport"]
     assert viewport and "width=device-width" in viewport[0] and "initial-scale=1" in viewport[0]
     assert ("html", {"lang": "en"}) in tags
-    loaded = [a.get("href") or a.get("src") for t, a in tags if t in ("link", "script")]
+    loaded = [a["href"] for t, a in tags if t == "link" and a.get("rel") == "stylesheet"]
+    loaded += [a["src"] for t, a in tags if t == "script"]
     assert {"/static/styles.css", "/static/app.js"} <= set(loaded)
     assert all(url.startswith("/static/") for url in loaded)
     assert [a["type"] for t, a in tags if t == "script"] == ["module"]
+    assert {"rel": "icon", "href": "data:,"} in [a for t, a in tags if t == "link"]   # no /favicon.ico request
 
 
 def test_colour_tokens_are_on_root_and_redefined_for_dark():
@@ -218,8 +266,74 @@ def test_layout_collapses_below_800px_to_one_column_with_a_16px_gutter():
     assert any(h == "#sidebar-toggle" and re.search(r"display:\s*none", b) for h, b in css)   # gone at 801 px and up
 
 
-def test_long_words_wrap_focus_is_visible_and_the_banner_sticks():
+def test_long_words_wrap_in_the_conversation_focus_is_visible_and_the_banner_sticks():
     css = _stylesheet()
-    assert re.search(r"overflow-wrap:\s*(anywhere|break-word)", " ".join(b for h, b in css))
+    conversation = " ".join(b for h, b in css if h == "#conversation")   # its own rule, not just any rule
+    assert re.search(r"overflow-wrap:\s*anywhere", conversation)
     assert any(":focus-visible" in h for h, b in css)
     assert any(h == ".banner" and re.search(r"position:\s*sticky", b) for h, b in css)
+
+
+def test_narrow_rules_make_one_column_confine_the_drawer_and_park_the_sidebar():
+    narrow = _media(NARROW)
+
+    def rule(selector):
+        return " ".join(b for h, b in narrow if h == selector)
+
+    assert re.search(r"grid-template-columns:\s*minmax\(0,\s*1fr\)\s*;", rule("body"))   # one column
+    assert re.findall(r'"([^"]+)"', rule("body")) == ["banner", "conversation", "composer"]
+    assert re.search(r"grid-area:\s*2\s*/\s*1\s*/\s*3\s*/\s*2\s*;", rule("#drawer"))   # the conversation row only
+    assert re.search(r"transform:\s*translateX\(-100%\)", rule("#sidebar"))   # off-canvas ...
+    assert re.search(r"visibility:\s*hidden", rule("#sidebar"))   # ... and out of the tab order
+    shown = rule("body.sidebar-open #sidebar")
+    assert re.search(r"visibility:\s*visible", shown) and re.search(r"transform:\s*none", shown)
+
+
+def test_composer_gives_each_row_its_width_and_lets_the_buttons_wrap():
+    css = _stylesheet()
+
+    def rule(selector):
+        return " ".join(b for h, b in css if h == selector)
+
+    assert re.search(r"display:\s*flex", rule("#composer")) and re.search(r"flex-wrap:\s*wrap", rule("#composer"))
+    assert re.search(r"flex:\s*1\s+0\s+100%", rule("#image-well, #preview, #prompt, #chips"))   # chips: a row of their own
+    assert re.search(r"flex:\s*none", rule("#composer > button")) and "nowrap" in rule("#composer > button")
+    assert not [h for h, b in _media(NARROW) if re.search(r"#composer|#chips|#prompt|#image-well", h)]   # at every width
+
+
+def test_send_comes_before_stop_in_the_dom_and_no_rule_reorders_or_places_the_buttons():
+    assert [a["id"] for t, a in _tags() if a.get("id") in ("settings", "send", "stop")] == ["settings", "send", "stop"]
+    rules = list(_walk(_stylesheet()))
+    assert not re.search(r"(?<![\w-])order\s*:", " ".join(b for _, _, b in rules))   # border: is not order:
+    placed = [h for _, h, b in rules if h in ("#settings", "#send", "#stop", "#composer > button")
+              and re.search(r"(?<![\w-])(grid-area|grid-row|grid-column)\s*:", b)]
+    assert not placed, placed   # they flow in DOM order: a grid area would put Stop before Send again
+
+
+def test_the_sidebar_toggle_has_no_negative_vertical_margin_to_clip_its_focus_ring():
+    margins = [m for _, h, b in _walk(_stylesheet()) if h == "#sidebar-toggle" for m in _vertical_margins(b)]
+    assert margins and not [m for m in margins if m.startswith("-")]
+
+
+def test_a_short_viewport_scrolls_the_page_instead_of_pinning_and_capping():
+    short = _media(r"@media\s*\(\s*max-height:\s*480px\s*\)")
+    assert short, "no @media (max-height: 480px)"
+
+    def rule(selector):
+        return " ".join(b for h, b in short if selector in h.split(", "))
+
+    assert re.search(r"overflow:\s*visible", rule("body")) and re.search(r"(?<![\w-])height:\s*auto", rule("body"))
+    assert re.search(r"overflow:\s*visible", rule("#conversation")) and re.search(r"overflow:\s*visible", rule("#composer"))
+    assert not re.search(r"max-height", " ".join(b for h, b in short))   # nothing is capped
+
+
+def test_motion_exists_only_under_no_preference():
+    css = _stylesheet()
+    motion = r"@media\s*\(\s*prefers-reduced-motion:\s*no-preference\s*\)"
+    declares = r"(?<![\w-])(transition|animation)(-[a-z-]+)?\s*:"
+    inside, outside = [], []
+    for trail, selector, body in _walk(css):
+        if re.search(declares, body):
+            (inside if any(re.fullmatch(motion, t) for t in trail) else outside).append(selector)
+    assert inside and not outside, {"inside": inside, "outside": outside}
+    assert not [h for h, b in css if h.startswith("@keyframes")]   # the keyframes sit inside that block too
