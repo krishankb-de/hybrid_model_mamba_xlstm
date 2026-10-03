@@ -260,11 +260,13 @@ export function renderReport(view, ctx) {
   return el('div', { class: v.provisional ? 'report provisional' : 'report' },
     body,
     v.truncated ? el('p', { class: 'note truncated' }, 'Report stopped at the token budget mid-sentence') : null,
-    el('div', { class: 'report-actions' }, typeof cx.copy === 'function' ? copyButton(cx, () => (ui.raw ? raw : shown)) : null, toggle));
+    el('div', { class: 'report-actions' }, typeof cx.copy === 'function' && !v.provisional ? copyButton(cx, () => (ui.raw ? raw : shown)) : null, toggle));
 }
 
 // Copy hands ctx.copy the text. A copy that throws or whose promise is rejected (a refused clipboard) must not pass
-// unnoticed: the button says "Copy failed" for a moment, and the failure is not left as an unhandled rejection.
+// unnoticed: the button says "Copy failed" for a moment, and the failure is not left as an unhandled rejection. That state
+// lives on the button, and a streaming turn rebuilds the card every frame, so the button is not offered while the report is
+// provisional (the best beam so far, not the report); it appears when the block closes.
 function copyButton(cx, textNow) {
   const idle = () => { copy.textContent = 'Copy'; copy.setAttribute('aria-label', named('Copy report', cx)); };
   const failed = () => {

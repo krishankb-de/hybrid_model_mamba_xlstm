@@ -9,8 +9,9 @@
  * instead and nothing is pinned or capped (WCAG 1.4.10).
  *
  * Hooks the scripts use: the hidden attribute (drawer, preview, stop, viewer), body.sidebar-open (the off-canvas
- * sidebar; a click on its scrim lands on the body), #image-well.dragging (P6-A), ol.timeline li[data-state] and
- * li.open, .provisional, and the .card and .chip helpers (render.js).
+ * sidebar; a click on its scrim lands on the body), #image-well.dragging, ol.timeline li[data-state] and li.open,
+ * .provisional, and the .card and .chip helpers (render.js). app.js builds the rows of #session-list, #exports,
+ * #session-more, #notice, the contents of #drawer and #health[data-state="down"], styled below.
  *
  * System fonts only and no url(): the page makes no request but to its own /static/ files.
  */
@@ -174,6 +175,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   text-transform: uppercase;
 }
 #health { margin-left: auto; color: var(--muted); font-weight: 400; }
+#health[data-state="down"] { color: var(--warn); font-weight: 500; }   /* "server restarting…" */
 #mode-badge:empty, #health:empty { display: none; }
 
 #sidebar-toggle { display: none; }   /* shown at 800 px and below */
@@ -198,6 +200,14 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 #session-list a { display: block; padding: 8px 10px; border-radius: 8px; color: inherit; text-decoration: none; }
 #session-list a:hover, #session-list [aria-current], #session-list .active { background: var(--soft); }
 #session-list [aria-current], #session-list .active { font-weight: 600; }
+#session-list li { display: flex; align-items: center; gap: 4px; }   /* the link, and a delete button beside it */
+#session-list li > a { flex: 1 1 auto; min-width: 0; }
+.session-title, .session-meta { display: block; }
+.session-meta { color: var(--muted); font-size: 0.75rem; font-weight: 400; }
+.session-delete { flex: none; min-height: 32px; padding: 0 10px; border-color: transparent; background: none; color: var(--muted); }
+#exports { display: flex; flex-wrap: wrap; gap: 8px; }
+#exports button { flex: 1 1 auto; font-size: 0.875rem; }
+#session-more { width: 100%; }
 
 /* ---- conversation: a centred column of turns ------------------------------------------------------------------ */
 
@@ -386,6 +396,20 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 #chips:empty { display: none; }
 #chips > * { padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; line-height: 1.6; }
 
+#notice {   /* what went wrong before a turn could start: the first row of the composer, until dismissed */
+  flex: 1 0 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--bad);
+  border-radius: 10px;
+  color: var(--bad);
+  font-size: 0.875rem;
+}
+#notice p { flex: 1 1 auto; min-width: 0; margin: 0; }
+#notice button { flex: none; min-height: 32px; padding: 2px 10px; color: var(--fg); }
+
 #stop { border-color: var(--bad); color: var(--bad); }
 #send { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; }
 #send:hover:not(:disabled) { background: var(--accent); filter: brightness(1.1); }
@@ -408,6 +432,15 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   width: 100%;
   margin-top: 4px;
 }
+.drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.drawer-head h2 { margin: 0; }
+#drawer-close { flex: none; min-width: 40px; padding: 0; }
+#drawer .check { display: flex; align-items: center; gap: 8px; }   /* a checkbox, then its words */
+#drawer .note, #drawer .hint { margin: 4px 0 0; color: var(--muted); font-size: 0.8125rem; }
+#drawer h3 { margin: 20px 0 4px; }
+#drawer h4 { margin: 12px 0 4px; color: var(--muted); font-size: 0.875rem; }
+#models-section table { table-layout: fixed; }   /* a long checkpoint path wraps in its cell instead of widening the drawer */
+#models-section th { width: 42%; overflow-wrap: anywhere; }
 
 /* ---- viewer: a full-pane overlay under the banner; P6-E fills it ---------------------------------------------- */
 

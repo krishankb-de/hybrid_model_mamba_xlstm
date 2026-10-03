@@ -1,0 +1,2363 @@
+// tests/frontend/app.test.mjs — app/static/app.js (CHAT_UI_PLAN.md P4-D): the pure helpers, the watchdog state machine on
+// an injected clock, and the page wiring on the DOM shim with a fake window, fake timers, a fake fetch and a fake api module.
+//
+// No MIMIC data and no server: events are synthetic (state.js folds them) or the recorded tiny turn (fixtures/turn_tiny.json).
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { ShimEvent, installDom, serialize } from './dom_shim.mjs';
+import {
+  BOUNDS, CLIENT_KEY, DEFAULT_SETTINGS, HEALTH_MS, HEALTH_SLOW_MS, SETTINGS_KEY, STALL_MS, browserStorage,
+  checkImageFile, chosenCard, clientId, createApp, createWatchdog, errorMessage, exportFilename, healthText, loadSettings,
+  nearBottom, nextHealthDelay, optionsFromSettings, parseRoute, saveSettings, sessionDate, sessionMeta, sessionTitle,
+  userTurnMessage,
+} from '../../app/static/app.js';
+import { applyEvent, initialView } from '../../app/static/state.js';
+import { el, renderAssistantCard } from '../../app/static/render.js';
+
+installDom();   // after the import above: with no #composer on the page, importing app.js started nothing
+
+const SETTINGS_FILE = SETTINGS_KEY;
+const memoryStorage = (initial = {}) => {
+  const data = new Map(Object.entries(initial));
+  return { data, getItem: (k) => (data.has(k) ? data.get(k) : null), setItem: (k, v) => { data.set(k, String(v)); }, removeItem: (k) => { data.delete(k); } };
+};
+const brokenStorage = () => ({ getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } });
+const flush = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise((resolve) => setImmediate(resolve)); };
+
+// ---- routes ---------------------------------------------------------------------------------------------------------------
+
+test('parseRoute reads #/s/<id> as a session, #/new as an empty chat, and anything else as home', () => {
+  assert.deepEqual(parseRoute('#/s/s_01abc'), { kind: 'session', id: 's_01abc' });
+  assert.deepEqual(parseRoute('#/s/s_01abc/'), { kind: 'session', id: 's_01abc' });   // a trailing slash is the same route
+  assert.deepEqual(parseRoute('#/s/A-b_9'), { kind: 'session', id: 'A-b_9' });
+  assert.deepEqual(parseRoute('#/s/%73_1'), { kind: 'session', id: 's_1' });          // decoded, then checked
+  assert.deepEqual(parseRoute('#/new'), { kind: 'new' });
+  for (const home of ['', '#', '#/', '#/s', '#/s/', '#/s//', '#/s/a/b', '#/s/a?x=1', '#/s/a#b', '#/s/..%2Fetc', '#/s/a b', '#/s/%E0%A4%A',
+                      '#/s/' + 'a'.repeat(65), '#/other', '#new', 'x', '#/new/', null, undefined, 42, {}]) {
+    assert.deepEqual(parseRoute(home), { kind: 'home' }, String(home));   // a malformed id never reaches a request
+  }
+  assert.deepEqual(parseRoute('#/s/' + 'a'.repeat(64)), { kind: 'session', id: 'a'.repeat(64) });
+});
+
+// ---- settings ---------------------------------------------------------------------------------------------------------------
+
+test('loadSettings gives the defaults for no storage, an empty one, a broken one and a refusing one', () => {
+  for (const storage of [undefined, null, memoryStorage(), brokenStorage(), {}, { getItem: () => undefined }, { getItem: () => 42 }]) {
+    assert.deepEqual(loadSettings(storage), DEFAULT_SETTINGS);
+  }
+  assert.deepEqual(DEFAULT_SETTINGS, {
+    model: '', decode: 'beam', beam_size: 3, max_new_tokens: 100, cached_decode: true, compile: false, k_images: 4, k_reports: 3,
+    label: true, display_repair: false, token: '',
+  });   // the published protocol, and nothing else
+  assert.notEqual(loadSettings(undefined), DEFAULT_SETTINGS);   // a fresh object each time: the caller may change it
+});
+
+test('loadSettings reads what saveSettings wrote, and nothing it cannot trust', () => {
+  const storage = memoryStorage();
+  const mine = { ...DEFAULT_SETTINGS, model: 'm', decode: 'greedy', beam_size: 5, max_new_tokens: 150, cached_decode: false, compile: true,
+                 k_images: 0, k_reports: 10, label: false, display_repair: true, token: 'secret' };
+  assert.equal(saveSettings(storage, mine), true);
+  assert.equal(typeof storage.data.get(SETTINGS_FILE), 'string');
+  assert.deepEqual(loadSettings(storage), mine);
+
+  const cases = [
+    ['not JSON', '{nope'], ['an array', '[1,2]'], ['a number', '7'], ['null', 'null'], ['a string', '"x"'], ['empty', ''],
+  ];
+  for (const [name, raw] of cases) assert.deepEqual(loadSettings(memoryStorage({ [SETTINGS_FILE]: raw })), DEFAULT_SETTINGS, name);
+  const junk = memoryStorage({ [SETTINGS_FILE]: JSON.stringify({
+    model: 5, decode: 'sampling', beam_size: 'many', max_new_tokens: null, cached_decode: 'yes', compile: 1, k_images: {}, k_reports: [],
+    label: 'no', display_repair: 0, token: 7, evil: '<img src=x onerror=alert(1)>', __proto__: { polluted: true },
+  }) });
+  assert.deepEqual(loadSettings(junk), DEFAULT_SETTINGS);   // each wrong type falls back to its own default
+  assert.equal(Object.hasOwn(loadSettings(junk), 'evil'), false);   // and a key that is no setting is not carried
+  const partial = loadSettings(memoryStorage({ [SETTINGS_FILE]: JSON.stringify({ beam_size: 6, token: 't' }) }));
+  assert.deepEqual(partial, { ...DEFAULT_SETTINGS, beam_size: 6, token: 't' });   // the rest from the defaults
+});
+
+test('loadSettings clamps what it loads to the bounds', () => {
+  const loaded = loadSettings(memoryStorage({ [SETTINGS_FILE]: JSON.stringify({ beam_size: 99, max_new_tokens: 1, k_images: -4, k_reports: 11.6 }) }));
+  assert.deepEqual([loaded.beam_size, loaded.max_new_tokens, loaded.k_images, loaded.k_reports], [8, 16, 0, 10]);
+  assert.deepEqual(Object.keys(BOUNDS).sort(), ['beam_size', 'k_images', 'k_reports', 'max_new_tokens']);
+});
+
+test('saveSettings says whether it stored, and never throws', () => {
+  const storage = memoryStorage();
+  assert.equal(saveSettings(storage, { ...DEFAULT_SETTINGS, beam_size: 4, evil: 'x' }), true);
+  assert.deepEqual(JSON.parse(storage.data.get(SETTINGS_FILE)), { ...DEFAULT_SETTINGS, beam_size: 4 });   // sanitised on the way in too
+  assert.equal(saveSettings(brokenStorage(), DEFAULT_SETTINGS), false);   // a full or blocked store
+  assert.equal(saveSettings(undefined, DEFAULT_SETTINGS), false);
+  assert.equal(saveSettings(null, DEFAULT_SETTINGS), false);
+  assert.equal(saveSettings({}, DEFAULT_SETTINGS), false);
+  assert.equal(saveSettings(storage, null), true);   // nothing to save is the defaults
+});
+
+test('browserStorage returns the page storage, or null where reading the property throws', () => {
+  const store = memoryStorage();
+  assert.equal(browserStorage({ localStorage: store }), store);
+  assert.equal(browserStorage({}), null);
+  assert.equal(browserStorage(undefined), null);
+  assert.equal(browserStorage({ get localStorage() { throw new Error('SecurityError'); } }), null);   // a browser that blocks site data
+});
+
+// ---- options for a turn -----------------------------------------------------------------------------------------------------
+
+const CARD_CACHED = { name: 'hybrid_150m_m3_rrg', cached_decode_available: true };
+const CARD_PLAIN = { name: 'hybrid_150m_v2_rrg', cached_decode_available: false };
+const MODELS = { default_model: 'hybrid_150m_m3_rrg', mode: 'private', allow_compile: false, models: [CARD_CACHED, CARD_PLAIN] };
+const OPTION_KEYS = ['beam_size', 'cached_decode', 'compile', 'decode', 'display_repair', 'k_images', 'k_reports', 'label', 'max_new_tokens'];
+
+test('optionsFromSettings sends exactly the keys of the server Options that the drawer sets, at the published defaults', () => {
+  const options = optionsFromSettings(DEFAULT_SETTINGS, MODELS);
+  assert.deepEqual(options, { decode: 'beam', beam_size: 3, max_new_tokens: 100, cached_decode: true, compile: false, k_images: 4, k_reports: 3,
+                              label: true, display_repair: false });   // no model: the server's default runs
+  assert.deepEqual(Object.keys(optionsFromSettings({ ...DEFAULT_SETTINGS, model: CARD_PLAIN.name }, MODELS)).sort(), [...OPTION_KEYS, 'model'].sort());
+  for (const key of ['reference', 'test_row', 'retrieval_k', 'token']) assert.equal(key in options, false, key);   // extra="forbid" would refuse them
+  assert.doesNotThrow(() => JSON.stringify(options));
+});
+
+test('optionsFromSettings clamps every number to the server bounds, rounds, and replaces what is not a number', () => {
+  const at = (patch) => optionsFromSettings({ ...DEFAULT_SETTINGS, ...patch }, MODELS);
+  assert.deepEqual([at({ beam_size: 0 }).beam_size, at({ beam_size: 1 }).beam_size, at({ beam_size: 8 }).beam_size, at({ beam_size: 9 }).beam_size], [1, 1, 8, 8]);
+  assert.deepEqual([at({ max_new_tokens: 15 }).max_new_tokens, at({ max_new_tokens: 16 }).max_new_tokens, at({ max_new_tokens: 200 }).max_new_tokens,
+                    at({ max_new_tokens: 201 }).max_new_tokens], [16, 16, 200, 200]);
+  assert.deepEqual([at({ k_images: -1 }).k_images, at({ k_images: 0 }).k_images, at({ k_images: 12 }).k_images, at({ k_images: 13 }).k_images], [0, 0, 12, 12]);
+  assert.deepEqual([at({ k_reports: -1 }).k_reports, at({ k_reports: 0 }).k_reports, at({ k_reports: 10 }).k_reports, at({ k_reports: 11 }).k_reports], [0, 0, 10, 10]);
+  assert.equal(at({ beam_size: 3.4 }).beam_size, 3);
+  assert.equal(at({ beam_size: 3.6 }).beam_size, 4);
+  assert.equal(at({ beam_size: '5' }).beam_size, 5);   // what a number input hands over
+  for (const bad of [NaN, Infinity, -Infinity, '', ' ', 'x', null, undefined, {}, [], true]) {
+    assert.equal(at({ beam_size: bad }).beam_size, 3, String(bad));   // the default, never NaN and never a throw
+  }
+  assert.equal(at({ decode: 'sampling' }).decode, 'beam');
+  assert.equal(at({ decode: 'greedy' }).decode, 'greedy');
+});
+
+test('optionsFromSettings holds for any input: every key present, every number inside its bounds, no key of its own', () => {
+  const pool = [NaN, Infinity, -1e9, 1e9, -1, 0, 1, 7.5, 8, 9, 15, 16, 200, 201, '3', 'x', '', null, undefined, true, false, {}, [], 'greedy', 'beam', 'sampling'];
+  let seed = 7;
+  const pick = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return pool[seed % pool.length]; };
+  for (let i = 0; i < 2000; i++) {
+    const messy = { beam_size: pick(), max_new_tokens: pick(), k_images: pick(), k_reports: pick(), decode: pick(), cached_decode: pick(), compile: pick(),
+                    label: pick(), display_repair: pick(), model: pick(), token: pick(), extra: pick() };
+    const o = optionsFromSettings(messy, [MODELS, null, undefined, {}, [], [CARD_PLAIN], { models: 'no' }][i % 7]);
+    assert.deepEqual(Object.keys(o).filter((k) => k !== 'model').sort(), OPTION_KEYS);
+    assert.ok(Number.isInteger(o.beam_size) && o.beam_size >= 1 && o.beam_size <= 8);
+    assert.ok(Number.isInteger(o.max_new_tokens) && o.max_new_tokens >= 16 && o.max_new_tokens <= 200);
+    assert.ok(Number.isInteger(o.k_images) && o.k_images >= 0 && o.k_images <= 12);
+    assert.ok(Number.isInteger(o.k_reports) && o.k_reports >= 0 && o.k_reports <= 10);
+    assert.ok(['beam', 'greedy'].includes(o.decode));
+    for (const flag of ['cached_decode', 'compile', 'label', 'display_repair']) assert.equal(typeof o[flag], 'boolean', flag);
+    assert.ok(!('model' in o) || typeof o.model === 'string');
+  }
+});
+
+test('optionsFromSettings forces cached_decode off for a model whose card says it has no cache, and leaves it for one that has', () => {
+  const on = { ...DEFAULT_SETTINGS, cached_decode: true };
+  assert.equal(optionsFromSettings({ ...on, model: CARD_PLAIN.name }, MODELS).cached_decode, false);   // the 13D model: uncached only
+  assert.equal(optionsFromSettings({ ...on, model: CARD_CACHED.name }, MODELS).cached_decode, true);
+  assert.equal(optionsFromSettings({ ...on, model: '' }, MODELS).cached_decode, true);                  // the default model has the cache
+  assert.equal(optionsFromSettings({ ...on, model: '' }, { ...MODELS, default_model: CARD_PLAIN.name }).cached_decode, false);   // and when the default has none
+  assert.equal(optionsFromSettings({ ...on, cached_decode: false, model: CARD_CACHED.name }, MODELS).cached_decode, false);   // the user's own off stays off
+  assert.equal(optionsFromSettings(on, null).cached_decode, true);   // models not loaded yet: nothing says otherwise
+  assert.equal(optionsFromSettings(on, { models: [{ name: 'x' }], default_model: 'x' }).cached_decode, true);   // a card that does not say
+});
+
+test('optionsFromSettings forces compile off unless the server allows it', () => {
+  const asked = { ...DEFAULT_SETTINGS, compile: true };
+  assert.equal(optionsFromSettings(asked, MODELS).compile, false);
+  assert.equal(optionsFromSettings(asked, { ...MODELS, allow_compile: true }).compile, true);
+  assert.equal(optionsFromSettings(asked, { ...MODELS, allow_compile: 'yes' }).compile, false);   // only a real true allows it
+  assert.equal(optionsFromSettings(asked, null).compile, false);
+  assert.equal(optionsFromSettings(asked, [CARD_CACHED]).compile, false);
+  assert.equal(optionsFromSettings({ ...asked, compile: false }, { ...MODELS, allow_compile: true }).compile, false);
+});
+
+test('optionsFromSettings names a model only when the server lists it', () => {
+  assert.equal(optionsFromSettings({ ...DEFAULT_SETTINGS, model: CARD_PLAIN.name }, MODELS).model, CARD_PLAIN.name);
+  assert.equal('model' in optionsFromSettings({ ...DEFAULT_SETTINGS, model: 'gone' }, MODELS), false);   // a stale choice: the default runs
+  assert.equal('model' in optionsFromSettings({ ...DEFAULT_SETTINGS, model: CARD_PLAIN.name }, null), false);
+  assert.equal(chosenCard({ model: CARD_PLAIN.name }, MODELS), CARD_PLAIN);
+  assert.equal(chosenCard({ model: '' }, MODELS), CARD_CACHED);   // the default is the chosen one
+  assert.equal(chosenCard({ model: 'gone' }, MODELS), CARD_CACHED);
+  assert.equal(chosenCard({}, null), null);
+  assert.equal(chosenCard({ model: 'a' }, [{ name: 'a' }]).name, 'a');
+});
+
+// ---- the client id ----------------------------------------------------------------------------------------------------------
+
+test('clientId is random, kept under cxrchat.client, and fresh when storage fails', () => {
+  const visible = /^[\x21-\x7e]{1,128}$/;   // the server accepts visible ASCII, 1 to 128 characters
+  const storage = memoryStorage();
+  const first = clientId(storage);
+  assert.match(first, visible);
+  assert.equal(CLIENT_KEY, 'cxrchat.client');
+  assert.equal(storage.data.get(CLIENT_KEY), first);   // kept
+  assert.equal(clientId(storage), first);              // and read back
+  assert.notEqual(clientId(memoryStorage()), first);   // random
+
+  const ids = new Set();
+  for (let i = 0; i < 50; i++) ids.add(clientId(brokenStorage()));
+  assert.equal(ids.size, 50);   // a storage that refuses: a fresh one every time
+  for (const id of ids) assert.match(id, visible);
+  assert.match(clientId(undefined), visible);
+  assert.match(clientId(null), visible);
+  assert.match(clientId({}), visible);
+  const readOnly = { getItem: () => null, setItem() { throw new Error('quota'); } };
+  assert.match(clientId(readOnly), visible);   // reads fine, cannot write: still an id
+
+  for (const bad of ['', ' ', 'a b', 'x'.repeat(129), 'é', 'a\nb', 7]) {
+    const held = memoryStorage({ [CLIENT_KEY]: bad });
+    const got = clientId(held);
+    assert.notEqual(got, bad);
+    assert.match(got, visible);   // an id the server would refuse is replaced, and the replacement is kept
+    assert.equal(held.data.get(CLIENT_KEY), got);
+  }
+});
+
+// ---- error messages ---------------------------------------------------------------------------------------------------------
+
+const refusal = (status, message, kind = 'validation_error') => Object.assign(new Error('refused'), {
+  status, body: message === undefined ? null : { type: 'error', error: { type: kind, message } },
+});
+
+test('errorMessage maps the status and the server envelope to what the user reads', () => {
+  assert.equal(errorMessage(refusal(401, 'Missing or wrong token: send Authorization: Bearer <token>.')), 'Enter the access token in Settings');
+  assert.equal(errorMessage(refusal(429, 'The server is busy with 4 turns; try again shortly.')), 'The server is busy; try again shortly');
+  assert.equal(errorMessage(refusal(422, 'Invalid options: beam_size: Input should be less than or equal to 8')), 'Invalid options: beam_size: Input should be less than or equal to 8');
+  assert.equal(errorMessage(refusal(413, 'The image is over the 20 MB upload limit.')), 'The image is over the 20 MB upload limit.');
+  assert.equal(errorMessage(refusal(422)), 'The server could not use that request.');   // no envelope: a sentence of our own
+  assert.equal(errorMessage(refusal(413)), 'The image is too large.');
+  assert.equal(errorMessage(refusal(404, 'Session not found.', 'not_found_error')), 'Session not found.');
+  assert.equal(errorMessage(refusal(400, 'options must be a JSON object.')), 'options must be a JSON object.');
+  assert.equal(errorMessage(refusal(403, 'Test-split studies are not available in public mode.')), 'Test-split studies are not available in public mode.');
+  assert.equal(errorMessage(refusal(500, 'Could not store the image.')), 'Could not store the image.');
+  assert.equal(errorMessage(refusal(404)), 'Not found. It may have been deleted.');
+  assert.equal(errorMessage(refusal(500)), 'The server had a problem. Try again.');
+  assert.equal(errorMessage(refusal(503)), 'The server had a problem. Try again.');
+  assert.equal(errorMessage(refusal(400)), 'The server could not read the request.');
+  assert.equal(errorMessage(refusal(403)), 'The server refused this request.');
+  assert.equal(errorMessage(refusal(418)), 'The request failed.');
+});
+
+test('errorMessage copes with a network failure, an odd envelope and what is not an error at all', () => {
+  assert.equal(errorMessage(new TypeError('Failed to fetch')), 'Cannot reach the server. Check the connection and try again.');
+  assert.equal(errorMessage(new Error('boom')), 'boom');
+  assert.equal(errorMessage(new Error('')), 'Something went wrong.');
+  assert.equal(errorMessage('plain text'), 'plain text');
+  assert.equal(errorMessage(''), 'Something went wrong.');
+  for (const odd of [null, undefined, 42, {}, [], { status: 'x' }, { body: 7 }, { body: { error: 7 } }, { message: 7 }]) {
+    assert.equal(typeof errorMessage(odd), 'string', String(odd));
+    assert.ok(errorMessage(odd).length > 0);   // always something to show
+  }
+  assert.equal(errorMessage(refusal(422, { deep: 1 })), 'The server could not use that request.');   // a message that is no text is ignored
+  assert.equal(errorMessage(refusal(422, '   ')), 'The server could not use that request.');
+  assert.equal(errorMessage({ status: 422, body: { error: { message: 'x'.repeat(1000) } } }).length, 300);   // an unreasonable message is cut
+  assert.equal(errorMessage({ status: 401, body: { error: { message: 'x' } } }), 'Enter the access token in Settings');
+});
+
+// ---- the watchdog -----------------------------------------------------------------------------------------------------------
+
+test('the watchdog hands a running turn to polling after 3 s without bytes, once, and never touches a clock of its own', () => {
+  assert.equal(STALL_MS, 3000);
+  let t = 5000;
+  const wd = createWatchdog({ now: () => t });
+  assert.equal(wd.phase, 'idle');
+  assert.equal(wd.tick('running'), 'none');   // nothing to watch before the turn is sent
+  wd.arm();
+  assert.equal(wd.phase, 'stream');
+  t += 2999;
+  assert.equal(wd.tick('running'), 'none');
+  t += 1;   // exactly 3000 ms of silence
+  assert.equal(wd.tick('running'), 'poll');
+  assert.equal(wd.phase, 'poll');
+  t += 10000;
+  assert.equal(wd.tick('running'), 'none');   // asked once: polling is already the transport
+});
+
+test('bytes on the stream restart the silence, and a turn that is no longer running is never handed over', () => {
+  let t = 0;
+  const wd = createWatchdog({ now: () => t });
+  wd.arm();
+  t = 2900; wd.bytes();
+  t = 5800;
+  assert.equal(wd.tick('running'), 'none');   // 2900 ms since the last event
+  t = 5900;
+  assert.equal(wd.tick('running'), 'poll');
+
+  const done = createWatchdog({ now: () => t });
+  t = 0; done.arm();
+  t = 60000;
+  assert.equal(done.tick('done'), 'none');    // it ended: silence is what a finished stream looks like
+  assert.equal(done.phase, 'idle');
+  for (const status of ['aborted', 'error']) {
+    const w = createWatchdog({ now: () => t });
+    t = 0; w.arm(); t = 60000;
+    assert.equal(w.tick(status), 'none', status);
+  }
+  const late = createWatchdog({ now: () => t });
+  t = 0; late.arm(); late.settle(); late.bytes(); t = 60000;
+  assert.equal(late.tick('running'), 'none');   // a settled turn is not revived by a stray byte or a tick
+  assert.equal(createWatchdog({ now: () => t, stallMs: 100 }).tick('running'), 'none');
+  const quick = createWatchdog({ now: () => t, stallMs: 100 });
+  t = 0; quick.arm(); t = 100;
+  assert.equal(quick.tick('running'), 'poll');   // the limit is a parameter
+});
+
+test('when the stream ends the watchdog says poll while the turn runs, and nothing once it has ended', () => {
+  let t = 0;
+  const wd = createWatchdog({ now: () => t });
+  wd.arm();
+  assert.equal(wd.ended('running'), 'poll');   // closed without a message_stop, or dropped by Stop or by the stall
+  assert.equal(wd.phase, 'poll');
+  wd.arm();
+  assert.equal(wd.ended('done'), 'none');
+  assert.equal(wd.phase, 'idle');
+  assert.equal(wd.ended('running'), 'none');   // idle: nothing started this stream
+  wd.arm(); t = 3000;
+  assert.equal(wd.tick('running'), 'poll');
+  assert.equal(wd.ended('running'), 'poll');   // the stall aborted the stream: its end asks for the same poll again, harmlessly
+});
+
+test('a poll that fails offers a retry that polls again, and a resumed turn starts in the poll phase', () => {
+  const wd = createWatchdog({ now: () => 0 });
+  assert.equal(wd.retry(), 'none');            // nothing failed
+  wd.resume();
+  assert.equal(wd.phase, 'poll');              // a turn found running on open has no stream
+  wd.failed();
+  assert.equal(wd.phase, 'failed');
+  assert.equal(wd.ended('running'), 'none');   // a failed poll is not restarted by a stray stream end
+  assert.equal(wd.tick('running'), 'none');
+  assert.equal(wd.retry(), 'poll');
+  assert.equal(wd.phase, 'poll');
+  assert.equal(wd.retry(), 'none');            // one retry per failure
+  wd.settle();
+  assert.equal(wd.phase, 'idle');
+  wd.failed();
+  assert.equal(wd.phase, 'idle');              // failed() only follows a poll
+});
+
+// ---- small formatters ---------------------------------------------------------------------------------------------------------
+
+test('session titles, dates and counts as the sidebar shows them', () => {
+  assert.equal(sessionTitle({ title: 'chest.png' }), 'chest.png');
+  assert.equal(sessionTitle({ title: '  ' }), 'New chat');
+  assert.equal(sessionTitle({}), 'New chat');
+  assert.equal(sessionTitle(null), 'New chat');
+  const now = new Date('2026-10-03T12:00:00Z');
+  assert.match(sessionDate('2026-10-01T09:00:00+00:00', now), /1/);
+  assert.match(sessionDate('2025-10-01T09:00:00+00:00', now), /2025/);   // another year says so
+  assert.doesNotMatch(sessionDate('2026-10-01T09:00:00+00:00', now), /2026/);
+  for (const bad of ['', 'not a date', null, undefined, 5, {}]) assert.equal(sessionDate(bad, now), '', String(bad));
+  assert.match(sessionMeta({ updated_at: '2026-10-01T09:00:00+00:00', turns: 2 }, now), /· 2 turns$/);
+  assert.match(sessionMeta({ updated_at: '2026-10-01T09:00:00+00:00', turns: 1 }, now), /· 1 turn$/);
+  assert.equal(sessionMeta({ updated_at: 'junk', turns: 0 }, now), '0 turns');
+  assert.equal(sessionMeta({}, now), '0 turns');
+  assert.match(sessionMeta({ created_at: '2026-10-01T09:00:00+00:00', turns: 3 }, now), /3 turns/);   // no updated_at: the creation date
+});
+
+test('the health strip text and its schedule: 10 s, 30 s after three failures, 10 s again at the first answer', () => {
+  assert.equal(healthText({ status: 'ok', mode: 'private', turns_in_flight: 1, queue_cap: 4 }), 'private · 1 of 4 turns in flight');
+  assert.equal(healthText({ mode: 'public', turns_in_flight: 0, queue_cap: 4 }), 'public · 0 of 4 turns in flight');
+  assert.equal(healthText({ mode: 'private', turns_in_flight: 2 }), 'private · 2 turns in flight');
+  assert.equal(healthText({ mode: 'private' }), 'private');
+  assert.equal(healthText({}), 'server ok');
+  assert.equal(healthText(null), 'server ok');
+  assert.deepEqual([0, 1, 2, 3, 4, 50].map(nextHealthDelay), [10000, 10000, 10000, 30000, 30000, 30000]);
+  assert.deepEqual([HEALTH_MS, HEALTH_SLOW_MS], [10000, 30000]);
+});
+
+test('an export is saved under the name the server gave it, or one made from the session id, never a path', () => {
+  assert.equal(exportFilename('attachment; filename="session-s_1.json"', 's_1', 'json'), 'session-s_1.json');
+  assert.equal(exportFilename('attachment; filename=session-s_1.md', 's_1', 'md'), 'session-s_1.md');
+  assert.equal(exportFilename("attachment; filename*=UTF-8''session-s_1.md", 's_1', 'md'), 'session-s_1.md');
+  for (const bad of [null, undefined, '', 'attachment', 'attachment; filename="../../etc/passwd"', 'attachment; filename="a/b.json"',
+                     'attachment; filename="a\\b.json"', 'attachment; filename=""', 'attachment; filename=".hidden"', 42]) {
+    assert.equal(exportFilename(bad, 's_9', 'json'), 'session-s_9.json', String(bad));
+  }
+});
+
+test('a stored user message becomes the user turn: its text, its file name and the options the assistant row carries', () => {
+  const options = { beam_size: 3 };
+  assert.deepEqual(userTurnMessage({ text: 'beam 5', image_filename: 'chest.png' }, { options }),
+                   { text: 'beam 5', image: { url: null, filename: 'chest.png' }, options });   // no image URL until P6-B
+  assert.deepEqual(userTurnMessage({ text: '', image_filename: null }, { options: null }), { text: '', image: null, options: null });
+  assert.deepEqual(userTurnMessage({ text: 'a' }, null), { text: 'a', image: null, options: null });
+  assert.deepEqual(userTurnMessage(null, undefined), { text: '', image: null, options: null });
+  assert.equal(userTurnMessage({ text: 5, image_filename: 7 }, { options: 'x' }).image, null);
+});
+
+test('nearBottom is true within 80 px of the end and when nothing has been measured', () => {
+  assert.equal(nearBottom({ scrollTop: 920, clientHeight: 400, scrollHeight: 1400 }), true);    // 80 px left
+  assert.equal(nearBottom({ scrollTop: 919, clientHeight: 400, scrollHeight: 1400 }), false);   // 81
+  assert.equal(nearBottom({ scrollTop: 1000, clientHeight: 400, scrollHeight: 1400 }), true);   // at the end
+  assert.equal(nearBottom({ scrollTop: 0, clientHeight: 400, scrollHeight: 400 }), true);       // nothing to scroll
+  assert.equal(nearBottom({ scrollTop: 100, clientHeight: 400, scrollHeight: 1400 }, 2000), true);
+  for (const unmeasured of [{}, null, undefined, { scrollTop: NaN, clientHeight: 1, scrollHeight: 9 }]) assert.equal(nearBottom(unmeasured), true);
+});
+
+test('checkImageFile lets through PNG, JPEG, WEBP and a file with no type, and says why it refuses the rest', () => {
+  const file = (type, size = 1000) => ({ type, size, name: 'x' });
+  for (const type of ['image/png', 'image/jpeg', 'image/webp', '']) assert.equal(checkImageFile(file(type)), null, type);
+  for (const type of ['image/gif', 'image/svg+xml', 'application/pdf', 'text/html']) assert.equal(checkImageFile(file(type)), 'Choose a PNG, JPEG or WEBP image.', type);
+  assert.equal(checkImageFile(file('image/png', 20 * 1024 * 1024)), null);                         // the limit itself is fine
+  assert.equal(checkImageFile(file('image/png', 20 * 1024 * 1024 + 1)), 'The image is over the 20 MB limit.');
+  assert.equal(checkImageFile(null), 'Choose an image.');
+  assert.equal(checkImageFile({ type: 'image/png' }), null);   // no size known: the server decides
+});
+
+// ---- the page: a shim DOM shaped like index.html, a fake window, timers, fetch and api module ------------------------------
+
+const $ = (id) => document.getElementById(id);
+const q = (node, selector) => node.querySelector(selector);
+const qa = (node, selector) => node.querySelectorAll(selector);
+const texts = (nodes) => nodes.map((n) => n.textContent);
+
+const frames = [];
+globalThis.requestAnimationFrame = (callback) => { frames.push(callback); return frames.length; };   // a frame is run by hand
+const nextFrame = () => { for (const run of frames.splice(0)) run(); };
+
+// The shell of app/static/index.html: every id the script looks up (a test below checks the two agree).
+function buildPage() {
+  document.body.replaceChildren(
+    el('header', { class: 'banner' },
+      el('button', { id: 'sidebar-toggle', type: 'button', 'aria-controls': 'sidebar', 'aria-expanded': 'false', 'aria-label': 'Sessions' }, '☰'),
+      el('p', { class: 'disclaimer' }, 'Research prototype — not for clinical use.'),
+      el('span', { id: 'mode-badge' }), el('span', { id: 'health', 'aria-live': 'polite' })),
+    el('div', { class: 'layout' },
+      el('nav', { id: 'sidebar', 'aria-label': 'Sessions' }, el('button', { id: 'new-session', type: 'button' }, 'New chat'), el('ol', { id: 'session-list' })),
+      el('main', { id: 'conversation', 'aria-live': 'polite' }),
+      el('aside', { id: 'drawer', hidden: true, 'aria-label': 'Settings' })),
+    el('form', { id: 'composer', 'aria-label': 'New turn' },
+      el('div', { id: 'image-well', tabindex: 0, role: 'button' }, 'Drop, paste or click to attach an X-ray (PNG, JPEG, WEBP)'),
+      el('div', { id: 'preview', hidden: true }),
+      el('textarea', { id: 'prompt', rows: 2, 'aria-label': 'Note or command' }),
+      el('div', { id: 'chips', role: 'group', 'aria-label': 'Current settings' }),
+      el('button', { id: 'settings', type: 'button', 'aria-controls': 'drawer', 'aria-expanded': 'false' }, 'Settings'),
+      el('button', { id: 'send', type: 'submit' }, 'Send'),
+      el('button', { id: 'stop', type: 'button', hidden: true }, 'Stop'),
+      el('input', { id: 'file', type: 'file', hidden: true })),
+    el('div', { id: 'viewer', hidden: true }));
+}
+
+function fakeWindow(hash = '') {
+  const listeners = new Map();
+  const win = {
+    short: false, replaced: [], copied: [], scrollY: 0, innerHeight: 800,
+    location: {
+      current: hash,
+      get hash() { return this.current; },
+      set hash(value) { if (String(value) === this.current) return; this.current = String(value); win.fire('hashchange'); },
+    },
+    history: { replaceState(_state, _title, url) { win.replaced.push(url); win.location.current = url; } },
+    addEventListener(type, fn) { if (!listeners.has(type)) listeners.set(type, []); listeners.get(type).push(fn); },
+    fire(type) { for (const fn of listeners.get(type) ?? []) fn({ type }); },
+    matchMedia: (query) => ({ matches: win.short && /max-height/.test(query) }),
+    navigator: { clipboard: { writeText: async (value) => { win.copied.push(value); } } },
+  };
+  return win;
+}
+
+function fakeTimers() {
+  let now = 0;
+  let next = 1;
+  const timeouts = new Map();
+  const intervals = new Map();
+  return {
+    now: () => now,
+    setTimeout: (fn, ms) => { const id = next++; timeouts.set(id, { fn, at: now + ms, ms }); return id; },
+    clearTimeout: (id) => { timeouts.delete(id); },
+    setInterval: (fn, ms) => { const id = next++; intervals.set(id, { fn, ms, at: now + ms }); return id; },
+    clearInterval: (id) => { intervals.delete(id); },
+    get timeouts() { return [...timeouts.values()]; },
+    get intervals() { return intervals.size; },
+    advance(ms) {   // runs what is due in time order, the clock at each one's moment
+      const end = now + ms;
+      for (;;) {
+        const due = [...timeouts.entries(), ...intervals.entries()].filter(([, v]) => v.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        const [id, item] = due;
+        now = Math.max(now, item.at);
+        if (timeouts.has(id)) timeouts.delete(id); else item.at += item.ms;
+        item.fn();
+      }
+      now = end;
+    },
+  };
+}
+
+// A route answers with a body (200), a refused() or a Response; a function gets (url, init).
+const refused = (status, message, kind = 'validation_error') => ({ __status: status, body: { type: 'error', error: { type: kind, message } } });
+function fakeFetch(routes) {
+  const calls = [];
+  const fn = async (url, init = {}) => {
+    const method = init.method ?? 'GET';
+    calls.push({ method, url: String(url), headers: init.headers ?? {}, body: init.body });
+    const route = routes[`${method} ${String(url).split('?')[0]}`];
+    if (route === undefined) return new Response(JSON.stringify({ type: 'error', error: { type: 'not_found_error', message: 'no route' } }), { status: 404 });
+    const out = typeof route === 'function' ? await route(String(url), init) : route;
+    if (out instanceof Response) return out;
+    if (out && out.__status) {
+      return new Response(out.body === undefined ? null : JSON.stringify(out.body), { status: out.__status, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(JSON.stringify(out), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  fn.calls = calls;
+  fn.to = (method, prefix) => calls.filter((c) => c.method === method && c.url.startsWith(prefix));
+  return fn;
+}
+
+const abortError = () => Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' });
+
+// Items in, one at a time, and an end; iterate() throws AbortError as soon as its signal is aborted.
+function channel() {
+  const items = [];
+  let wake = null;
+  let ended = false;
+  let failure = null;
+  return {
+    push(...more) { items.push(...more); wake?.(); },
+    end() { ended = true; wake?.(); },
+    fail(err) { failure = err; wake?.(); },
+    async *iterate(signal, lenient = false) {   // lenient: events already queued still come out after an abort, as api.js yields a parsed batch
+      for (;;) {
+        if (signal?.aborted && !(lenient && items.length)) throw abortError();
+        if (failure) throw failure;
+        if (items.length) { yield items.shift(); continue; }
+        if (ended) return;
+        await new Promise((resolve) => { wake = resolve; signal?.addEventListener('abort', resolve, { once: true }); });
+        wake = null;
+      }
+    },
+  };
+}
+
+// api.js, faked: each streamTurn / pollMessage call is recorded with a channel the test pushes events into.
+function fakeApi() {
+  const api = {
+    streams: [], polls: [], cancels: [], order: [], cleared: 0,
+    refuse: null,        // an error streamTurn throws before it has an id
+    silent: false,       // a server that sends no X-Message-Id: onMessageId is never called
+    holdAbort: false,    // an abort does not end the stream at once: run.fail(err) does, whenever the test says
+    lenient: false,      // events already queued still come out of a stream or a poll that was aborted
+    cancelError: null,   // what cancelMessage rejects with
+    streamTurn(opts) {
+      const run = { opts, channel: channel(), id: null };
+      run.accepted = new Promise((resolve) => { run.accept = (id) => { run.id = id; resolve(); }; });
+      run.failed = new Promise((_, reject) => { run.fail = reject; });
+      run.failed.catch(() => {});
+      const held = api.holdAbort;
+      const lenient = api.lenient;
+      api.streams.push(run);
+      opts.signal?.addEventListener('abort', () => api.order.push('abort'), { once: true });
+      return (async function* stream() {
+        if (api.refuse) throw api.refuse;
+        if (!api.silent) {
+          await Promise.race([run.accepted, run.failed, held ? new Promise(() => {})
+            : new Promise((_, reject) => opts.signal?.addEventListener('abort', () => reject(abortError()), { once: true }))]);
+          opts.onMessageId?.(run.id);
+        }
+        yield* run.channel.iterate(opts.signal, lenient);
+      }());
+    },
+    pollMessage(opts) {
+      const run = { opts, channel: channel() };
+      api.polls.push(run);
+      return run.channel.iterate(opts.signal, api.lenient);
+    },
+    async cancelMessage(opts) {
+      api.order.push('cancel');
+      api.cancels.push(opts);
+      if (api.cancelError) throw api.cancelError;
+      return { id: opts.messageId, status: 'running', cancel_requested: true };
+    },
+    loadImage: async (url) => `blob:fake/${url}`,
+    clearImageCache() { api.cleared += 1; },
+  };
+  return api;
+}
+
+const iso = (day) => `2026-10-${String(day).padStart(2, '0')}T10:00:00+00:00`;
+const sess = (id, title, turns = 1, day = 3) => ({ id, title, turns, created_at: iso(day), updated_at: iso(day), mode: 'private' });
+const userMsg = (id, text, filename = null) => ({ id, role: 'user', text, image_filename: filename, options: null, status: 'done' });
+const botMsg = (id, status = 'done', options = null) => ({ id, role: 'assistant', text: '', options, status });
+const TINY_CARD = { name: 'tiny', cached_decode_available: true, device: 'cpu', prefix_k: 4 };
+
+let eventCount = 0;
+const SHA = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
+const START_DATA = {
+  message_id: 'm_a', user_message_id: 'u_a', session_id: 's_a', mode: 'private', model: TINY_CARD,
+  options: { model: 'tiny', decode: 'beam', beam_size: 5, max_new_tokens: 100, cached_decode: true, compile: false, k_images: 4, k_reports: 3,
+             label: true, reference: null, display_repair: false, test_row: null },
+  image: { sha256: SHA, filename: 'chest.png', source: 'upload', urls: {} },
+};
+const ev = (event, data = {}) => ({ event, data: { ...data, seq: ++eventCount } });
+const startEv = (over = {}) => ev('message_start', { ...START_DATA, ...over });
+const stageStartEv = (stage, index) => ev('stage_start', { stage, index });
+const stageEndEv = (stage, ms = 5, detail = { x: 1 }) => ev('stage_end', { stage, ms, detail });
+const skipEv = (stage, reason) => ev('stage_end', { stage, skipped: reason });
+const snapEv = (text, step = 0) => ev('content_block_delta', { index: 0, delta: { type: 'beam_snapshot', step, text } });
+const stopEv = (status = 'done', over = {}) => ev('message_stop', {
+  message_id: 'm_a', status, total_ms: 12, report: null, display_report: null, truncated_mid_sentence: false, disclaimer: 'Research prototype; not for clinical use.', ...over,
+});
+const resetEvents = () => { eventCount = 0; };
+// The events of a whole turn, 1..n, ending in message_stop done.
+const fullTurn = (id = 'm_a') => {
+  resetEvents();
+  return [startEv({ message_id: id }), stageStartEv('preprocess', 0), stageEndEv('preprocess'), stageStartEv('encode', 1), stageEndEv('encode'),
+          skipEv('retrieve', 'gallery_unavailable'), stageStartEv('generate', 3), ev('content_block_start', { index: 0, content_block: { type: 'report', text: '' } }),
+          snapEv('Findings: clear.'), ev('content_block_stop', { index: 0 }), stageEndEv('generate', 9), skipEv('label', 'labeler_unavailable'),
+          skipEv('score', 'no_reference'), stopEv('done', { message_id: id, report: 'Findings: clear.', display_report: 'Findings: clear.' })];
+};
+const rows = (events) => events.map((e) => ({ seq: e.data.seq, event: e.event, data: e.data }));
+
+function harness({ hash = '', sessions = [], models = MODELS, storage = memoryStorage(), routes = {}, confirmAnswer = true, urls } = {}) {
+  installDom();   // a new document each time: the body of the last test still holds that app's listeners
+  buildPage();
+  frames.length = 0;
+  const timers = fakeTimers();
+  const win = fakeWindow(hash);
+  const api = fakeApi();
+  const confirms = [];
+  const h = { timers, win, api, storage, confirms, answer: confirmAnswer, sessions };
+  h.fetch = fakeFetch({
+    'GET /healthz': { status: 'ok', mode: 'private', default_model: 'tiny', turns_in_flight: 0, queue_cap: 4 },
+    'GET /v1/models': models,
+    'GET /v1/sessions': () => ({ sessions: h.sessions, next_cursor: null }),
+    ...routes,
+  });
+  h.app = createApp({
+    document, window: win, storage, fetch: h.fetch, api, now: timers.now, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout,
+    setInterval: timers.setInterval, clearInterval: timers.clearInterval, confirm: (message) => { confirms.push(message); return h.answer; },
+    ...(urls ? { URL: urls } : {}),
+  });
+  return h;
+}
+
+const imageFile = (name = 'chest.png', type = 'image/png', size = 2048) => new File([new Uint8Array(size)], name, { type });
+const press = (target, key, init = {}) => {
+  const event = new ShimEvent('keydown', { key, bubbles: true, cancelable: true, ...init });
+  target.dispatchEvent(event);
+  return event;
+};
+const attach = (file) => { $('file').files = [file]; $('file').dispatchEvent(new ShimEvent('change', { bubbles: true })); };
+
+// ---- start and routes --------------------------------------------------------------------------------------------------------
+
+test('every id the script looks up is in the page, and the page names none the shell test does not', () => {
+  const html = readFileSync(new URL('../../app/static/index.html', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../../app/static/app.js', import.meta.url), 'utf8');
+  const asked = new Set([...source.matchAll(/\$\('([\w-]+)'\)/g)].map((m) => m[1]));
+  assert.ok(asked.size >= 17, `the script looks up ${asked.size} ids`);
+  for (const id of asked) assert.match(html, new RegExp(`id="${id}"`), `index.html has #${id}`);
+  buildPage();
+  for (const id of asked) assert.ok(document.getElementById(id), `the test page has #${id}`);
+});
+
+test('the ids the script adds to the page are unique, and an existing status region is used instead of a second one', async () => {
+  const h = harness({ sessions: [sess('s_a', 'A', 0)], routes: EXISTING });
+  document.body.append(el('div', { id: 'status', class: 'existing' }));
+  await h.app.start();
+  await flush();
+  const ids = qa(document.body, '[id]').map((n) => n.getAttribute('id'));
+  assert.equal(new Set(ids).size, ids.length, 'no id twice');
+  for (const added of ['drawer-close', 'models-section', 'exports', 'session-more', 'notice', 'cached-note', 'status']) assert.ok(ids.includes(added), added);
+  assert.equal($('status').getAttribute('class'), 'existing');   // the one that was there
+  assert.equal($('status').parentNode, document.body);
+  const fresh = harness();   // none there: the page makes a visually hidden, polite one
+  await fresh.app.start();
+  assert.deepEqual(['class', 'role', 'aria-live'].map((a) => $('status').getAttribute(a)), ['visually-hidden', 'status', 'polite']);
+  assert.equal($('status').parentNode, document.body);
+});
+
+test('start with no hash opens the newest session and replays it: its user turn, and a card identical to the live one', async () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/turn_tiny.json', import.meta.url)));
+  const botId = fixture[0].data.message_id;
+  const options = fixture[0].data.options;
+  const h = harness({
+    sessions: [sess('s_b', 'chest.png', 1, 3), sess('s_a', 'an older chat', 2, 2)],
+    routes: {
+      'GET /v1/sessions/s_b': { ...sess('s_b', 'chest.png', 1), messages: [userMsg('u_b', 'beam 5\nplease', 'chest.png'), botMsg(botId, 'done', options)] },
+      [`GET /v1/messages/${botId}`]: { ...botMsg(botId, 'done', options), events: rows(fixture) },
+    },
+  });
+  await h.app.start();
+  await flush();
+  assert.deepEqual(h.win.replaced, ['#/s/s_b']);   // home became the newest session, without a history entry
+  assert.equal($('mode-badge').textContent, 'private');
+  assert.equal($('health').textContent, 'private · 0 of 4 turns in flight');
+
+  const items = qa($('session-list'), 'li');
+  assert.deepEqual(items.map((li) => li.getAttribute('data-session')), ['s_b', 's_a']);   // newest first, as the server sent them
+  assert.deepEqual(items.map((li) => q(li, '.session-title').textContent), ['chest.png', 'an older chat']);
+  assert.match(q(items[0], '.session-meta').textContent, /· 1 turn$/);
+  assert.match(q(items[1], '.session-meta').textContent, /· 2 turns$/);
+  assert.equal(q(items[0], 'a').getAttribute('href'), '#/s/s_b');
+  assert.equal(q(items[0], 'a').getAttribute('aria-current'), 'page');
+  assert.equal(q(items[1], 'a').hasAttribute('aria-current'), false);
+  assert.equal($('session-list').getAttribute('role'), 'list');
+  assert.equal($('session-more').hidden, true);
+
+  const [user, card] = $('conversation').children;
+  assert.deepEqual([user.localName, user.getAttribute('class'), card.localName, card.getAttribute('data-message-id')], ['article', 'turn user', 'article', botId]);
+  assert.equal(q(user, '.user-text').textContent, 'beam 5\nplease');
+  assert.equal(q(user, '.chip').textContent, 'chest.png');                                // a replayed upload: its file name, until P6-B
+  assert.equal(qa(user, 'img').length, 0);
+  assert.deepEqual(texts(qa(user, '.options .chip')), ['beam 3', '16 tok', 'cached', 'k 4/3']);   // the options the assistant row carries
+  assert.equal(user.getAttribute('aria-label'), 'Your message, turn 1');
+  const replayed = fixture.reduce(applyEvent, initialView(botId));
+  const fresh = renderAssistantCard(replayed, { copy() {}, showModels() {}, turn: 1, ui: new Map() });
+  assert.equal(serialize(card), serialize(fresh));   // the same builders over the same log: the same card
+  assert.equal(h.fetch.calls.every((c) => c.headers['X-Client-Id'] && !c.headers.Authorization || c.url === '/healthz'), true);
+  assert.equal($('send').disabled, false);
+  assert.equal($('stop').hidden, true);
+});
+
+test('a deep link opens that session and not the newest, and a malformed one is home', async () => {
+  const routes = { 'GET /v1/sessions/s_a': { ...sess('s_a', 'older', 1), messages: [] } };
+  const deep = harness({ hash: '#/s/s_a', sessions: [sess('s_b', 'newer'), sess('s_a', 'older')], routes });
+  await deep.app.start();
+  await flush();
+  assert.deepEqual(deep.win.replaced, []);   // the address already named it
+  assert.deepEqual(deep.fetch.to('GET', '/v1/sessions/').map((c) => c.url), ['/v1/sessions/s_a']);
+  assert.equal(q($('session-list'), '[aria-current]').parentNode.getAttribute('data-session'), 's_a');
+
+  const bad = harness({ hash: '#/s/../etc', sessions: [sess('s_b', 'newer')], routes: { 'GET /v1/sessions/s_b': { ...sess('s_b', 'newer', 0), messages: [] } } });
+  await bad.app.start();
+  await flush();
+  assert.deepEqual(bad.win.replaced, ['#/s/s_b']);
+});
+
+test('with no session at all the page shows an empty New chat, and Send without an image says so and asks the server nothing', async () => {
+  const h = harness({ sessions: [] });
+  await h.app.start();
+  await flush();
+  assert.deepEqual(h.win.replaced, ['#/new']);
+  assert.equal($('conversation').children.length, 0);
+  assert.equal(h.fetch.to('POST', '/v1/sessions').length, 0);
+  await h.app.send();
+  assert.equal($('notice').hidden, false);
+  assert.equal(q($('notice'), 'p').textContent, 'Attach an X-ray first.');
+  assert.equal($('notice').getAttribute('role'), 'alert');
+  assert.equal(h.fetch.to('POST', '/v1/sessions').length, 0);   // no empty session is made for nothing
+  assert.equal(h.api.streams.length, 0);
+  q($('notice'), 'button[aria-label="Dismiss"]').click();
+  assert.equal($('notice').hidden, true);
+});
+
+test('a session the server does not have falls back to the newest one that it does, and never loops on the missing one', async () => {
+  const h = harness({
+    hash: '#/s/s_gone', sessions: [sess('s_gone', 'stale entry'), sess('s_ok', 'fine')],
+    routes: { 'GET /v1/sessions/s_gone': refused(404, 'Session not found.'), 'GET /v1/sessions/s_ok': { ...sess('s_ok', 'fine', 0), messages: [] } },
+  });
+  await h.app.start();
+  await flush(12);
+  assert.equal(h.fetch.to('GET', '/v1/sessions/s_gone').length, 1);   // asked once
+  assert.equal(h.fetch.to('GET', '/v1/sessions/s_ok').length, 1);
+  assert.deepEqual(h.win.replaced.at(-1), '#/s/s_ok');
+  assert.equal(q($('notice'), 'p').textContent, 'Session not found.');
+});
+
+test('a server that needs a token: the first 401 says to enter it in Settings, and the page stays usable', async () => {
+  const h = harness({ routes: { 'GET /v1/models': refused(401, 'Missing or wrong token'), 'GET /v1/sessions': refused(401, 'Missing or wrong token') } });
+  await h.app.start();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Enter the access token in Settings');
+  assert.deepEqual(h.win.replaced, ['#/new']);   // an empty chat: nothing to list
+  assert.equal($('send').disabled, false);
+});
+
+// ---- a turn: send, refusal, keys, Stop, the watchdog, resume ------------------------------------------------------------------
+
+const EXISTING = { 'GET /v1/sessions/s_a': { ...sess('s_a', 'earlier', 0), messages: [] } };
+// An open, empty session s_a with an image attached: what a turn needs.
+async function ready(extra = {}) {
+  const h = harness({ sessions: [sess('s_a', 'earlier', 0)], routes: { ...EXISTING, ...extra.routes }, ...extra.options });
+  await h.app.start();
+  await flush();
+  attach(imageFile('chest.png'));
+  return h;
+}
+const cardOf = () => q($('conversation'), 'article.card');
+const buttonOf = (node, label) => qa(node, 'button').find((b) => b.textContent === label);
+
+test('Send streams a turn: Send is off and Stop is on while it runs, the card fills in, and the turn settles', async () => {
+  const h = harness({ routes: { 'POST /v1/sessions': { id: 's_new', title: '', mode: 'private', turns: 0, created_at: iso(3), updated_at: iso(3) } } });
+  await h.app.start();
+  await flush();
+  assert.equal($('exports').hidden, true);   // nothing to export before the chat has a session
+  attach(imageFile('chest.png', 'image/png', 2048));
+  assert.equal($('preview').hidden, false);
+  assert.match(q($('preview'), 'span').textContent, /^chest\.png · 2 KB$/);
+  assert.equal(q($('preview'), 'img').getAttribute('alt'), '');
+  $('prompt').value = 'beam 5';
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+
+  const created = h.fetch.to('POST', '/v1/sessions')[0];   // the empty chat became a session, with a JSON body
+  assert.equal(created.url, '/v1/sessions');
+  assert.equal(created.headers['Content-Type'], 'application/json');
+  assert.deepEqual(h.win.replaced, ['#/new', '#/s/s_new']);   // the address follows without a navigation: a hashchange would tear the turn down
+  assert.equal($('exports').hidden, false);
+
+  const run = h.api.streams[0];
+  assert.equal(run.opts.sessionId, 's_new');
+  assert.equal(run.opts.form.get('text'), 'beam 5');
+  assert.equal(run.opts.form.get('image').name, 'chest.png');
+  assert.deepEqual(JSON.parse(run.opts.form.get('options')), { decode: 'beam', beam_size: 3, max_new_tokens: 100, cached_decode: true, compile: false,
+                                                                 k_images: 4, k_reports: 3, label: true, display_repair: false });
+  assert.equal(typeof run.opts.clientId, 'string');
+  assert.equal(run.opts.token, '');
+  assert.equal($('send').disabled, true);
+  assert.equal($('stop').hidden, false);
+  assert.equal($('stop').disabled, true);   // the server has not said the turn's id yet: nothing to cancel
+  assert.equal($('conversation').getAttribute('aria-busy'), 'true');
+  const [user] = $('conversation').children;
+  assert.equal(user.getAttribute('class'), 'turn user');   // drawn at once, from the local file
+  assert.equal(q(user, '.user-text').textContent, 'beam 5');
+  assert.match(q(user, 'img').getAttribute('src'), /^blob:/);
+  assert.equal(cardOf(), null);   // and no card until the turn is accepted
+  assert.equal($('prompt').value, 'beam 5');   // the composer keeps its content until then
+
+  run.accept('m_a');
+  await flush();
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_a');
+  assert.equal($('stop').disabled, false);
+  assert.equal($('prompt').value, '');   // accepted: the text and the file are spent
+  assert.equal($('preview').hidden, true);
+  for (const e of events.slice(0, 4)) run.channel.push(e);   // message_start .. encode running
+  await flush();
+  nextFrame();
+  assert.equal(cardOf().getAttribute('data-status'), 'running');
+  assert.equal($('status').textContent, 'encode running');
+  assert.deepEqual(texts(qa(q($('conversation'), '.turn.user'), '.options .chip')), ['beam 5', '100 tok', 'cached', 'k 4/3']);   // the options the server resolved
+
+  const listed = h.fetch.to('GET', '/v1/sessions?').length;
+  for (const e of events.slice(4)) run.channel.push(e);
+  run.channel.end();
+  await turn;
+  assert.equal(h.fetch.to('GET', '/v1/sessions?').length, listed + 1);   // its title and count changed: the sidebar asks again, once
+  assert.equal(cardOf().getAttribute('data-status'), 'done');   // drawn at once when the turn ends, not on the next frame
+  assert.deepEqual([q(cardOf(), '.report-section h3').textContent, q(cardOf(), '.report-section p').textContent], ['Findings', 'clear.']);
+  assert.equal($('status').textContent, 'Report ready');
+  assert.equal($('send').disabled, false);
+  assert.equal($('stop').hidden, true);
+  assert.equal($('conversation').hasAttribute('aria-busy'), false);
+  assert.ok(h.fetch.to('GET', '/v1/sessions?').length >= 2, 'the sidebar was refreshed');
+  nextFrame();
+  assert.equal(cardOf().getAttribute('data-status'), 'done');   // a frame that was still queued changes nothing
+});
+
+test('the status region says a thing only when it changes', async () => {
+  const h = await ready();
+  const spoken = [];
+  const status = $('status');
+  let current = '';
+  Object.defineProperty(status, 'textContent', { get: () => current, set: (v) => { current = v; spoken.push(v); } });   // every write is counted
+  const run = (events) => events.forEach((e) => h.api.streams[0].channel.push(e));
+  const turn = h.app.send();
+  await flush();
+  h.api.streams[0].accept('m_a');
+  await flush();
+  resetEvents();
+  run([startEv(), stageStartEv('encode', 1)]);
+  await flush();
+  nextFrame();
+  run([snapEv('Findings: a', 0)]);   // still "encode running": the stage has not ended
+  await flush();
+  nextFrame();
+  run([snapEv('Findings: a b', 1)]);
+  await flush();
+  nextFrame();
+  assert.deepEqual(spoken, ['Queued', 'encode running']);   // accepted, then the stage; three more frames said nothing new
+  run([stageEndEv('encode'), stopEv('done', { report: 'Findings: a b' })]);
+  h.api.streams[0].channel.end();
+  await turn;
+  assert.deepEqual(spoken, ['Queued', 'encode running', 'Report ready']);
+});
+
+test('a turn that the server refuses before its stream opens: the notice says why, its user turn is taken back, and the composer is as it was', async () => {
+  const h = await ready();
+  $('prompt').value = 'beam 99';
+  const cases = [
+    [refusal(422, 'Invalid options: beam_size: Input should be less than or equal to 8'), 'Invalid options: beam_size: Input should be less than or equal to 8'],
+    [refusal(413, 'The image is over the 20 MB upload limit.'), 'The image is over the 20 MB upload limit.'],
+    [refusal(401, 'Missing or wrong token'), 'Enter the access token in Settings'],
+    [refusal(429, 'The server is busy with 4 turns; try again shortly.'), 'The server is busy; try again shortly'],
+    [new TypeError('Failed to fetch'), 'Cannot reach the server. Check the connection and try again.'],
+  ];
+  for (const [err, shown] of cases) {
+    h.api.refuse = err;
+    await h.app.send();
+    assert.equal(q($('notice'), 'p').textContent, shown);
+    assert.equal($('notice').hidden, false);
+    assert.equal($('conversation').children.length, 0, 'the optimistic user turn is gone');
+    assert.equal($('prompt').value, 'beam 99');   // nothing to type again
+    assert.equal($('preview').hidden, false);
+    assert.equal(q($('preview'), 'span').textContent.startsWith('chest.png'), true);
+    assert.equal($('send').disabled, false);
+    assert.equal($('stop').hidden, true);
+    assert.equal($('conversation').hasAttribute('aria-busy'), false);
+  }
+  h.api.refuse = null;
+  const turn = h.app.send();   // the retry needs no re-entry, and clears the notice
+  await flush();
+  assert.equal($('notice').hidden, true);
+  h.api.streams.at(-1).accept('m_a');
+  await flush();
+  h.api.streams.at(-1).channel.push(...fullTurn().slice(-1));
+  h.api.streams.at(-1).channel.end();
+  await turn;
+  assert.equal($('conversation').children.length, 2);   // the user turn and the card, once each
+  assert.equal($('prompt').value, '');
+});
+
+test('Enter sends and Shift+Enter is a newline; an input method\'s Enter is not a send; Enter during a turn does nothing', async () => {
+  const h = await ready();
+  const shift = press($('prompt'), 'Enter', { shiftKey: true });
+  assert.equal(shift.defaultPrevented, false);   // the browser inserts the newline
+  const composing = press($('prompt'), 'Enter', { isComposing: true });
+  const legacy = press($('prompt'), 'Enter', { keyCode: 229 });
+  assert.deepEqual([composing.defaultPrevented, legacy.defaultPrevented], [false, false]);
+  const letter = press($('prompt'), 'a');
+  assert.equal(letter.defaultPrevented, false);
+  await flush();
+  assert.equal(h.api.streams.length, 0);
+
+  const enter = press($('prompt'), 'Enter');
+  assert.equal(enter.defaultPrevented, true);
+  await flush();
+  assert.equal(h.api.streams.length, 1);   // sent
+  const again = press($('prompt'), 'Enter');
+  assert.equal(again.defaultPrevented, true);   // no newline either
+  await flush();
+  assert.equal(h.api.streams.length, 1);   // and not sent twice
+  assert.equal($('send').disabled, true);
+
+  const submit = new ShimEvent('submit', { bubbles: true, cancelable: true });   // the Send button
+  $('composer').dispatchEvent(submit);
+  assert.equal(submit.defaultPrevented, true);   // the form never reloads the page
+  await flush();
+  assert.equal(h.api.streams.length, 1);
+});
+
+test('Stop sends the cancel first and drops the stream second; the AbortError is quiet and the poll brings the turn\'s own message_stop', async (t) => {
+  const errors = [];
+  const original = console.error;
+  console.error = (...args) => errors.push(args);
+  t.after(() => { console.error = original; });
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  assert.equal($('stop').disabled, true);
+  $('stop').click();   // before the id is known: nothing happens
+  await flush();
+  assert.deepEqual(h.api.cancels, []);
+  run.accept('m_a');
+  await flush();
+  for (const e of events.slice(0, 9)) run.channel.push(e);   // up to the first snapshot of the report
+  await flush();
+  nextFrame();
+  assert.equal($('stop').disabled, false);
+
+  $('stop').focus();
+  assert.equal(document.activeElement, $('stop'));
+  $('stop').click();
+  await flush();
+  assert.deepEqual(h.api.order, ['cancel', 'abort']);   // the server is asked first, then the stream is dropped
+  assert.deepEqual(h.api.cancels.map((c) => c.messageId), ['m_a']);
+  assert.equal($('stop').textContent, 'Stopping…');
+  assert.equal($('stop').disabled, true);
+  $('stop').click();
+  await flush();
+  assert.equal(h.api.cancels.length, 1);   // asked once
+  assert.equal(h.api.polls.length, 1);     // the dropped stream is followed by a poll, from the last seq the view has
+  assert.equal(h.api.polls[0].opts.messageId, 'm_a');
+  assert.equal(h.api.polls[0].opts.after, 9);
+  assert.equal($('send').disabled, true);   // not over until the turn says so
+  assert.equal(cardOf().getAttribute('data-status'), 'running');
+
+  const aborted = stopEv('aborted');
+  h.api.polls[0].channel.push(aborted);
+  h.api.polls[0].channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'aborted');
+  assert.equal(q(cardOf(), '.note.stopped').textContent, 'Turn stopped');
+  assert.equal($('status').textContent, 'Turn stopped');
+  assert.equal($('stop').hidden, true);
+  assert.equal($('stop').textContent, 'Stop');   // ready for the next turn
+  assert.equal($('stop').disabled, false);
+  assert.equal($('send').disabled, false);
+  assert.equal(document.activeElement, $('prompt'));   // Stop is gone: focus moved to where the next turn is typed, not to the page's top
+  assert.deepEqual(errors, []);   // an AbortError is the user's doing: nothing is reported
+});
+
+test('a cancel the server refuses leaves the stream running and Stop usable again, with the reason in the notice', async () => {
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(events[0]);
+  await flush();
+  h.api.cancelError = refusal(404, 'Message not found.', 'not_found_error');
+  $('stop').click();
+  await flush();
+  assert.deepEqual(h.api.order, ['cancel']);   // no abort: the turn is still running on the server
+  assert.equal(q($('notice'), 'p').textContent, 'Message not found.');
+  assert.equal($('stop').textContent, 'Stop');
+  assert.equal($('stop').disabled, false);
+  run.channel.push(...events.slice(1, 4));   // and the stream still brings events
+  await flush();
+  nextFrame();
+  assert.equal($('status').textContent, 'encode running');
+  run.channel.push(...events.slice(4));
+  run.channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+});
+
+test('3 s without an event drops the stream and polls from the last seq until the turn ends; an event restarts the clock', async () => {
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  assert.equal(h.timers.intervals, 1);   // the watchdog's ticker
+  run.channel.push(...events.slice(0, 3));
+  await flush();
+  h.timers.advance(2500);
+  run.channel.push(events[3]);   // an event at 2.5 s
+  await flush();
+  h.timers.advance(2900);        // 5.4 s: 2.9 s of silence
+  await flush();
+  assert.deepEqual(h.api.order, []);
+  assert.equal(h.api.polls.length, 0);
+  h.timers.advance(100);         // 5.5 s: 3 s of silence
+  await flush();
+  assert.deepEqual(h.api.order, ['abort']);   // the stream is dropped, and nothing is cancelled
+  assert.deepEqual(h.api.cancels, []);
+  assert.equal(h.api.polls.length, 1);
+  assert.equal(h.api.polls[0].opts.after, 4);   // from the last seq the view has
+  assert.equal(h.timers.intervals, 0);          // no stall check while polling
+  assert.equal($('send').disabled, true);
+  h.api.polls[0].channel.push(...events.slice(4));
+  h.api.polls[0].channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal(q(cardOf(), '.report-section p').textContent, 'clear.');
+  assert.equal($('send').disabled, false);
+  assert.equal(h.api.polls.length, 1);
+});
+
+test('a turn still queued sends no bytes: after 3 s the page polls it from the start, and the queue\'s events arrive by polling', async () => {
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  h.api.streams[0].accept('m_a');
+  await flush();
+  assert.equal(cardOf().getAttribute('data-status'), 'running');
+  assert.equal(statusOf(), 'Queued');
+  h.timers.advance(3000);
+  await flush();
+  assert.equal(h.api.polls.length, 1);
+  assert.equal(h.api.polls[0].opts.after, 0);
+  h.api.polls[0].channel.push(...events);
+  h.api.polls[0].channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  function statusOf() { return $('status').textContent; }
+});
+
+test('a stream that closes without a message_stop is followed by a poll too', async () => {
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(...events.slice(0, 5));
+  run.channel.end();   // the connection closed, no message_stop
+  await flush();
+  assert.equal(h.api.polls.length, 1);
+  assert.equal(h.api.polls[0].opts.after, 5);
+  h.api.polls[0].channel.push(...events.slice(5));
+  h.api.polls[0].channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+});
+
+test('a server that sends no X-Message-Id still gets its card, from message_start, and Stop has the id it needs', async () => {
+  const h = await ready();
+  h.api.silent = true;
+  const events = fullTurn('m_s');
+  const turn = h.app.send();
+  await flush();
+  assert.equal(cardOf(), null);   // nothing to draw yet
+  assert.equal($('stop').disabled, true);
+  h.api.streams[0].channel.push(events[0], events[1]);
+  await flush();
+  nextFrame();
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_s');
+  assert.equal($('stop').disabled, false);
+  assert.equal($('prompt').value, '');
+  $('stop').click();
+  await flush();
+  assert.deepEqual(h.api.cancels.map((c) => c.messageId), ['m_s']);
+  h.api.polls[0].channel.push(stopEv('aborted', { message_id: 'm_s' }));
+  h.api.polls[0].channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'aborted');
+});
+
+test('a refusal that reaches a chat the user already left does not stop the watchdog of the turn running in the chat they are in now', async () => {
+  const h = harness({ sessions: [sess('s_a', 'A', 0), sess('s_b', 'B', 0)], routes: { ...EXISTING, 'GET /v1/sessions/s_b': { ...sess('s_b', 'B', 0), messages: [] } } });
+  h.api.holdAbort = true;   // the first stream does not notice its abort for a while
+  await h.app.start();
+  await flush();
+  attach(imageFile());
+  const first = h.app.send();
+  await flush();
+  h.win.location.hash = '#/s/s_b';   // leaves the chat with that upload in flight
+  await flush();
+  h.api.holdAbort = false;
+  attach(imageFile('second.png'));
+  const second = h.app.send();
+  await flush();
+  h.api.streams[1].accept('m_b');
+  await flush();
+  assert.equal(h.timers.intervals, 1);   // the second turn's stall check
+  h.api.streams[0].fail(abortError());   // now the first one ends, as a refusal of a turn that nobody is waiting for any more
+  await first;
+  assert.equal(h.timers.intervals, 1);   // and does not take that check away
+  assert.equal($('notice').hidden, true);
+  assert.equal($('send').disabled, true);
+  h.timers.advance(3000);
+  await flush();
+  assert.equal(h.api.polls.length, 1);   // so the second turn is still handed to polling after 3 s
+  assert.equal(h.api.polls[0].opts.messageId, 'm_b');
+  h.api.polls[0].channel.push(stopEv('done', { message_id: 'm_b' }));
+  h.api.polls[0].channel.end();
+  await second;
+  assert.equal($('send').disabled, false);
+});
+
+test('a chat made for a first turn does not move the address of a chat the user has gone to meanwhile', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = harness({
+    hash: '#/new', sessions: [sess('s_b', 'B', 1)],
+    routes: {
+      ...doneSession('s_b', 'B', 'm_b'),
+      'POST /v1/sessions': async () => { await gate; return { id: 's_new', title: '', mode: 'private', turns: 0, created_at: iso(3), updated_at: iso(3) }; },
+    },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal($('conversation').children.length, 0);   // an empty chat
+  attach(imageFile());
+  const turn = h.app.send();   // the chat is being made
+  await flush();
+  assert.equal(h.api.streams.length, 0);
+  assert.equal($('send').disabled, true);
+  h.win.location.hash = '#/s/s_b';   // the user opens another chat before it is there
+  await flush();
+  assert.equal(q($('conversation'), '.user-text').textContent, 'from s_b');
+  assert.equal($('send').disabled, false);
+  release();
+  await turn;
+  await flush();
+  assert.equal(h.win.location.hash, '#/s/s_b');   // still where the user went
+  assert.equal(h.win.replaced.includes('#/s/s_new'), false);
+  assert.equal(h.api.streams.length, 0);   // and no turn was started in a chat that is not on screen
+  assert.equal(q($('conversation'), '.user-text').textContent, 'from s_b');
+  assert.equal($('send').disabled, false);
+  assert.equal($('exports').hidden, false);   // the open chat is s_b, which can be exported
+});
+
+test('a poll that fails for good shows its error with a Retry that polls again from the last seq', async () => {
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(...events.slice(0, 6));
+  await flush();
+  h.timers.advance(3000);
+  await flush();
+  const first = h.api.polls[0];
+  first.channel.push(events[6]);
+  await flush();
+  first.channel.fail(refusal(404, 'Message not found.', 'not_found_error'));   // not one of the failures api.js retries
+  await turn;
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Message not found.');
+  const retry = buttonOf($('notice'), 'Retry');
+  assert.equal(retry.hidden, false);
+  assert.equal($('send').disabled, true);    // the turn is still running as far as the page knows
+  assert.equal(cardOf().getAttribute('data-status'), 'running');
+  retry.click();
+  await flush();
+  assert.equal($('notice').hidden, true);
+  assert.equal(h.api.polls.length, 2);
+  assert.equal(h.api.polls[1].opts.after, 7);   // re-created from the view's last seq
+  h.api.polls[1].channel.push(...events.slice(7));
+  h.api.polls[1].channel.end();
+  await flush();
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal($('send').disabled, false);
+  retry.click();   // a second click on the same button does nothing
+  await flush();
+  assert.equal(h.api.polls.length, 2);
+});
+
+test('a poll that ends with the turn still running leaves a notice and does not leave the page waiting', async () => {
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  h.api.streams[0].accept('m_a');
+  await flush();
+  h.api.streams[0].channel.push(...events.slice(0, 4));
+  h.api.streams[0].channel.end();
+  await flush();
+  h.api.polls[0].channel.end();   // the server says the turn left running, and the log has no end
+  await turn;
+  await flush();
+  assert.match(q($('notice'), 'p').textContent, /ended without a result/);
+  assert.equal($('send').disabled, false);
+  assert.equal($('stop').hidden, true);
+});
+
+test('a session opened with its last turn still running polls it from its last seq, and settles when it ends', async () => {
+  resetEvents();
+  const partial = [startEv(), stageStartEv('preprocess', 0), stageEndEv('preprocess'), stageStartEv('encode', 1)];
+  const rest = [stageEndEv('encode'), skipEv('retrieve', 'gallery_unavailable'), stopEv('done', { report: 'Findings: ok.', display_report: 'Findings: ok.' })];
+  const h = harness({
+    sessions: [sess('s_a', 'running one', 1)],
+    routes: {
+      'GET /v1/sessions/s_a': { ...sess('s_a', 'running one', 1), messages: [userMsg('u_a', '', 'chest.png'), botMsg('m_a', 'running', START_DATA.options)] },
+      'GET /v1/messages/m_a': { ...botMsg('m_a', 'running'), events: rows(partial) },
+    },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal(cardOf().getAttribute('data-status'), 'running');
+  assert.equal($('send').disabled, true);
+  assert.equal($('stop').hidden, false);
+  assert.equal($('stop').disabled, false);   // the id is known: Stop can cancel it
+  assert.equal($('conversation').getAttribute('aria-busy'), 'true');
+  assert.equal(h.api.streams.length, 0);     // there is no stream to rejoin
+  assert.equal(h.api.polls.length, 1);
+  assert.deepEqual([h.api.polls[0].opts.messageId, h.api.polls[0].opts.after], ['m_a', 4]);
+  h.api.polls[0].channel.push(...rest);
+  h.api.polls[0].channel.end();
+  await flush();
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal($('send').disabled, false);
+  assert.equal($('stop').hidden, true);
+  assert.equal($('conversation').hasAttribute('aria-busy'), false);
+});
+
+test('a question turn and a turn stopped before its content block closed both replay', async () => {
+  resetEvents();
+  const question = [startEv({ message_id: 'm_q', image: null }), ev('warning', { code: 'not_a_command', message: 'This is a report generator, not a question answerer.' }),
+                    stopEv('done', { message_id: 'm_q' })];
+  const cancelled = [startEv({ message_id: 'm_c' }), stageStartEv('preprocess', 0), stageEndEv('preprocess'), stageStartEv('generate', 3),
+                     ev('content_block_start', { index: 0, content_block: { type: 'report', text: '' } }), snapEv('Findings: part'),
+                     stopEv('aborted', { message_id: 'm_c' })];   // no content_block_stop, no stage_end of generate
+  const h = harness({
+    sessions: [sess('s_a', 'two turns', 2)],
+    routes: {
+      'GET /v1/sessions/s_a': { ...sess('s_a', 'two turns', 2), messages: [userMsg('u_q', 'what is this?'), botMsg('m_q', 'done', START_DATA.options),
+                                                                           userMsg('u_c', '', 'chest.png'), botMsg('m_c', 'aborted', START_DATA.options)] },
+      'GET /v1/messages/m_q': { ...botMsg('m_q', 'done'), events: rows(question) },
+      'GET /v1/messages/m_c': { ...botMsg('m_c', 'aborted'), events: rows(cancelled) },
+    },
+  });
+  await h.app.start();
+  await flush();
+  const [u1, c1, u2, c2] = $('conversation').children;
+  assert.deepEqual([u1, c1, u2, c2].map((n) => n.getAttribute('aria-label')), ['Your message, turn 1', 'Assistant report, turn 1', 'Your message, turn 2', 'Assistant report, turn 2']);
+  assert.equal(q(c1, '.note.notice').textContent, 'This is a report generator, not a question answerer.');
+  assert.equal(q(u1, '.user-text').textContent, 'what is this?');
+  assert.equal(c1.getAttribute('data-status'), 'done');
+  assert.equal(q(c2, '.note.stopped').textContent, 'Turn stopped');
+  assert.equal(q(c2, '.report-section p').textContent, 'part');
+  assert.equal(qa(c2, '[data-state="running"]').length, 0);   // nothing is left spinning
+  assert.equal(h.api.polls.length, 0);   // both are over: nothing to follow
+  assert.equal($('send').disabled, false);
+});
+
+// ---- leaving a session, a new token ---------------------------------------------------------------------------------------------
+
+const stageToggle = (card, stage) => q(card, `li[data-stage="${stage}"] > button`);
+const doneSession = (id, title, botId, text = 'from ' + id) => ({
+  [`GET /v1/sessions/${id}`]: { ...sess(id, title, 1), messages: [userMsg(`u_${id}`, text, `${id}.png`), botMsg(botId, 'done', START_DATA.options)] },
+  [`GET /v1/messages/${botId}`]: () => ({ ...botMsg(botId, 'done'), events: rows(fullTurn(botId)) }),
+});
+
+test('switching session replaces the conversation, clears the image cache and the open-stage memory, and moves the highlight', async () => {
+  const h = harness({ sessions: [sess('s_b', 'B'), sess('s_a', 'A')], routes: { ...doneSession('s_b', 'B', 'm_b'), ...doneSession('s_a', 'A', 'm_a2') } });
+  await h.app.start();
+  await flush();
+  assert.equal(q($('conversation'), '.user-text').textContent, 'from s_b');
+  const cleared = h.api.cleared;
+  stageToggle(cardOf(), 'encode').click();   // a stage opened here must not stay open in a card the next view builds
+  assert.equal(stageToggle(cardOf(), 'encode').getAttribute('aria-expanded'), 'true');
+
+  h.win.location.hash = '#/s/s_a';   // the user follows a link in the sidebar: a hashchange
+  await flush();
+  assert.equal(q($('conversation'), '.user-text').textContent, 'from s_a');
+  assert.equal($('conversation').children.length, 2);
+  assert.ok(h.api.cleared > cleared, 'the image cache was cleared');
+  assert.equal(q(q($('session-list'), '[aria-current]').parentNode, '.session-title').textContent, 'A');
+  h.win.location.hash = '#/s/s_b';
+  await flush();
+  assert.equal(stageToggle(cardOf(), 'encode').getAttribute('aria-expanded'), 'false');   // the memory belonged to the view that was left
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_b');
+});
+
+test('leaving a chat with a turn running drops its stream and cancels nothing; coming back finds it running and polls it', async () => {
+  let aRunning = false;
+  const events = fullTurn();
+  const h = harness({
+    sessions: [sess('s_a', 'A', 0), sess('s_b', 'B', 1)],
+    routes: {
+      ...doneSession('s_b', 'B', 'm_b'),
+      'GET /v1/sessions/s_a': () => ({ ...sess('s_a', 'A', aRunning ? 1 : 0), messages: aRunning ? [userMsg('u_a', '', 'a.png'), botMsg('m_a', 'running', START_DATA.options)] : [] }),
+      'GET /v1/messages/m_a': () => ({ ...botMsg('m_a', 'running'), events: rows(events.slice(0, 4)) }),
+    },
+  });
+  await h.app.start();
+  await flush();
+  attach(imageFile('a.png'));
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(...events.slice(0, 4));
+  await flush();
+  assert.equal($('send').disabled, true);
+
+  h.win.location.hash = '#/s/s_b';
+  await flush();
+  await turn;
+  assert.deepEqual(h.api.order, ['abort']);   // dropped, not cancelled
+  assert.equal(run.opts.signal.aborted, true);
+  assert.deepEqual(h.api.cancels, []);
+  assert.equal(q($('conversation'), '.user-text').textContent, 'from s_b');
+  assert.equal($('send').disabled, false);   // this view has no turn running
+  assert.equal($('stop').hidden, true);
+  assert.equal($('conversation').hasAttribute('aria-busy'), false);
+  assert.equal(h.timers.intervals, 0);   // and no ticker left over
+  run.channel.push(...events.slice(4, 9));   // what was already on the wire when the stream was dropped
+  await flush();
+  nextFrame();
+  assert.equal($('conversation').children.length, 2);   // is not drawn into this view
+  assert.equal(q($('conversation'), '.user-text').textContent, 'from s_b');
+
+  aRunning = true;
+  h.win.location.hash = '#/s/s_a';
+  await flush();
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_a');
+  assert.equal($('send').disabled, true);   // found running: polled from the last seq it has
+  assert.deepEqual([h.api.polls[0].opts.messageId, h.api.polls[0].opts.after], ['m_a', 4]);
+});
+
+test('leaving a chat whose turn is being polled drops the poll, and a message_stop that was already read changes nothing', async () => {
+  resetEvents();
+  const partial = [startEv(), stageStartEv('preprocess', 0), stageEndEv('preprocess'), stageStartEv('encode', 1)];
+  const h = harness({
+    sessions: [sess('s_a', 'running', 1), sess('s_b', 'B', 1)],
+    routes: {
+      'GET /v1/sessions/s_a': { ...sess('s_a', 'running', 1), messages: [userMsg('u_a', '', 'chest.png'), botMsg('m_a', 'running', START_DATA.options)] },
+      'GET /v1/messages/m_a': { ...botMsg('m_a', 'running'), events: rows(partial) },
+      ...doneSession('s_b', 'B', 'm_b'),
+    },
+  });
+  h.api.lenient = true;   // what a poll had already fetched still comes out after the abort
+  await h.app.start();
+  await flush();
+  assert.equal(h.api.polls.length, 1);
+  const poll = h.api.polls[0];
+  assert.equal($('send').disabled, true);
+  const listed = h.fetch.to('GET', '/v1/sessions?').length;
+  poll.channel.push(stopEv('done', { report: 'Findings: late.', display_report: 'Findings: late.' }));   // fetched just as the user leaves
+  h.win.location.hash = '#/s/s_b';
+  await flush();
+  assert.equal(poll.opts.signal.aborted, true);   // the poll was dropped
+  assert.deepEqual(h.api.cancels, []);            // and the turn was not cancelled
+  assert.equal(q($('conversation'), '.user-text').textContent, 'from s_b');
+  assert.equal(h.fetch.to('GET', '/v1/sessions?').length, listed);   // that turn did not "end" in the chat now on screen: no refresh, no settle
+  assert.equal($('send').disabled, false);
+  assert.equal($('conversation').children.length, 2);
+});
+
+test('a chat that loads after the user has moved on is not drawn', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = harness({
+    hash: '#/s/s_b', sessions: [sess('s_b', 'B'), sess('s_a', 'A')],
+    routes: {
+      ...doneSession('s_b', 'B', 'm_b'),
+      'GET /v1/sessions/s_a': async () => { await gate; return { ...sess('s_a', 'A', 1), messages: [userMsg('u_a', 'from s_a', 'a.png'), botMsg('m_a2', 'done', START_DATA.options)] }; },
+      'GET /v1/messages/m_a2': () => ({ ...botMsg('m_a2', 'done'), events: rows(fullTurn('m_a2')) }),
+    },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal(q($('conversation'), '.user-text').textContent, 'from s_b');
+  h.win.location.hash = '#/s/s_a';   // a slow one
+  await flush();
+  assert.equal($('send').disabled, true);   // loading
+  assert.equal($('conversation').children.length, 0);
+  h.win.location.hash = '#/s/s_b';   // the user changes their mind
+  await flush();
+  assert.equal(q($('conversation'), '.user-text').textContent, 'from s_b');
+  assert.equal($('send').disabled, false);
+  release();
+  await flush(12);
+  assert.equal(q($('conversation'), '.user-text').textContent, 'from s_b');   // s_a arrived late and was not drawn over it
+  assert.equal($('conversation').children.length, 2);
+  assert.equal($('send').disabled, false);
+  assert.equal(q($('session-list'), '[aria-current]').parentNode.getAttribute('data-session'), 's_b');
+});
+
+test('a turn whose id arrives after the user left its chat draws nothing into the chat they are in now', async () => {
+  const h = harness({ sessions: [sess('s_a', 'A', 0), sess('s_b', 'B', 1)], routes: { ...doneSession('s_b', 'B', 'm_b'), ...EXISTING } });
+  await h.app.start();
+  await flush();
+  attach(imageFile());
+  const turn = h.app.send();
+  await flush();
+  const { opts } = h.api.streams[0];
+  h.win.location.hash = '#/s/s_b';
+  await flush();
+  await turn;
+  opts.onMessageId('m_late');   // the server's answer to an upload that was in flight
+  nextFrame();
+  assert.equal($('conversation').children.length, 2);
+  assert.equal(q($('conversation'), '.user-text').textContent, 'from s_b');
+  assert.equal($('notice').hidden, true);   // leaving is not a failure
+  assert.equal($('send').disabled, false);
+});
+
+test('a new access token is stored, clears the image cache, drops a running stream without cancelling it, and loads everything again with it', async () => {
+  const h = await ready();
+  const turn = h.app.send();
+  await flush();
+  h.api.streams[0].accept('m_a');
+  await flush();
+  const cleared = h.api.cleared;
+  const modelCalls = h.fetch.to('GET', '/v1/models').length;
+  $('settings').click();
+  const token = q($('drawer'), 'input[type="password"]');
+  assert.equal(token.getAttribute('autocomplete'), 'off');
+  assert.match($('drawer').textContent, /Saved in this browser on this device, because you typed it here\./);
+  token.value = '  s3cret  ';
+  token.dispatchEvent(new ShimEvent('change', { bubbles: true }));
+  assert.deepEqual(h.api.order, ['abort']);   // before anything is fetched again: the stream of the old identity goes first
+  assert.ok(h.api.cleared > cleared, 'and so do its images');
+  await flush(12);
+  await turn;
+  assert.equal(JSON.parse(h.storage.data.get(SETTINGS_KEY)).token, 's3cret');   // trimmed, and kept where the user typed it
+  assert.deepEqual(h.api.order, ['abort']);
+  assert.deepEqual(h.api.cancels, []);
+  assert.ok(h.api.cleared > cleared);
+  assert.equal(h.fetch.to('GET', '/v1/models').length, modelCalls + 1);
+  assert.equal(h.fetch.to('GET', '/v1/models').at(-1).headers.Authorization, 'Bearer s3cret');
+  assert.equal(h.fetch.to('GET', '/v1/sessions/s_a').at(-1).headers.Authorization, 'Bearer s3cret');   // the open chat was fetched again
+  assert.equal($('send').disabled, false);
+
+  const calls = h.fetch.calls.length;
+  token.dispatchEvent(new ShimEvent('change', { bubbles: true }));   // the same token again: nothing to reload
+  await flush();
+  assert.equal(h.fetch.calls.length, calls);
+});
+
+// ---- the drawer ----------------------------------------------------------------------------------------------------------------------
+
+const saved = (h) => JSON.parse(h.storage.data.get(SETTINGS_KEY));
+const chipsText = () => texts(qa($('chips'), 'span'));
+const change = (node) => node.dispatchEvent(new ShimEvent('change', { bubbles: true }));
+const ownText = (node) => node.childNodes.filter((n) => n.nodeType === 3).map((n) => n.data).join('');   // a label's words, not its select's options
+const labelled = (text) => qa($('drawer'), 'label').find((l) => (text instanceof RegExp ? text.test(ownText(l)) : ownText(l) === text));
+const control = (text) => q(labelled(text), 'input, select');
+
+test('Settings opens and closes the drawer with the hidden attribute and aria-expanded; the close button and Esc close it and give focus back', async () => {
+  const h = harness();
+  await h.app.start();
+  assert.equal($('drawer').hidden, true);
+  assert.equal($('settings').getAttribute('aria-expanded'), 'false');
+  assert.equal($('drawer').hasAttribute('style'), false);   // never style.display
+
+  $('settings').focus();
+  $('settings').click();
+  assert.equal($('drawer').hidden, false);
+  assert.equal($('settings').getAttribute('aria-expanded'), 'true');
+  for (const other of ['a', 'Enter', 'Tab', ' ', 'Backspace', 'Esc']) {   // only "Escape" closes it
+    assert.equal(press(document.activeElement, other).defaultPrevented, false, other);
+    assert.equal($('drawer').hidden, false, other);
+  }
+  const close = $('drawer-close');
+  assert.equal(close.getAttribute('aria-label'), 'Close settings');
+  assert.equal(close.textContent, '✕');
+  assert.equal(document.activeElement, close);   // focus moves into the panel it opened
+  assert.equal(q($('drawer'), 'h2').textContent, 'Settings');
+
+  $('settings').click();   // the same button closes it
+  assert.deepEqual([$('drawer').hidden, $('settings').getAttribute('aria-expanded')], [true, 'false']);
+  $('settings').click();
+  close.click();
+  assert.deepEqual([$('drawer').hidden, $('settings').getAttribute('aria-expanded')], [true, 'false']);
+  assert.equal(document.activeElement, $('settings'));   // back where it was opened from
+
+  $('settings').click();
+  const escape = press(document.activeElement, 'Escape');
+  assert.equal($('drawer').hidden, true);
+  assert.equal(escape.defaultPrevented, true);
+  assert.equal(document.activeElement, $('settings'));
+  assert.equal(press(document.body, 'Escape').defaultPrevented, false);   // nothing open: Esc is left alone
+  assert.equal(press(document.body, 'a').defaultPrevented, false);
+
+  $('prompt').focus();   // opened while focus is elsewhere (a link in a card, say): Esc returns focus there
+  $('settings').click();
+  press(document.body, 'Escape');
+  assert.equal(document.activeElement, $('prompt'));
+  $('prompt').focus();
+  $('settings').click();
+  $('prompt').remove();   // and if that control is gone by then, Settings is where it lands
+  press(document.body, 'Escape');
+  assert.equal(document.activeElement, $('settings'));
+});
+
+test('the drawer lists the models with the default chosen; a model with no cache turns cached decode off, disabled and explained', async () => {
+  const h = harness({ models: MODELS });
+  await h.app.start();
+  await flush();
+  $('settings').click();
+  const model = control('Model');
+  assert.deepEqual(qa(model, 'option').map((o) => o.getAttribute('value')), [CARD_CACHED.name, CARD_PLAIN.name]);
+  assert.equal(model.value, CARD_CACHED.name);   // the default is preselected
+  const cached = control('Cached decode');
+  assert.equal(cached.disabled, false);
+  assert.equal(cached.checked, true);
+  assert.equal($('cached-note').hidden, true);
+  assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3']);
+
+  model.value = CARD_PLAIN.name;
+  change(model);
+  assert.equal(saved(h).model, CARD_PLAIN.name);
+  assert.equal(cached.disabled, true);
+  assert.equal(cached.hasAttribute('disabled'), true);
+  assert.equal(cached.checked, false);
+  assert.equal($('cached-note').hidden, false);
+  assert.equal(cached.getAttribute('aria-describedby'), 'cached-note');
+  assert.match($('cached-note').textContent, /no decode cache/);
+  assert.equal(chipsText().includes('uncached'), true);
+  assert.equal(saved(h).cached_decode, true);   // the user's own choice is kept for the model that has the cache
+
+  model.value = CARD_CACHED.name;   // the default again
+  change(model);
+  assert.equal(saved(h).model, '');   // stored as "the default", so a new server default is followed
+  assert.deepEqual([cached.disabled, cached.checked, $('cached-note').hidden], [false, true, true]);
+
+  const names = qa($('models-section'), 'h4').map((n) => n.textContent);
+  assert.deepEqual(names, [CARD_CACHED.name, CARD_PLAIN.name]);   // the provenance link opens these
+  assert.equal(qa($('models-section'), 'table').length, 2);
+});
+
+test('compile is offered only when the server allows it', async () => {
+  const closed = harness({ models: MODELS });
+  await closed.app.start();
+  await flush();
+  assert.equal(labelled(/^Compile/).hidden, true);
+  const open = harness({ models: { ...MODELS, allow_compile: true } });
+  await open.app.start();
+  await flush();
+  assert.equal(labelled(/^Compile/).hidden, false);
+  const compile = control(/^Compile/);
+  compile.checked = true;
+  change(compile);
+  assert.equal(saved(open).compile, true);
+  assert.equal(chipsText().includes('compiled'), true);
+});
+
+test('the number fields clamp what is typed to the server bounds, write the clamped value back, and keep the old one for text', async () => {
+  const h = harness({ models: MODELS });
+  await h.app.start();
+  await flush();
+  $('settings').click();
+  const field = (text) => control(text);
+  const type = (input, value) => { input.value = value; change(input); };
+  type(field('Beam size'), '99');
+  assert.deepEqual([field('Beam size').value, saved(h).beam_size], ['8', 8]);
+  type(field('Beam size'), '0');
+  assert.deepEqual([field('Beam size').value, saved(h).beam_size], ['1', 1]);
+  type(field('Beam size'), 'many');
+  assert.deepEqual([field('Beam size').value, saved(h).beam_size], ['1', 1]);   // text: the value it had
+  type(field('Token budget'), '5');
+  assert.deepEqual([field('Token budget').value, saved(h).max_new_tokens], ['16', 16]);
+  type(field('Token budget'), '250');
+  assert.deepEqual([field('Token budget').value, saved(h).max_new_tokens], ['200', 200]);
+  type(field(/k_images/), '13');
+  assert.deepEqual([field(/k_images/).value, saved(h).k_images], ['12', 12]);
+  type(field(/k_reports/), '-3');
+  assert.deepEqual([field(/k_reports/).value, saved(h).k_reports], ['0', 0]);
+  assert.deepEqual(['min', 'max'].map((a) => field('Beam size').getAttribute(a)), ['1', '8']);
+  assert.deepEqual(chipsText(), ['beam 1', '200 tok', 'cached', 'k 12/0']);   // the chips follow what will be sent
+});
+
+test('decode, labels and display repair are settings too; greedy has no beam to size; the mode is shown and cannot be edited', async () => {
+  const h = harness({ models: MODELS });
+  await h.app.start();
+  await flush();
+  const decode = control('Decode');
+  decode.value = 'greedy';
+  change(decode);
+  assert.equal(saved(h).decode, 'greedy');
+  assert.equal(control('Beam size').disabled, true);
+  assert.equal(chipsText()[0], 'greedy');
+  decode.value = 'beam';
+  change(decode);
+  assert.equal(control('Beam size').disabled, false);
+  const labels = control('CheXbert labels');
+  labels.checked = false;
+  change(labels);
+  const repair = control('Display repair');
+  repair.checked = true;
+  change(repair);
+  assert.deepEqual([saved(h).label, saved(h).display_repair], [false, true]);
+  assert.deepEqual(chipsText().slice(-2), ['labels off', 'repair on']);
+  const mode = control('Mode');
+  assert.equal(mode.value, 'private');
+  assert.equal(mode.hasAttribute('readonly'), true);
+  assert.equal(q(labelled('Access token'), 'input').getAttribute('type'), 'password');
+  assert.equal(qa($('drawer'), 'input[type="url"]').length, 0);   // no API base URL: the page is served by its server
+});
+
+test('settings are kept in storage, read at the next load, and applied when storage is unavailable', async () => {
+  const first = harness({ models: MODELS });
+  await first.app.start();
+  await flush();
+  const beam = control('Beam size');
+  beam.value = '6';
+  change(beam);
+  assert.equal(saved(first).beam_size, 6);
+  assert.equal($('drawer').textContent.includes('Browser storage is unavailable'), true);
+  assert.equal(labelled('Browser storage is unavailable'), undefined);   // it is a note, not a field
+  assert.equal(qa($('drawer'), '.hint').find((n) => n.textContent.startsWith('Browser storage')).hidden, true);   // hidden while storage works
+
+  const second = harness({ models: MODELS, storage: first.storage });   // the next page load
+  await second.app.start();
+  await flush();
+  assert.equal(control('Beam size').value, '6');
+  assert.equal(chipsText()[0], 'beam 6');
+
+  const blocked = harness({ models: MODELS, storage: brokenStorage() });
+  await blocked.app.start();
+  await flush();
+  assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3']);   // the defaults
+  const note = qa($('drawer'), '.hint').find((n) => n.textContent.startsWith('Browser storage'));
+  assert.equal(note.hidden, true);
+  const input = control('Beam size');
+  input.value = '5';
+  change(input);
+  assert.equal(chipsText()[0], 'beam 5');   // still applied for this page
+  assert.equal(note.hidden, false);          // and the user is told it will not last
+});
+
+// ---- the sidebar ----------------------------------------------------------------------------------------------------------------------
+
+test('the sidebar toggle flips body.sidebar-open and its aria-expanded; the scrim (a click on the body itself) and Esc close it', async () => {
+  const h = harness();
+  await h.app.start();
+  const toggle = $('sidebar-toggle');
+  const open = () => document.body.classList.contains('sidebar-open');
+  assert.equal(open(), false);
+  toggle.focus();
+  toggle.click();
+  assert.deepEqual([open(), toggle.getAttribute('aria-expanded')], [true, 'true']);
+  $('sidebar').click();   // a click inside the panel is not the scrim
+  assert.equal(open(), true);
+  document.body.dispatchEvent(new ShimEvent('click', { bubbles: true }));   // target === the body: the scrim is its ::after
+  assert.deepEqual([open(), toggle.getAttribute('aria-expanded')], [false, 'false']);
+  toggle.click();
+  toggle.click();
+  assert.equal(open(), false);
+
+  toggle.click();
+  $('prompt').focus();
+  press($('prompt'), 'Enter');   // any other key leaves it open
+  press($('prompt'), 'a');
+  assert.equal(open(), true);
+  press($('prompt'), 'Escape');
+  assert.deepEqual([open(), toggle.getAttribute('aria-expanded')], [false, 'false']);
+  assert.equal(document.activeElement, toggle);   // back to the control that opened it
+  toggle.click();
+  $('settings').focus();
+  $('settings').click();   // both open: one Esc closes both, and focus returns to the drawer's opener
+  press(document.body, 'Escape');
+  assert.deepEqual([open(), $('drawer').hidden], [false, true]);
+  assert.equal(document.activeElement, $('settings'));
+});
+
+test('a session link closes the sidebar; New chat opens an empty chat, clears the composer and closes the sidebar', async () => {
+  const h = harness({ sessions: [sess('s_b', 'B')], routes: { ...doneSession('s_b', 'B', 'm_b') } });
+  await h.app.start();
+  await flush();
+  attach(imageFile());
+  $('prompt').value = 'draft';
+  $('sidebar-toggle').click();
+  q($('session-list'), 'a').focus();
+  q($('session-list'), 'a').click();   // following the link: the sidebar gets out of the way of the conversation
+  assert.equal(document.body.classList.contains('sidebar-open'), false);
+  assert.equal(document.activeElement, $('sidebar-toggle'));   // and focus goes back to what opened it, not into a panel that is now hidden
+
+  $('sidebar-toggle').click();
+  $('new-session').click();
+  await flush();
+  assert.equal(document.body.classList.contains('sidebar-open'), false);
+  assert.equal(h.win.location.hash, '#/new');
+  assert.equal($('conversation').children.length, 0);
+  assert.equal($('prompt').value, '');
+  assert.equal($('preview').hidden, true);
+  assert.equal(qa($('session-list'), '[aria-current]').length, 0);
+  assert.equal($('exports').hidden, true);
+  $('new-session').click();   // already there: nothing to do, and nothing breaks
+  await flush();
+  assert.equal(h.win.location.hash, '#/new');
+});
+
+test('Delete asks once; a no changes nothing, a yes deletes, and deleting the open chat goes to the newest one left', async () => {
+  const h = harness({
+    sessions: [sess('s_c', 'C'), sess('s_b', 'B'), sess('s_a', 'A')],
+    routes: {
+      ...doneSession('s_c', 'C', 'm_c'), ...doneSession('s_b', 'B', 'm_b'), ...doneSession('s_a', 'A', 'm_a2'),
+      'DELETE /v1/sessions/s_b': () => { h.sessions = h.sessions.filter((s) => s.id !== 's_b'); return new Response(null, { status: 204 }); },
+      'DELETE /v1/sessions/s_c': () => { h.sessions = h.sessions.filter((s) => s.id !== 's_c'); return new Response(null, { status: 204 }); },
+    },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_c');
+  const deleteOf = (id) => q(qa($('session-list'), 'li').find((li) => li.getAttribute('data-session') === id), 'button.session-delete');
+  assert.equal(deleteOf('s_b').getAttribute('aria-label'), 'Delete chat: B');
+
+  h.answer = false;
+  deleteOf('s_b').click();
+  await flush();
+  assert.equal(h.confirms.length, 1);   // asked once
+  assert.match(h.confirms[0], /Delete "B"/);
+  assert.equal(h.fetch.to('DELETE', '/v1/sessions').length, 0);   // a no changes nothing
+
+  h.answer = true;
+  deleteOf('s_b').click();   // not the open chat: it just goes
+  await flush();
+  assert.equal(h.confirms.length, 2);
+  assert.equal(h.fetch.to('DELETE', '/v1/sessions/s_b').length, 1);
+  assert.deepEqual(qa($('session-list'), 'li').map((li) => li.getAttribute('data-session')), ['s_c', 's_a']);
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_c');   // still on C
+
+  const cleared = h.api.cleared;
+  deleteOf('s_c').click();   // the open chat: the view is reset and the newest one left is opened
+  await flush(12);
+  assert.equal(h.fetch.to('DELETE', '/v1/sessions/s_c').length, 1);
+  assert.ok(h.api.cleared > cleared);
+  assert.deepEqual(qa($('session-list'), 'li').map((li) => li.getAttribute('data-session')), ['s_a']);
+  assert.equal(h.win.replaced.at(-1), '#/s/s_a');
+});
+
+test('deleting the last chat leaves an empty New chat, and a delete the server refuses says why', async () => {
+  const h = harness({
+    sessions: [sess('s_b', 'B')],
+    routes: { ...doneSession('s_b', 'B', 'm_b'), 'DELETE /v1/sessions/s_b': () => refused(500, 'Could not delete.') },
+  });
+  await h.app.start();
+  await flush();
+  q($('session-list'), 'button.session-delete').click();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Could not delete.');
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_b');   // nothing was reset
+  h.fetch.calls.length = 0;
+  const handlers = { 'DELETE /v1/sessions/s_b': () => { h.sessions = []; return new Response(null, { status: 204 }); } };
+  Object.assign(h, { routes: handlers });
+  // a fresh harness that deletes: the session list is empty afterwards, so the page goes to an empty chat
+  const g = harness({ sessions: [sess('s_b', 'B')], routes: { ...doneSession('s_b', 'B', 'm_b'), 'DELETE /v1/sessions/s_b': () => { g.sessions = []; return new Response(null, { status: 204 }); } } });
+  await g.app.start();
+  await flush();
+  q($('session-list'), 'button.session-delete').click();
+  await flush(12);
+  assert.equal(g.win.replaced.at(-1), '#/new');
+  assert.equal($('conversation').children.length, 0);
+  assert.equal(qa($('session-list'), 'li').length, 0);
+  assert.equal($('exports').hidden, true);
+});
+
+test('deleting the open chat clears it from the screen at once, before the list is asked for again', async () => {
+  let release;
+  let hold = false;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = harness({
+    sessions: [sess('s_b', 'B')],
+    routes: {
+      ...doneSession('s_b', 'B', 'm_b'),
+      'GET /v1/sessions': async () => { if (hold) await gate; return { sessions: h.sessions, next_cursor: null }; },
+      'DELETE /v1/sessions/s_b': () => { h.sessions = []; return new Response(null, { status: 204 }); },
+    },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal($('conversation').children.length, 2);
+  assert.equal($('exports').hidden, false);
+  hold = true;
+  q($('session-list'), 'button.session-delete').click();
+  await flush();
+  assert.equal($('conversation').children.length, 0);   // a deleted chat is not left on screen while the list loads
+  assert.equal($('exports').hidden, true);               // and cannot be exported
+  release();
+  await flush(12);
+  assert.equal(h.win.replaced.at(-1), '#/new');
+});
+
+test('a delete that finds the chat already gone is not an error: the list is simply asked for again', async () => {
+  const h = harness({
+    sessions: [sess('s_b', 'B'), sess('s_a', 'A')],
+    routes: { ...doneSession('s_b', 'B', 'm_b'), 'DELETE /v1/sessions/s_a': () => refused(404, 'Session not found.', 'not_found_error') },
+  });
+  await h.app.start();
+  await flush();
+  const listed = h.fetch.to('GET', '/v1/sessions?').length;
+  h.sessions = [sess('s_b', 'B')];   // what the server says now: the other tab deleted it
+  const row = qa($('session-list'), 'li').find((li) => li.getAttribute('data-session') === 's_a');
+  q(row, 'button.session-delete').click();
+  await flush();
+  assert.equal($('notice').hidden, true);
+  assert.equal(h.fetch.to('GET', '/v1/sessions?').length, listed + 1);
+  assert.deepEqual(qa($('session-list'), 'li').map((li) => li.getAttribute('data-session')), ['s_b']);
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_b');
+});
+
+test('More pages the sidebar with the cursor, and the list that a refresh gives keeps the pages already loaded', async () => {
+  const h = harness({
+    sessions: [], routes: {
+      'GET /v1/sessions': (url) => (url.includes('cursor=c1') ? { sessions: [sess('s_old', 'old', 1, 1)], next_cursor: null }
+        : { sessions: [sess('s_b', 'B', 1, 3), sess('s_a', 'A', 1, 2)], next_cursor: 'c1' }),
+      ...doneSession('s_b', 'B', 'm_b'),
+    },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal($('session-more').hidden, false);
+  assert.equal($('session-more').textContent, 'More');
+  $('session-more').click();
+  await flush();
+  assert.deepEqual(qa($('session-list'), 'li').map((li) => li.getAttribute('data-session')), ['s_b', 's_a', 's_old']);
+  assert.equal(h.fetch.to('GET', '/v1/sessions?').at(-1).url, '/v1/sessions?limit=50&cursor=c1');
+  assert.equal($('session-more').hidden, true);
+  await h.app.refreshSessions();   // after a turn, say: three loaded, so ask for at least that many
+  assert.match(h.fetch.to('GET', '/v1/sessions?').at(-1).url, /^\/v1\/sessions\?limit=50$/);
+});
+
+test('a refresh asks for as many sessions as are loaded, so a long list is not cut back to one page', async () => {
+  const many = (top, n) => Array.from({ length: n }, (_, i) => sess(`s_${String(top - i).padStart(3, '0')}`, `chat ${top - i}`, 1, 3));
+  const h = harness({
+    hash: '#/new',
+    routes: { 'GET /v1/sessions': (url) => (url.includes('cursor=') ? { sessions: many(10, 10), next_cursor: null } : { sessions: many(60, 50), next_cursor: 'c1' }) },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal(qa($('session-list'), 'li').length, 50);
+  $('session-more').click();
+  await flush();
+  assert.equal(qa($('session-list'), 'li').length, 60);
+  await h.app.refreshSessions();
+  assert.equal(h.fetch.to('GET', '/v1/sessions?').at(-1).url, '/v1/sessions?limit=60');   // sixty are on screen: ask for sixty
+});
+
+// ---- exports ---------------------------------------------------------------------------------------------------------------------------
+
+test('Export fetches the export with the auth headers and saves it through a Blob link, then revokes the object URL', async () => {
+  const made = [];
+  const revoked = [];
+  const urls = { createObjectURL: (blob) => { made.push(blob); return 'blob:fake/export'; }, revokeObjectURL: (u) => { revoked.push(u); } };
+  const storage = memoryStorage({ [SETTINGS_KEY]: JSON.stringify({ token: 't0k' }) });
+  const h = harness({
+    storage, urls, sessions: [sess('s_a', 'A', 0)],
+    routes: {
+      ...EXISTING,
+      'GET /v1/sessions/s_a/export': (url) => new Response(url.endsWith('md') ? '# Session' : '{"session":{}}', {
+        status: 200, headers: { 'Content-Type': 'text/plain', 'Content-Disposition': `attachment; filename="session-s_a.${url.endsWith('md') ? 'md' : 'json'}"` } }),
+    },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal($('exports').hidden, false);
+  assert.deepEqual(texts(qa($('exports'), 'button')), ['Export JSON', 'Export Markdown']);
+  const clicked = [];
+  document.body.addEventListener('click', (e) => { if (e.target.localName === 'a') clicked.push(e.target); });
+  qa($('exports'), 'button')[0].click();
+  await flush();
+  const call = h.fetch.to('GET', '/v1/sessions/s_a/export')[0];
+  assert.equal(call.url, '/v1/sessions/s_a/export?format=json');
+  assert.equal(call.headers.Authorization, 'Bearer t0k');
+  assert.ok(call.headers['X-Client-Id']);
+  assert.equal(clicked.length, 1);
+  assert.equal(clicked[0].getAttribute('download'), 'session-s_a.json');
+  assert.equal(clicked[0].getAttribute('href'), 'blob:fake/export');
+  assert.equal(await made[0].text(), '{"session":{}}');
+  assert.equal(clicked[0].parentNode, null);   // the link was only there to click
+  assert.deepEqual(revoked, []);
+  h.timers.advance(1000);
+  assert.deepEqual(revoked, ['blob:fake/export']);   // revoked afterwards
+
+  qa($('exports'), 'button')[1].click();
+  await flush();
+  assert.equal(h.fetch.to('GET', '/v1/sessions/s_a/export').at(-1).url, '/v1/sessions/s_a/export?format=md');
+  assert.equal(clicked[1].getAttribute('download'), 'session-s_a.md');
+  assert.equal(await made[1].text(), '# Session');
+  h.timers.advance(1000);
+  assert.equal(revoked.length, 2);
+});
+
+test('an export the server refuses shows why and saves nothing', async () => {
+  const made = [];
+  const h = harness({
+    urls: { createObjectURL: (b) => { made.push(b); return 'blob:x'; }, revokeObjectURL() {} }, sessions: [sess('s_a', 'A', 0)],
+    routes: { ...EXISTING, 'GET /v1/sessions/s_a/export': () => refused(404, 'Session not found.', 'not_found_error') },
+  });
+  await h.app.start();
+  await flush();
+  qa($('exports'), 'button')[0].click();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Session not found.');
+  assert.deepEqual(made, []);
+});
+
+// ---- the health strip ------------------------------------------------------------------------------------------------------------------
+
+test('the strip says "server restarting…" while /healthz fails, backs off to 30 s after three failures, and is back at 10 s on the first answer', async () => {
+  let failing = false;
+  let down = 'status';
+  const h = harness({
+    routes: {
+      'GET /healthz': () => {
+        if (!failing) return { status: 'ok', mode: 'private', turns_in_flight: 1, queue_cap: 4 };
+        if (down === 'network') throw new TypeError('Failed to fetch');
+        return new Response('bad gateway', { status: 502 });
+      },
+    },
+  });
+  await h.app.start();
+  await flush();
+  const delays = () => h.timers.timeouts.map((t) => t.ms);
+  assert.equal($('health').textContent, 'private · 1 of 4 turns in flight');
+  assert.equal($('health').hasAttribute('data-state'), false);
+  assert.deepEqual(delays(), [10000]);
+
+  failing = true;
+  const check = async (ms) => { h.timers.advance(ms); await flush(); };
+  await check(10000);   // failure 1: a proxy answering 502
+  assert.equal($('health').textContent, 'server restarting…');
+  assert.equal($('health').getAttribute('data-state'), 'down');
+  assert.deepEqual(delays(), [10000]);
+  down = 'network';
+  await check(10000);   // failure 2: the connection itself
+  assert.deepEqual(delays(), [10000]);
+  await check(10000);   // failure 3
+  assert.equal($('health').textContent, 'server restarting…');
+  assert.deepEqual(delays(), [30000]);   // slower from here on
+  await check(29999);
+  assert.deepEqual(delays(), [30000]);   // not before
+  failing = false;
+  await check(1);
+  assert.equal($('health').textContent, 'private · 1 of 4 turns in flight');   // the first answer
+  assert.equal($('health').hasAttribute('data-state'), false);
+  assert.deepEqual(delays(), [10000]);   // and back to the quick pace
+  assert.equal(h.fetch.to('GET', '/healthz').length, 5);
+});
+
+test('the health text is written only when it changes, and a mode in it fills the badge', async () => {
+  let load = 0;
+  const h = harness({ routes: { 'GET /healthz': () => ({ status: 'ok', mode: 'public', turns_in_flight: load, queue_cap: 4 }) } });
+  await h.app.start();
+  await flush();
+  assert.equal($('mode-badge').textContent, 'private');   // /v1/models said private first; healthz carries the mode too
+  const strip = $('health');
+  let writes = 0;
+  let value = strip.textContent;
+  Object.defineProperty(strip, 'textContent', { get: () => value, set: (v) => { value = v; writes += 1; } });
+  h.timers.advance(10000);
+  await flush();
+  h.timers.advance(10000);
+  await flush();
+  assert.equal(writes, 0);   // the same answer twice: the live region is not poked
+  load = 2;
+  h.timers.advance(10000);
+  await flush();
+  assert.equal(writes, 1);
+  assert.equal(strip.textContent, 'public · 2 of 4 turns in flight');
+  assert.equal($('mode-badge').textContent, 'public');
+});
+
+// ---- scroll, focus, copy ---------------------------------------------------------------------------------------------------------------
+
+test('the page follows a streaming turn only while the reader is near the bottom of #conversation', async () => {
+  const h = await ready();
+  const conversation = $('conversation');
+  Object.assign(conversation, { clientHeight: 400, scrollHeight: 2000, scrollTop: 1600 });
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  assert.equal(conversation.scrollTop, 2000);   // a turn the user just sent is shown
+  conversation.scrollTop = 1550;   // 50 px from the end: still at the bottom
+  run.channel.push(events[0]);
+  await flush();
+  conversation.scrollTop = 1550;
+  nextFrame();
+  assert.equal(conversation.scrollTop, 2000);   // followed
+  conversation.scrollTop = 500;   // scrolled up to read something
+  run.channel.push(events[1]);
+  await flush();
+  nextFrame();
+  assert.equal(conversation.scrollTop, 500);   // not yanked back
+  run.channel.push(...events.slice(2));
+  run.channel.end();
+  await turn;
+  assert.equal(conversation.scrollTop, 500);   // not even by the last card
+});
+
+test('where the document scrolls (a short viewport) the newest card is scrolled into view, and only for a reader near the end', async () => {
+  const proto = Object.getPrototypeOf(document.createElement('div'));
+  const scrolled = [];
+  proto.scrollIntoView = function scrollIntoView(options) { scrolled.push([this.getAttribute('data-message-id') ?? this.getAttribute('class'), options]); };
+  try {
+    const h = await ready();
+    h.win.short = true;
+    document.documentElement = { scrollHeight: 3000, scrollTop: 0, clientHeight: 800 };
+    $('conversation').scrollTop = 0;
+    const events = fullTurn();
+    const turn = h.app.send();
+    await flush();
+    const run = h.api.streams[0];
+    run.accept('m_a');
+    await flush();
+    assert.deepEqual(scrolled.at(-1), ['m_a', { block: 'end' }]);   // the card the user just asked for
+    assert.equal($('conversation').scrollTop, 0);                    // #conversation is not the scroller here
+    const before = scrolled.length;
+    h.win.scrollY = 100;   // 3000 - 100 - 800 is far from the end: the reader is up the page
+    run.channel.push(events[0]);
+    await flush();
+    nextFrame();
+    assert.equal(scrolled.length, before);
+    h.win.scrollY = 2150;  // 50 px from the end
+    run.channel.push(events[1]);
+    await flush();
+    nextFrame();
+    assert.equal(scrolled.length, before + 1);
+    assert.deepEqual(scrolled.at(-1), ['m_a', { block: 'end' }]);
+    run.channel.push(...events.slice(2));
+    run.channel.end();
+    await turn;
+  } finally {
+    delete proto.scrollIntoView;
+    delete document.documentElement;
+  }
+});
+
+test('a card rebuilt mid-stream keeps focus on the same control; focus in another card or outside the cards is left alone', async () => {
+  const h = harness({ sessions: [sess('s_b', 'B', 1)], routes: { ...doneSession('s_b', 'B', 'm_b') } });
+  await h.app.start();
+  await flush();
+  attach(imageFile());
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_n');
+  await flush();
+  const events = fullTurn('m_n');
+  run.channel.push(...events.slice(0, 5));   // up to the end of encode: its stage has a detail, so a button
+  await flush();
+  nextFrame();
+  const cards = () => qa($('conversation'), 'article.card');
+  const [settled, live] = cards();
+  assert.equal(live.getAttribute('data-message-id'), 'm_n');
+  const encode = stageToggle(live, 'encode');
+  encode.focus();
+  assert.equal(document.activeElement, encode);
+  run.channel.push(events[5]);
+  await flush();
+  nextFrame();
+  const rebuilt = cards()[1];
+  assert.notEqual(rebuilt, live);   // the whole card was replaced
+  assert.equal(document.activeElement, stageToggle(rebuilt, 'encode'));   // and focus is on the same control of the new one
+
+  run.channel.push(...events.slice(6, 9));   // generate runs and the first snapshot arrives: the live card has a Show raw of its own now
+  await flush();
+  nextFrame();
+  assert.ok(buttonOf(cards()[1], 'Show raw'));
+  const raw = buttonOf(settled, 'Show raw');
+  raw.focus();
+  run.channel.push(events[9]);   // the report closes: the live card is rebuilt again, and gains its Copy
+  await flush();
+  nextFrame();
+  assert.ok(buttonOf(cards()[1], 'Copy'));
+  assert.equal(document.activeElement, raw);   // a control of another card keeps its focus, and is not taken by the live card's
+  $('prompt').focus();
+  run.channel.push(events[10]);
+  await flush();
+  nextFrame();
+  assert.equal(document.activeElement, $('prompt'));
+  run.channel.push(...events.slice(11));
+  run.channel.end();
+  await turn;
+});
+
+test('Copy in a card writes the report to the clipboard; with no clipboard it says "Copy failed"', async (t) => {
+  const timers = [];
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };
+  t.after(() => { globalThis.setTimeout = realSetTimeout; });
+  const h = harness({ sessions: [sess('s_b', 'B', 1)], routes: { ...doneSession('s_b', 'B', 'm_b') } });
+  await h.app.start();
+  await flush();
+  buttonOf(cardOf(), 'Copy').click();
+  await flush();
+  assert.deepEqual(h.win.copied, ['Findings: clear.']);
+  assert.equal(buttonOf(cardOf(), 'Copy').getAttribute('aria-label'), 'Copy report, turn 1');
+  h.win.navigator = {};
+  buttonOf(cardOf(), 'Copy').click();
+  await flush();
+  assert.equal(buttonOf(cardOf(), 'Copy failed').textContent, 'Copy failed');
+  const link = buttonOf(cardOf(), 'model details');
+  link.click();   // the provenance link opens the drawer at the models
+  assert.equal($('drawer').hidden, false);
+  assert.equal(document.activeElement, $('drawer-close'));
+});
+
+// ---- the composer (minimal) -----------------------------------------------------------------------------------------------------------------
+
+test('the image well opens the picker from a click, Enter and Space; a chosen file is previewed, replaceable and removable', async () => {
+  const made = [];
+  const revoked = [];
+  const urls = { createObjectURL: (blob) => { made.push(blob); return `blob:fake/${made.length}`; }, revokeObjectURL: (u) => { revoked.push(u); } };
+  const h = harness({ urls });
+  await h.app.start();
+  await flush();
+  let picks = 0;
+  $('file').addEventListener('click', () => { picks += 1; });
+  $('image-well').click();
+  assert.equal(picks, 1);
+  const enter = press($('image-well'), 'Enter');
+  const space = press($('image-well'), ' ');
+  assert.deepEqual([picks, enter.defaultPrevented, space.defaultPrevented], [3, true, true]);   // Space must not scroll the page
+  press($('image-well'), 'a');
+  press($('image-well'), 'Tab');
+  assert.equal(picks, 3);
+
+  attach(imageFile('x-ray.png', 'image/png', 51200));
+  assert.equal($('preview').hidden, false);
+  assert.equal(q($('preview'), 'img').getAttribute('src'), 'blob:fake/1');
+  assert.equal(q($('preview'), 'span').textContent, 'x-ray.png · 50 KB');
+  assert.equal(buttonOf($('preview'), 'Remove').getAttribute('aria-label'), 'Remove attached image');
+  assert.equal($('file').value, '');   // so choosing the same file again fires change again
+  attach(imageFile('second.jpg', 'image/jpeg', 100));
+  assert.equal(qa($('preview'), 'img').length, 1);   // replaced, not added
+  assert.equal(q($('preview'), 'span').textContent, 'second.jpg · 1 KB');
+  assert.deepEqual(revoked, ['blob:fake/1']);   // the first preview's object URL went with it
+  buttonOf($('preview'), 'Remove').click();
+  assert.equal($('preview').hidden, true);
+  assert.equal($('preview').children.length, 0);
+  assert.deepEqual(revoked, ['blob:fake/1', 'blob:fake/2']);
+  $('file').files = [];
+  change($('file'));   // a cancelled picker: nothing
+  assert.equal($('preview').hidden, true);
+});
+
+test('a file that cannot work is refused with a notice and not attached', async () => {
+  const h = harness();
+  await h.app.start();
+  await flush();
+  for (const [file, why] of [[imageFile('doc.pdf', 'application/pdf'), 'Choose a PNG, JPEG or WEBP image.'],
+                             [{ name: 'big.png', type: 'image/png', size: 21 * 1024 * 1024 }, 'The image is over the 20 MB limit.']]) {
+    attach(file);
+    assert.equal(q($('notice'), 'p').textContent, why);
+    assert.equal($('preview').hidden, true);
+  }
+  attach(imageFile('ok.png'));   // a good one clears the notice
+  assert.equal($('notice').hidden, true);
+  assert.equal($('preview').hidden, false);
+});
+
+test('a file dropped on the well or pasted into the note is attached; a file dropped elsewhere does not navigate the page; text is left alone', async () => {
+  const h = harness();
+  await h.app.start();
+  await flush();
+  const fire = (target, type, init) => { const e = new ShimEvent(type, { bubbles: true, cancelable: true, ...init }); target.dispatchEvent(e); return e; };
+  const files = { types: ['Files'], files: [imageFile('dropped.png')] };
+  const over = fire($('image-well'), 'dragover', { dataTransfer: files });
+  assert.equal(over.defaultPrevented, true);   // without it the browser would not let the drop happen here
+  assert.equal($('image-well').classList.contains('dragging'), true);
+  fire($('image-well'), 'dragleave', {});
+  assert.equal($('image-well').classList.contains('dragging'), false);
+  fire($('image-well'), 'dragover', { dataTransfer: files });
+  const dropped = fire($('image-well'), 'drop', { dataTransfer: files });
+  assert.equal(dropped.defaultPrevented, true);
+  assert.equal($('image-well').classList.contains('dragging'), false);
+  assert.match(q($('preview'), 'span').textContent, /^dropped\.png/);
+
+  const webImage = { types: ['text/uri-list', 'text/html'], files: [] };   // an image dragged from another web page: no file, but a link the browser would follow
+  assert.equal(fire($('image-well'), 'dragover', { dataTransfer: webImage }).defaultPrevented, true);
+  assert.equal(fire($('image-well'), 'drop', { dataTransfer: webImage }).defaultPrevented, true);   // dropped on the well it opens nothing
+  assert.match(q($('preview'), 'span').textContent, /^dropped\.png/);   // and attaches nothing
+  const elsewhere = fire($('conversation'), 'drop', { dataTransfer: { types: ['Files'], files: [imageFile('stray.png')] } });
+  assert.equal(elsewhere.defaultPrevented, true);   // the page stays on the chat instead of opening the file
+  assert.match(q($('preview'), 'span').textContent, /^dropped\.png/);   // and only the well attaches
+  assert.equal(fire($('prompt'), 'drop', { dataTransfer: { types: ['text/plain'], files: [] } }).defaultPrevented, false);   // text may be dropped into the note
+  assert.equal(fire($('prompt'), 'dragover', { dataTransfer: { types: ['text/plain'], files: [] } }).defaultPrevented, false);
+
+  buttonOf($('preview'), 'Remove').click();
+  const pasted = fire($('prompt'), 'paste', { clipboardData: { files: [imageFile('shot.png')] } });
+  assert.equal(pasted.defaultPrevented, true);
+  assert.match(q($('preview'), 'span').textContent, /^shot\.png/);
+  buttonOf($('preview'), 'Remove').click();
+  assert.equal(fire($('prompt'), 'paste', { clipboardData: { files: [] } }).defaultPrevented, false);   // text pastes as text
+  assert.equal(fire($('prompt'), 'paste', { clipboardData: { files: [imageFile('x.gif', 'image/gif')] } }).defaultPrevented, false);
+  assert.equal(fire($('prompt'), 'paste', {}).defaultPrevented, false);
+  assert.equal($('preview').hidden, true);
+});
+
+test('the page makes no request to any other origin and sets no style: every URL is a path of this server', async () => {
+  const h = harness({ sessions: [sess('s_b', 'B', 1)], routes: { ...doneSession('s_b', 'B', 'm_b'), 'GET /v1/sessions/s_b/export': new Response('{}', { status: 200 }) } });
+  await h.app.start();
+  await flush();
+  attach(imageFile());
+  const turn = h.app.send();
+  await flush();
+  h.api.streams[0].accept('m_a');
+  await flush();
+  h.api.streams[0].channel.push(...fullTurn());
+  h.api.streams[0].channel.end();
+  await turn;
+  for (const call of h.fetch.calls) assert.match(call.url, /^\/(?:v1|healthz)/, call.url);   // same origin, always a path
+  assert.equal(qa(document.body, '[style]').length, 0);
+});
+
+// ---- the module's own start-up ------------------------------------------------------------------------------------------------------------
+
+test('importing app.js starts nothing without a #composer on the page, and starts the app on a page that has one', async (t) => {
+  const asked = [];
+  const realFetch = globalThis.fetch;
+  const realSetTimeout = globalThis.setTimeout;
+  const realSetInterval = globalThis.setInterval;
+  globalThis.fetch = async (url) => { asked.push(String(url)); return new Response(JSON.stringify({ sessions: [], next_cursor: null, models: [] }), { status: 200 }); };
+  globalThis.setTimeout = () => 0;   // the health loop would keep this process alive for ever
+  globalThis.setInterval = () => 0;
+  const storage = memoryStorage();   // the page's own storage (and not node's, which warns when it is touched without a file)
+  const realStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', { value: storage, configurable: true, writable: true });
+  t.after(() => {
+    Object.assign(globalThis, { fetch: realFetch, setTimeout: realSetTimeout, setInterval: realSetInterval });
+    if (realStorage) Object.defineProperty(globalThis, 'localStorage', realStorage); else delete globalThis.localStorage;
+    installDom();
+  });
+
+  const logged = [];
+  const realError = console.error;
+  console.error = (...args) => logged.push(args);
+  t.after(() => { console.error = realError; });
+  installDom();   // a page with no composer: a test importing the helpers is this
+  await import('../../app/static/app.js?bare');
+  await flush();
+  assert.deepEqual(asked, []);
+  assert.deepEqual(logged, []);   // it did not start and fail either: starting on a page without the shell would throw
+  console.error = realError;
+
+  installDom();
+  buildPage();
+  await import('../../app/static/app.js?started');
+  await flush(12);
+  assert.ok(asked.includes('/v1/models'), `the app started and asked for the models: ${asked}`);
+  assert.ok(asked.some((u) => u.startsWith('/v1/sessions?')));
+  assert.ok(asked.includes('/healthz'));
+  assert.ok($('status'), 'it built its status region');
+  assert.equal($('drawer').children.length > 0, true);   // and the drawer
+  assert.equal($('image-well').getAttribute('role'), 'button');
+  assert.match(storage.data.get(CLIENT_KEY), /^[\x21-\x7e]{1,128}$/);   // it read the page's storage, and kept its client id there
+});
+
+// ---- keeping the keyboard's place when the page rebuilds what it was on -----------------------------------------------------------------------
+
+test('a rebuilt session list keeps focus on the same link or delete button, and the last More hands focus to its first new row', async () => {
+  const h = harness({
+    routes: {
+      'GET /v1/sessions': (url) => (url.includes('cursor=c1') ? { sessions: [sess('s_z', 'z', 1, 1), sess('s_y', 'y', 1, 1)], next_cursor: null }
+        : { sessions: [sess('s_b', 'B', 1, 3), sess('s_a', 'A', 1, 2)], next_cursor: 'c1' }),
+      ...doneSession('s_b', 'B', 'm_b'), ...doneSession('s_a', 'A', 'm_a2'),
+    },
+  });
+  await h.app.start();
+  await flush();
+  const rowOf = (id) => qa($('session-list'), 'li').find((li) => li.getAttribute('data-session') === id);
+  const link = rowOf('s_a').querySelector('a');
+  link.focus();
+  await h.app.refreshSessions();
+  const again = rowOf('s_a').querySelector('a');
+  assert.notEqual(again, link);   // the list was rebuilt
+  assert.equal(document.activeElement, again);
+  const del = rowOf('s_b').querySelector('button');
+  del.focus();
+  await h.app.refreshSessions();
+  assert.equal(document.activeElement, rowOf('s_b').querySelector('button'));
+  link.remove();
+  $('prompt').focus();
+  await h.app.refreshSessions();
+  assert.equal(document.activeElement, $('prompt'));   // focus elsewhere is left alone
+
+  $('session-more').focus();
+  assert.equal(document.activeElement, $('session-more'));
+  $('session-more').click();
+  await flush();
+  assert.equal($('session-more').hidden, true);   // the last page: the button is gone
+  assert.equal(document.activeElement, qa($('session-list'), 'li a')[2]);   // so focus goes to the first row it added
+  assert.equal(qa($('session-list'), 'li').length, 4);
+});
+
+test('dismissing a notice or removing the attached image does not leave focus on a control that has gone', async () => {
+  const h = harness();
+  await h.app.start();
+  await flush();
+  await h.app.send();   // no image: the notice
+  const dismiss = buttonOf($('notice'), '✕');
+  dismiss.focus();
+  dismiss.click();
+  assert.equal($('notice').hidden, true);
+  assert.equal(document.activeElement, $('prompt'));
+
+  attach(imageFile());
+  const remove = buttonOf($('preview'), 'Remove');
+  remove.focus();
+  remove.click();
+  assert.equal($('preview').hidden, true);
+  assert.equal(document.activeElement, $('image-well'));   // the control that brought the image in
+  $('prompt').focus();
+  attach(imageFile());
+  buttonOf($('preview'), 'Remove').click();
+  assert.equal(document.activeElement, $('prompt'));   // focus that was elsewhere stays there
+});

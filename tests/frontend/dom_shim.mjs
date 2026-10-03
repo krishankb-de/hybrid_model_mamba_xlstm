@@ -2,8 +2,9 @@
 //
 // It covers what app/static/render.js builds a card with: createElement and createTextNode; setAttribute,
 // getAttribute, hasAttribute, removeAttribute; append, replaceChildren, replaceWith, remove, contains, closest;
-// textContent (read, and write); classList; children; addEventListener with dispatchEvent and click, events bubbling
-// to the parents; querySelector and querySelectorAll over tag, #id, .class, [attr], [attr=value] and the descendant
+// textContent (read, and write); classList; children; hidden and disabled as properties that follow their attributes;
+// addEventListener with dispatchEvent and click, events bubbling to the parents; document.getElementById;
+// querySelector and querySelectorAll over tag, #id, .class, [attr], [attr=value] and the descendant
 // and child combinators; focus, blur and document.activeElement, with a browser's rules for what can be focused: a
 // button, an input, an enabled select or textarea, a link with an href, or anything with a tabindex, and only while
 // it is in the document (the body of the installed document) and neither it nor anything above it has the hidden
@@ -208,6 +209,8 @@ class ShimElement extends ShimNode {
   get className() { return this.getAttribute('class') ?? ''; }
   get hidden() { return this.hasAttribute('hidden'); }
   set hidden(on) { if (on) this.setAttribute('hidden', ''); else this.removeAttribute('hidden'); }
+  get disabled() { return this.hasAttribute('disabled'); }
+  set disabled(on) { if (on) this.setAttribute('disabled', ''); else this.removeAttribute('disabled'); }
 
   setAttribute(name, value) { this.attrs.set(String(name).toLowerCase(), String(value)); }
   getAttribute(name) { const k = String(name).toLowerCase(); return this.attrs.has(k) ? this.attrs.get(k) : null; }
@@ -284,6 +287,7 @@ export function createDocument() {
     createElement: (tag) => new ShimElement(tag),
     createTextNode: (data) => new ShimText(data),
     body,
+    getElementById: (id) => body.querySelector(`#${id}`),
     querySelector: (selector) => body.querySelector(selector),
     querySelectorAll: (selector) => body.querySelectorAll(selector),
     write: () => tripwire('document.write'),

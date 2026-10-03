@@ -1163,6 +1163,22 @@ test('detailTable keeps no show-more state of its own: without a store it starts
   assert.deepEqual([...store], []);
 });
 
+test('Copy is not offered while the report is provisional, so a "Copy failed" on its button cannot be lost to a mid-stream rebuild', () => {
+  const streaming = viewOf([START, stageStart('generate', 3), snapshot('Findings: so far')]);   // a snapshot: the best beam so far
+  assert.equal(streaming.provisional, true);
+  const card = renderAssistantCard(streaming, { copy() {}, showModels() {} });
+  assert.equal(button(card, 'Copy'), null);
+  assert.equal(qa(card, '[data-action="copy"]').length, 0);
+  assert.ok(button(card, 'Show raw'), 'the raw view is still offered');
+  assert.equal(q(card, '.report').getAttribute('class'), 'report provisional');
+  assert.equal(button(renderReport(streaming, { copy() {} }), 'Copy'), null);   // the same for the report on its own
+  const closed = viewOf([START, stageStart('generate', 3), snapshot('Findings: so far'), step('content_block_stop', { index: 0 })]);
+  assert.equal(closed.provisional, false);   // the report is final once its block closes, before the labels and scores are
+  assert.ok(button(renderAssistantCard(closed, { copy() {} }), 'Copy'));
+  assert.ok(button(renderAssistantCard(finished(), { copy() {} }), 'Copy'));
+  assert.equal(button(renderAssistantCard(finished(), {}), 'Copy'), null);   // and still none without a ctx.copy
+});
+
 // ---- focus hooks for the whole-card replace (M2) ---------------------------------------------------------------------
 
 test('Copy, Show raw, model details and show more carry a stable data-action, and a stage button its stage', () => {
