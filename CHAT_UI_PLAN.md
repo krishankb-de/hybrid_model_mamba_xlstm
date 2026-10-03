@@ -2464,7 +2464,7 @@ def test_curl_walkthrough_options_validate():
 
 Gate: in a browser on `--engine tiny`, a full turn streams; reload replays an identical card; JSON and Markdown exports open; `node --test` green; layout usable at 375 px.
 
-- [ ] **P4-A** `index.html` and `styles.css`: layout grid, banner, light/dark tokens, 375 px; served at `/` and `/static/*`.
+- [x] **P4-A** `index.html` and `styles.css`: layout grid, banner, light/dark tokens, 375 px; served at `/` and `/static/*`.
 
 **Files:** create `app/static/index.html`, `app/static/styles.css`; modify `app/server.py`; create `tests/test_app_static.py`.
 
@@ -2526,6 +2526,21 @@ def test_page_makes_no_external_requests():
 ```
 
 Commit `"P4-A: page shell + styles"`.
+
+*As built (P4-A, commits d98f4cb, 8fa8ecc; the code is authoritative where it differs from the HTML above):*
+- **Banner.** It is `<header class="banner">` with no `role`. The disclaimer sits in `<p class="disclaimer">`, and `#sidebar-toggle` (☰) comes first.
+- **Accessibility markup.**
+  - `#chips` has `role="group"`.
+  - The textarea has `aria-label="Note or command"`.
+  - `#settings` has `aria-expanded`.
+  - `#image-well` is named by its visible text.
+  - A `data:` favicon is set.
+- **Layout.**
+  - The narrow layout applies at ≤ 800 px. There the drawer is confined to the conversation row and the sidebar is off-canvas (`body.sidebar-open`).
+  - Chips sit on their own row, and the action row wraps.
+  - At ≤ 480 px height the document scrolls.
+- **Caching.** `/` and `/static/*` send `Cache-Control: no-cache`.
+- **Geometry check.** `scripts/chat_ui_layout_check.py` is a CDP geometry check: 88 cases, run locally, not by `validate.sh`.
 
 - [ ] **P4-B** `api.js` (SSE parser, stream, poll, cancel, image loader) and `state.js` (reducers, replay); `node --test` with a recorded fixture; `validate.sh` gains the node gate.
 
