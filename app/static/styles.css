@@ -1,0 +1,392 @@
+/* CXR report chat: the page shell (CHAT_UI_PLAN.md P4-A).
+ *
+ * Layout: the body is one grid, the banner over sidebar | conversation | drawer, with the composer under the
+ * conversation. .layout is display: contents so its three children and the composer share that grid. Each pane
+ * scrolls by itself and the document does not. Below 800 px the grid is one column; the sidebar and the drawer then
+ * overlay it, under the banner, which stays in view.
+ *
+ * Hooks the scripts use: the hidden attribute (drawer, preview, stop, viewer), body.sidebar-open (the off-canvas
+ * sidebar; a click on its scrim lands on the body), #image-well.dragging (P6-A), ol.timeline li[data-state] and
+ * li.open, .provisional, and the .card and .chip helpers (render.js).
+ *
+ * System fonts only and no url(): the page makes no request but to its own /static/ files.
+ */
+
+:root {
+  color-scheme: light dark;
+  --bg: #faf9f5;
+  --fg: #1f1e1d;
+  --muted: #66645e;
+  --accent: #b4472a;
+  --card: #ffffff;
+  --border: #dcd8cc;
+  --ok: #2b7a4b;
+  --warn: #8a5a00;
+  --bad: #b3261e;
+  --on-accent: #ffffff;   /* text on an accent fill */
+  --soft: #f0eee6;        /* hover and selected fill */
+  --control: #8a877e;     /* border of a form control: 3:1 against --bg and --card */
+  --shadow: 0 1px 2px rgba(31, 30, 29, 0.06), 0 6px 20px rgba(31, 30, 29, 0.06);
+  --scrim: rgba(31, 30, 29, 0.45);
+
+  --sidebar-w: 260px;
+  --drawer-w: 320px;
+  --column-w: 760px;
+  --gutter: 24px;
+  --radius: 12px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1f1e1d;
+    --fg: #ece9e1;
+    --muted: #a8a59c;
+    --accent: #e8926f;
+    --card: #2b2a28;
+    --border: #3e3c38;
+    --ok: #6fcf97;
+    --warn: #e0b04a;
+    --bad: #f08a80;
+    --on-accent: #1f1e1d;
+    --soft: #33312e;
+    --control: #85827a;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.35);
+    --scrim: rgba(0, 0, 0, 0.6);
+  }
+}
+
+/* ---- base ---------------------------------------------------------------------------------------------------- */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+[hidden] { display: none !important; }   /* an author display rule below would otherwise defeat the attribute */
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) auto;   /* auto: the drawer's own width, none while hidden */
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "banner  banner       banner"
+    "sidebar conversation drawer"
+    "sidebar composer     drawer";
+  height: 100vh;
+  height: 100dvh;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.5 var(--font);
+}
+
+.layout { display: contents; }
+
+a { color: var(--accent); text-underline-offset: 2px; }
+h1, h2, h3, h4 { margin: 0 0 8px; line-height: 1.3; }
+h1 { font-size: 1.25rem; }
+h2 { font-size: 1.125rem; }
+h3, h4 { font-size: 1rem; }
+p { margin: 0 0 8px; }
+pre, code { font-family: var(--mono); font-size: 0.875em; }
+pre { margin: 0; white-space: pre-wrap; }
+img { max-width: 100%; height: auto; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+th, td { padding: 4px 8px; border-top: 1px solid var(--border); text-align: left; vertical-align: top; }
+th { color: var(--muted); font-weight: 500; overflow-wrap: normal; }   /* a key keeps its width; the value wraps */
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+::placeholder { color: var(--muted); opacity: 1; }
+
+button {
+  min-height: 40px;
+  padding: 8px 14px;
+  border: 1px solid var(--control);
+  border-radius: 10px;
+  background: var(--card);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { background: var(--soft); }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+#conversation button { min-height: 32px; padding: 4px 10px; font-size: 0.875rem; }   /* Copy, Show raw: compact in a card */
+
+textarea, select, input:not([type]), input[type="text"], input[type="number"], input[type="password"],
+input[type="url"] {
+  max-width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--control);
+  border-radius: 10px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+}
+input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+
+/* ---- banner -------------------------------------------------------------------------------------------------- */
+
+.banner {
+  grid-area: banner;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  min-height: 40px;
+  padding: 6px var(--gutter);
+  border-bottom: 1px solid var(--border);
+  background: var(--soft);
+  background: color-mix(in srgb, var(--warn) 10%, var(--bg));
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+#mode-badge {
+  padding: 0 8px;
+  border: 1px solid var(--control);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+#health { margin-left: auto; color: var(--muted); font-weight: 400; }
+#mode-badge:empty, #health:empty { display: none; }
+
+#sidebar-toggle { display: none; }   /* shown below 800 px */
+#sidebar-toggle[aria-expanded="true"] { background: var(--soft); }
+
+/* ---- sidebar: sessions --------------------------------------------------------------------------------------- */
+
+#sidebar {
+  grid-area: sidebar;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 12px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  border-right: 1px solid var(--border);
+  background: var(--bg);
+}
+#new-session { width: 100%; font-weight: 600; }
+#session-list { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+#session-list a { display: block; padding: 8px 10px; border-radius: 8px; color: inherit; text-decoration: none; }
+#session-list a:hover, #session-list [aria-current], #session-list .active { background: var(--soft); }
+#session-list [aria-current], #session-list .active { font-weight: 600; }
+
+/* ---- conversation: a centred column of turns ------------------------------------------------------------------ */
+
+#conversation {
+  grid-area: conversation;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  min-height: 0;
+  padding: 24px var(--gutter) 16px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;   /* a long word or URL wraps instead of widening the page */
+}
+#conversation > * { flex: none; width: 100%; max-width: var(--column-w); margin-inline: auto; }
+
+#conversation:empty { align-items: center; justify-content: center; color: var(--muted); text-align: center; }
+#conversation:empty::before { content: "Attach a chest X-ray below to generate a report."; max-width: 28ch; font-size: 1.125rem; }
+
+.card {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 10px;
+  border: 1px solid var(--control);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+
+.provisional { color: var(--muted); font-style: italic; }   /* the best beam so far: earlier text can still change */
+
+.timeline { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; padding: 0; list-style: none; font-size: 0.8125rem; }
+.timeline > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted);
+}
+.timeline > li::before { content: "○"; }
+.timeline > li:has(> table) { cursor: pointer; }
+.timeline > li[data-state="running"] { border-color: var(--accent); color: var(--accent); }
+.timeline > li[data-state="running"]::before { content: "●"; }
+.timeline > li[data-state="done"] { color: var(--fg); }
+.timeline > li[data-state="done"]::before { content: "✓"; color: var(--ok); }
+.timeline > li[data-state="skipped"] { border-style: dashed; font-style: italic; }
+.timeline > li[data-state="skipped"]::before { content: "–"; }
+.timeline > li[data-state="error"] { border-color: var(--bad); color: var(--bad); }
+.timeline > li[data-state="error"]::before { content: "✕"; }
+.timeline > li > table { display: none; flex: 1 1 100%; }
+.timeline > li.open { flex: 1 1 100%; border-radius: var(--radius); }
+.timeline > li.open > table { display: table; }
+
+/* ---- composer: pinned under the conversation column ----------------------------------------------------------- */
+
+#composer {
+  grid-area: composer;
+  justify-self: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-areas:
+    "well  well     well  well"
+    "prev  prev     prev  prev"
+    "text  text     text  text"
+    "chips settings stop  send";
+  align-items: center;
+  width: min(100% - 2 * var(--gutter), var(--column-w));
+  max-height: 60vh;
+  max-height: 60dvh;
+  margin: 0 0 16px;
+  padding: 10px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+#image-well {
+  grid-area: well;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border: 1px dashed var(--control);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 0.875rem;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+}
+#image-well:hover, #image-well.dragging { border-color: var(--accent); background: var(--soft); color: var(--fg); }
+
+#preview { grid-area: prev; display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+#preview img { flex: none; width: 56px; height: 56px; object-fit: cover; border: 1px solid var(--border); border-radius: 8px; }
+#preview span { flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 0.8125rem; overflow-wrap: anywhere; }
+
+#prompt { grid-area: text; width: 100%; min-height: 3.25rem; max-height: 40vh; margin-bottom: 8px; resize: vertical; }
+
+#chips { grid-area: chips; display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; color: var(--muted); font-size: 0.75rem; overflow-wrap: anywhere; }
+#chips > * { padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; line-height: 1.6; }
+
+#composer > button { margin-left: 8px; white-space: nowrap; }   /* a margin, not a gap: the hidden Stop leaves no space */
+#settings { grid-area: settings; }
+#stop { grid-area: stop; border-color: var(--bad); color: var(--bad); }
+#send { grid-area: send; border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; }
+#send:hover:not(:disabled) { background: var(--accent); filter: brightness(1.1); }
+
+/* ---- drawer: settings, on the right --------------------------------------------------------------------------- */
+
+#drawer {
+  grid-area: drawer;
+  width: var(--drawer-w);
+  min-height: 0;
+  padding: 16px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  border-left: 1px solid var(--border);
+  background: var(--card);
+}
+#drawer label { display: block; margin-top: 12px; }
+#drawer select, #drawer textarea, #drawer input:not([type="checkbox"]):not([type="radio"]) {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+}
+
+/* ---- viewer: a full-pane overlay under the banner; P6-E fills it ---------------------------------------------- */
+
+#viewer {
+  grid-area: 2 / 1 / -1 / -1;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #0b0b0a;   /* dark in both themes: an X-ray is read against a dark ground */
+  color: #ece9e1;
+}
+
+/* ---- narrow: one column, the sidebar and the drawer overlay it ------------------------------------------------ */
+
+@media (max-width: 800px) {
+  :root { --gutter: 16px; }
+
+  body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "banner"
+      "conversation"
+      "composer";
+  }
+
+  #sidebar-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    margin: -4px 0 -4px -6px;
+    padding: 0;
+    background: transparent;
+    font-size: 1.25rem;
+    line-height: 1;
+  }
+
+  #composer {   /* the chips take a row of their own: beside three buttons they would be a sliver */
+    grid-template-areas:
+      "well  well     well  well"
+      "prev  prev     prev  prev"
+      "text  text     text  text"
+      "chips chips    chips chips"
+      ".     settings stop  send";
+  }
+  #chips:not(:empty) { margin-bottom: 8px; }
+
+  #sidebar, #drawer { grid-area: 2 / 1 / -1 / 2; z-index: 30; box-shadow: var(--shadow); }
+
+  #sidebar {
+    justify-self: start;
+    width: min(var(--sidebar-w), 85%);
+    transform: translateX(-100%);
+    visibility: hidden;   /* off-canvas and out of the tab order until body.sidebar-open */
+  }
+  body.sidebar-open #sidebar { transform: none; visibility: visible; }
+  body.sidebar-open::after { content: ""; grid-area: 2 / 1 / -1 / 2; z-index: 25; background: var(--scrim); }
+
+  #drawer { justify-self: end; width: min(var(--drawer-w), 100%); }
+}
+
+/* ---- motion: none for a reader who asked for less ------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: no-preference) {
+  #sidebar { transition: transform 0.2s ease, visibility 0.2s; }
+  .timeline > li[data-state="running"]::before { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+}
