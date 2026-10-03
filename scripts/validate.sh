@@ -13,7 +13,8 @@
 # Gates, in order:
 #   1. Hydra config invariants for the 70M models
 #   2. pytest -m "not cuda and not slow"
-#   2b. node --test tests/frontend (CHAT_UI_PLAN.md P4-B; skipped with a warning when node is missing)
+#   2b. node --test tests/frontend (CHAT_UI_PLAN.md P4-B; skipped, with a warning and a SUMMARY line, when node is
+#       missing or older than 22.7 / 20.19)
 #   3. model import + CPU forward/backward over all five mixer types, every parameter gets a grad
 #
 # The interpreter is the first of: $PYTHON, ./.venv (cluster), ./venv (laptop), python3.
@@ -35,14 +36,16 @@ fi
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 PASS_TAG="[${GREEN}PASS${NC}]"; FAIL_TAG="[${RED}FAIL${NC}]"; WARN_TAG="[${YELLOW}WARN${NC}]"
-declare -a SUMMARY_PASS=() SUMMARY_FAIL=()
+declare -a SUMMARY_PASS=() SUMMARY_FAIL=() SUMMARY_SKIP=()
 gate_pass() { SUMMARY_PASS+=("$1"); echo -e "${PASS_TAG} $1"; }
 gate_fail() { SUMMARY_FAIL+=("$1"); echo -e "${FAIL_TAG} $1"; }
+gate_skip() { SUMMARY_SKIP+=("$1"); echo -e "${WARN_TAG} $1"; }   # not run, not a failure: still listed in the SUMMARY
 
 print_summary() {
   echo ""
   echo "════════════════════════ SUMMARY ════════════════════════"
   for p in "${SUMMARY_PASS[@]:-}"; do [[ -n "$p" ]] && echo -e "  ${PASS_TAG} $p"; done
+  for w in "${SUMMARY_SKIP[@]:-}"; do [[ -n "$w" ]] && echo -e "  ${WARN_TAG} $w"; done
   for f in "${SUMMARY_FAIL[@]:-}"; do [[ -n "$f" ]] && echo -e "  ${FAIL_TAG} $f"; done
   echo "═════════════════════════════════════════════════════════"
   if [[ ${#SUMMARY_FAIL[@]} -gt 0 ]]; then
@@ -102,14 +105,27 @@ else
   gate_fail "pytest: one or more tests failed"
 fi
 
-# ── Gate 2b: frontend parsers (node --test) — CHAT_UI_PLAN.md P4-B ──────────
+# ── Gate 2b: frontend tests (node --test) — CHAT_UI_PLAN.md P4-B ────────────
+# app/static/*.js has no package.json (everything there is served publicly), so node must detect ES-module syntax itself:
+# it does from 22.7, and from 20.19 on the 20 line. A node that is missing, older, or without tests to run skips the gate
+# with a WARN that also lands in the SUMMARY (tests/test_validate_node_gate.py runs this block under a fake node).
 echo ""
 echo "── Gate 2b: node --test tests/frontend ──"
-if command -v node >/dev/null 2>&1 && compgen -G "${REPO_ROOT}/tests/frontend/*.test.mjs" >/dev/null; then
-  if node --test "${REPO_ROOT}"/tests/frontend/*.test.mjs 2>&1; then gate_pass "node: frontend tests passed"
-  else gate_fail "node: frontend tests failed"; fi
+if ! command -v node >/dev/null 2>&1; then
+  gate_skip "node: frontend tests skipped (node not found)"
+elif ! compgen -G "${REPO_ROOT}/tests/frontend/*.test.mjs" >/dev/null; then
+  gate_skip "node: frontend tests skipped (no tests/frontend/*.test.mjs)"
 else
-  echo -e "${WARN_TAG} node not found or no tests/frontend/*.test.mjs — skipped"
+  NODE_VERSION="$(node --version 2>/dev/null)"
+  NODE_MAJOR="${NODE_VERSION#v}"; NODE_MAJOR="${NODE_MAJOR%%.*}"
+  NODE_MINOR="${NODE_VERSION#v*.}"; NODE_MINOR="${NODE_MINOR%%.*}"
+  if [[ "${NODE_MAJOR}" =~ ^[0-9]+$ && "${NODE_MINOR}" =~ ^[0-9]+$ ]] &&
+     (( NODE_MAJOR > 22 || (NODE_MAJOR == 22 && NODE_MINOR >= 7) || (NODE_MAJOR == 20 && NODE_MINOR >= 19) )); then
+    if node --test --test-timeout=30000 "${REPO_ROOT}"/tests/frontend/*.test.mjs 2>&1; then gate_pass "node: frontend tests passed"
+    else gate_fail "node: frontend tests failed"; fi
+  else
+    gate_skip "node: frontend tests skipped (node '${NODE_VERSION}' cannot load ES modules without a package.json: needs 22.7+ or 20.19+)"
+  fi
 fi
 
 # ── Gate 3: model import + CPU forward/backward smoke ────────────────────────

@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
   authHeaders, cancelMessage, clearImageCache, loadImage, parseSSE, pollMessage, streamTurn,
 } from '../../app/static/api.js';
-import { applyEvent, initialView, replay } from '../../app/static/state.js';
+import { STAGES, applyEvent, initialView, labelsPending, replay, stageState } from '../../app/static/state.js';
 
 test('a frame split across chunks reassembles', () => {
   const whole = 'event: stage_start\ndata: {"seq":1,"stage":"encode"}\n\n';
@@ -75,6 +75,18 @@ function stubFetch(t, respond) {
   return calls;
 }
 
+// Notes every delay a timer is asked for and skips it, so a backoff of seconds costs a test nothing.
+function skipWaits(t) {
+  const waits = [];
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    waits.push(ms);
+    return realSetTimeout(fn, 0, ...args);
+  };
+  t.after(() => { globalThis.setTimeout = realSetTimeout; });
+  return waits;
+}
+
 // A response body the test feeds by hand: a turn can sit queued with its headers sent and no byte of body.
 function openStream() {
   let controller;
@@ -95,6 +107,19 @@ test('parseSSE: data without a space, other fields skipped, a bare frame is "mes
   assert.deepEqual(events, [{ event: 'warning', data: { seq: 2 } }]);
   assert.equal(rest, 'event: stage_st');
   assert.deepEqual(parseSSE('data: {"seq":3}\n\n').events, [{ event: 'message', data: { seq: 3 } }]);
+});
+
+test('parseSSE skips a frame whose data is not JSON, a bare "data:" included, and keeps the frames around it', () => {
+  const { events, rest } = parseSSE(
+    'data: {"seq":1}\n\nevent: x\ndata: {oops\n\ndata:\n\nevent: y\ndata: not json at all\n\ndata: {"seq":5}\n\nevent: tail');
+  assert.deepEqual(events, [{ event: 'message', data: { seq: 1 } }, { event: 'message', data: { seq: 5 } }]);
+  assert.equal(rest, 'event: tail');   // the unfinished frame is still the rest
+  assert.deepEqual(parseSSE('data:\n\n').events, []);   // a bare data: alone is not an event, and not an error
+});
+
+test('parseSSE reads event: and data: without the space after the colon', () => {
+  const { events } = parseSSE('event:warning\ndata:{"seq":4}\n\nevent:  stage_end  \ndata:  {"seq":5}\n\n');
+  assert.deepEqual(events, [{ event: 'warning', data: { seq: 4 } }, { event: 'stage_end', data: { seq: 5 } }]);
 });
 
 test('authHeaders sends the bearer token and the client id only when there are some', () => {
@@ -119,6 +144,14 @@ test('the recorded turn is a gap-free log that folds into the view the card show
   assert.deepEqual([view.report, view.displayReport, view.truncated, view.totalMs],
                    [stop.report, stop.display_report, stop.truncated_mid_sentence, stop.total_ms]);
   assert.deepEqual([view.provisional, view.error, view.notices], [false, null, []]);
+
+  // A skipped stage contributes nothing to the fields derived from its detail. The recording has no gallery, labeler
+  // or reference, so retrieve, label and score all end skipped, and none of them leaves a truthy empty value behind.
+  assert.deepEqual([view.stages.retrieve.state, view.stages.label.state, view.stages.score.state],
+                   ['skipped', 'skipped', 'skipped']);
+  assert.deepEqual([view.neighbors, view.matches, view.trueRank], [[], [], null]);
+  assert.deepEqual([view.labels, view.agreement, view.score], [null, null, null]);
+  assert.deepEqual(STAGES, Object.keys(view.stages));   // the contract order the timeline draws
 
   const firstSnapshot = log.find((e) => e.event === 'content_block_delta');   // a reload in the middle of the turn
   const midway = replay(log.slice(0, log.indexOf(firstSnapshot) + 1));
@@ -190,12 +223,16 @@ test('a cancelled turn with no content_block_stop ends aborted, keeps its partia
   const view = assertSettled([...partial, ev(last.data.seq + 1, 'message_stop', stopOf(id, 'aborted'))]);
   assert.deepEqual([view.status, view.report, view.displayReport, view.truncated, view.error],
                    ['aborted', last.data.delta.text, last.data.delta.text, false, null]);
-  // The log never ended generate and the reducer invents nothing: a stage keeps the state its last event gave it, so
-  // render.js must not show it as running once view.status says the turn is over.
-  assert.deepEqual(view.stages.generate, { state: 'running' });
+  // The log never ended generate, so what the timeline shows comes from stageState: the stages that finished stay as
+  // they were, and the one the Stop caught and the ones it never reached are closed as stopped.
+  const stopped = { state: 'skipped', skipped: 'stopped' };
+  assert.deepEqual(STAGES.map((s) => stageState(view, s)),
+                   [view.stages.preprocess, view.stages.encode, view.stages.retrieve, stopped, stopped, stopped]);
+  assert.equal(stageState(midway, 'generate').state, 'running');   // the same log while the turn was still going
 
   const queued = assertSettled([log[0], ev(2, 'message_stop', stopOf(id, 'aborted'))]);   // stopped while still queued
   assert.deepEqual([queued.status, queued.report, queued.stages], ['aborted', '', {}]);
+  assert.deepEqual(STAGES.map((s) => stageState(queued, s)), STAGES.map(() => stopped));
 });
 
 test('an error event then message_stop(error) keeps the error on a settled view', () => {
@@ -210,6 +247,52 @@ test('an error event then message_stop(error) keeps the error on a settled view'
 
   const view = assertSettled([...failing, ev(seq + 2, 'message_stop', stopOf(id, 'error'))]);
   assert.deepEqual([view.status, view.error, view.report], ['error', failure.error, partial.at(-1).data.delta.text]);
+  const notRun = { state: 'skipped', skipped: 'not_run' };   // generate was the stage that failed
+  assert.deepEqual(STAGES.map((s) => stageState(view, s)),
+                   [view.stages.preprocess, view.stages.encode, view.stages.retrieve, { state: 'error' }, notRun, notRun]);
+});
+
+// ---- stageState and labelsPending: what the timeline and the label chips show -----------------------------------------
+
+test('stageState closes what an aborted or failed turn left running or pending, and nothing else', () => {
+  const records = {   // what view.stages holds for the stage under test; undefined: the log never mentioned it
+    pending: undefined,
+    running: { state: 'running' },
+    done: { state: 'done', ms: 12.5, detail: { tokens: 16 } },
+    skipped: { state: 'skipped', skipped: 'gallery_unavailable' },
+  };
+  const stopped = { state: 'skipped', skipped: 'stopped' };
+  const notRun = { state: 'skipped', skipped: 'not_run' };
+  const expected = {   // turn status -> stage record -> what stageState says
+    running: { pending: { state: 'pending' }, running: records.running, done: records.done, skipped: records.skipped },
+    done: { pending: { state: 'pending' }, running: records.running, done: records.done, skipped: records.skipped },
+    aborted: { pending: stopped, running: stopped, done: records.done, skipped: records.skipped },
+    error: { pending: notRun, running: { state: 'error' }, done: records.done, skipped: records.skipped },
+  };
+  for (const [status, row] of Object.entries(expected)) {
+    for (const [kind, want] of Object.entries(row)) {
+      const stages = kind === 'pending' ? {} : { generate: records[kind] };
+      const view = deepFreeze({ ...initialView('m1'), status, stages });   // frozen: the selector must not write to it
+      assert.deepEqual(stageState(view, 'generate'), want, `a ${status} turn, a ${kind} stage`);
+    }
+  }
+});
+
+test('stageState and STAGES name the six stages in contract order', () => {
+  assert.deepEqual(STAGES, ['preprocess', 'encode', 'retrieve', 'generate', 'label', 'score']);
+  assert.deepEqual(STAGES.map((s) => stageState(initialView('m1'), s)), STAGES.map(() => ({ state: 'pending' })));
+});
+
+test('labelsPending is true only while the turn runs and the label stage has not ended', () => {
+  const view = (status, label) => ({ ...initialView('m1'), status, stages: label ? { label } : {} });
+  assert.equal(labelsPending(view('running')), true);                                          // not reached yet
+  assert.equal(labelsPending(view('running', { state: 'running' })), true);                    // labelling now
+  assert.equal(labelsPending(view('running', { state: 'done', ms: 5, detail: {} })), false);
+  assert.equal(labelsPending(view('running', { state: 'skipped', skipped: 'label_off' })), false);
+  for (const status of ['done', 'aborted', 'error']) {
+    assert.equal(labelsPending(view(status)), false, `a ${status} turn`);
+    assert.equal(labelsPending(view(status, { state: 'running' })), false, `a ${status} turn, label still running`);
+  }
 });
 
 test('warnings accumulate in arrival order and do not end or stage anything', () => {
@@ -254,6 +337,31 @@ test('retrieve, label and score details land in their view fields; a skipped sta
   assert.equal(applyEvent(initialView('m2'), end(1, 'label', {})).labels, null);
 });
 
+test('a skipped retrieve, label or score stage contributes nothing to the fields derived from its detail', () => {
+  const skip = (seq, stage, reason) => ev(seq, 'stage_end', { stage, skipped: reason });
+  let view = initialView('m1');
+  view = applyEvent(view, skip(1, 'retrieve', 'gallery_unavailable'));
+  view = applyEvent(view, skip(2, 'label', 'labeler_unavailable'));
+  view = applyEvent(view, skip(3, 'score', 'no_reference'));
+  assert.deepEqual([view.neighbors, view.matches, view.trueRank], [[], [], null]);
+  assert.deepEqual([view.labels, view.agreement, view.score], [null, null, null]);   // null, not {}: {} is truthy
+  assert.deepEqual([view.stages.retrieve, view.stages.label, view.stages.score], [
+    { state: 'skipped', skipped: 'gallery_unavailable' }, { state: 'skipped', skipped: 'labeler_unavailable' },
+    { state: 'skipped', skipped: 'no_reference' },
+  ]);
+  const done = applyEvent(initialView('m2'), ev(1, 'stage_end', { stage: 'score', ms: 2, detail: { rouge_l: 0.2 } }));
+  assert.deepEqual(done.score, { rouge_l: 0.2 });   // a stage that ran still fills its field
+
+  // Skipped means nothing is read from it, whatever else the event carries.
+  const stray = (seq, stage, detail) => ev(seq, 'stage_end', { stage, skipped: 'not_run', detail });
+  view = applyEvent(initialView('m3'), stray(1, 'retrieve', { image_neighbors: [{ rank: 1 }], report_matches: [{ rank: 1 }],
+                                                                 true_report_rank: { rank: 1 } }));
+  view = applyEvent(view, stray(2, 'label', { chexbert_14: { Cardiomegaly: 1 }, neighbor_agreement: [{ rank: 1 }] }));
+  view = applyEvent(view, stray(3, 'score', { rouge_l: 0.9 }));
+  assert.deepEqual([view.neighbors, view.matches, view.trueRank, view.labels, view.agreement, view.score],
+                   [[], [], null, null, null, null]);
+});
+
 // ---- pollMessage -------------------------------------------------------------------------------------------------
 
 test('pollMessage yields each stored event once, in order, and stops when the turn is no longer running', async (t) => {
@@ -289,13 +397,7 @@ test('pollMessage resumes after the seq it is given', async (t) => {
 });
 
 test('pollMessage waits 500 ms between polls unless told otherwise', async (t) => {
-  const waits = [];
-  const realSetTimeout = globalThis.setTimeout;
-  globalThis.setTimeout = (fn, ms, ...args) => {   // note the wait, skip it
-    waits.push(ms);
-    return realSetTimeout(fn, 0, ...args);
-  };
-  t.after(() => { globalThis.setTimeout = realSetTimeout; });
+  const waits = skipWaits(t);
   stubFetch(t, (n) => json({ id: 'm1', status: n < 3 ? 'running' : 'done', events: [] }));
   assert.deepEqual(await drain(pollMessage({ messageId: 'm1' })), []);
   assert.deepEqual(waits, [500, 500]);
@@ -350,6 +452,109 @@ test('pollMessage throws a refusal with its status and parsed body', async (t) =
   await assert.rejects(drain(pollMessage({ messageId: 'nope', intervalMs: 1 })), refusedWith(404, gone));
 });
 
+// ---- pollMessage riding out failures (D7: it is the fallback when the stream drops, so it must outlast a flap) ------
+
+const netDown = () => { throw new TypeError('fetch failed'); };   // what fetch throws when the connection cannot be made
+const polled = (calls) => calls.map((c) => c.url.split('?')[1]);   // the query string of each request
+const page = (status, events = []) => json({ id: 'm1', status, events });
+
+test('pollMessage rides out two network errors and a 502: every event arrives once, asked for after the same seq', async (t) => {
+  const row = (seq, event) => ({ seq, event, data: { seq } });
+  const stored = [row(1, 'message_start'), row(2, 'stage_start'), row(3, 'stage_end'), row(4, 'message_stop')];
+  const steps = [
+    () => page('running', [stored[0], stored[1]]),
+    netDown,
+    netDown,
+    () => new Response('<html>Bad Gateway</html>', { status: 502 }),   // a proxy's page, not the server's JSON
+    () => page('done', [stored[2], stored[3]]),
+  ];
+  const calls = stubFetch(t, (n) => steps[n - 1]());
+  const got = await drain(pollMessage({ messageId: 'm1', intervalMs: 1, maxBackoffMs: 4 }));
+  assert.deepEqual(got, stored.map(({ event, data }) => ({ event, data })));   // nothing lost, nothing twice
+  assert.deepEqual(polled(calls), ['after=0', 'after=2', 'after=2', 'after=2', 'after=2']);
+});
+
+test('pollMessage retries 429, 502, 503 and 504', async (t) => {
+  let status;
+  const calls = stubFetch(t, (n) => (n % 2 === 1 ? json(envelope('overloaded_error', 'busy'), status) : page('done')));
+  for (status of [429, 502, 503, 504]) {
+    calls.length = 0;
+    assert.deepEqual(await drain(pollMessage({ messageId: 'm1', intervalMs: 1, maxBackoffMs: 2 })), []);
+    assert.equal(calls.length, 2, `after a ${status}`);   // refused once, then asked again
+  }
+});
+
+test('pollMessage throws at once on 400, 401, 403, 404, 422 and 500, with the status and the parsed body', async (t) => {
+  const waits = skipWaits(t);
+  let status;
+  const calls = stubFetch(t, () => json(envelope('some_error', `refused with ${status}`), status));
+  for (status of [400, 401, 403, 404, 422, 500]) {
+    calls.length = 0;
+    await assert.rejects(drain(pollMessage({ messageId: 'm1' })), refusedWith(status, envelope('some_error', `refused with ${status}`)));
+    assert.equal(calls.length, 1, `a ${status} is final`);
+  }
+  assert.deepEqual(waits, []);   // and no backoff was waited
+});
+
+test('pollMessage gives up after 20 consecutive failures and throws the last one', async (t) => {
+  let respond = netDown;
+  const calls = stubFetch(t, () => respond());
+  await assert.rejects(drain(pollMessage({ messageId: 'm1', intervalMs: 1, maxBackoffMs: 2 })), TypeError);
+  assert.equal(calls.length, 20);
+
+  const busy = envelope('overloaded_error', 'busy');   // an HTTP failure keeps its status and body when it is given up on
+  respond = () => json(busy, 503);
+  calls.length = 0;
+  await assert.rejects(drain(pollMessage({ messageId: 'm1', intervalMs: 1, maxBackoffMs: 2 })), refusedWith(503, busy));
+  assert.equal(calls.length, 20);
+});
+
+test('a successful poll resets the failure count', async (t) => {
+  const plan = [...Array(19).fill('fail'), 'running', ...Array(19).fill('fail'), 'done'];   // never 20 in a row
+  const calls = stubFetch(t, (n) => (plan[n - 1] === 'fail' ? netDown() : page(plan[n - 1])));
+  assert.deepEqual(await drain(pollMessage({ messageId: 'm1', intervalMs: 1, maxBackoffMs: 2 })), []);
+  assert.equal(calls.length, plan.length);
+});
+
+test('pollMessage backs off 500, 1000, 2000, 4000 and then 5000 ms, and starts over after a success', async (t) => {
+  const waits = skipWaits(t);
+  const plan = ['fail', 'fail', 'fail', 'fail', 'fail', 'fail', 'running', 'fail', 'done'];
+  stubFetch(t, (n) => (plan[n - 1] === 'fail' ? netDown() : page(plan[n - 1])));
+  await drain(pollMessage({ messageId: 'm1' }));
+  // six failures, the normal wait after the success, then the first backoff again (5000 if the count had not reset)
+  assert.deepEqual(waits, [500, 1000, 2000, 4000, 5000, 5000, 500, 500]);
+});
+
+test('pollMessage ends quietly when its signal aborts during a backoff wait, and leaves no timer behind', async (t) => {
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  const [realSetTimeout, realClearTimeout] = [globalThis.setTimeout, globalThis.clearTimeout];
+  const backoffTimers = new Set();   // the one-minute backoff's timer, until it fires or is cleared
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    const handle = realSetTimeout((...a) => { backoffTimers.delete(handle); fn(...a); }, ms, ...args);
+    if (ms === 60_000) backoffTimers.add(handle);
+    return handle;
+  };
+  globalThis.clearTimeout = (handle) => { backoffTimers.delete(handle); realClearTimeout(handle); };
+  t.after(() => {
+    process.off('unhandledRejection', onUnhandled);
+    [globalThis.setTimeout, globalThis.clearTimeout] = [realSetTimeout, realClearTimeout];
+  });
+  const calls = stubFetch(t, netDown);
+
+  const ctl = new AbortController();
+  const next = pollMessage({ messageId: 'm1', signal: ctl.signal, intervalMs: 60_000, maxBackoffMs: 60_000 }).next();   // fails, backs off
+  await until(() => backoffTimers.size === 1);
+  ctl.abort();
+  assert.deepEqual(await next, { value: undefined, done: true });
+  assert.equal(backoffTimers.size, 0);
+  assert.equal(calls.length, 1);   // it did not try again
+  await tick();
+  await tick();
+  assert.deepEqual(unhandled, []);
+});
+
 // ---- streamTurn and cancelMessage --------------------------------------------------------------------------------
 
 test('streamTurn reports X-Message-Id before any body byte, then yields the parsed events', async (t) => {
@@ -390,6 +595,33 @@ test('streamTurn reports X-Message-Id before any body byte, then yields the pars
   assert.deepEqual(events.map((e) => e.data.seq), [1, 2, 3]);
   assert.equal(events[1].data.delta.text, 'No acute — change');
   assert.deepEqual(ids, ['msg_1']);   // once
+});
+
+test('streamTurn cancels the response body when the consumer stops early or onMessageId throws', async (t) => {
+  const cancelled = [];
+  const openBody = () => new ReadableStream({   // one frame, then it stays open like a turn still running
+    start(c) { c.enqueue(new TextEncoder().encode(wire('message_start', { seq: 1, message_id: 'm1' }))); },
+    cancel(reason) { cancelled.push(reason); },
+  });
+  stubFetch(t, () => new Response(openBody(), { status: 200, headers: { 'X-Message-Id': 'm1' } }));
+
+  for await (const e of streamTurn({ sessionId: 's1', form: new FormData() })) {   // leaves without aborting
+    assert.equal(e.event, 'message_start');
+    break;
+  }
+  assert.equal(cancelled.length, 1);   // the connection is closed, not left open until the server ends the turn
+
+  const boom = new Error('onMessageId failed');
+  const turn = streamTurn({ sessionId: 's1', form: new FormData(), onMessageId: () => { throw boom; } });
+  await assert.rejects(drain(turn), (err) => err === boom);   // the error is the consumer's own, and comes out
+  assert.equal(cancelled.length, 2);   // the body is released all the same
+});
+
+test('streamTurn goes on after a frame that is not JSON', async (t) => {
+  const body = wire('message_start', { seq: 1, message_id: 'm1' }) + 'event: x\ndata: {oops\n\n' + wire('message_stop', { seq: 3 });
+  stubFetch(t, () => new Response(body, { status: 200 }));
+  const got = await drain(streamTurn({ sessionId: 's1', form: new FormData() }));
+  assert.deepEqual(got.map((e) => e.event), ['message_start', 'message_stop']);
 });
 
 test('streamTurn throws a 422 with the parsed body, never reports an id, and tolerates a body that is not JSON', async (t) => {
@@ -447,6 +679,28 @@ test('loadImage fetches once with the auth headers for concurrent calls, and cle
   assert.deepEqual(revoked.sort(), ['blob:test/0', 'blob:test/1', 'blob:test/2']);   // every object URL, at once
   await loadImage(thumb, auth);
   assert.equal(calls.length, 4);   // the cache really was emptied
+});
+
+test('loadImage takes a same-origin path only, so the bearer token never reaches another URL', async (t) => {
+  stubObjectUrls(t);
+  const calls = stubFetch(t, () => new Response(new Blob(['png'])));
+  const auth = { token: 'tok', clientId: 'cid' };
+  const refused = [
+    'https://evil.example/x.png', 'http://evil.example/x.png', '//evil.example/x.png',   // another origin
+    '/\\evil.example/x.png', '\\\\evil.example/x.png',                              // a backslash counts as a slash
+    '/\t/evil.example/x.png', '/\n/evil.example/x.png',                              // a tab or newline is dropped, leaving //
+    'x.png', './x.png', 'blob:null/abc', 'data:image/png;base64,AAAA', 'javascript:alert(1)', '', undefined, null, 42,
+  ];
+  for (const url of refused) {
+    await assert.rejects(loadImage(url, auth), (err) => err instanceof Error, `${JSON.stringify(url)} was accepted`);
+  }
+  assert.equal(calls.length, 0);   // nothing was fetched, so no request carried the token anywhere
+
+  assert.match(await loadImage('/v1/messages/u1/image?variant=thumb', auth), /^blob:/);   // a path on this origin is fine
+  assert.match(await loadImage('/v1/messages/u1/image?variant=a%2Fb&x=1#frag'), /^blob:/);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, '/v1/messages/u1/image?variant=thumb');
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer tok');
 });
 
 test('a failed image fetch rejects with its status and is not cached', async (t) => {

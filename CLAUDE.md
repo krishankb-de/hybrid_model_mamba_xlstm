@@ -204,9 +204,10 @@ The system will run on A100 GPU with max 40 GB of VRAM on the production system 
 bash scripts/validate.sh
 ```
 
-Three gates, a few minutes, no env bootstrap:
+Four gates, a few minutes, no env bootstrap:
 1. Hydra config invariants for the 70M models (`dim=512`, `num_layers=8`, `vocab_size`, `max_position_embeddings`, non-empty `layer_pattern`)
 2. `pytest tests/ -m "not cuda and not slow"` (CPU, no SLURM required)
+- **2b.** `node --test tests/frontend/*.test.mjs` (the chat page's browser modules in `app/static/`, replayed against a recorded fixture; no dependencies). Skipped with a warning, which also lands in the SUMMARY, when `node` is missing or older than 22.7 (20.x: 20.19), since older nodes cannot load the page's ES modules without a `package.json`.
 3. Model import + CPU forward/backward over **all five mixer types** (`mamba`, `mamba3`, `mlstm`, `slstm`, `attention`) with `use_fast_path=False` and `use_tfla=False`, asserting finite loss and that **every parameter receives a gradient**
 
 It picks its interpreter from `$PYTHON`, else `./.venv` (cluster), else `./venv` (laptop), else `python3`.
