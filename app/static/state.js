@@ -6,7 +6,8 @@
 // ends aborted or in error never sends the stage_end of the stage it was in, nor any event for a stage it never
 // reached, so that record still says 'running' or says nothing. stageState(view, name) is what to draw: it closes those.
 // The fields a stage fills (neighbors, labels, score, ...) stay empty (null or []) when the stage was skipped.
-export const STAGES = ['preprocess', 'encode', 'retrieve', 'generate', 'label', 'score'];   // the contract order
+// STAGES is frozen: every card draws from it, so a renderer that sorts or pushes to it throws instead of reordering them all.
+export const STAGES = Object.freeze(['preprocess', 'encode', 'retrieve', 'generate', 'label', 'score']);   // the contract order
 
 export function initialView(messageId) {
   return { id: messageId, status: 'running', lastSeq: 0, mode: null, provenance: null, options: null,

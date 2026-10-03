@@ -10,7 +10,9 @@
 
 export function parseSSE(buffer) {
   // Pure: feed text, get the complete frames and the unconsumed tail. ": ping" comments are skipped, and so is a frame
-  // whose data is not JSON (a bare "data:" too): the frames around it are still returned.
+  // whose data is not JSON (a bare "data:" too) or is JSON that is no event: every event the server sends is an object
+  // with an integer seq, and applyEvent reads it (null throws there, a missing seq would disable the dedupe). The
+  // frames around a skipped one are still returned.
   buffer = buffer.replace(/\r\n/g, '\n');
   const events = [];
   let i;
@@ -25,7 +27,10 @@ export function parseSSE(buffer) {
       else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
     }
     if (!data.length) continue;
-    try { events.push({ event, data: JSON.parse(data.join('\n')) }); } catch { /* not JSON: drop this frame only */ }
+    try {
+      const d = JSON.parse(data.join('\n'));
+      if (Number.isInteger(d?.seq)) events.push({ event, data: d });
+    } catch { /* not JSON: drop this frame only */ }
   }
   return { events, rest: buffer };
 }

@@ -117,6 +117,21 @@ test('parseSSE skips a frame whose data is not JSON, a bare "data:" included, an
   assert.deepEqual(parseSSE('data:\n\n').events, []);   // a bare data: alone is not an event, and not an error
 });
 
+test('parseSSE yields a frame only when its data is an object with an integer seq, and keeps the frames around the rest', () => {
+  // JSON that parses but is no event. applyEvent reads data.seq of every event it is given: null throws there, and an
+  // object without a seq would set lastSeq to undefined and turn the dedupe off for the rest of the turn.
+  const notEvents = ['null', '5', '"text"', 'true', '[1]', '[]', '{}', '{"stage":"encode"}', '{"seq":"2"}', '{"seq":2.5}', '{"seq":null}'];
+  for (const json of notEvents) {
+    assert.deepEqual(parseSSE(`event: x\ndata: ${json}\n\n`).events, [], `data: ${json} was yielded`);
+  }
+  const between = notEvents.map((json, i) => `event: junk${i}\ndata: ${json}\n\n`).join('');
+  const { events, rest } = parseSSE(wire('message_start', { seq: 1, message_id: 'm1' }) + between
+    + wire('message_stop', { seq: 2, message_id: 'm1', status: 'done' }) + 'event: tail');
+  assert.deepEqual(events.map((e) => [e.event, e.data.seq]), [['message_start', 1], ['message_stop', 2]]);
+  assert.equal(rest, 'event: tail');
+  assert.equal(events.reduce(applyEvent, initialView('m1')).lastSeq, 2);   // what survives folds, dedupe intact
+});
+
 test('parseSSE reads event: and data: without the space after the colon', () => {
   const { events } = parseSSE('event:warning\ndata:{"seq":4}\n\nevent:  stage_end  \ndata:  {"seq":5}\n\n');
   assert.deepEqual(events, [{ event: 'warning', data: { seq: 4 } }, { event: 'stage_end', data: { seq: 5 } }]);
@@ -281,6 +296,13 @@ test('stageState closes what an aborted or failed turn left running or pending, 
 test('stageState and STAGES name the six stages in contract order', () => {
   assert.deepEqual(STAGES, ['preprocess', 'encode', 'retrieve', 'generate', 'label', 'score']);
   assert.deepEqual(STAGES.map((s) => stageState(initialView('m1'), s)), STAGES.map(() => ({ state: 'pending' })));
+});
+
+test('STAGES is frozen: a renderer that sorts or pushes to it throws instead of reordering every card', () => {
+  assert.ok(Object.isFrozen(STAGES));
+  assert.throws(() => STAGES.sort(), TypeError);   // the contract order is not alphabetical, so a sort would reorder it
+  assert.throws(() => STAGES.push('extra'), TypeError);
+  assert.deepEqual(STAGES, ['preprocess', 'encode', 'retrieve', 'generate', 'label', 'score']);   // and it is untouched
 });
 
 test('labelsPending is true only while the turn runs and the label stage has not ended', () => {
@@ -615,6 +637,25 @@ test('streamTurn cancels the response body when the consumer stops early or onMe
   const turn = streamTurn({ sessionId: 's1', form: new FormData(), onMessageId: () => { throw boom; } });
   await assert.rejects(drain(turn), (err) => err === boom);   // the error is the consumer's own, and comes out
   assert.equal(cancelled.length, 2);   // the body is released all the same
+});
+
+test('streamTurn: a body whose cancel() rejects does not fail a consumer that stops early', async (t) => {
+  // The cleanup in streamTurn's finally block is `await reader.cancel().catch(() => {})`. A plain `await reader.cancel()`
+  // passes every other test here and turns a failing cleanup into an exception thrown at the consumer's `break`.
+  const cancelAttempts = [];
+  const body = new ReadableStream({   // one frame, then open; closing it fails
+    start(c) { c.enqueue(new TextEncoder().encode(wire('message_start', { seq: 1, message_id: 'm1' }))); },
+    cancel() { cancelAttempts.push('cancel'); throw new Error('the connection was already gone'); },
+  });
+  stubFetch(t, () => new Response(body, { status: 200, headers: { 'X-Message-Id': 'm1' } }));
+
+  const seen = [];
+  for await (const e of streamTurn({ sessionId: 's1', form: new FormData() })) {
+    seen.push(e.event);
+    break;   // must not throw from here
+  }
+  assert.deepEqual(seen, ['message_start']);
+  assert.deepEqual(cancelAttempts, ['cancel']);   // it did try to close the body: the rejection was swallowed, not skipped
 });
 
 test('streamTurn goes on after a frame that is not JSON', async (t) => {
