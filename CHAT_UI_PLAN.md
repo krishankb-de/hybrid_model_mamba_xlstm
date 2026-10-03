@@ -2434,7 +2434,7 @@ The Markdown export starts with `# Session <id>` and has one `## Turn <n> — <U
 
 2. Run: FAIL. 3. Implement. 4. `venv/bin/python -m pytest tests/test_app_api.py tests/test_app_commands.py -v` → PASS. 5–7. Commit `"P3-D: streaming API, runner, cancel, auth, scoping, commands"`.
 
-- [ ] **P3-E** OpenAPI summaries and examples for every route; `app/README.md`'s curl walkthrough reproduced by a test.
+- [x] **P3-E** OpenAPI summaries and examples for every route; `app/README.md`'s curl walkthrough reproduced by a test.
 
 **Files:** modify `app/server.py`; create `tests/test_app_openapi.py` (with its own `client` fixture, identical to the one in `tests/test_app_api.py`).
 

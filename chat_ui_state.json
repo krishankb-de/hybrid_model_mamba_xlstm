@@ -4,9 +4,9 @@
   "branch": "chat_ui",
   "base": "h100_efficiency @ 5c45527 (2026-09-30, 'SLURM: partition aisc-batch renamed to pot-hpi-aisc-batch')",
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
-  "current_phase": "P3",
-  "status": "P0-P2 complete 2026-10-02: engine reproduces the published decode (CPU 20/20 vs script, GPU 20/20 vs dump). P3 store + streaming API in progress.",
-  "next_action": "P3-E (OpenAPI summaries/examples; tests/test_app_openapi.py) via implementer, plus the carried P3-D deleted-session minor as its own commit; then P4 (UI).",
+  "current_phase": "P4",
+  "status": "P0-P3 complete 2026-10-03 (store, redaction, streaming API, OpenAPI on the tiny engine). P4 frontend next; P3-E doc follow-up first.",
+  "next_action": "Resume after the weekly usage limit (resets 2026-10-08 13:00 Europe/Berlin). First: 'P3-E follow-up' commit (doc accuracy, see .superpowers/sdd/CHAT_UI_PLAN/progress.md P3-E minors 1-5: /v1/models default refusal, TEXT_DOC, stream event list without the plan citation, pipeline read race + helper, _option_ranges .get) + scoped re-review. Then P4-A (page shell + styles; brief ready: task-P4-A-brief.md).",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -301,7 +301,7 @@
     },
     "P3": {
       "title": "Store and streaming API (laptop, tiny engine)",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "P3-A": {
           "done": true,
@@ -320,14 +320,14 @@
           "desc": "app/pipeline.py, app/server.py, app/commands.py: routes, auth, bind refusal, single-worker runner, SSE bridge, polling, cancel, overload, text commands."
         },
         "P3-E": {
-          "done": false,
+          "done": true,
           "desc": "OpenAPI summaries and examples for every route; app/README.md's curl walkthrough reproduced by a test."
         }
       },
       "evidence": {
-        "commits": "a028feb,e177105,1d36ef1",
-        "tests": "test_app_api.py + test_app_commands.py 83 passed; repeated, concurrent and stress runs clean; validate 1096 passed",
-        "review": "clean after fix round 1 (pre-stream upload save; shutdown as server_restart; loopback guard; CHAT_HOME guard for checkouts of this project; exact held-worker tests)"
+        "commits": "68b5321,5a31fcc",
+        "tests": "openapi + api 90 passed; validate 1107 passed",
+        "review": "Approved (differential run: no route behaviour change); follow-up pending: doc-accuracy minors"
       },
       "verdict": null
     },
@@ -543,7 +543,9 @@
     "2026-10-02: P3-A complete.",
     "2026-10-02: P3-B complete; journal_mode exposed and tested 'wal' locally (NFS drill is P7-E).",
     "2026-10-02: P3-C complete; R1 policy + catch-all + U2 invariant.",
-    "2026-10-03: P3-D complete; streaming API on the tiny engine."
+    "2026-10-03: P3-D complete; streaming API on the tiny engine.",
+    "2026-10-03: P3 complete. Paused by the weekly usage limit (resets 2026-10-08 13:00).",
+    "2026-10-03: current_phase -> P4"
   ],
-  "last_updated": "2026-10-02T23:56:50+02:00"
+  "last_updated": "2026-10-03T04:31:18+02:00"
 }
