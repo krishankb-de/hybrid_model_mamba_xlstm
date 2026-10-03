@@ -4,9 +4,12 @@
 // getAttribute, hasAttribute, removeAttribute; append, replaceChildren, replaceWith, remove, contains, closest;
 // textContent (read, and write); classList; children; addEventListener with dispatchEvent and click, events bubbling
 // to the parents; querySelector and querySelectorAll over tag, #id, .class, [attr], [attr=value] and the descendant
-// and child combinators. It follows the DOM where a test could tell: append turns a string into a text node and never
-// parses it (so a report that contains markup stays text), and a value that is not a node is made a string, so an
-// `undefined` or `false` that slips into a card shows up as that word.
+// and child combinators; focus, blur and document.activeElement, with a browser's rules for what can be focused: a
+// button, an input, an enabled select or textarea, a link with an href, or anything with a tabindex, and only while
+// it is in the document (the body of the installed document), so a card that was replaced has lost its focus.
+// It follows the DOM where a test could tell: append turns a string into a text node and never parses it (so a report
+// that contains markup stays text), and a value that is not a node is made a string, so an `undefined` or `false`
+// that slips into a card shows up as that word.
 //
 // The HTML-string APIs are tripwires: reading or writing them throws, so a renderer that reached for one fails its
 // test instead of passing on a shim that quietly accepts it. serialize(node) is the test's own way to look at markup:
@@ -15,6 +18,9 @@
 // installDom() puts a fresh document on globalThis for one test file and returns restore().
 
 const VOID_TAGS = new Set(['area', 'br', 'col', 'hr', 'img', 'input', 'link', 'meta', 'wbr']);
+const FOCUSABLE_TAGS = new Set(['button', 'input', 'select', 'textarea']);
+let documentBody = null;   // the body of the document installed last: focus works inside it only
+let focused = null;        // the element that has focus, if it is still in that body
 const tripwire = (name) => { throw new Error(`the DOM shim has no ${name}: a renderer must build nodes, not parse strings`); };
 
 export class ShimEvent {
@@ -189,6 +195,12 @@ class ShimElement extends ShimNode {
     this.replaceChildren(...(text === '' ? [] : [text]));
   }
   get textContent() { return super.textContent; }
+  focus() {
+    const focusable = this.hasAttribute('tabindex') || (FOCUSABLE_TAGS.has(this.localName) && !this.hasAttribute('disabled'))
+      || (this.localName === 'a' && this.hasAttribute('href'));
+    if (focusable && documentBody && documentBody.contains(this)) focused = this;
+  }
+  blur() { if (focused === this) focused = null; }
   get id() { return this.getAttribute('id') ?? ''; }
   get className() { return this.getAttribute('class') ?? ''; }
   get hidden() { return this.hasAttribute('hidden'); }
@@ -259,7 +271,10 @@ class ShimElement extends ShimNode {
 
 export function createDocument() {
   const body = new ShimElement('body');
+  documentBody = body;
+  focused = null;
   return {
+    get activeElement() { return focused && body.contains(focused) ? focused : body; },
     createElement: (tag) => new ShimElement(tag),
     createTextNode: (data) => new ShimText(data),
     body,

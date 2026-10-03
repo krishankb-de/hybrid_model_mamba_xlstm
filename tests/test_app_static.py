@@ -363,3 +363,12 @@ def test_every_class_render_js_emits_is_styled_or_a_plain_hook():
     styled = set(re.findall(r"\.([A-Za-z_][\w-]*)", css))
     assert emitted >= {"card", "chip", "timeline", "provisional", "report", "label-chips", "thumb", "provenance"}, emitted
     assert emitted - styled - HOOK_ONLY == set(), sorted(emitted - styled - HOOK_ONLY)
+
+
+def test_visually_hidden_is_the_standard_one_pixel_clipped_box():
+    """The class a chip's spoken state and the page's live status node both use: out of sight, in the accessibility tree."""
+    rule = " ".join(b for _, h, b in _walk(_stylesheet()) if h == ".visually-hidden")
+    for declaration in (r"position:\s*absolute", r"width:\s*1px", r"height:\s*1px", r"overflow:\s*hidden", r"white-space:\s*nowrap"):
+        assert re.search(r"(?<![\w-])" + declaration, rule), declaration
+    assert re.search(r"clip-path:\s*inset\(\s*50%\s*\)|(?<![\w-])clip:\s*rect\(", rule)   # clipped to nothing
+    assert not re.search(r"display:\s*none|visibility:\s*hidden", rule)   # either would hide it from a screen reader too

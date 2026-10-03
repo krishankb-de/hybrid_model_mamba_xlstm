@@ -12,15 +12,20 @@
 // input) cannot become markup. The only URLs set on an element are blob: object URLs and data: images; an image comes
 // through ctx.loadImage because an <img src> cannot carry the bearer token.
 //
-// ctx = { loadImage, openViewer, copy, showModels, labelNames, ui }. Every member is optional and a missing callback
-// hides its control.
+// ctx = { loadImage, openViewer, copy, showModels, labelNames, ui, turn }. Every member is optional and a missing
+// callback hides its control.
 //   loadImage(path) -> Promise<object URL>   api.js loadImage with the page's auth: a user turn's thumbnail
 //   openViewer(image)                        a click on the thumbnail; image is what renderUserTurn was given
-//   copy(text)                               the report's Copy button
+//   copy(text)                               the report's Copy button; a throw or a rejected promise shows "Copy failed"
 //   showModels()                             the provenance link, which opens /v1/models in the drawer
 //   labelNames: [14 names]                   CHEXBERT_14 order, from /v1/models; else the order of view.labels
 //   ui: Map                                  keeps the open stage details and Show raw, per message id, across the
 //                                            whole-card replace; without it a re-rendered card starts closed
+//   turn: 3                                  the turn's number in the session: it names the card and tells the same
+//                                            control of two cards apart ("Copy report, turn 3")
+// Every control a card rebuilds each frame has a data-action (copy, raw, models, more, stage), so the page can give
+// focus back to the same control after the replace: focusKey before it, restoreFocus after.
+import { isSameOriginPath } from './api.js';
 import { STAGES, initialView, labelsPending, stageState } from './state.js';
 
 export { STAGES };
@@ -47,6 +52,11 @@ const said = (prefix, value, suffix = '') => (str(value) ? `${prefix}${str(value
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isPrimitive = (v) => v === null || (typeof v !== 'object' && typeof v !== 'function');
 
+// The turn number a ctx (or the options of detailTable) carries, if it is one; and a spoken name with it appended.
+const turnOf = (cx) => (Number.isInteger(cx?.turn) && cx.turn > 0 ? cx.turn : null);
+const named = (text, cx) => (turnOf(cx) ? `${text}, turn ${turnOf(cx)}` : text);
+const path = (...parts) => parts.map(str).filter(Boolean).join(' ');   // "retrieve report_matches 2 report"
+
 // The view with every field present: what a builder reads, so a field that is missing is the empty value.
 function whole(view) {
   const base = initialView(null);
@@ -72,9 +82,13 @@ function uiOf(view, ctx) {
 
 // ---- the timeline -----------------------------------------------------------------------------------------------------
 
+// A stage with a detail is a disclosure: a <button aria-expanded aria-controls> inside its item carries the label and
+// opens the table, and Enter and Space come with the button. A stage without a detail is plain text: nothing to open,
+// so nothing to focus. The item keeps data-stage, data-state and .open for the stylesheet.
 export function renderTimeline(view, ctx) {
   const v = whole(view);
-  const ui = uiOf(v, ctx);
+  const cx = ctx ?? {};
+  const ui = uiOf(v, cx);
   return el('ol', { class: 'timeline', 'aria-label': 'Pipeline stages' }, ...STAGES.map((s) => {
     const st = stageState(v, s);
     const state = typeof st.state === 'string' ? st.state : 'pending';
@@ -85,81 +99,93 @@ export function renderTimeline(view, ctx) {
                 : state === 'skipped' ? `${s} · skipped${why === 'stopped' ? ' (stopped)' : ''}` : s;
     const spoken = state === 'done' ? (ms == null ? `${s}, done` : `${s}, done, ${ms} milliseconds`)
                  : state === 'skipped' ? `${s}, skipped${why ? `: ${why}` : ''}` : `${s}, ${state}`;
-    const li = el('li', { 'data-stage': s, 'data-state': state, 'aria-label': spoken, tabindex: 0 }, label);
-    if (isObject(st.detail) && Object.keys(st.detail).length) {
-      const table = detailTable(st.detail, `${s} details`);
-      const toggle = () => { if (li.classList.toggle('open')) ui.open.add(s); else ui.open.delete(s); };
-      if (ui.open.has(s)) li.classList.add('open');
-      li.addEventListener('click', (e) => { if (!table.contains(e.target)) toggle(); });   // not a click inside the table
-      li.addEventListener('keydown', (e) => {   // Enter or Space on the item itself, not on a button inside its table
-        if (e.target === li && (e.key === 'Enter' || e.key === ' ')) {
-          e.preventDefault();
-          toggle();
-        }
-      });
-      li.append(table);
+    if (!(isObject(st.detail) && Object.keys(st.detail).length)) {
+      return el('li', { 'data-stage': s, 'data-state': state, 'aria-label': spoken }, label);
     }
+    const id = `detail-${str(v.id).replace(/[^\w-]/g, '_') || 'turn'}-${s}`;   // unique per message, and a usable id reference
+    const table = detailTable(st.detail, `${s} details`, { id, name: s, turn: turnOf(cx) });
+    const open = ui.open.has(s);
+    const toggle = el('button', {
+      type: 'button', 'data-action': 'stage', 'data-stage': s, 'aria-expanded': String(open), 'aria-controls': id,
+      'aria-label': named(spoken, cx),
+    }, label);
+    const li = el('li', { 'data-stage': s, 'data-state': state, class: open ? 'open' : null }, toggle, table);
+    toggle.addEventListener('click', () => {
+      const now = li.classList.toggle('open');
+      toggle.setAttribute('aria-expanded', String(now));
+      if (now) ui.open.add(s); else ui.open.delete(s);
+    });
     return li;
   }));
 }
 
 // A stage's detail as a table: a row per key; an array of objects as a nested table with a row per object and a column
-// per key; an object as a table of its own; a long string clipped with "show more". label names the table.
-export function detailTable(detail, label) {
+// per key; an object as a table of its own; a long string clipped with "show more". label names the table. options:
+// { id } for the table (what a button's aria-controls names), { name } the stage, and { turn }, which together name each
+// show-more button so no two sound alike ("show more of retrieve report_matches 2 report, turn 3").
+export function detailTable(detail, label, options) {
+  const o = isObject(options) ? options : {};
   const entries = isObject(detail) ? Object.entries(detail) : [];
-  return el('table', { 'aria-label': label }, el('tbody', {}, ...entries.map(([key, value]) => row(key, value, 1))));
+  const env = { turn: turnOf(o) };
+  return el('table', { id: str(o.id) || null, 'aria-label': label },
+    el('tbody', {}, ...entries.map(([key, value]) => row(key, value, 1, env, str(o.name)))));
 }
 
-const row = (key, value, depth) => el('tr', {}, el('th', { scope: 'row' }, key), el('td', {}, valueNode(value, depth)));
+const row = (key, value, depth, env, parent) => el('tr', {},
+  el('th', { scope: 'row' }, key), el('td', {}, valueNode(value, depth, path(parent, key), env)));
 
 const numberText = (n) => (Number.isInteger(n) ? String(n) : Number.isFinite(n) ? String(Number(n.toPrecision(6))) : NONE);
 
-function valueNode(v, depth) {
+function valueNode(v, depth, name, env) {
   if (v == null) return NONE;
-  if (typeof v === 'string') return v.length > CLIP ? clipped(v) : v;
+  if (typeof v === 'string') return v.length > CLIP ? clipped(v, name, env) : v;
   if (typeof v === 'number') return numberText(v);
   if (typeof v !== 'object') return String(v);
-  if (depth >= MAX_DEPTH) return valueNode(jsonText(v), depth);
-  if (Array.isArray(v)) return arrayNode(v, depth);
+  if (depth >= MAX_DEPTH) return valueNode(jsonText(v), depth, name, env);
+  if (Array.isArray(v)) return arrayNode(v, depth, name, env);
   const entries = Object.entries(v);
   if (!entries.length) return NONE;
-  return el('table', { class: 'nested' }, el('tbody', {}, ...entries.map(([key, value]) => row(key, value, depth + 1))));
+  return el('table', { class: 'nested' }, el('tbody', {}, ...entries.map(([key, value]) => row(key, value, depth + 1, env, name))));
 }
 
 function jsonText(v) {
   try { return JSON.stringify(v); } catch { return NONE; }
 }
 
-function arrayNode(items, depth) {
+function arrayNode(items, depth, name, env) {
   if (!items.length) return NONE;
   const inline = (x) => isPrimitive(x) && !(typeof x === 'string' && x.length > CLIP);
   if (items.every(inline)) return items.map((x) => (x == null ? NONE : typeof x === 'number' ? numberText(x) : String(x))).join(', ');
-  if (items.every(isObject)) return recordsTable(items, depth);
-  return el('ol', { class: 'values' }, ...items.map((x) => el('li', {}, valueNode(x, depth + 1))));
+  if (items.every(isObject)) return recordsTable(items, depth, name, env);
+  return el('ol', { class: 'values' }, ...items.map((x, i) => el('li', {}, valueNode(x, depth + 1, path(name, i + 1), env))));
 }
 
-function recordsTable(items, depth) {
+function recordsTable(items, depth, name, env) {
   const columns = [...new Set(items.flatMap((item) => Object.keys(item)))];
   if (!columns.length) return NONE;
   return el('table', { class: 'nested' },
     el('thead', {}, el('tr', {}, ...columns.map((c) => el('th', { scope: 'col' }, c)))),
-    el('tbody', {}, ...items.map((item) => el('tr', {}, ...columns.map(
-      (c) => el('td', {}, valueNode(Object.hasOwn(item, c) ? item[c] : undefined, depth + 1)))))));
+    el('tbody', {}, ...items.map((item, i) => el('tr', {}, ...columns.map(
+      (c) => el('td', {}, valueNode(Object.hasOwn(item, c) ? item[c] : undefined, depth + 1, path(name, i + 1, c), env)))))));
 }
 
-// The first CLIP characters and a button that shows the rest, and hides it again.
-function clipped(text) {
+// The first CLIP characters and a button that shows the rest, and hides it again. name says which string it is.
+function clipped(text, name, env) {
   let end = CLIP;
   const last = text.charCodeAt(end - 1);
   if (last >= 0xd800 && last <= 0xdbff) end -= 1;   // not between the halves of a surrogate pair
   const head = `${text.slice(0, end)}…`;
   const shown = el('span', { class: 'clip-text' }, head);
-  const more = el('button', { type: 'button', class: 'more', 'aria-expanded': 'false' }, 'show more');
+  const of = name ? ` of ${name}` : '';
+  const more = el('button', {
+    type: 'button', class: 'more', 'data-action': 'more', 'aria-expanded': 'false', 'aria-label': named(`show more${of}`, env),
+  }, 'show more');
   more.addEventListener('click', () => {
     const open = more.getAttribute('aria-expanded') !== 'true';
     shown.textContent = open ? text : head;
     more.textContent = open ? 'show less' : 'show more';
     more.setAttribute('aria-expanded', String(open));
+    more.setAttribute('aria-label', named(`${open ? 'show less' : 'show more'}${of}`, env));
   });
   return el('span', { class: 'clip' }, shown, ' ', more);
 }
@@ -190,6 +216,8 @@ export function statusText(view) {
 
 // ---- the report --------------------------------------------------------------------------------------------------------
 
+const COPY_FAILED_MS = 2000;   // how long the Copy button says "Copy failed"
+
 // The text as sections: before the first header, then one per literal "Findings:" or "Impression:" in text order.
 export function splitReport(text) {
   const parts = str(text).split(/(Findings:|Impression:)/);
@@ -211,7 +239,7 @@ export function renderReport(view, ctx) {
     : el('div', { class: 'report-body' }, ...splitReport(shown).map(({ title, body }) => el('section', { class: 'report-section' },
       title ? el('h3', {}, title) : null, body ? el('p', {}, body) : null))));
   let body = bodyOf();
-  const toggle = el('button', { type: 'button', 'aria-pressed': String(ui.raw) }, 'Show raw');
+  const toggle = el('button', { type: 'button', 'data-action': 'raw', 'aria-pressed': String(ui.raw), 'aria-label': named('Show raw report', cx) }, 'Show raw');
   toggle.addEventListener('click', () => {
     ui.raw = !ui.raw;
     toggle.setAttribute('aria-pressed', String(ui.raw));
@@ -219,12 +247,31 @@ export function renderReport(view, ctx) {
     body.replaceWith(next);
     body = next;
   });
-  const copy = typeof cx.copy === 'function'
-    ? el('button', { type: 'button', onclick: () => cx.copy(ui.raw ? raw : shown) }, 'Copy') : null;
   return el('div', { class: v.provisional ? 'report provisional' : 'report' },
     body,
     v.truncated ? el('p', { class: 'note truncated' }, 'Report stopped at the token budget mid-sentence') : null,
-    el('div', { class: 'report-actions' }, copy, toggle));
+    el('div', { class: 'report-actions' }, typeof cx.copy === 'function' ? copyButton(cx, () => (ui.raw ? raw : shown)) : null, toggle));
+}
+
+// Copy hands ctx.copy the text. A copy that throws or whose promise is rejected (a refused clipboard) must not pass
+// unnoticed: the button says "Copy failed" for a moment, and the failure is not left as an unhandled rejection.
+function copyButton(cx, textNow) {
+  const idle = () => { copy.textContent = 'Copy'; copy.setAttribute('aria-label', named('Copy report', cx)); };
+  const failed = () => {
+    copy.textContent = 'Copy failed';
+    copy.setAttribute('aria-label', named('Copy failed', cx));
+    setTimeout(idle, COPY_FAILED_MS);
+  };
+  const copy = el('button', { type: 'button', 'data-action': 'copy', 'aria-label': named('Copy report', cx) }, 'Copy');
+  copy.addEventListener('click', () => {
+    try {
+      const done = cx.copy(textNow());
+      if (done && typeof done.then === 'function') done.then(undefined, failed);
+    } catch {
+      failed();
+    }
+  });
+  return copy;
 }
 
 // ---- labels and scores -------------------------------------------------------------------------------------------------
@@ -233,7 +280,10 @@ const isOn = (x) => x === 1 || x === true;   // a label is 1 or 0
 
 const CHIP_CLASS = { positive: 'chip label positive', negative: 'chip label negative', unknown: 'chip label unknown' };
 const CHIP_SPOKEN = { positive: 'positive', negative: 'negative', unknown: 'not reported' };
-const SCORES = [['ROUGE-L', 'rouge_l'], ['BLEU-1', 'bleu_1'], ['BLEU-4', 'bleu_4'], ['CheXbert-14 F1', 'chexbert_14_micro_f1']];
+// What each number is, as the thesis scores it for one report: ROUGE-L is the sentence-level F-measure (beta 1.2) of
+// scripts/evaluate_report_generation.py, BLEU-n is its corpus formula applied to this one pair, and the CheXbert F1 is
+// micro-averaged over the 14 labels of this report (the corpus-level tables average over many).
+const SCORES = [['ROUGE-L', 'rouge_l'], ['BLEU-1', 'bleu_1'], ['BLEU-4', 'bleu_4'], ['CheXbert-14 micro F1', 'chexbert_14_micro_f1']];
 const REFERENCES = { user: 'your reference', test_split: 'test-split reference' };
 
 export function renderLabels(view, ctx) {
@@ -245,7 +295,7 @@ export function renderLabels(view, ctx) {
   if (isObject(v.labels)) {
     ({ node: body, marked } = chipList(v, cx));
   } else if (labelsPending(v)) {
-    body = note('labelling…');
+    body = note(isObject(v.options) && v.options.label === false ? 'labels off' : 'labelling…');   // off: say so now, not at the end
   } else {
     const st = stageState(v, 'label');   // a stop or an error settles it; a settled turn that never got here shows nothing
     const why = str(st.skipped);
@@ -272,22 +322,26 @@ function chipList(v, cx) {
     const known = reference && kind !== 'unknown' && Object.hasOwn(reference, name) && reference[name] != null;
     const agrees = known ? isOn(reference[name]) === (kind === 'positive') : null;
     if (agrees !== null) marked = true;
-    const spoken = `${name}: ${CHIP_SPOKEN[kind]}${agrees === null ? '' : agrees ? ', matches reference' : ', differs from reference'}`;
+    // The state is text inside the chip, hidden from the eye: a screen reader in browse mode reads the text of a list
+    // item and not its aria-label, so a label there would never be heard.
+    const spoken = `: ${CHIP_SPOKEN[kind]}${agrees === null ? '' : agrees ? ', matches reference' : ', differs from reference'}`;
     return el('li', {
       class: CHIP_CLASS[kind], 'data-label': name, 'data-value': kind === 'unknown' ? null : kind === 'positive' ? '1' : '0',
-      'data-agree': agrees === null ? null : String(agrees), 'aria-label': spoken,
-    }, name, agrees === null ? null : el('span', { class: 'mark', 'aria-hidden': 'true' }, agrees ? '✓' : '✗'));
+      'data-agree': agrees === null ? null : String(agrees),
+    }, name, el('span', { class: 'visually-hidden' }, spoken),
+    agrees === null ? null : el('span', { class: 'mark', 'aria-hidden': 'true' }, agrees ? '✓' : '✗'));
   });
   return { node: el('ul', { class: 'label-chips', 'aria-label': 'CheXbert-14 labels of the generated report' }, ...chips), marked };
 }
 
 function scoreBlock(score, marked) {
   const entries = SCORES.filter(([, key]) => isNum(score[key])).map(([name, key]) => [name, score[key].toFixed(3)]);
-  if (typeof score.exact_match_14 === 'boolean') entries.push(['Exact match', score.exact_match_14 ? 'yes' : 'no']);
+  if (typeof score.exact_match_14 === 'boolean') entries.push(['CheXbert-14 exact match', score.exact_match_14 ? 'yes' : 'no']);
   if (!entries.length) return null;
   const source = typeof score.reference_source === 'string'
     ? (Object.hasOwn(REFERENCES, score.reference_source) ? REFERENCES[score.reference_source] : score.reference_source) : null;
-  const caption = [source ? `vs ${source}` : null, marked ? '✓ same as the reference, ✗ different' : null].filter(Boolean).join(' · ');
+  const caption = [source ? `vs ${source}` : null, 'this report only', marked ? '✓ same as the reference, ✗ different' : null]
+    .filter(Boolean).join(' · ');
   return el('div', { class: 'score-block' },
     el('dl', { class: 'score' }, ...entries.map(([name, value]) => el('div', {}, el('dt', {}, name), el('dd', {}, value)))),
     caption ? el('p', { class: 'score-source' }, caption) : null);
@@ -324,7 +378,7 @@ export function renderProvenance(view, ctx) {
   const drift = str(card.drift_note) || str(generate.drift_note);
   // A button, not an anchor: a link to a hash would change the page's route.
   const link = (text || drift) && typeof cx.showModels === 'function'
-    ? el('button', { type: 'button', onclick: () => cx.showModels() }, 'model details') : null;
+    ? el('button', { type: 'button', 'data-action': 'models', 'aria-label': named('model details', cx), onclick: () => cx.showModels() }, 'model details') : null;
   return el('footer', { class: 'provenance', hidden: !text && !drift },
     text || link ? el('p', {}, text, text && link ? ' · ' : null, link) : null,
     drift ? el('p', { class: 'drift' }, drift) : null);
@@ -334,7 +388,6 @@ export function renderProvenance(view, ctx) {
 
 const IMAGE_URL = /^(?:blob:|data:image\/(?:png|jpeg|webp|gif);base64,)/;
 const usable = (url) => typeof url === 'string' && IMAGE_URL.test(url);
-const SERVER_PATH = /^\/(?![/\\])/;   // one slash, then neither a slash nor a backslash: a path on this origin
 
 // The resolved options as small chips: beam 3 · 100 tok · cached · k 4/3, and what else deviates from the defaults.
 export function optionChips(options) {
@@ -361,7 +414,7 @@ export function renderUserTurn(msg, ctx) {
   const text = str(m.text).trim();
   const chips = optionChips(m.options);
   const picture = isObject(m.image) ? thumbnail(m.image, cx) : null;
-  return el('article', { class: 'turn user', hidden: !picture && !text && !chips.length },
+  return el('article', { class: 'turn user', 'aria-label': named('Your message', cx), hidden: !picture && !text && !chips.length },
     el('div', { class: 'bubble' }, picture, text ? el('p', { class: 'user-text' }, text) : null,
       chips.length ? el('ul', { class: 'options', 'aria-label': 'Settings used' }, ...chips.map((c) => el('li', { class: 'chip' }, c))) : null));
 }
@@ -369,7 +422,7 @@ export function renderUserTurn(msg, ctx) {
 function thumbnail(image, cx) {
   const name = str(image.filename);
   const shown = usable(image.url);
-  const fetched = !shown && typeof image.url === 'string' && SERVER_PATH.test(image.url) && typeof cx.loadImage === 'function';
+  const fetched = !shown && isSameOriginPath(image.url) && typeof cx.loadImage === 'function';   // api.js's filter: the token goes nowhere else
   if (!shown && !fetched) return name ? el('span', { class: 'chip' }, name) : null;
   const img = el('img', { class: 'thumb', alt: name ? `Uploaded X-ray: ${name}` : 'Uploaded X-ray' });
   if (shown) {
@@ -380,23 +433,60 @@ function thumbnail(image, cx) {
       () => img.setAttribute('data-failed', ''));
   }
   if (typeof cx.openViewer !== 'function') return img;
-  return el('button', { type: 'button', class: 'thumb-button', 'aria-label': 'Open X-ray in the viewer', onclick: () => cx.openViewer(image) }, img);
+  return el('button', { type: 'button', class: 'thumb-button', 'aria-label': named('Open X-ray in the viewer', cx), onclick: () => cx.openViewer(image) }, img);
 }
 
 // ---- the assistant card and the throttle ---------------------------------------------------------------------------------
 
 export function renderAssistantCard(view, ctx) {
   const v = whole(view);
-  const timeline = renderTimeline(v, ctx);
-  const provenance = renderProvenance(v, ctx);
+  const cx = ctx ?? {};
+  const timeline = renderTimeline(v, cx);
+  const provenance = renderProvenance(v, cx);
   // A turn that finished having run no stage (a question the server answered with a warning) has no pipeline to show,
   // and no model to attribute: nothing ran. One that was stopped or failed before its first stage still shows its stages.
   if (v.status === 'done' && !Object.keys(v.stages).length) {
     timeline.setAttribute('hidden', '');
     provenance.setAttribute('hidden', '');
   }
-  return el('article', { class: 'card', 'data-message-id': str(v.id) || null, 'data-status': str(v.status) || null },
-    timeline, renderNotes(v), renderReport(v, ctx), renderLabels(v, ctx), provenance);
+  return el('article', { class: 'card', 'aria-label': named('Assistant report', cx), 'data-message-id': str(v.id) || null, 'data-status': str(v.status) || null },
+    timeline, renderNotes(v), renderReport(v, cx), renderLabels(v, cx), provenance);
+}
+
+// ---- keeping focus through the whole-card replace -------------------------------------------------------------------------
+
+// The control a node is in (or is), as a key that survives the rebuild: copy, raw, models, stage:<stage> or
+// more:<stage>:<n>, the nth show-more button of that stage's table. null when the node is not in one of those.
+export function focusKey(node) {
+  const control = node?.closest?.('[data-action]');
+  if (!control) return null;
+  const action = control.getAttribute('data-action');
+  if (action === 'copy' || action === 'raw' || action === 'models') return action;
+  const item = control.closest('li[data-stage]');
+  const stage = item?.getAttribute('data-stage');
+  if (!stage) return null;
+  if (action === 'stage') return `stage:${stage}`;
+  if (action !== 'more') return null;
+  const index = Array.from(item.querySelectorAll('[data-action="more"]')).indexOf(control);
+  return index < 0 ? null : `more:${stage}:${index}`;
+}
+
+const FOCUS_KEY = /^(?:(copy|raw|models)|stage:([a-z]+)|more:([a-z]+):(\d+))$/;
+
+// Puts focus on the control of the rebuilt card that key names: after card.replaceWith(next), restoreFocus(next, key),
+// with key taken by focusKey before it. true when the control took focus; false when there is no such control (a Copy
+// the page no longer offers, a stage that has no detail) or it cannot be focused (a stage closed, so its buttons are not
+// shown: keep ctx.ui so it is open again). Never scrolls the pane.
+export function restoreFocus(card, key) {
+  const m = typeof key === 'string' ? FOCUS_KEY.exec(key) : null;
+  if (!m || typeof card?.querySelector !== 'function') return false;
+  let target = null;
+  if (m[1]) target = card.querySelector(`[data-action="${m[1]}"]`);
+  else if (m[2]) target = STAGES.includes(m[2]) ? card.querySelector(`li[data-stage="${m[2]}"] > [data-action="stage"]`) : null;
+  else if (STAGES.includes(m[3])) target = Array.from(card.querySelectorAll(`li[data-stage="${m[3]}"] [data-action="more"]`))[Number(m[4])];
+  if (!target) return false;
+  target.focus({ preventScroll: true });
+  return globalThis.document?.activeElement === target;
 }
 
 const pending = new WeakSet();

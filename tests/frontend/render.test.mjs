@@ -4,13 +4,19 @@
 // engine cannot produce yet (labels, scores, errors, a public mode) folded from synthetic events: no MIMIC data here.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
-import { ShimEvent, installDom, serialize } from './dom_shim.mjs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { installDom, serialize } from './dom_shim.mjs';
 import { initialView, replay } from '../../app/static/state.js';
+import * as render from '../../app/static/render.js';
 import {
   STAGES, detailTable, el, optionChips, provenanceText, renderAssistantCard, renderLabels, renderNotes, renderProvenance,
   renderReport, renderTimeline, renderUserTurn, scheduleRender, splitReport, statusText,
 } from '../../app/static/render.js';
+
+const { focusKey, restoreFocus } = render;   // fix round 1: read off the namespace, so a missing export fails its own tests only
 
 installDom();   // this file's process only: the other test files never see a document
 
@@ -27,13 +33,15 @@ const q = (node, selector) => node.querySelector(selector);
 const qa = (node, selector) => node.querySelectorAll(selector);
 const texts = (nodes) => nodes.map((n) => n.textContent);
 const tick = () => new Promise((resolve) => setImmediate(resolve));
-const press = (node, key) => {   // a keydown on node; the event comes back so a test can read defaultPrevented
-  const event = new ShimEvent('keydown', { bubbles: true, cancelable: true, key });
-  node.dispatchEvent(event);
-  return event;
-};
 const stageItem = (card, stage) => q(card, `li[data-stage="${stage}"]`);
+const stageButton = (card, stage) => q(card, `li[data-stage="${stage}"] > button`);   // the disclosure control of a stage with a detail
 const button = (card, label) => qa(card, 'button').find((b) => b.textContent === label) ?? null;
+// What the page shows of a node: its text without what is visually hidden (that is for a screen reader).
+const visibleText = (node) => (node.nodeType === 3 ? node.data
+  : node.classList.contains('visually-hidden') ? '' : node.childNodes.map(visibleText).join(''));
+// What Tab can reach under root: a control that takes focus and is not taken out of the tab order.
+const tabStops = (root) => qa(root, 'button, input, select, textarea, a[href], [tabindex]')
+  .filter((n) => n.getAttribute('tabindex') !== '-1' && !n.hasAttribute('disabled'));
 const part = (table, name) => table.children.find((c) => c.localName === name);   // a table's own thead or tbody
 const bodyRows = (table) => part(table, 'tbody').children;                        // its own rows, not those of nested tables
 const pair = (row) => [row.children[0].textContent, row.children[1].textContent];
@@ -99,6 +107,14 @@ const labelling = () => viewOf([
   stageEnd('generate', 9, GENERATE), stageStart('label', 4),
 ]);
 
+// A finished turn whose retrieve stage carries three strings long enough to be clipped (a private turn's matched reports).
+const withClips = () => viewOf([
+  START, stageStart('retrieve', 2),
+  stageEnd('retrieve', 8, { report_matches: [{ report: 'x'.repeat(300) }, { report: 'y'.repeat(300) }], note: 'z'.repeat(300) }),
+  stageStart('generate', 3), snapshot('Findings: ok'), stageEnd('generate', 9, GENERATE),
+  stopOf('done', { report: 'Findings: ok', display_report: 'Findings: ok' }),
+]);
+
 // ---- el ------------------------------------------------------------------------------------------------------------
 
 test('el sets attributes, wires on* handlers, drops null children and appends strings as text, never as markup', () => {
@@ -145,6 +161,24 @@ test('the shim follows the DOM where these tests lean on it: selectors, events, 
   p.textContent = '<b>x</b>';
   assert.deepEqual([p.children.length, p.textContent], [0, '<b>x</b>']);
 
+  document.body.replaceChildren(root);   // focus follows a browser's rules: controls take it, plain elements do not, and only in the page
+  const box = document.createElement('li');
+  const push = el('button', { type: 'button' }, 'b');
+  root.append(box, push, el('li', { tabindex: -1 }, 'x'));
+  box.focus();
+  assert.equal(document.activeElement, document.body);
+  push.focus();
+  assert.equal(document.activeElement, push);
+  push.remove();
+  assert.equal(document.activeElement, document.body);   // a removed element has lost focus
+  const loose = el('button', { type: 'button' }, 'loose');
+  loose.focus();
+  assert.equal(document.activeElement, document.body);   // not in the page: no focus
+  root.children.at(-1).focus();
+  assert.equal(document.activeElement, root.children.at(-1));   // tabindex -1: focusable by script
+  assert.deepEqual(tabStops(root).map((n) => n.localName), []);   // ... but not a tab stop
+  document.body.replaceChildren();
+
   assert.throws(() => { p.innerHTML = '<b>x</b>'; }, /no innerHTML/);
   assert.throws(() => p.outerHTML, /no outerHTML/);
   assert.throws(() => p.insertAdjacentHTML('beforeend', 'x'), /no insertAdjacentHTML/);
@@ -160,7 +194,7 @@ test('the timeline is an ordered list of the six stages in contract order', () =
   assert.equal(ol.getAttribute('aria-label'), 'Pipeline stages');
   assert.deepEqual(qa(ol, 'li').map((li) => li.getAttribute('data-stage')), ['preprocess', 'encode', 'retrieve', 'generate', 'label', 'score']);
   assert.deepEqual(STAGES, ['preprocess', 'encode', 'retrieve', 'generate', 'label', 'score']);
-  for (const li of qa(ol, 'li')) assert.equal(li.getAttribute('tabindex'), '0');   // focusable, as the brief has it
+  assert.equal(qa(ol, '[tabindex]').length, 0);   // no item is made a tab stop by hand
 });
 
 test('a pending stage shows its bare name, a running one its name, a done one its time; the spoken label says the state', () => {
@@ -171,10 +205,11 @@ test('a pending stage shows its bare name, a running one its name, a done one it
   const mid = renderTimeline(viewOf([START, stageStart('preprocess', 0), stageEnd('preprocess', 1.6, {}), stageStart('encode', 1),
                                      stageEnd('encode', 611.6, { device: 'cpu' }), skipped('retrieve', 'gallery_unavailable'),
                                      stageStart('generate', 3)]));
-  const label = (stage) => stageItem(mid, stage).childNodes[0].textContent;   // the label, apart from any detail table
-  assert.deepEqual([stageItem(mid, 'encode').getAttribute('data-state'), label('encode'), stageItem(mid, 'encode').getAttribute('aria-label')],
+  const encode = stageButton(mid, 'encode');   // a stage with a detail: its label is on the button that opens it
+  assert.deepEqual([stageItem(mid, 'encode').getAttribute('data-state'), encode.textContent, encode.getAttribute('aria-label')],
                    ['done', 'encode · 612 ms', 'encode, done, 612 milliseconds']);   // the brief's own example
-  assert.equal(label('preprocess'), 'preprocess · 2 ms');   // rounded
+  const preprocess = stageItem(mid, 'preprocess');   // one without: plain text on the item
+  assert.deepEqual([preprocess.textContent, preprocess.getAttribute('aria-label')], ['preprocess · 2 ms', 'preprocess, done, 2 milliseconds']);   // rounded
   assert.deepEqual([stageItem(mid, 'generate').getAttribute('data-state'), stageItem(mid, 'generate').textContent,
                     stageItem(mid, 'generate').getAttribute('aria-label')], ['running', 'generate', 'generate, running']);
 });
@@ -221,56 +256,81 @@ test('a time that is missing or not a number never prints NaN', () => {
 
 // ---- the detail table ----------------------------------------------------------------------------------------------
 
-test('a done stage with a detail opens a table of it on click and closes it on the next; one without has no table', () => {
+test('a stage with a detail is a disclosure button: aria-expanded and aria-controls follow its table, and a click toggles both', () => {
   const card = renderAssistantCard(finished());
-  const encode = stageItem(card, 'encode');
-  const table = q(encode, 'table');
-  assert.ok(table, 'the done stage carries its detail');
-  assert.equal(encode.classList.contains('open'), false);   // styles.css shows the table only while li.open
-  encode.click();
-  assert.equal(encode.classList.contains('open'), true);
-  encode.click();
-  assert.equal(encode.classList.contains('open'), false);
+  const li = stageItem(card, 'encode');
+  const toggle = stageButton(card, 'encode');
+  const table = q(li, 'table');
+  assert.ok(toggle && table, 'the done stage carries its detail and the button that opens it');
+  assert.equal(toggle.localName, 'button');
+  assert.equal(toggle.getAttribute('type'), 'button');
+  assert.match(table.getAttribute('id'), /^[\w-]+$/);   // an id that aria-controls can name
+  assert.equal(toggle.getAttribute('aria-controls'), table.getAttribute('id'));
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(toggle.textContent, 'encode · 612 ms');   // the visible label
+  assert.equal(toggle.getAttribute('aria-label'), 'encode, done, 612 milliseconds');   // the spoken one
+  assert.deepEqual([li.getAttribute('data-stage'), li.getAttribute('data-state')], ['encode', 'done']);   // the hooks stay on the item
+  assert.equal(li.hasAttribute('aria-label') || li.hasAttribute('tabindex'), false);   // the name and the focus are the button's
+  assert.equal(li.classList.contains('open'), false);   // styles.css shows the table only while li.open
+  toggle.click();
+  assert.deepEqual([toggle.getAttribute('aria-expanded'), li.classList.contains('open')], ['true', true]);
+  toggle.click();
+  assert.deepEqual([toggle.getAttribute('aria-expanded'), li.classList.contains('open')], ['false', false]);
 
-  for (const stage of ['retrieve', 'label', 'score']) {   // skipped: nothing to open
-    const li = stageItem(card, stage);
-    assert.equal(q(li, 'table'), null, stage);
-    li.click();
-    assert.equal(li.classList.contains('open'), false, stage);
+  for (const stage of ['retrieve', 'label', 'score']) {   // skipped: nothing to open, and no control
+    const skippedItem = stageItem(card, stage);
+    assert.equal(q(skippedItem, 'table'), null, stage);
+    assert.equal(q(skippedItem, 'button'), null, stage);
+    skippedItem.click();
+    assert.equal(skippedItem.classList.contains('open'), false, stage);
   }
 });
 
-test('a stage whose detail is empty has nothing to open', () => {
+test('the ids a card hands out are unique, and differ between two messages', () => {
+  const idsOf = (card) => qa(card, '[id]').map((n) => n.getAttribute('id'));
+  const one = idsOf(renderAssistantCard(finished()));
+  const two = idsOf(renderAssistantCard({ ...finished(), id: 'm_other' }));
+  assert.ok(one.length >= 3);
+  assert.equal(new Set(one).size, one.length);
+  assert.deepEqual(one.filter((id) => two.includes(id)), []);
+});
+
+test('a stage whose detail is empty has nothing to open and no button', () => {
   const ol = renderTimeline(viewOf([START, stageStart('encode', 1), stageEnd('encode', 3, {})]));
   assert.equal(q(stageItem(ol, 'encode'), 'table'), null);
+  assert.equal(q(stageItem(ol, 'encode'), 'button'), null);
 });
 
-test('Enter and Space on a focused stage toggle its detail as a click does; other keys do not', () => {
-  const li = stageItem(renderAssistantCard(finished()), 'encode');
-  const enter = press(li, 'Enter');
-  assert.equal(li.classList.contains('open'), true);
-  assert.equal(enter.defaultPrevented, true);
-  const space = press(li, ' ');
-  assert.equal(li.classList.contains('open'), false);
-  assert.equal(space.defaultPrevented, true);   // else the page scrolls under the toggle
-  for (const key of ['a', 'Tab', 'Escape', 'ArrowDown']) {
-    assert.equal(press(li, key).defaultPrevented, false, key);
-    assert.equal(li.classList.contains('open'), false, key);
+test('only a stage with a detail can be focused: the rest of the timeline is plain text and not a tab stop', () => {
+  const card = renderAssistantCard(finished(), {});
+  document.body.replaceChildren(card);
+  const ol = q(card, 'ol.timeline');
+  assert.deepEqual(tabStops(ol).map((n) => [n.localName, n.getAttribute('data-stage')]),
+                   [['button', 'preprocess'], ['button', 'encode'], ['button', 'generate']]);   // retrieve, label and score were skipped
+  assert.equal(qa(ol, '[tabindex]').length, 0);
+  for (const li of qa(ol, 'li')) {   // the control is the button: Enter and Space come with it, so no item listens for keys or clicks
+    assert.deepEqual([(li.listeners.get('keydown') ?? []).length, (li.listeners.get('click') ?? []).length], [0, 0], li.getAttribute('data-stage'));
+    li.focus();
+    assert.equal(document.activeElement, document.body, `${li.getAttribute('data-stage')}: an item cannot take focus`);
   }
+  stageButton(card, 'encode').focus();
+  assert.equal(document.activeElement, stageButton(card, 'encode'));
+
+  const running = renderTimeline(viewOf([START, stageStart('preprocess', 0), stageEnd('preprocess', 1, { format: 'PNG' }), stageStart('encode', 1)]));
+  assert.deepEqual(tabStops(running).map((n) => n.getAttribute('data-stage')), ['preprocess']);   // encode runs, the rest are pending
+  assert.equal(tabStops(renderTimeline(initialView('m1'))).length, 0);
+  document.body.replaceChildren();
 });
 
-test('a click or a key inside the open table does not close it', () => {
-  const li = stageItem(renderAssistantCard(finished()), 'encode');
-  li.click();
-  const cell = q(li, 'td');
-  cell.click();
-  assert.equal(li.classList.contains('open'), true);   // selecting text in the table must not collapse it
-  const enter = press(q(li, 'th'), 'Enter');           // a key that lands on something inside the table is that element's
+test('a click inside the open table does not close it', () => {
+  const card = renderAssistantCard(finished());
+  stageButton(card, 'encode').click();
+  const li = stageItem(card, 'encode');
+  q(li, 'td').click();   // text selected in the table
+  q(li, 'th').click();
+  li.click();            // or the pill around the button
   assert.equal(li.classList.contains('open'), true);
-  assert.equal(enter.defaultPrevented, false);
-  const space = press(cell, ' ');
-  assert.equal(li.classList.contains('open'), true);   // separately: two toggles would cancel out
-  assert.equal(space.defaultPrevented, false);
+  assert.equal(stageButton(card, 'encode').getAttribute('aria-expanded'), 'true');
 });
 
 test('the table lists keys and values; arrays of numbers read inline, booleans and nothing read as words', () => {
@@ -458,14 +518,14 @@ test('the chips are the 14 names in ctx.labelNames order: positives filled, nega
   const view = finished({ labels: labelled(['Cardiomegaly', 'Support Devices']) });
   const labels = renderLabels(view, { labelNames: LABEL_NAMES });
   const chips = qa(labels, '.chip');
-  assert.deepEqual(texts(chips), LABEL_NAMES);
+  assert.deepEqual(chips.map(visibleText), LABEL_NAMES);
   assert.deepEqual(chips.map((c) => c.getAttribute('data-label')), LABEL_NAMES);
   const positive = chips.filter((c) => c.classList.contains('positive'));
-  assert.deepEqual(positive.map((c) => c.textContent), ['Cardiomegaly', 'Support Devices']);
+  assert.deepEqual(positive.map(visibleText), ['Cardiomegaly', 'Support Devices']);
   assert.ok(chips.filter((c) => !positive.includes(c)).every((c) => c.classList.contains('negative')));
   assert.deepEqual(chips.filter((c) => c.getAttribute('data-value') === '1').length, 2);
-  assert.equal(chips[1].getAttribute('aria-label'), 'Cardiomegaly: positive');
-  assert.equal(chips[0].getAttribute('aria-label'), 'Enlarged Cardiomediastinum: negative');
+  assert.equal(chips[1].textContent, 'Cardiomegaly: positive');   // the state is text in the chip, which a screen reader reads
+  assert.equal(chips[0].textContent, 'Enlarged Cardiomediastinum: negative');
   assert.equal(qa(labels, '.chip').every((c) => c.classList.contains('label')), true);
   assert.equal(q(labels, '.note'), null);
   assert.equal(q(labels, '.score'), null);   // no score without a reference
@@ -473,16 +533,16 @@ test('the chips are the 14 names in ctx.labelNames order: positives filled, nega
 
 test('without ctx.labelNames the chips follow the order of the labels in the view', () => {
   const view = finished({ labels: { Edema: 1, 'No Finding': 0, Cardiomegaly: 0 } });
-  assert.deepEqual(texts(qa(renderLabels(view), '.chip')), ['Edema', 'No Finding', 'Cardiomegaly']);
-  assert.deepEqual(texts(qa(renderLabels(view, { labelNames: [] }), '.chip')), ['Edema', 'No Finding', 'Cardiomegaly']);
+  assert.deepEqual(qa(renderLabels(view), '.chip').map(visibleText), ['Edema', 'No Finding', 'Cardiomegaly']);
+  assert.deepEqual(qa(renderLabels(view, { labelNames: [] }), '.chip').map(visibleText), ['Edema', 'No Finding', 'Cardiomegaly']);
 });
 
 test('a name in the list that the labels lack reads unknown, and a label outside the list is not dropped', () => {
   const view = finished({ labels: { Edema: 1, Stranger: 1 } });
   const chips = qa(renderLabels(view, { labelNames: ['Edema', 'Cardiomegaly'] }), '.chip');
-  assert.deepEqual(chips.map((c) => [c.textContent, c.classList.contains('unknown'), c.classList.contains('positive')]),
+  assert.deepEqual(chips.map((c) => [visibleText(c), c.classList.contains('unknown'), c.classList.contains('positive')]),
                    [['Edema', false, true], ['Cardiomegaly', true, false], ['Stranger', false, true]]);
-  assert.equal(chips[1].getAttribute('aria-label'), 'Cardiomegaly: not reported');
+  assert.equal(chips[1].textContent, 'Cardiomegaly: not reported');
 });
 
 test('with a score each chip also shows whether it agrees with the reference, and the score numbers sit beside the chips', () => {
@@ -497,8 +557,8 @@ test('with a score each chip also shows whether it agrees with the reference, an
   assert.equal(byName.Edema.getAttribute('data-agree'), 'false');                 // the reference has it, the report not
   assert.equal(byName['Support Devices'].getAttribute('data-agree'), 'false');    // the report has it, the reference not
   assert.equal(byName.Fracture.getAttribute('data-agree'), 'true');               // both negative
-  assert.match(byName.Edema.getAttribute('aria-label'), /Edema: negative, differs from reference/);
-  assert.match(byName.Cardiomegaly.getAttribute('aria-label'), /Cardiomegaly: positive, matches reference/);
+  assert.match(byName.Edema.textContent, /Edema: negative, differs from reference/);
+  assert.match(byName.Cardiomegaly.textContent, /Cardiomegaly: positive, matches reference/);
   assert.equal(q(byName.Edema, '.mark').textContent, '✗');
   assert.equal(q(byName.Fracture, '.mark').textContent, '✓');
   assert.equal(q(byName.Edema, '.mark').getAttribute('aria-hidden'), 'true');   // the glyph is not read out twice
@@ -506,10 +566,44 @@ test('with a score each chip also shows whether it agrees with the reference, an
 
   const score = q(labels, '.score');
   assert.deepEqual(qa(score, 'div').map((d) => [q(d, 'dt').textContent, q(d, 'dd').textContent]), [
-    ['ROUGE-L', '0.190'], ['BLEU-1', '0.300'], ['BLEU-4', '0.100'], ['CheXbert-14 F1', '0.474'], ['Exact match', 'no'],
-  ]);
-  assert.match(labels.textContent, /vs your reference · ✓ same as the reference, ✗ different/);   // the marks are explained
+    ['ROUGE-L', '0.190'], ['BLEU-1', '0.300'], ['BLEU-4', '0.100'], ['CheXbert-14 micro F1', '0.474'], ['CheXbert-14 exact match', 'no'],
+  ]);   // the F1 says which average it is: micro, over the 14 labels of this one report
+  assert.match(labels.textContent, /vs your reference · this report only · ✓ same as the reference, ✗ different/);   // and the marks are explained
   assert.equal(labels.querySelector('.label-chips').parentNode, score.parentNode.parentNode);   // chips and numbers share the section
+});
+
+test('a chip says its state in text inside the chip, not in an aria-label on the list item', () => {
+  const view = finished({
+    labels: labelled(['Cardiomegaly', 'Support Devices']),
+    score: { ...SCORE, reference_chexbert_14: labelled(['Cardiomegaly', 'Edema']) },
+  });
+  const chips = qa(renderLabels(view, { labelNames: [...LABEL_NAMES, 'Stranger'] }), '.chip');
+  const byName = Object.fromEntries(chips.map((c) => [c.getAttribute('data-label'), c]));
+  assert.equal(chips.some((c) => c.hasAttribute('aria-label')), false);   // browse mode reads the text of a list item, not its label
+  const said = (name) => q(byName[name], '.visually-hidden').textContent;
+  assert.equal(said('Cardiomegaly'), ': positive, matches reference');
+  assert.equal(said('Edema'), ': negative, differs from reference');
+  assert.equal(said('Support Devices'), ': positive, differs from reference');
+  assert.equal(said('Fracture'), ': negative, matches reference');
+  assert.equal(said('Stranger'), ': not reported');
+  assert.equal(byName.Cardiomegaly.textContent, 'Cardiomegaly: positive, matches reference✓');   // read out, then the glyph
+  assert.equal(visibleText(byName.Cardiomegaly), 'Cardiomegaly✓');                                  // shown: the name and the glyph
+  assert.equal(q(byName.Cardiomegaly, '.mark').getAttribute('aria-hidden'), 'true');
+  const plain = Object.fromEntries(qa(renderLabels(finished({ labels: labelled(['Edema']) }), { labelNames: LABEL_NAMES }), '.chip')
+    .map((c) => [c.getAttribute('data-label'), c]));
+  assert.equal(q(plain.Edema, '.visually-hidden').textContent, ': positive');   // with no reference there is no agreement to say
+  assert.equal(q(plain.Fracture, '.visually-hidden').textContent, ': negative');
+});
+
+test('with labels off the card says "labels off" from the start instead of "labelling…"', () => {
+  const off = (...steps) => viewOf([step('message_start', { ...START.data, options: { ...START.data.options, label: false } }), ...steps]);
+  assert.equal(renderLabels(off(stageStart('preprocess', 0))).textContent, 'labels off');
+  assert.equal(renderLabels(off(stageStart('generate', 3), snapshot('Findings: x'), stageEnd('generate', 9, GENERATE), stageStart('label', 4))).textContent,
+               'labels off');
+  assert.equal(renderLabels(off(skipped('label', 'label_off'), stopOf('done'))).textContent, 'labels unavailable (label_off)');   // settled: ruling 4's words
+  assert.equal(renderLabels(labelling()).textContent, 'labelling…');   // labels on: as before
+  assert.equal(renderLabels({ ...labelling(), options: null }).textContent, 'labelling…');
+  assert.equal(renderLabels({ ...labelling(), options: { label: true } }).textContent, 'labelling…');
 });
 
 test('a score without per-label reference labels shows its numbers and no agree marks; no score, no numbers', () => {
@@ -524,7 +618,7 @@ test('a score without per-label reference labels shows its numbers and no agree 
   assert.equal(qa(q(noLabels, '.score'), 'dd').length, 4);
   const partial = renderLabels(finished({ labels: labelled([]), score: { rouge_l: 0.5, bleu_1: NaN, bleu_4: null, reference_source: 'test_split' } }));
   assert.deepEqual(qa(partial, '.score dt').map((n) => n.textContent), ['ROUGE-L']);   // only the numbers that are numbers
-  assert.match(partial.textContent, /test-split reference/);
+  assert.match(partial.textContent, /vs test-split reference · this report only/);
   assert.doesNotMatch(serialize(partial), /NaN|undefined|null/);
 });
 
@@ -650,24 +744,34 @@ function assertClean(node, name) {
   walk(node);
 }
 
-test('a public-mode view, with the fields the server redacts missing, renders without errors or stray words', () => {
+test('a public-mode turn, as app/redact.py sends it, renders without errors or stray words and ends with every stage settled', () => {
   const pub = viewOf([
     step('message_start', { message_id: 'm_pub', user_message_id: 'u', session_id: 's', mode: 'public',
                             model: { name: 'hybrid_150m_m3_rrg', checkpoint: 'last.ckpt' }, options: { decode: 'beam', beam_size: 3 },
                             image: { sha256: SHA, filename: 'x.png', source: 'upload', urls: {} } }),
+    stageStart('preprocess', 0), stageEnd('preprocess', 1, { format: 'PNG', input_px: [320, 320] }),
+    stageStart('encode', 1), stageEnd('encode', 6, { device: 'cpu' }),
     stageStart('retrieve', 2),
     stageEnd('retrieve', 8, { image_neighbors: [{ rank: 1, similarity: 0.9 }], gallery: { images: 20 } }),   // rank and similarity only
     stageStart('generate', 3), snapshot('Findings: ok'), stageEnd('generate', 9, { decode: 'beam', beam_size: 3 }),
-    stageEnd('label', 4, { chexbert_14: { Cardiomegaly: 1 } }),   // no neighbor_agreement
-    skipped('score', 'no_reference'),
+    stageStart('label', 4), stageEnd('label', 4, { chexbert_14: { Cardiomegaly: 1 } }),   // no neighbor_agreement
+    // No score event of any kind: public mode has no reference, and redact.py drops stage_start and stage_end of score.
     stopOf('done', { report: 'Findings: ok', display_report: 'Findings: ok' }),
   ]);
+  assert.equal('score' in pub.stages, false);   // the public log never mentions it
   assert.deepEqual([pub.score, pub.agreement, pub.trueRank, pub.matches], [null, null, null, []]);
   const built = everyBuilder(pub, { labelNames: LABEL_NAMES });
   for (const [name, node] of Object.entries(built)) assertClean(node, name);
-  assert.deepEqual(texts(qa(built.labels, '.chip')), LABEL_NAMES);   // 14 chips, the 13 the labels lack read unknown
+  assert.deepEqual(qa(built.labels, '.chip').map(visibleText), LABEL_NAMES);   // 14 chips, the 13 the labels lack read unknown
   assert.equal(qa(built.labels, '.chip.positive').length, 1);
   assert.equal(qa(built.labels, '.chip.unknown').length, 13);
+
+  // The finished turn is settled all the way down: the stage the public log never sent is skipped, not pending forever.
+  assert.deepEqual(qa(built.timeline, 'li').map((li) => li.getAttribute('data-state')), ['done', 'done', 'done', 'done', 'done', 'skipped']);
+  const score = stageItem(built.timeline, 'score');
+  assert.deepEqual([score.textContent, score.getAttribute('aria-label')], ['score · skipped', 'score, skipped: not_run']);
+  assert.equal(qa(built.card, '[data-state="pending"]').length, 0);
+  assert.equal(statusText(pub), 'Report ready');
 });
 
 test('a view that lacks fields outright still renders: every builder takes {} and a null-filled view', () => {
@@ -676,7 +780,7 @@ test('a view that lacks fields outright still renders: every builder takes {} an
                  neighbors: undefined, matches: undefined, trueRank: undefined, notices: undefined, options: undefined,
                  image: undefined, totalMs: undefined };
   for (const view of [{}, bare, initialView(null), { ...initialView('m'), provenance: { name: null, device: null, prefix_k: null } }]) {
-    for (const ctx of [undefined, null, {}, { labelNames: null, copy: null, ui: null }]) {
+    for (const ctx of [undefined, null, {}, { labelNames: null, copy: null, ui: null }, { turn: NaN }, { turn: -1 }, { turn: '3' }, { turn: 2.5 }]) {
       const built = everyBuilder(view, ctx);
       for (const [name, node] of Object.entries(built)) assertClean(node, name);
     }
@@ -814,16 +918,21 @@ test('warnings are shown in arrival order', () => {
   assert.equal(renderNotes(finished()).hasAttribute('hidden'), true);
 });
 
-test('no builder mutates the view, the labels list or the context it is given', () => {
+test('no builder writes to the view, the labels list or the ctx object it is given; only the ui store it is handed changes', () => {
   const view = deepFreeze(finished({ labels: labelled(['Edema']), score: { ...SCORE, reference_chexbert_14: labelled([]) }, truncated: true }));
   const names = deepFreeze([...LABEL_NAMES]);
-  const ctx = { labelNames: names, copy() {}, showModels() {}, ui: new Map() };
+  const ui = new Map();   // the one thing a builder is meant to write to
+  const ctx = Object.freeze({ labelNames: names, copy() {}, showModels() {}, openViewer() {}, turn: 4, ui });
   const card = renderAssistantCard(view, ctx);   // a write to a frozen object throws in a module
-  for (const li of qa(card, 'li[data-stage]')) { li.click(); li.click(); }
+  assert.ok(qa(card, 'li[data-stage] > button').length >= 3);   // there are controls to work
+  for (const toggle of qa(card, 'li[data-stage] > button')) { toggle.click(); toggle.click(); }
   button(card, 'Show raw').click();
-  everyBuilder(deepFreeze(tinyView()), ctx);
+  const tiny = deepFreeze(tinyView());
+  everyBuilder(tiny, ctx);
   everyBuilder(deepFreeze(viewOf([START, stageStart('generate', 3), stopOf('aborted')])), ctx);
+  renderUserTurn(deepFreeze({ text: 'beam 5', image: { url: 'blob:x/1', filename: 'a.png' }, options: tinyView().options }), ctx);
   assert.deepEqual(names, LABEL_NAMES);
+  assert.deepEqual([...ui.keys()].sort(), ['m_test', tiny.id].sort());   // a record per message, and nothing else was written
 });
 
 // ---- the user turn ---------------------------------------------------------------------------------------------------
@@ -868,9 +977,10 @@ test('a preview URL is used as it is and a server path goes through ctx.loadImag
 
   loaded.length = 0;
   const refused = ['javascript:alert(1)', 'data:text/html,<b>x</b>', 'data:image/svg+xml;base64,AAAA', 'https://evil.example/x.png',
-                   '//evil.example/x.png', '/\\evil.example/x.png', '\\\\evil.example/x.png', 'x.png', '', 42, {}, null];
+                   '//evil.example/x.png', '/\\evil.example/x.png', '\\\\evil.example/x.png', 'x.png', '', 42, {}, null,
+                   '/\t/evil.example/x.png', '/\n/evil.example/x.png', '/\r/evil.example/x.png', '/ok\x00', '/ok\x7f'];   // a control character is dropped by the browser's URL parser, and "//host" is what is left
   for (const bad of refused) assert.equal(await srcOf({ url: bad }), null, `url ${JSON.stringify(bad)} was used`);
-  assert.deepEqual(loaded, []);   // not even asked: neither the loader nor the token saw them
+  assert.deepEqual(loaded, []);   // not even asked: neither the loader nor the token saw them, as api.js's own filter
   const hostile = { loadImage: async () => 'javascript:alert(1)' };   // an answer from the loader is checked too
   assert.equal(await srcOf({ url: '/v1/x' }, hostile), null);
   assert.equal(await srcOf({ url: '/v1/x' }, {}), null);   // no loader and no preview: nothing to show, nothing thrown
@@ -925,29 +1035,185 @@ test('with ctx.ui the open stages and the raw toggle survive the whole-card repl
   const ui = new Map();
   const ctx = { ui, copy() {} };
   let card = renderAssistantCard(view, ctx);
-  stageItem(card, 'encode').click();
-  stageItem(card, 'generate').click();
-  stageItem(card, 'generate').click();   // opened and closed again
+  stageButton(card, 'encode').click();
+  stageButton(card, 'generate').click();
+  stageButton(card, 'generate').click();   // opened and closed again
   button(card, 'Show raw').click();
 
   card = renderAssistantCard(view, ctx);   // the next throttled frame
-  assert.equal(stageItem(card, 'encode').classList.contains('open'), true);
-  assert.equal(stageItem(card, 'generate').classList.contains('open'), false);
-  assert.equal(stageItem(card, 'preprocess').classList.contains('open'), false);
+  const open = (stage) => [stageItem(card, stage).classList.contains('open'), stageButton(card, stage).getAttribute('aria-expanded')];
+  assert.deepEqual(open('encode'), [true, 'true']);   // the class and the state the button announces agree
+  assert.deepEqual(open('generate'), [false, 'false']);
+  assert.deepEqual(open('preprocess'), [false, 'false']);
   assert.equal(q(card, 'pre').textContent, 'Findings: a. Impression: b.');
   assert.equal(button(card, 'Show raw').getAttribute('aria-pressed'), 'true');
 
   button(card, 'Show raw').click();
-  stageItem(card, 'encode').click();
+  stageButton(card, 'encode').click();
   card = renderAssistantCard(view, ctx);
-  assert.equal(stageItem(card, 'encode').classList.contains('open'), false);
+  assert.deepEqual(open('encode'), [false, 'false']);
   assert.equal(q(card, 'pre'), null);
 
-  stageItem(card, 'encode').click();
+  stageButton(card, 'encode').click();
   const other = renderAssistantCard({ ...view, id: 'm_other' }, ctx);   // another message has its own state
   assert.equal(stageItem(other, 'encode').classList.contains('open'), false);
   const bare = renderAssistantCard(view, { copy() {} });   // no store: nothing remembered
   assert.equal(stageItem(bare, 'encode').classList.contains('open'), false);
+});
+
+// ---- focus hooks for the whole-card replace (M2) ---------------------------------------------------------------------
+
+test('Copy, Show raw, model details and show more carry a stable data-action, and a stage button its stage', () => {
+  const card = renderAssistantCard(withClips(), { copy() {}, showModels() {} });
+  assert.equal(button(card, 'Copy').getAttribute('data-action'), 'copy');
+  assert.equal(button(card, 'Show raw').getAttribute('data-action'), 'raw');
+  assert.equal(button(card, 'model details').getAttribute('data-action'), 'models');
+  const more = qa(card, 'button.more');
+  assert.equal(more.length, 3);
+  assert.ok(more.every((b) => b.getAttribute('data-action') === 'more'));
+  assert.deepEqual(qa(card, 'li > button').map((b) => [b.getAttribute('data-action'), b.getAttribute('data-stage')]),
+                   [['stage', 'retrieve'], ['stage', 'generate']]);   // only the stages that have a detail
+});
+
+test('focusKey names the focused control and restoreFocus puts focus on its twin in the rebuilt card', () => {
+  const view = withClips();
+  const ctx = { copy() {}, showModels() {}, ui: new Map() };
+  let card = renderAssistantCard(view, ctx);
+  document.body.replaceChildren(card);
+  stageButton(card, 'retrieve').click();   // open, so that its show-more buttons are on screen and can take focus
+  const controls = (c) => ({
+    'stage:retrieve': stageButton(c, 'retrieve'), 'stage:generate': stageButton(c, 'generate'),
+    copy: button(c, 'Copy'), raw: button(c, 'Show raw'), models: button(c, 'model details'),
+    'more:retrieve:0': qa(c, 'button.more')[0], 'more:retrieve:2': qa(c, 'button.more')[2],
+  });
+  for (const key of Object.keys(controls(card))) {
+    const control = controls(card)[key];
+    control.focus();
+    assert.equal(document.activeElement, control, key);
+    assert.equal(focusKey(document.activeElement), key);
+    const next = renderAssistantCard(view, ctx);   // the next frame: the card is rebuilt and replaces the old one
+    card.replaceWith(next);
+    card = next;
+    assert.equal(document.activeElement, document.body, `${key}: the replace takes focus away`);
+    assert.equal(restoreFocus(card, key), true, key);
+    assert.equal(document.activeElement, controls(card)[key], `${key}: focus is on the same control of the new card`);
+    assert.equal(focusKey(document.activeElement), key);
+  }
+  document.body.replaceChildren();
+});
+
+test('focusKey reads the control from anything inside it; restoreFocus gives up quietly when it cannot restore', () => {
+  const card = renderAssistantCard(finished(), {});   // no copy callback and no models link
+  document.body.replaceChildren(card);
+  assert.equal(focusKey(null), null);
+  assert.equal(focusKey(document.body), null);
+  assert.equal(focusKey(q(card, 'p, .note') ?? q(card, 'ol')), null);   // not inside a control
+  const raw = button(card, 'Show raw');
+  assert.equal(focusKey(raw), 'raw');
+  raw.append(el('span', {}, 'inner'));
+  assert.equal(focusKey(q(raw, 'span')), 'raw');   // a click or focus can land on a child of the button
+  for (const key of [null, undefined, '', 'copy', 'models', 'stage:retrieve', 'stage:nope', 'more:encode:0', 'more:retrieve:0',
+                     'stage:"] x', 'x:y:z', 'copy:extra', 'raw:1', 'more:encode:-1', 'more:encode:x']) {
+    assert.equal(restoreFocus(card, key), false, String(key));   // absent, unknown or malformed: false, and no exception
+  }
+  assert.equal(document.activeElement, document.body);
+  assert.equal(restoreFocus(card, 'raw'), true);
+  assert.equal(document.activeElement, raw);
+  document.body.replaceChildren();
+});
+
+test('restoreFocus says whether focus really moved, and never scrolls the pane to do it', () => {
+  const card = renderAssistantCard(finished(), {});
+  const raw = button(card, 'Show raw');
+  const asked = [];
+  const focus = raw.focus.bind(raw);
+  raw.focus = (options) => { asked.push(options); focus(options); };   // what the page would be told to do
+  assert.equal(restoreFocus(card, 'raw'), false);   // the card is not in the page: the control exists but cannot take focus
+  assert.equal(document.activeElement, document.body);
+  document.body.replaceChildren(card);
+  assert.equal(restoreFocus(card, 'raw'), true);
+  assert.equal(document.activeElement, raw);
+  assert.deepEqual(asked, [{ preventScroll: true }, { preventScroll: true }]);   // a frame that rebuilds the card must not jump the pane
+  document.body.replaceChildren();
+});
+
+// ---- names of repeated controls (M3) ----------------------------------------------------------------------------------
+
+test('repeated controls have distinct names that contain their visible text, and the turn number tells the cards apart', () => {
+  const view = withClips();
+  const ctxOf = (turn) => ({ copy() {}, showModels() {}, openViewer() {}, ...(turn ? { turn } : {}) });
+  const three = renderAssistantCard(view, ctxOf(3));
+  const nameOf = (card, label) => button(card, label).getAttribute('aria-label');
+  assert.equal(three.getAttribute('aria-label'), 'Assistant report, turn 3');
+  assert.equal(nameOf(three, 'Copy'), 'Copy report, turn 3');
+  assert.equal(nameOf(three, 'Show raw'), 'Show raw report, turn 3');
+  assert.equal(nameOf(three, 'model details'), 'model details, turn 3');
+  assert.deepEqual(qa(three, 'button.more').map((b) => b.getAttribute('aria-label')), [
+    'show more of retrieve report_matches 1 report, turn 3', 'show more of retrieve report_matches 2 report, turn 3',
+    'show more of retrieve note, turn 3',
+  ]);   // the stage and the path to the string, so no two of them sound alike
+  assert.equal(stageButton(three, 'generate').getAttribute('aria-label'), 'generate, done, 9 milliseconds, turn 3');
+  qa(three, 'button.more')[2].click();
+  assert.equal(qa(three, 'button.more')[2].getAttribute('aria-label'), 'show less of retrieve note, turn 3');
+
+  const unnumbered = renderAssistantCard(view, ctxOf());
+  assert.equal(unnumbered.getAttribute('aria-label'), 'Assistant report');
+  assert.deepEqual([nameOf(unnumbered, 'Copy'), nameOf(unnumbered, 'Show raw'), nameOf(unnumbered, 'model details')],
+                   ['Copy report', 'Show raw report', 'model details']);
+  assert.equal(stageButton(unnumbered, 'generate').getAttribute('aria-label'), 'generate, done, 9 milliseconds');   // the brief's wording
+
+  const names = (card) => qa(card, 'button').map((b) => b.getAttribute('aria-label'));
+  const seven = renderAssistantCard(view, ctxOf(7));
+  const [a, b] = [names(three), names(seven)];
+  assert.equal(new Set(a).size, a.length);   // distinct within a card
+  assert.deepEqual(a.filter((n) => b.includes(n)), []);   // and between two cards
+
+  for (const control of qa(three, 'button[data-action]').filter((c) => c.getAttribute('data-action') !== 'stage')) {
+    const [name, text] = [control.getAttribute('aria-label').toLowerCase(), control.textContent.toLowerCase()];
+    assert.ok(name.includes(text), `"${control.getAttribute('aria-label')}" should contain "${control.textContent}"`);   // WCAG 2.5.3, label in name
+  }
+
+  const user = renderUserTurn({ text: 'hi', image: { url: 'blob:x/1', filename: 'a.png' } }, ctxOf(3));
+  assert.equal(user.getAttribute('aria-label'), 'Your message, turn 3');
+  assert.equal(q(user, 'button.thumb-button').getAttribute('aria-label'), 'Open X-ray in the viewer, turn 3');
+  const plainUser = renderUserTurn({ text: 'hi', image: { url: 'blob:x/1' } }, ctxOf());
+  assert.equal(plainUser.getAttribute('aria-label'), 'Your message');
+  assert.equal(q(plainUser, 'button.thumb-button').getAttribute('aria-label'), 'Open X-ray in the viewer');
+});
+
+test('a rejected ctx.copy shows "Copy failed" on the button for a moment, then "Copy" again; success changes nothing', async (t) => {
+  const timers = [];
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };   // a timer is run by hand
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  t.after(() => { globalThis.setTimeout = realSetTimeout; process.off('unhandledRejection', onUnhandled); });
+
+  const failures = [async () => { throw new Error('denied'); }, () => Promise.reject(new Error('denied')), () => { throw new Error('sync'); }];
+  for (const copy of failures) {
+    timers.length = 0;
+    const copyButton = button(renderReport(finished(), { copy, turn: 2 }), 'Copy');
+    copyButton.click();   // a throw from copy itself must not escape the click either
+    await tick();
+    assert.equal(copyButton.textContent, 'Copy failed');
+    assert.equal(copyButton.getAttribute('aria-label'), 'Copy failed, turn 2');
+    assert.deepEqual(timers.map((x) => x.ms), [2000]);
+    timers[0].fn();   // the moment is over
+    assert.equal(copyButton.textContent, 'Copy');
+    assert.equal(copyButton.getAttribute('aria-label'), 'Copy report, turn 2');
+  }
+  for (const copy of [async () => {}, () => undefined, () => true, () => ({ then: undefined })]) {
+    timers.length = 0;
+    const copyButton = button(renderReport(finished(), { copy }), 'Copy');
+    copyButton.click();
+    await tick();
+    assert.equal(copyButton.textContent, 'Copy');
+    assert.equal(copyButton.getAttribute('aria-label'), 'Copy report');
+    assert.deepEqual(timers, []);
+  }
+  await tick();
+  assert.deepEqual(unhandled, []);
 });
 
 // ---- the throttle (ruling 9) -------------------------------------------------------------------------------------------
@@ -998,23 +1264,54 @@ test('scheduleRender falls back to a timer where there is no requestAnimationFra
   }
 });
 
-// ---- what app/static may contain (rulings 3 and 10) ---------------------------------------------------------------------
+// ---- what app/static may contain (rulings 3 and 10, and M6) ---------------------------------------------------------------
 
-const STATIC_DIR = new URL('../../app/static/', import.meta.url);
-const scripts = () => readdirSync(STATIC_DIR).filter((n) => n.endsWith('.js')).map((n) => [n, readFileSync(new URL(n, STATIC_DIR), 'utf8')]);
+const STATIC_PATH = fileURLToPath(new URL('../../app/static/', import.meta.url));
+// Every way to turn a string into markup, or into a document of its own: none may appear in a script or page of the app.
+const HTML_SINKS = /innerHTML|outerHTML|insertAdjacentHTML|document\s*\.\s*write|DOMParser|createContextualFragment|setHTMLUnsafe|parseHTMLUnsafe|srcdoc/;
 
-test('no script in app/static uses an HTML-string API: report and user text can only ever be text', () => {
-  const found = scripts();
-  assert.ok(found.some(([name]) => name === 'render.js'), 'render.js is among the scripts scanned');
-  const banned = /innerHTML|outerHTML|insertAdjacentHTML|document\s*\.\s*write/;
-  for (const [name, source] of found) assert.doesNotMatch(source, banned, name);
+// The .js, .mjs and .html files under dir, however deep: [path relative to dir, text].
+const staticSources = (dir) => readdirSync(dir, { recursive: true })
+  .filter((name) => /\.(?:m?js|html)$/.test(name))
+  .map((name) => [name, readFileSync(join(dir, name), 'utf8')]);
+
+test('no script or page in app/static uses an HTML-string API: report and user text can only ever be text', () => {
+  const found = staticSources(STATIC_PATH);
+  assert.ok(found.some(([name]) => name === 'render.js') && found.some(([name]) => name === 'index.html'), 'the scan reads render.js and the page');
+  for (const [name, source] of found) assert.doesNotMatch(source, HTML_SINKS, name);
+});
+
+test('the HTML-string scan reads nested directories and knows every sink', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'static-scan-'));
+  try {
+    const sinks = ['x.innerHTML = a', 'x.outerHTML = a', 'x.insertAdjacentHTML("beforeend", a)', 'document.write(a)', 'document . write(a)',
+                   'new DOMParser()', 'range.createContextualFragment(a)', 'el.setHTMLUnsafe(a)', 'Document.parseHTMLUnsafe(a)', 'frame.srcdoc = a'];
+    mkdirSync(join(dir, 'deep', 'er'), { recursive: true });
+    sinks.forEach((code, i) => writeFileSync(join(dir, i % 2 ? join('deep', 'er') : 'deep', `s${i}.js`), `${code};\n`));
+    writeFileSync(join(dir, 'deep', 'page.html'), '<iframe srcdoc="x"></iframe>');
+    writeFileSync(join(dir, 'clean.js'), 'export const a = 1;\n');
+    writeFileSync(join(dir, 'deep', 'notes.txt'), 'innerHTML in a text file is not a script');
+    const flagged = staticSources(dir).filter(([, source]) => HTML_SINKS.test(source)).map(([name]) => name);
+    assert.equal(flagged.length, sinks.length + 1);   // every sink file, at two depths, and the page; not clean.js, not the .txt
+    assert.ok(!flagged.includes('clean.js') && !flagged.some((n) => n.endsWith('.txt')));
+    for (const [i, code] of sinks.entries()) assert.ok(HTML_SINKS.test(code), code);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('app/static has no EventSource and no absolute URL, and imports only its own files', () => {
-  for (const [name, source] of scripts()) {
+  const scripts = staticSources(STATIC_PATH).filter(([name]) => name.endsWith('.js'));
+  assert.ok(scripts.length >= 3);   // api, state, render, and whatever the page adds
+  for (const [name, source] of scripts) {
     assert.doesNotMatch(source, /EventSource/, name);
     assert.doesNotMatch(source, /https?:\/\//, name);
-    for (const [, specifier] of source.matchAll(/(?:^|\n)\s*(?:import|export)\b[^'"\n]*?from\s*['"]([^'"]+)['"]/g)) {
+    const specifiers = [
+      ...source.matchAll(/\b(?:import|export)\b[^;'"]*?\bfrom\s*['"]([^'"]+)['"]/g),   // import { a, b } from '...', across lines too
+      ...source.matchAll(/\bimport\s*\(\s*['"]([^'"]+)['"]/g),                          // import('...')
+      ...source.matchAll(/(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g),                       // import '...'
+    ].map((m) => m[1]);
+    for (const specifier of specifiers) {
       assert.match(specifier, /^\.\/[\w-]+\.js$/, `${name} imports ${specifier}`);   // browser-native modules, no packages
     }
   }

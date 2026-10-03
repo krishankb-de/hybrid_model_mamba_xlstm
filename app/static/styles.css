@@ -104,6 +104,19 @@ th { color: var(--muted); font-weight: 500; overflow-wrap: normal; }   /* a key 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 ::placeholder { color: var(--muted); opacity: 1; }
 
+.visually-hidden {   /* out of sight and in the accessibility tree: a chip's spoken state, the page's status line */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 button {
   min-height: 40px;
   padding: 8px 14px;
@@ -238,7 +251,17 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   color: var(--muted);
 }
 .timeline > li::before { content: "○"; }
-.timeline > li:has(> table) { cursor: pointer; }
+#conversation .timeline > li > button {   /* the control of a stage that has a detail: it reads as the label, inside the pill */
+  min-height: 24px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+#conversation .timeline > li > button:hover:not(:disabled) { background: none; text-decoration: underline; text-underline-offset: 2px; }
 .timeline > li[data-state="running"] { border-color: var(--accent); color: var(--accent); }
 .timeline > li[data-state="running"]::before { content: "●"; }
 .timeline > li[data-state="done"] { color: var(--fg); }

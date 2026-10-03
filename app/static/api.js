@@ -138,10 +138,14 @@ const objectUrls = new Set();   // every object URL made, so clearImageCache can
 // turn "/<tab>/host" into "//host").
 const SAME_ORIGIN_PATH = /^\/(?![/\\])[^\x00-\x1f\x7f]*$/;
 
+// The one filter for a URL that may be fetched with the token: loadImage applies it, and so does render.js before it asks
+// for a thumbnail, so what one refuses the other never sees.
+export const isSameOriginPath = (url) => typeof url === 'string' && SAME_ORIGIN_PATH.test(url);
+
 // An image behind the token, as an object URL for <img src>: auth = {token, clientId}. A failed fetch is not cached.
 // Only a same-origin path is fetched: anything else rejects before a request is made, so the token never leaves.
 export function loadImage(url, auth = {}) {
-  if (typeof url !== 'string' || !SAME_ORIGIN_PATH.test(url)) {
+  if (!isSameOriginPath(url)) {
     return Promise.reject(new Error('loadImage takes a path on this origin, starting with a single "/"'));
   }
   if (!images.has(url)) {

@@ -52,16 +52,20 @@ export function applyEvent(view, { event, data }) {
 
 export const replay = (events) => events.reduce(applyEvent, initialView(events.length ? events[0].data.message_id : null));
 
-// What the timeline draws for a stage: the log's record while the turn runs or is done, and a settled one once it was
-// stopped or failed: the stage it was in and the stages it never reached are not left spinning or pending.
+// What the timeline draws for a stage: the log's record while the turn runs, and a settled one once it has ended: a
+// stage that was running or never reached is not left spinning or pending.
 //   aborted: running and pending -> {state: 'skipped', skipped: 'stopped'}
 //   error:   running -> {state: 'error'}, pending -> {state: 'skipped', skipped: 'not_run'}
+//   done:    pending -> {state: 'skipped', skipped: 'not_run'}, once the log holds some other stage. Public mode never
+//            sends the score stage, so a finished public turn has a stage its log never mentions. A question turn ran
+//            no stage and records none: it stays pending, and the card draws no timeline for it.
 // A stage that is done or skipped is final in every turn. -> {state, ms?, detail?, skipped?}
 export function stageState(view, name) {
   const recorded = view.stages[name] || { state: 'pending' };
   if (recorded.state !== 'running' && recorded.state !== 'pending') return recorded;
   if (view.status === 'aborted') return { state: 'skipped', skipped: 'stopped' };
   if (view.status === 'error') return recorded.state === 'running' ? { state: 'error' } : { state: 'skipped', skipped: 'not_run' };
+  if (view.status === 'done' && recorded.state === 'pending' && Object.keys(view.stages).length) return { state: 'skipped', skipped: 'not_run' };
   return recorded;
 }
 

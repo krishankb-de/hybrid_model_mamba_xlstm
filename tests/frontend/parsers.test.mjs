@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
   authHeaders, cancelMessage, clearImageCache, loadImage, parseSSE, pollMessage, streamTurn,
 } from '../../app/static/api.js';
+import * as api from '../../app/static/api.js';
 import { STAGES, applyEvent, initialView, labelsPending, replay, stageState } from '../../app/static/state.js';
 
 test('a frame split across chunks reassembles', () => {
@@ -269,28 +270,55 @@ test('an error event then message_stop(error) keeps the error on a settled view'
 
 // ---- stageState and labelsPending: what the timeline and the label chips show -----------------------------------------
 
-test('stageState closes what an aborted or failed turn left running or pending, and nothing else', () => {
+test('stageState closes what a finished, stopped or failed turn left running or pending, and nothing else', () => {
   const records = {   // what view.stages holds for the stage under test; undefined: the log never mentioned it
-    pending: undefined,
     running: { state: 'running' },
     done: { state: 'done', ms: 12.5, detail: { tokens: 16 } },
     skipped: { state: 'skipped', skipped: 'gallery_unavailable' },
   };
   const stopped = { state: 'skipped', skipped: 'stopped' };
   const notRun = { state: 'skipped', skipped: 'not_run' };
-  const expected = {   // turn status -> stage record -> what stageState says
-    running: { pending: { state: 'pending' }, running: records.running, done: records.done, skipped: records.skipped },
-    done: { pending: { state: 'pending' }, running: records.running, done: records.done, skipped: records.skipped },
-    aborted: { pending: stopped, running: stopped, done: records.done, skipped: records.skipped },
-    error: { pending: notRun, running: { state: 'error' }, done: records.done, skipped: records.skipped },
+  const pending = { state: 'pending' };
+  // What the log holds, for the stage under test (generate) and for the turn: the stage's own record, and whether the
+  // turn recorded some other stage (preprocess) or nothing at all.
+  const logs = {
+    'never mentioned, nothing else recorded': {},
+    'never mentioned, another stage recorded': { preprocess: records.done },
+    running: { generate: records.running },
+    done: { generate: records.done },
+    skipped: { generate: records.skipped },
+  };
+  const expected = {   // turn status -> what the log holds -> what stageState says of generate
+    running: { 'never mentioned, nothing else recorded': pending, 'never mentioned, another stage recorded': pending,
+               running: records.running, done: records.done, skipped: records.skipped },
+    // Public mode never sends the score stage, so a finished turn can have stages its log never mentions: those are
+    // settled as not run. A question turn ran no stage at all, records none, and stays as it is.
+    done: { 'never mentioned, nothing else recorded': pending, 'never mentioned, another stage recorded': notRun,
+            running: records.running, done: records.done, skipped: records.skipped },
+    aborted: { 'never mentioned, nothing else recorded': stopped, 'never mentioned, another stage recorded': stopped,
+               running: stopped, done: records.done, skipped: records.skipped },
+    error: { 'never mentioned, nothing else recorded': notRun, 'never mentioned, another stage recorded': notRun,
+             running: { state: 'error' }, done: records.done, skipped: records.skipped },
   };
   for (const [status, row] of Object.entries(expected)) {
     for (const [kind, want] of Object.entries(row)) {
-      const stages = kind === 'pending' ? {} : { generate: records[kind] };
-      const view = deepFreeze({ ...initialView('m1'), status, stages });   // frozen: the selector must not write to it
-      assert.deepEqual(stageState(view, 'generate'), want, `a ${status} turn, a ${kind} stage`);
+      const view = deepFreeze({ ...initialView('m1'), status, stages: logs[kind] });   // frozen: the selector must not write to it
+      assert.deepEqual(stageState(view, 'generate'), want, `a ${status} turn, ${kind}`);
     }
   }
+});
+
+test('a finished turn whose log lacks a stage settles it: the public log has no score stage, a question turn has none at all', () => {
+  const without = (log, stage) => log.filter((e) => e.data.stage !== stage).map((e, i) => ({ ...e, data: { ...e.data, seq: i + 1 } }));
+  const recordedLog = recorded();
+  const publicLike = replay(without(recordedLog, 'score'));   // what app/redact.py sends: no stage_start or stage_end of score
+  assert.equal('score' in publicLike.stages, false);
+  assert.equal(publicLike.status, 'done');
+  assert.deepEqual(stageState(publicLike, 'score'), { state: 'skipped', skipped: 'not_run' });
+  assert.deepEqual(STAGES.map((s) => stageState(publicLike, s).state), ['done', 'done', 'skipped', 'done', 'skipped', 'skipped']);   // retrieve, label: skipped in the recording
+  const question = replay([recordedLog[0], { event: 'message_stop', data: { ...recordedLog.at(-1).data, seq: 2 } }]);
+  assert.deepEqual(question.stages, {});
+  assert.deepEqual(STAGES.map((s) => stageState(question, s)), STAGES.map(() => ({ state: 'pending' })));   // nothing ran: nothing to settle
 });
 
 test('stageState and STAGES name the six stages in contract order', () => {
@@ -722,6 +750,15 @@ test('loadImage fetches once with the auth headers for concurrent calls, and cle
   assert.equal(calls.length, 4);   // the cache really was emptied
 });
 
+test('isSameOriginPath is the one filter for a path on this origin: a single slash and no control character, nothing else', () => {
+  const { isSameOriginPath } = api;   // read off the namespace: a missing export fails this test only
+  for (const ok of ['/', '/v1/x', '/v1/messages/u1/image?variant=a%2Fb&x=1#frag']) assert.equal(isSameOriginPath(ok), true, ok);
+  const refused = ['//evil.example/x', '/\\evil.example/x', '\\\\evil.example/x', 'x.png', './x', '', 'https://e.example/x', 'blob:null/abc',
+                   'data:image/png;base64,AAAA', 'javascript:alert(1)', '/\t/evil.example/x', '/\n/evil.example/x', '/\r/evil.example/x',
+                   '/a\x00b', '/a\x1fb', '/a\x7fb', undefined, null, 42, {}, ['/x']];
+  for (const bad of refused) assert.equal(isSameOriginPath(bad), false, JSON.stringify(bad));
+});
+
 test('loadImage takes a same-origin path only, so the bearer token never reaches another URL', async (t) => {
   stubObjectUrls(t);
   const calls = stubFetch(t, () => new Response(new Blob(['png'])));
@@ -729,7 +766,7 @@ test('loadImage takes a same-origin path only, so the bearer token never reaches
   const refused = [
     'https://evil.example/x.png', 'http://evil.example/x.png', '//evil.example/x.png',   // another origin
     '/\\evil.example/x.png', '\\\\evil.example/x.png',                              // a backslash counts as a slash
-    '/\t/evil.example/x.png', '/\n/evil.example/x.png',                              // a tab or newline is dropped, leaving //
+    '/\t/evil.example/x.png', '/\n/evil.example/x.png', '/\r/evil.example/x.png',   // a tab, newline or CR is dropped, leaving //
     'x.png', './x.png', 'blob:null/abc', 'data:image/png;base64,AAAA', 'javascript:alert(1)', '', undefined, null, 42,
   ];
   for (const url of refused) {
