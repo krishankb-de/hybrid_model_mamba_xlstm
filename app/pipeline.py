@@ -160,11 +160,15 @@ class Pipeline:
             data = job.upload
         else:
             path = self.store.upload_path(job.session_id, job.previous_sha256, "original")
-            if path is None:   # alive at _check(): the session was deleted since, or the file went missing from disk
-                if self.store.get_message(job.message_id, None) is None:   # resolved through its session
-                    raise _Gone()
-                raise FileNotFoundError("the turn's image is no longer stored")
-            data = path.read_bytes()
+            try:
+                if path is None:
+                    raise FileNotFoundError("the turn's image is no longer stored")
+                data = path.read_bytes()
+            except FileNotFoundError:
+                # The session was alive at _check(). Deleted since (before the lookup or before the read), it ends
+                # the turn quietly; with the session alive, only the file went missing from disk: an error.
+                self._require_session(job.message_id)
+                raise
         result, prepared = engine.preprocess(data)
         detail = dict(result.detail, source=source)
         return StageResult(detail, round((time.perf_counter() - t0) * 1000.0, 1)), prepared
@@ -185,7 +189,11 @@ class Pipeline:
         ends the turn, and so does the deletion of its session."""
         if turn.cancel.is_set():
             raise Cancelled()
-        if self.store.get_message(turn.job.message_id, None) is None:   # resolved through its session
+        self._require_session(turn.job.message_id)
+
+    def _require_session(self, message_id: str) -> None:
+        """_Gone once the turn's session is deleted: a message is resolved through its session."""
+        if self.store.get_message(message_id, None) is None:
             raise _Gone()
 
     def _stage(self, turn: _Turn, name: str, run: Callable[[], Tuple[StageResult, Any]]) -> Any:

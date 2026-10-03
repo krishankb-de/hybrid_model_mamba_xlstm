@@ -882,6 +882,32 @@ def test_a_text_only_turn_whose_session_is_deleted_during_preprocess_ends_quietl
     assert any("deleted" in r.getMessage() for r in caplog.records if r.name == "app.pipeline")
 
 
+def test_a_text_only_turn_whose_session_is_deleted_before_its_image_is_read_ends_quietly(client, monkeypatch, caplog):
+    # The other half of that window: upload_path found the file, then the delete (which removes the uploads) landed.
+    sid = client.post("/v1/sessions", json={}).json()["id"]
+    sha = _turn(client, sid)[0]["data"]["image"]["sha256"]
+    store, pipeline = client.app.state.store, client.app.state.worker.pipeline
+    uid, mid = store.start_turn(sid, "greedy", "private", {}, sha, "x.png")   # alive when the stage starts
+    path, reads = store.upload_path(sid, sha, "original"), []   # the genuine path, found while the session is alive
+
+    class DeletedOnRead:
+        def read_bytes(self):   # the session goes after upload_path answered and before the bytes are read
+            reads.append(1)
+            assert store.delete_session(sid, None)
+            return path.read_bytes()   # the uploads went with the session: FileNotFoundError
+
+    monkeypatch.setattr(store, "upload_path", lambda *args: DeletedOnRead())
+    sent = []
+    job = TurnJob(sid, uid, mid, "greedy", None, "x.png", Options(decode="greedy"), mode="private",
+                  previous_sha256=sha)
+    pipeline.run(job, lambda event, data: sent.append((event, data)), threading.Event())
+    assert reads == [1]
+    assert [e for e, _ in sent] == ["message_start", "stage_start", "message_stop"]   # aborted, with no error event
+    assert sent[-1][1]["status"] == "aborted"
+    assert [e["event"] for e in store.events_after(mid)] == ["message_start", "stage_start", "message_stop"]
+    assert any("deleted" in r.getMessage() for r in caplog.records if r.name == "app.pipeline")
+
+
 def test_a_text_only_turn_whose_image_left_the_disk_is_an_error_not_a_quiet_end(client, tmp_path):   # fix-1
     sid = client.post("/v1/sessions", json={}).json()["id"]
     sha = _turn(client, sid)[0]["data"]["image"]["sha256"]

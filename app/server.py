@@ -74,9 +74,18 @@ OPTIONS_EXAMPLE = ('{"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "c
 
 
 def _option_ranges() -> str:
-    """"beam_size 1-8, max_new_tokens 16-200, ...", read from Options so the reference cannot drift from it."""
-    props = Options.model_json_schema()["properties"]
-    return ", ".join("{} {}-{}".format(name, p["minimum"], p["maximum"]) for name, p in props.items() if "maximum" in p)
+    """"beam_size 1-8, max_new_tokens 16-200, ...", read from Options so the reference cannot drift from it. A field
+    with one bound only reads "up to N" or "from N"; one with none is left out."""
+    ranges = []
+    for name, p in Options.model_json_schema()["properties"].items():
+        low, high = p.get("minimum"), p.get("maximum")
+        if low is not None and high is not None:
+            ranges.append("{} {}-{}".format(name, low, high))
+        elif high is not None:
+            ranges.append("{} up to {}".format(name, high))
+        elif low is not None:
+            ranges.append("{} from {}".format(name, low))
+    return ", ".join(ranges)
 
 
 API_DESCRIPTION = (
@@ -90,10 +99,12 @@ API_DESCRIPTION = (
     "kind of its status: " + ", ".join("{} {}".format(status, kind) for status, kind in ERROR_KINDS.items()) + ".")
 CLIENT_ID_DOC = ("Public mode only: names the caller, 1 to 128 visible ASCII characters, and scopes its sessions and "
                  "messages. A private server ignores it.")
-IMAGE_DOC = ("The chest X-ray: PNG, JPEG or WEBP, at most {} MB, each side at least {} px. Leave it out to run the "
-             "session's latest image again.".format(UPLOAD_MB, MIN_SIDE))
-TEXT_DOC = ("A command that changes this turn's options, or a note kept with the turn. " + COMMAND_HELP + " With no "
-            "image, any other text is answered with the command list and no model runs.")
+IMAGE_DOC = ("The chest X-ray: PNG, JPEG or WEBP, at most {} MB, each side at least {} px. Leave it out to reuse the "
+             "session's latest image; a session with no image yet answers 422.".format(UPLOAD_MB, MIN_SIDE))
+TEXT_DOC = ("A command that changes this turn's options, or a note kept with the turn. " + COMMAND_HELP + " Sent "
+            "without an image, a command (or no text) runs the session's latest image again, and any other text is "
+            "answered with the command list and no model runs; a session with no image yet answers a text-only turn "
+            "with a 422.")
 OPTIONS_DOC = ("The turn's options as a JSON object with the keys " + ", ".join(Options.model_fields) + ". A key left "
                "out takes its default, the published protocol; the ranges are " + _option_ranges() + ". An unknown "
                "key or a value out of range is a 422, and anything that is not a JSON object a 400. `reference` and "
@@ -104,20 +115,19 @@ REFUSALS = {   # what a status means in the reference; a route that can answer i
     403: "A test-split study was asked for in public mode.",
     404: "The session or message does not exist or was deleted, or in public mode it belongs to another client.",
     413: "The image is over the {} MB upload limit.".format(UPLOAD_MB),
-    422: "The request failed validation: a parameter, an option, the model or the image cannot be used.",
+    422: "The request failed validation: a parameter, an option, the model or the image cannot be used, or there is "
+         "no image to run.",
     429: "The server is busy: its queue of accepted turns is full.",
     500: "The server could not store the image.",
 }
-DEFAULT_REFUSAL = {   # every route's `default`: what the guard and the client id answer before any route runs
-    "description": "Any other refusal, in the same envelope: 401 when the server has a token and the request lacks it, "
-                   "400 in public mode without a valid `X-Client-Id`, 403 from a tokenless server to a connection "
-                   "that is not loopback.",
-    "content": {"application/json": {"example": error_body(
-        ERROR_KINDS[401], "Missing or wrong token: send Authorization: Bearer <token>.")}}}
 STREAM_RESPONSE = {200: {   # the turn is Server-Sent Events, not JSON
-    "description": "The turn's events, one frame each (`event: <name>`, then `data: <one-line JSON>`), from "
-                   "`message_start` to `message_stop`; a `: ping` comment goes out every {:g} s while no event "
-                   "comes.".format(PING_S),
+    "description": "The turn's events, one frame each: `event: <name>`, then `data: <one-line JSON>` with a `seq` that "
+                   "counts 1, 2, ... without gaps. The names are `message_start`, `stage_start`, `stage_end`, "
+                   "`content_block_start`, `content_block_delta`, `content_block_stop`, `warning`, `error` and "
+                   "`message_stop`. The stream ends with a `message_stop` whose `status` is `done`, `error` or "
+                   "`aborted` (a cancelled turn). A failure after this 200 has opened is no HTTP status: it arrives as "
+                   "an `error` event followed by a `message_stop` with status `error`. A `: ping` comment goes out "
+                   "every {:g} s while no event comes.".format(PING_S),
     "headers": {"X-Message-Id": {"description": "The new message's id, sent before the first event.",
                                  "schema": {"type": "string"}}},
     "content": {"text/event-stream": {"schema": {"type": "string"}}}}}
@@ -128,15 +138,26 @@ EXPORT_RESPONSE = {200: {   # JSON is FastAPI's default; Markdown is the other f
     "content": {"text/markdown": {"schema": {"type": "string"}}}}}
 
 
-def _refusals(messages: Dict[int, str]) -> Dict[Any, Dict[str, Any]]:
+def _refusals(messages: Dict[int, str], token: bool = True, client_id: bool = True) -> Dict[Any, Dict[str, Any]]:
     """responses= for a route: each status it refuses with, as the error envelope carrying the message it really sends,
-    and the default every route shares. A route that declares a default (or its own 422) is not given FastAPI's own
+    and a default for what is answered before the route runs. That is 403 for a tokenless server reached off loopback
+    (every route), 401 for a missing token (token: every /v1 route) and 400 for a missing client id in public mode
+    (client_id: the session and message routes, not /v1/models). A route with a default is not given FastAPI's own
     422, whose HTTPValidationError body this API never sends."""
     out: Dict[Any, Dict[str, Any]] = {
         status: {"description": "{}: {}".format(ERROR_KINDS[status], REFUSALS[status]),
                  "content": {"application/json": {"example": error_body(ERROR_KINDS[status], message)}}}
         for status, message in messages.items()}
-    out["default"] = DEFAULT_REFUSAL
+    guards = []
+    if token:
+        guards.append("401 when the server has a token and the request lacks it")
+    if client_id:
+        guards.append("400 in public mode without a valid `X-Client-Id`")
+    guards.append("403 from a tokenless server to a connection that is not loopback")
+    example = (error_body(ERROR_KINDS[401], "Missing or wrong token: send Authorization: Bearer <token>.") if token
+               else error_body(ERROR_KINDS[403], NO_TOKEN_MSG))
+    out["default"] = {"description": "Any other refusal, in the same envelope: " + ", ".join(guards) + ".",
+                      "content": {"application/json": {"example": example}}}
     return out
 
 
@@ -428,13 +449,13 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
 
     app.mount("/static", _StaticFiles(directory=str(static_dir), check_dir=False), name="static")
 
-    @app.get("/healthz", summary="Check the server",
+    @app.get("/healthz", summary="Check the server", responses=_refusals({}, token=False, client_id=False),
              description="The server's mode, default model, turns in flight and queue cap. It needs no token.")
     def healthz():
         return {"status": "ok", "mode": mode, "default_model": default_model, "turns_in_flight": worker.in_flight,
                 "queue_cap": queue_cap}
 
-    @app.get("/v1/models", summary="List models", responses=_refusals({}),
+    @app.get("/v1/models", summary="List models", responses=_refusals({}, client_id=False),
              description="The models this server can run, each with its card (checkpoint, device, architecture "
                          "settings, whether decoding can be cached), and the default model, the mode and whether "
                          "`compile` is allowed. In public mode a card names its checkpoint by file name only.")
@@ -479,15 +500,11 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
 
     @app.post("/v1/sessions/{session_id}/messages", summary="Run a turn (streamed)", response_class=StreamingResponse,
               description="Runs one turn on the attached X-ray, or on the session's latest image when none is "
-                          "attached, and streams it as Server-Sent Events (`text/event-stream`): `message_start`, "
-                          "the stage events, `content_block_delta` snapshots of the growing report, then "
-                          "`message_stop`, as CHAT_UI_PLAN.md §6.2 specifies. The `X-Message-Id` response header "
-                          "carries the new message's id before the first event, so a client can cancel the turn or "
-                          "poll `GET /v1/messages/{message_id}` at once. Every refusal comes before the stream opens, "
-                          "as the JSON error envelope: 400 for `options` that is not a JSON object, 403 for a "
-                          "test-split study in public mode, 404 for an unknown session, 413 for an upload over "
-                          "the size limit, 422 for an option, model or image that cannot be used (or no image to "
-                          "run), 429 when the server is busy and 500 when the image cannot be stored.",
+                          "attached, and streams it as Server-Sent Events (`text/event-stream`), from "
+                          "`message_start` to `message_stop`. The `X-Message-Id` response header carries the new "
+                          "message's id before the first event, so a client can cancel the turn or poll `GET "
+                          "/v1/messages/{message_id}` at once; every refusal (400, 403, 404, 413, 422, 429, 500) "
+                          "comes before the stream opens, as a JSON error envelope.",
               responses={**STREAM_RESPONSE, **_refusals({
                   400: "options must be a JSON object.", 403: "Test-split studies are not available in public mode.",
                   404: "Session not found.", 413: TOO_LARGE_MSG,

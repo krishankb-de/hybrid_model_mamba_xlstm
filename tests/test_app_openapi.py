@@ -1,16 +1,24 @@
 """CHAT_UI_PLAN.md P3-E: the chat server's OpenAPI reference (/docs), on the tiny engine."""
 import json
+import re
+from typing import Annotated
 
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from pydantic import BaseModel, Field
 
+from app import server
+from app.commands import COMMAND_HELP
 from app.imaging import MAX_UPLOAD_BYTES
 from app.schemas import Options
 from app.server import ERROR_KINDS, create_app
+from app.store import FINAL_STATUSES
 from tests.app_helpers import iter_sse, png_bytes
 
 MESSAGES = "/v1/sessions/{session_id}/messages"   # the streaming turn
+STREAM_EVENTS = ["message_start", "stage_start", "stage_end", "content_block_start", "content_block_delta",
+                 "content_block_stop", "warning", "error", "message_stop"]   # every event name of the stream
 # The Options dict test_curl_walkthrough_options_validate pins: what the README's curl walkthrough sends (P8-E).
 WALKTHROUGH_OPTIONS = {"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "cached_decode": True, "compile": False,
                        "k_images": 4, "k_reports": 3, "label": True, "reference": None, "display_repair": False}
@@ -58,12 +66,15 @@ def test_curl_walkthrough_options_validate():
 # ---- beyond the brief: what makes /docs a reference rather than a list of function names ----------------------------
 
 def test_every_route_has_its_own_summary_and_a_plain_description(client):
+    spec = client.get("/openapi.json").json()
     for route in client.app.routes:
         if isinstance(route, APIRoute) and route.include_in_schema:
             assert route.summary, route.path   # without one FastAPI derives it from the function name ("Post Message")
-    for method, path, op in _operations(client.get("/openapi.json").json()):
+    for method, path, op in _operations(spec):
         description = op.get("description", "")
-        assert description and "ruling" not in description, (method, path)   # no docstring's plan jargon either
+        assert description and len(re.split(r"(?<=[.!?])\s+", description.strip())) <= 2, (method, path)   # 1 or 2
+    text = json.dumps(spec)   # and no jargon of the plan, whose files a reader of /docs cannot open
+    assert "ruling" not in text and "CHAT_UI_PLAN" not in text
 
 
 def test_the_options_example_is_the_walkthrough_json_and_validates_as_options(client):
@@ -86,19 +97,60 @@ def test_form_fields_and_the_client_id_header_are_described(client):
     assert [p["name"] for p in headers] == ["x-client-id"] and headers[0].get("description")
 
 
-def test_the_streaming_route_documents_its_event_stream(client):
+def test_the_streaming_route_documents_its_event_stream(client, monkeypatch):
     op = client.get("/openapi.json").json()["paths"][MESSAGES]["post"]
     for needle in ("text/event-stream", "message_start", "message_stop", "X-Message-Id"):
         assert needle in op["description"], needle
     ok = op["responses"]["200"]
     assert list(ok["content"]) == ["text/event-stream"] and "X-Message-Id" in ok["headers"]   # never JSON
-    sid = client.post("/v1/sessions", json={}).json()["id"]   # and the route does what its description says
-    r = client.post(MESSAGES.format(session_id=sid), files={"image": ("x.png", png_bytes(), "image/png")},
-                    data={"text": "", "options": json.dumps({"max_new_tokens": 16})})
-    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
-    frames = list(iter_sse([r.text]))
-    assert frames[0]["event"] == "message_start" and frames[-1]["event"] == "message_stop"
-    assert r.headers["x-message-id"] == frames[0]["data"]["message_id"]
+    for word in STREAM_EVENTS + list(FINAL_STATUSES):   # the 200 names every event and every status message_stop has
+        assert "`{}`".format(word) in ok["description"], word
+    assert "`error` event followed by a `message_stop` with status `error`" in ok["description"]   # after it opened
+    sid = client.post("/v1/sessions", json={}).json()["id"]   # and the stream really is what the 200 describes
+    turn, options = MESSAGES.format(session_id=sid), json.dumps({"max_new_tokens": 16})
+    image = {"image": ("x.png", png_bytes(), "image/png")}
+    seen, statuses = set(), set()
+
+    def run(**kwargs):
+        r = client.post(turn, **kwargs)
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+        frames = list(iter_sse([r.text]))
+        assert frames[0]["event"] == "message_start" and frames[-1]["event"] == "message_stop"
+        assert r.headers["x-message-id"] == frames[0]["data"]["message_id"]
+        seen.update(f["event"] for f in frames)
+        statuses.add(frames[-1]["data"]["status"])
+        return frames
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    run(files=image, data={"options": options})                    # a turn
+    run(data={"text": "is this pneumonia?", "options": options})   # a question: a warning and no model
+    monkeypatch.setattr(client.app.state.engines["tiny"], "generate", boom)
+    failed = run(files=image, data={"options": options})           # a failure once the 200 has opened
+    assert [f["event"] for f in failed[-2:]] == ["error", "message_stop"] and failed[-1]["data"]["status"] == "error"
+    assert seen == set(STREAM_EVENTS) and statuses == {"done", "error"}
+
+
+def test_the_text_and_image_docs_match_what_a_text_only_turn_really_does(client):
+    fields = _body_schema(client.get("/openapi.json").json())["properties"]
+    text_doc, image_doc = fields["text"]["description"], fields["image"]["description"]
+    sid = client.post("/v1/sessions", json={}).json()["id"]
+    turn, options = MESSAGES.format(session_id=sid), json.dumps({"max_new_tokens": 16})
+    for text in ("beam 2", "is this pneumonia?", ""):   # no image in this session yet: whatever the text, a 422
+        refused = client.post(turn, data={"text": text, "options": options})
+        assert refused.status_code == 422 and refused.json()["error"]["message"] == "Attach an X-ray first.", text
+    assert "422" in text_doc and "no image yet" in text_doc and "no image yet" in image_doc
+    image = {"image": ("x.png", png_bytes(), "image/png")}
+    client.post(turn, files=image, data={"options": options})   # and now it has one
+    question =list(iter_sse([client.post(turn, data={"text": "is this pneumonia?", "options": options}).text]))
+    assert [f["event"] for f in question] == ["message_start", "warning", "message_stop"]   # the command list, no model
+    assert question[1]["data"]["code"] == "not_a_command" and COMMAND_HELP in question[1]["data"]["message"]
+    assert COMMAND_HELP in text_doc and "command list" in text_doc and "no model runs" in text_doc
+    for text in ("beam 2", ""):   # a command, or no text at all, runs the session's latest image again
+        rerun = list(iter_sse([client.post(turn, data={"text": text, "options": options}).text]))
+        assert rerun[0]["data"]["image"]["source"] == "previous", text
+        assert "generate" in [f["data"]["stage"] for f in rerun if f["event"] == "stage_end"], text
 
 
 def test_the_api_description_names_the_access_rules_and_every_error_kind(client):
@@ -131,9 +183,8 @@ def test_refusals_are_declared_as_the_error_envelope_and_named_in_the_descriptio
             example = responses[str(status)]["content"]["application/json"]["example"]
             assert example["type"] == "error" and example["error"]["type"] == ERROR_KINDS[status], (key, status)
             assert set(example["error"]) == {"type", "message"} and example["error"]["message"], (key, status)
-        if key != ("GET", "/healthz"):   # every /v1 route can be refused by the guard or the client id
-            assert responses["default"]["content"]["application/json"]["example"]["type"] == "error", key
-            assert "HTTPValidationError" not in json.dumps(responses), key   # FastAPI's 422 is not this API's body
+        assert responses["default"]["content"]["application/json"]["example"]["type"] == "error", key   # every route
+        assert "HTTPValidationError" not in json.dumps(responses), key   # FastAPI's 422 is not this API's body
 
 
 def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, monkeypatch):
@@ -181,15 +232,42 @@ def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, m
         check(r, "POST", MESSAGES, 403)   # a test-split study in public mode
 
 
-def test_the_default_refusal_is_what_the_guard_and_the_client_id_answer(tmp_path):
+ROUTE_BODIES = {("POST", "/v1/sessions"): {"json": {}}, ("POST", MESSAGES): {"data": {"options": "{}"}}}   # to parse
+
+
+def test_each_routes_default_names_exactly_the_guard_refusals_it_really_gets(tmp_path):
+    # Which of 401 (token), 400 (client id) and 403 (loopback) a route can answer differs: /v1/models takes no client id
+    # and /healthz no token. So every route is asked in each of the three settings that refuse before a route runs.
+    def ask_all(c, base="", headers=None):
+        urls = {key: base + key[1].replace("{session_id}", "s_x").replace("{message_id}", "m_x")
+                for key in REFUSED_BY_THE_ROUTE}
+        return {key: c.request(key[0], url, headers=headers, **ROUTE_BODIES.get(key, {})) for key, url in urls.items()}
+
     with TestClient(create_app(engine="tiny", home=str(tmp_path / "open"))) as c:
-        default = c.get("/openapi.json").json()["paths"]["/v1/models"]["get"]["responses"]["default"]
-        off_loopback = c.get("http://10.1.2.3:8000/v1/sessions")   # no token: only loopback is served
+        spec = c.get("/openapi.json").json()
+        replies = {403: ask_all(c, "http://10.1.2.3:8000")}   # no token: only loopback is served
     with TestClient(create_app(engine="tiny", home=str(tmp_path / "token"), token="t")) as c:
-        no_token = c.get("/v1/sessions")
+        replies[401] = ask_all(c)   # a token, and none sent
     with TestClient(create_app(engine="tiny", home=str(tmp_path / "public"), mode="public", token="t")) as c:
-        no_client_id = c.get("/v1/sessions", headers={"Authorization": "Bearer t"})
-    for status, r in [(401, no_token), (400, no_client_id), (403, off_loopback)]:
-        assert r.status_code == status and r.json()["error"]["type"] == ERROR_KINDS[status]
-        assert str(status) in default["description"], status
-    assert no_token.json() == default["content"]["application/json"]["example"]   # the example is the real 401
+        replies[400] = ask_all(c, headers={"Authorization": "Bearer t"})   # public mode, and no client id
+    for key in REFUSED_BY_THE_ROUTE:
+        default = spec["paths"][key[1]][key[0].lower()]["responses"]["default"]
+        given = []
+        for status, answers in replies.items():
+            really = answers[key].status_code == status
+            assert really == (str(status) in default["description"]), (key, status)   # named if and only if it is given
+            if really:
+                assert answers[key].json()["error"]["type"] == ERROR_KINDS[status], (key, status)
+                given.append(answers[key].json())
+        assert default["content"]["application/json"]["example"] in given, key   # and the example is one of its replies
+
+
+def test_option_ranges_cope_with_a_field_that_has_only_one_bound(monkeypatch):
+    class OneBound(BaseModel):
+        both: Annotated[int, Field(ge=1, le=5)] = 2
+        most: Annotated[int, Field(le=7)] = 3   # no minimum: this was a KeyError at import
+        least: Annotated[int, Field(ge=4)] = 4
+        free: int = 0
+
+    monkeypatch.setattr(server, "Options", OneBound)
+    assert server._option_ranges() == "both 1-5, most up to 7, least from 4"
