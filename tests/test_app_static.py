@@ -337,3 +337,29 @@ def test_motion_exists_only_under_no_preference():
             (inside if any(re.fullmatch(motion, t) for t in trail) else outside).append(selector)
     assert inside and not outside, {"inside": inside, "outside": outside}
     assert not [h for h, b in css if h.startswith("@keyframes")]   # the keyframes sit inside that block too
+
+
+# ---- P4-C: the card parts render.js builds ---------------------------------------------------------------------------
+
+def test_the_banner_stays_above_the_viewer_the_drawer_the_sidebar_and_the_scrim():
+    """Where the page scrolls (a viewport 480 px tall or less) the drawer, the sidebar and the scrim would paint over the
+    sticky banner unless it is the topmost layer."""
+    layers = [(h, int(v)) for _, h, b in _walk(_stylesheet()) for v in re.findall(r"(?<![\w-])z-index:\s*(-?\d+)", b)]
+    assert [z for h, z in layers if h == ".banner"] == [60], layers
+    others = {h: z for h, z in layers if h != ".banner"}
+    assert others and all(z < 60 for z in others.values()), others
+
+
+# Classes render.js gives an element for the scripts to find and the tests to read, that no rule needs to style.
+HOOK_ONLY = {"label", "notice", "stopped", "error", "truncated", "unknown", "user", "values", "more", "clip", "clip-text",
+             "report-body", "mark"}
+
+
+def test_every_class_render_js_emits_is_styled_or_a_plain_hook():
+    js = (STATIC / "render.js").read_text(encoding="utf-8")
+    expressions = re.findall(r"class:\s*([^,}]+)", js) + re.findall(r"CHIP_CLASS = \{([^}]*)\}", js)   # `class: a ? 'x' : 'y'`
+    emitted = {c for expression in expressions for literal in re.findall(r"'([^'$]+)'", expression) for c in literal.split()}
+    css = re.sub(r"/\*.*?\*/", "", (STATIC / "styles.css").read_text(encoding="utf-8"), flags=re.S)
+    styled = set(re.findall(r"\.([A-Za-z_][\w-]*)", css))
+    assert emitted >= {"card", "chip", "timeline", "provisional", "report", "label-chips", "thumb", "provenance"}, emitted
+    assert emitted - styled - HOOK_ONLY == set(), sorted(emitted - styled - HOOK_ONLY)
