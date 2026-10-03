@@ -6,7 +6,7 @@
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P4",
   "status": "P0-P3 complete 2026-10-03 (store, redaction, streaming API, OpenAPI on the tiny engine). P4 frontend next; P3-E doc follow-up first.",
-  "next_action": "Resume after the weekly usage limit (resets 2026-10-08 13:00 Europe/Berlin). First: 'P3-E follow-up' commit (doc accuracy, see .superpowers/sdd/CHAT_UI_PLAN/progress.md P3-E minors 1-5: /v1/models default refusal, TEXT_DOC, stream event list without the plan citation, pipeline read race + helper, _option_ranges .get) + scoped re-review. Then P4-A (page shell + styles; brief ready: task-P4-A-brief.md).",
+  "next_action": "P4-A (app/static/index.html + styles.css; tests/test_app_static.py) via implementer; then P4-B api.js/state.js + node gate, P4-C render.js, P4-D app.js, P4-E browser checklist.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -545,7 +545,8 @@
     "2026-10-02: P3-C complete; R1 policy + catch-all + U2 invariant.",
     "2026-10-03: P3-D complete; streaming API on the tiny engine.",
     "2026-10-03: P3 complete. Paused by the weekly usage limit (resets 2026-10-08 13:00).",
-    "2026-10-03: current_phase -> P4"
+    "2026-10-03: current_phase -> P4",
+    "2026-10-03: 2026-10-03: P3-E follow-up a3db46d (doc accuracy + preprocess read race) clean on re-review; P4 started."
   ],
-  "last_updated": "2026-10-03T04:31:18+02:00"
+  "last_updated": "2026-10-03T04:54:57+02:00"
 }
