@@ -30,6 +30,7 @@ export const TICK_MS = 500;            // how often a running turn asks the watc
 export const HEALTH_MS = 10000;        // /healthz, while it answers
 export const HEALTH_SLOW_MS = 30000;   // and after HEALTH_SLOW_AFTER failures in a row, until it answers again
 export const HEALTH_SLOW_AFTER = 3;
+export const HEALTH_TIMEOUT_MS = 5000;  // a /healthz that has not answered by then has failed: a half-open tunnel never says so itself
 const PAGE = 50;                       // sessions per request of the sidebar
 const NEAR_PX = 80;                    // "at the bottom" for auto-scroll: within this many pixels of it
 const REVOKE_MS = 1000;                // an export's object URL is revoked this long after its link was clicked
@@ -176,11 +177,26 @@ export function browserStorage(win) {
 
 const text = (v) => (typeof v === 'string' && v.trim() ? v.trim() : '');
 const clip = (s, n = 300) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+const isAbort = (err) => err?.name === 'AbortError';   // what fetch throws for a request whose signal was aborted
+const GENERIC_ERROR = 'Something went wrong — see the console';   // for what is a bug of the page's, not the server's or the network's
+// What the browsers' fetch says when the network fails, each in its own words (Chrome, Firefox, Safari, node).
+const FETCH_FAILURE = /failed to fetch|fetch failed|load failed|networkerror|network error|network connection|internet connection|network request failed/i;
+
+// A TypeError is how fetch reports a network failure, and also how a bug of ours reports itself. Where only fetch can have
+// thrown (a request, the stream or the poll of api.js, a cancel) the error is marked, and errorMessage trusts the mark.
+function markNetwork(err) {
+  if (err instanceof TypeError && !('network' in err)) err.network = true;
+  return err;
+}
+
+// A failure that is the server's (it refused), the network's or the user's own cancel is shown; anything else is ours and is logged.
+const expected = (err) => typeof err?.status === 'number' || err?.network === true || isAbort(err);
 
 // What a failed request says to the user. err is what api.js throws: an Error with `status` and `body` (the server's
 // envelope {type: "error", error: {type, message}}), or what fetch throws when the network fails (a TypeError).
 export function errorMessage(err) {
   if (typeof err === 'string') return text(err) || 'Something went wrong.';
+  if (isAbort(err)) return 'The request was cancelled.';   // never the browser's own "signal is aborted without reason"
   const status = err?.status;
   const server = text(err?.body?.error?.message);
   if (status === 401) return 'Enter the access token in Settings';
@@ -194,8 +210,21 @@ export function errorMessage(err) {
     if (status === 404) return 'Not found. It may have been deleted.';
     return status >= 500 ? 'The server had a problem. Try again.' : 'The request failed.';
   }
-  if (err instanceof TypeError) return 'Cannot reach the server. Check the connection and try again.';
+  if (err?.network === true || (err instanceof TypeError && FETCH_FAILURE.test(err.message))) {
+    return 'Cannot reach the server. Check the connection and try again.';
+  }
+  if (err instanceof TypeError) return GENERIC_ERROR;
   return clip(text(err?.message) || 'Something went wrong.');
+}
+
+// What comes out of an api.js generator's next() is the transport's: a stream that failed, a poll that was refused. (What the page
+// does with each event is its own, and is caught where it is done.) A TypeError out of it is a network failure, and is marked.
+async function* fromTransport(source) {
+  try {
+    yield* source;
+  } catch (err) {
+    throw markNetwork(err);
+  }
 }
 
 // ---- the watchdog ----------------------------------------------------------------------------------------------------------
@@ -296,8 +325,6 @@ export function checkImageFile(file) {
   return null;
 }
 
-const isAbort = (err) => err?.name === 'AbortError';
-
 // ---- the page -----------------------------------------------------------------------------------------------------------------
 
 // env: document, window (location, history, addEventListener, matchMedia, navigator, confirm), storage, fetch, api (the
@@ -310,9 +337,11 @@ export function createApp(env) {
   const urls = env.URL ?? globalThis.URL;
   const doFetch = (url, init) => (env.fetch ?? globalThis.fetch)(url, init);
   const later = (fn, ms) => (env.setTimeout ? env.setTimeout(fn, ms) : globalThis.setTimeout(fn, ms));
+  const cancelLater = (id) => (env.clearTimeout ? env.clearTimeout(id) : globalThis.clearTimeout(id));
   const every = (fn, ms) => (env.setInterval ? env.setInterval(fn, ms) : globalThis.setInterval(fn, ms));
   const cancelEvery = (id) => (env.clearInterval ? env.clearInterval(id) : globalThis.clearInterval(id));
-  const confirmed = (message) => (env.confirm ? env.confirm(message) : typeof win.confirm === 'function' ? win.confirm(message) : true);
+  // Delete is the one thing this asks about, and it fails closed: with no way to ask, nothing is deleted.
+  const confirmed = (message) => (env.confirm ? env.confirm(message) : typeof win.confirm === 'function' ? win.confirm(message) : false);
   const watchdog = createWatchdog({ now: env.now ?? (() => Date.now()) });
 
   const $ = (id) => doc.getElementById(id);
@@ -342,6 +371,7 @@ export function createApp(env) {
     ticker: null,
     drawerOpener: null,
     healthFailures: 0,
+    loadingMore: false,      // a page of the sidebar is being fetched: More is off, so it cannot be asked twice
     noticeRetry: null,
     missing: null,           // a session the server said it does not have: home never picks it
   };
@@ -354,7 +384,12 @@ export function createApp(env) {
 
   // A JSON request with the page's auth headers. A refusal throws what api.js throws: an Error with status and body.
   async function request(path, { method = 'GET', body, headers, raw = false, signal } = {}) {
-    const res = await doFetch(path, { method, body, signal, headers: { ...authHeaders(state.settings.token, state.clientId), ...headers } });
+    let res;
+    try {
+      res = await doFetch(path, { method, body, signal, headers: { ...authHeaders(state.settings.token, state.clientId), ...headers } });
+    } catch (err) {
+      throw markNetwork(err);   // only fetch itself can have thrown here
+    }
     if (!res.ok) throw Object.assign(new Error('request refused'), { status: res.status, body: await res.json().catch(() => null) });
     if (raw) return res;
     return res.status === 204 ? null : res.json();
@@ -417,8 +452,9 @@ export function createApp(env) {
   };
 
   function makeTurn(session, n) {
-    const turn = { n, id: null, session, view: initialView(null), userEl: null, card: null, text: '', image: null,
-                   controller: null, poller: null, stopping: false, left: false, settled: false, dirty: false };
+    const turn = { n, id: null, session, view: initialView(null), userEl: null, card: null, text: '', image: null, file: null,
+                   controller: null, poller: null, streaming: false, polling: false, stopping: false, left: false, settled: false,
+                   dirty: false, reloading: false };
     turn.draw = () => paint(turn);   // one function per card, so scheduleRender draws it at most once a frame
     return turn;
   }
@@ -489,22 +525,30 @@ export function createApp(env) {
     turn.settled = true;
     stopTicker();
     watchdog.settle();
-    paint(turn);
-    if (state.turn === turn) {
-      state.turn = null;
-      setBusy(false);
+    try {
+      paint(turn);
+    } finally {   // a card that cannot be drawn must not leave the composer locked
+      if (state.turn === turn) {
+        state.turn = null;
+        setBusy(false);
+      }
+      detach(refreshSessions());
     }
-    detach(refreshSessions());
   }
 
   function feed(turn, event) {
     if (turn.left) return;   // events already read when the view was left still come out of the stream: they are not drawn
-    if (!turn.card && typeof event.data?.message_id === 'string') accept(turn, event.data.message_id);   // a server that sent no X-Message-Id
-    turn.view = applyEvent(turn.view, event);
-    turn.dirty = true;
-    if (event.event === 'message_start') refreshUserBubble(turn, event.data.options);   // the options the server resolved, commands included
-    if (turn.view.status !== 'running') settle(turn);
-    else scheduleRender(turn.draw);
+    try {
+      if (!turn.card && typeof event.data?.message_id === 'string') accept(turn, event.data.message_id);   // a server that sent no X-Message-Id
+      turn.view = applyEvent(turn.view, event);
+      turn.dirty = true;
+      if (event.event === 'message_start') refreshUserBubble(turn, event.data.options);   // the options the server resolved, commands included
+      if (turn.view.status !== 'running') settle(turn);
+      else scheduleRender(turn.draw);
+    } catch (err) {   // a reducer or a builder that threw on this event: say so, log it, and carry on with the next one
+      report(err);
+      showNotice(GENERIC_ERROR);
+    }
   }
 
   // The poll that takes over from the stream: from the last seq the view has, until the turn leaves running. A terminal
@@ -513,19 +557,23 @@ export function createApp(env) {
     stopTicker();
     const poller = new AbortController();
     turn.poller = poller;
+    turn.polling = true;
     try {
-      for await (const event of api.pollMessage({ messageId: turn.id, after: turn.view.lastSeq, ...auth(), signal: poller.signal })) {
+      for await (const event of fromTransport(api.pollMessage({ messageId: turn.id, after: turn.view.lastSeq, ...auth(), signal: poller.signal }))) {
         feed(turn, event);
       }
     } catch (err) {
       if (turn.left || isAbort(err)) return;
       watchdog.failed();
-      showNotice(errorMessage(err), () => {
-        if (watchdog.retry() !== 'poll') return;
-        clearNotice();
-        detach(pollTurn(turn));
-      });
+      if (state.turn === turn) {   // Stop works again, whatever it said: pressing it follows the turn from here
+        turn.stopping = false;
+        ui.stop.disabled = false;
+        ui.stop.textContent = 'Stop';
+      }
+      showNotice(errorMessage(err), () => follow(turn));
       return;
+    } finally {
+      turn.polling = false;
     }
     if (turn.left || turn.settled) return;
     if (turn.view.status === 'running') {   // the poll ended and the log has no end: do not leave the page waiting for it
@@ -534,58 +582,76 @@ export function createApp(env) {
     }
   }
 
+  // Polls a turn that nothing is following (its poll failed for good), from the last seq the view has. Retry in the notice and
+  // Stop both come here, and both have seen to it that the turn is this view's, not over, and not streaming; one that is
+  // already being polled needs nothing.
+  function follow(turn) {
+    if (turn.polling) return;
+    if (watchdog.retry() !== 'poll') watchdog.resume();
+    if (state.noticeRetry) clearNotice();
+    detach(pollTurn(turn));
+  }
+
   async function runTurn(session, { text: note, file, options }) {
     const turn = makeTurn(session, session.turns.length + 1);
     turn.text = note;
-    if (file) {
-      const url = urls.createObjectURL(file);
-      session.blobUrls.add(url);
-      turn.image = { url, filename: file.name };
-    }
-    turn.userEl = renderUserTurn({ text: note, image: turn.image, options }, cardCtx(turn.n));
-    session.turns.push(turn);
-    ui.conversation.append(turn.userEl);
-    scroller.toEnd(turn.userEl);
-    state.turn = turn;
-    syncControls();
-
-    const form = new FormData();
-    if (file) form.append('image', file, file.name);
-    form.append('text', note);
-    form.append('options', JSON.stringify(options));
-
-    const controller = new AbortController();
-    turn.controller = controller;
-    watchdog.arm();
-    startTicker(turn);
-    ui.stop.disabled = true;   // until the server has the turn and has said its id: that is what Stop cancels
+    turn.file = file;
     try {
-      for await (const event of api.streamTurn({
-        sessionId: session.id, form, ...auth(), signal: controller.signal, onMessageId: (id) => accept(turn, id),
-      })) {
+      if (file) {
+        const url = urls.createObjectURL(file);
+        session.blobUrls.add(url);
+        turn.image = { url, filename: file.name };
+      }
+      turn.userEl = renderUserTurn({ text: note, image: turn.image, options }, cardCtx(turn.n));
+      session.turns.push(turn);
+      ui.conversation.append(turn.userEl);
+      scroller.toEnd(turn.userEl);
+      state.turn = turn;
+      syncControls();
+
+      const form = new FormData();
+      if (file) form.append('image', file, file.name);
+      form.append('text', note);
+      form.append('options', JSON.stringify(options));
+
+      turn.controller = new AbortController();
+      ui.stop.disabled = true;   // until the server has the turn and has said its id: that is what Stop cancels
+      turn.streaming = true;
+      // No stall clock yet: accept() starts it when the server has the turn. Until then the request is an upload, and the server
+      // decoding and saving it, which can take longer than 3 s on a slow tunnel, and is not silence.
+      for await (const event of fromTransport(api.streamTurn({
+        sessionId: session.id, form, ...auth(), signal: turn.controller.signal, onMessageId: (id) => accept(turn, id),
+      }))) {
         watchdog.bytes();
         feed(turn, event);
       }
     } catch (err) {
       if (!turn.id) { refuse(turn, err); return; }   // it never started: no id was ever given
       if (!isAbort(err) && !turn.left) report(err);   // a network error mid-stream: the poll below carries on
+    } finally {
+      turn.streaming = false;
     }
     if (turn.left || turn.settled) return;
+    if (!turn.id) { refuse(turn, new Error('The server closed the connection before it accepted the turn.')); return; }
     if (watchdog.ended(turn.view.status) === 'poll') await pollTurn(turn);
   }
 
-  // The server has the turn: from here the composer's text and file are spent.
+  // The server has the turn. The composer's text and file that were sent are spent (what was typed or attached since Send is the
+  // next turn's, and stays), and the 3 s of silence that mean "poll instead" are counted from here.
   function accept(turn, id) {
     if (turn.left) return;   // the user moved to another chat while the upload was in flight: its turn is theirs to find later
     turn.id = id;
     turn.view = initialView(id);
     turn.card = renderAssistantCard(turn.view, cardCtx(turn.n));
     ui.conversation.append(turn.card);
-    ui.prompt.value = '';
-    clearFile();
+    const typed = ui.prompt.value ?? '';
+    ui.prompt.value = typed.startsWith(turn.text) ? typed.slice(turn.text.length) : typed;
+    if (state.file === turn.file) clearFile();
     ui.stop.disabled = false;
     scroller.toEnd(turn.card);
     announce(statusText(turn.view));
+    watchdog.arm();
+    startTicker(turn);
   }
 
   // The turn never started (the request was refused, or the network was down): take its user turn back out, show why,
@@ -601,6 +667,7 @@ export function createApp(env) {
     if (state.turn === turn) state.turn = null;
     setBusy(false);
     showNotice(errorMessage(err));
+    if (!expected(err)) report(err);
   }
 
   async function send() {
@@ -615,13 +682,16 @@ export function createApp(env) {
     ui.stop.disabled = true;
     try {
       if (!session.id) await createSession(session);
-    } catch (err) {
-      setBusy(false);
-      showNotice(errorMessage(err));
-      return;
+      if (state.session !== session) return;   // the user moved to another chat while this one was being made
+      await runTurn(session, { text: note, file, options });
+    } catch (err) {   // the chat could not be made, or something broke that runTurn does not deal with itself
+      if (state.session === session) {
+        showNotice(errorMessage(err));
+        if (!expected(err)) report(err);
+      }
+    } finally {
+      if (state.busy && !state.turn && state.session === session) setBusy(false);   // nothing is following a turn: the composer is not locked
     }
-    if (state.session !== session) return;   // the user moved to another chat while this one was being made
-    await runTurn(session, { text: note, file, options });
   }
 
   // An empty chat becomes a session at its first turn. The address follows without a navigation (replaceState fires no
@@ -648,12 +718,15 @@ export function createApp(env) {
       await api.cancelMessage({ messageId: turn.id, ...auth() });
     } catch (err) {
       turn.stopping = false;
+      if (turn.settled || turn.left || state.turn !== turn) return;   // it ended while the cancel was on its way: nothing to report
       ui.stop.disabled = false;
       ui.stop.textContent = 'Stop';
-      showNotice(errorMessage(err));
+      showNotice(errorMessage(markNetwork(err)));
       return;
     }
-    turn.controller?.abort();
+    if (turn.settled || turn.left) return;
+    if (turn.streaming) turn.controller?.abort();   // the poll that brings the turn's own message_stop starts as the stream unwinds
+    else follow(turn);                              // nothing is following it (its poll failed for good): follow it again
   }
 
   // Leaving a session (or a token change): the stream and the poll are dropped, the turn is not cancelled and is not
@@ -691,11 +764,46 @@ export function createApp(env) {
     setBusy(false);
   }
 
+  // One message with its events, as {log} or {error}: a message that cannot be read costs its own card and not the whole chat.
+  const loadLog = (messageId) => request(`/v1/messages/${encodeURIComponent(messageId)}?after=0`).then((log) => ({ log }), (error) => ({ error }));
+
   async function loadSession(id) {
     const session = await request(`/v1/sessions/${encodeURIComponent(id)}`);
     const assistants = session.messages.filter((m) => m.role === 'assistant');
-    const logs = await Promise.all(assistants.map((m) => request(`/v1/messages/${encodeURIComponent(m.id)}?after=0`)));
-    return { session, logs: new Map(logs.map((log) => [log.id, log])) };
+    const loaded = await Promise.all(assistants.map((m) => loadLog(m.id)));
+    return { session, logs: new Map(assistants.map((m, i) => [m.id, loaded[i]])) };
+  }
+
+  // The card of a turn whose log could not be read: what is wrong, and a Retry that reads it again.
+  function failedCard(turn, error) {
+    return el('article', { class: 'card', 'aria-label': `Assistant report, turn ${turn.n}`, 'data-message-id': turn.id },
+      el('p', { class: 'note error' }, `Couldn't load this turn. ${errorMessage(error)}`),
+      el('button', { type: 'button', onclick: () => detach(reloadTurn(turn)) }, 'Retry'));
+  }
+
+  async function reloadTurn(turn) {
+    if (turn.reloading) return;
+    turn.reloading = true;
+    const view = turn.session;
+    let loaded;
+    try {
+      loaded = await loadLog(turn.id);
+    } finally {
+      turn.reloading = false;
+    }
+    if (state.session !== view) return;   // the user has gone to another chat meanwhile
+    let next;
+    if (loaded.error) {
+      next = failedCard(turn, loaded.error);
+    } else {
+      turn.view = loaded.log.events.reduce(applyEvent, initialView(turn.id));
+      next = renderAssistantCard(turn.view, cardCtx(turn.n));
+    }
+    const hadFocus = doc.activeElement && turn.card.contains(doc.activeElement);
+    turn.card.replaceWith(next);
+    turn.card = next;
+    if (hadFocus) qa(next, 'button')[0]?.focus();   // the Retry that had focus is gone: the first control of what replaced it
+    if (!loaded.error && view.turns[view.turns.length - 1] === turn && turn.view.status === 'running' && loaded.log.status === 'running') resume(turn);
   }
 
   // Draws every turn from the stored log: the same reducers and builders the live stream goes through.
@@ -717,21 +825,35 @@ export function createApp(env) {
     for (const { user: u, assistant: a } of pairs) {
       const turn = makeTurn(view, view.turns.length + 1);
       if (u) {
-        turn.userEl = renderUserTurn(userTurnMessage(u, a), cardCtx(turn.n));
+        const shown = userTurnMessage(u, a);
+        turn.text = shown.text;      // a turn that was still queued has no events: its message_start rebuilds this bubble,
+        turn.image = shown.image;    // and rebuilds it from these
+        turn.userEl = renderUserTurn(shown, cardCtx(turn.n));
         nodes.push(turn.userEl);
       }
       if (a) {
         turn.id = a.id;
-        turn.view = (logs.get(a.id)?.events ?? []).reduce(applyEvent, initialView(a.id));
-        turn.card = renderAssistantCard(turn.view, cardCtx(turn.n));
+        const loaded = logs.get(a.id);
+        if (loaded?.log) {
+          turn.view = loaded.log.events.reduce(applyEvent, initialView(a.id));
+          turn.card = renderAssistantCard(turn.view, cardCtx(turn.n));
+        } else {
+          turn.card = failedCard(turn, loaded?.error);
+        }
         nodes.push(turn.card);
       }
       view.turns.push(turn);
     }
-    ui.conversation.replaceChildren(...nodes);
+    ui.conversation.setAttribute('aria-busy', 'true');   // a screen reader does not read the whole history as it goes in
+    try {
+      ui.conversation.replaceChildren(...nodes);
+    } finally {
+      ui.conversation.removeAttribute('aria-busy');
+    }
     scroller.toEnd(nodes[nodes.length - 1]);
     const last = view.turns[view.turns.length - 1];
-    if (last?.id && last.view.status === 'running' && logs.get(last.id)?.status === 'running') resume(last);
+    const lastLog = last?.id ? logs.get(last.id)?.log : null;
+    if (lastLog && last.view.status === 'running' && lastLog.status === 'running') resume(last);
   }
 
   async function openSession(id) {
@@ -752,8 +874,11 @@ export function createApp(env) {
         state.loading = false;
         setAddress('#/');
         await handleRoute();
+        showNotice(errorMessage(err));   // after the fallback has opened its chat, which clears the notices of the one before
+      } else {
+        state.session.id = null;   // nothing is open: its link (or the route) opens it again, and so does the Retry
+        showNotice(errorMessage(err), () => detach(openSession(id)));
       }
-      showNotice(errorMessage(err));   // after the fallback has opened its chat, which clears the notices of the one before
     } finally {
       if (gen === state.gen) {
         state.loading = false;
@@ -806,22 +931,34 @@ export function createApp(env) {
   }
 
   async function refreshSessions({ more = false } = {}) {
+    const shown = state.sessions.length;
+    const onMore = more && doc.activeElement === ui.more;
+    if (more) {
+      if (state.loadingMore) return;   // a double click asks once
+      state.loadingMore = true;
+      ui.more.disabled = true;
+    }
     try {
       const limit = more ? PAGE : Math.min(200, Math.max(PAGE, state.sessions.length));
       const query = `limit=${limit}${more && state.nextCursor ? `&cursor=${encodeURIComponent(state.nextCursor)}` : ''}`;
       const page = await request(`/v1/sessions?${query}`);
-      const shown = state.sessions.length;
-      const onMore = doc.activeElement === ui.more;
       state.sessions = more ? [...state.sessions, ...page.sessions] : page.sessions;
       state.nextCursor = page.next_cursor ?? null;
       state.sessionsLoaded = true;
       renderSessions();
-      if (more && onMore && ui.more.hidden) qa(ui.list, 'li a')[shown]?.focus();   // that was the last page: More is gone, so focus moves on
     } catch (err) {
       state.sessionsLoaded = true;
       showNotice(errorMessage(err));
+    } finally {
+      if (more) {
+        state.loadingMore = false;
+        ui.more.disabled = false;
+        if (onMore) (ui.more.hidden ? qa(ui.list, 'li a')[shown] : ui.more)?.focus();   // More keeps focus; the last page hands it to its first new row
+      }
     }
   }
+
+  const rowOf = (id) => qa(ui.list, 'li').find((li) => li.getAttribute('data-session') === id);   // an id is compared, never put into a selector
 
   function renderSessions() {
     const active = doc.activeElement;
@@ -830,13 +967,19 @@ export function createApp(env) {
       const title = sessionTitle(s);
       const current = s.id === state.session.id;
       return el('li', { 'data-session': s.id },
-        el('a', { href: `#/s/${s.id}`, 'aria-current': current ? 'page' : null, onclick: () => closeSidebar() },
+        el('a', {
+          href: `#/s/${s.id}`, 'aria-current': current ? 'page' : null,
+          onclick: () => {
+            closeSidebar();
+            if (win.location?.hash === `#/s/${s.id}`) detach(handleRoute());   // the same address fires no hashchange: a chat that failed to open tries again here
+          },
+        },
           el('span', { class: 'session-title' }, title), el('span', { class: 'session-meta' }, sessionMeta(s))),
         el('button', { type: 'button', class: 'session-delete', 'aria-label': `Delete chat: ${title}`, onclick: () => detach(deleteSession(s)) }, '✕'));
     }));
     ui.more.hidden = !state.nextCursor;
     syncControls();
-    if (held?.id) qa(ui.list, `li[data-session="${held.id}"] ${held.tag}`)[0]?.focus();   // a rebuilt list must not drop the keyboard's place
+    if (held?.id) rowOf(held.id)?.querySelector(held.tag)?.focus();   // a rebuilt list must not drop the keyboard's place
   }
 
   async function deleteSession(session) {
@@ -853,6 +996,8 @@ export function createApp(env) {
       setAddress('#/');
       await handleRoute();   // home: the newest chat that is left, or an empty one
     }
+    const open = state.session.id ? rowOf(state.session.id) : null;
+    (open?.querySelector('a') ?? ui.newChat).focus();   // the Delete that had focus is gone: the chat that is open, or New chat
   }
 
   // ---- export --------------------------------------------------------------------------------------------------------------------
@@ -862,7 +1007,7 @@ export function createApp(env) {
     if (!id) return;
     try {
       const res = await request(`/v1/sessions/${encodeURIComponent(id)}/export?format=${format}`, { raw: true });
-      const blob = await res.blob();
+      const blob = await res.blob().catch((err) => { throw markNetwork(err); });
       const url = urls.createObjectURL(blob);
       const link = doc.createElement('a');
       link.setAttribute('href', url);
@@ -884,8 +1029,10 @@ export function createApp(env) {
   }
 
   async function checkHealth() {
+    const controller = new AbortController();
+    const timer = later(() => controller.abort(), HEALTH_TIMEOUT_MS);   // a half-open tunnel never answers and never fails by itself
     try {
-      const res = await doFetch('/healthz', { cache: 'no-store' });
+      const res = await doFetch('/healthz', { cache: 'no-store', signal: controller.signal });
       if (!res.ok) throw new Error('unhealthy');
       const h = await res.json();
       state.healthFailures = 0;
@@ -894,6 +1041,8 @@ export function createApp(env) {
     } catch {
       state.healthFailures += 1;
       setHealth('server restarting…', true);
+    } finally {
+      cancelLater(timer);
     }
     later(() => detach(checkHealth()), nextHealthDelay(state.healthFailures));
   }

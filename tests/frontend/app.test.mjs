@@ -541,6 +541,7 @@ function fakeApi() {
     holdAbort: false,    // an abort does not end the stream at once: run.fail(err) does, whenever the test says
     lenient: false,      // events already queued still come out of a stream or a poll that was aborted
     cancelError: null,   // what cancelMessage rejects with
+    cancelGate: null,    // a promise cancelMessage waits for before it answers
     streamTurn(opts) {
       const run = { opts, channel: channel(), id: null };
       run.accepted = new Promise((resolve) => { run.accept = (id) => { run.id = id; resolve(); }; });
@@ -568,6 +569,7 @@ function fakeApi() {
     async cancelMessage(opts) {
       api.order.push('cancel');
       api.cancels.push(opts);
+      if (api.cancelGate) await api.cancelGate;
       if (api.cancelError) throw api.cancelError;
       return { id: opts.messageId, status: 'running', cancel_requested: true };
     },
@@ -611,7 +613,7 @@ const fullTurn = (id = 'm_a') => {
 };
 const rows = (events) => events.map((e) => ({ seq: e.data.seq, event: e.event, data: e.data }));
 
-function harness({ hash = '', sessions = [], models = MODELS, storage = memoryStorage(), routes = {}, confirmAnswer = true, urls } = {}) {
+function harness({ hash = '', sessions = [], models = MODELS, storage = memoryStorage(), routes = {}, confirmAnswer = true, urls, noConfirm = false } = {}) {
   installDom();   // a new document each time: the body of the last test still holds that app's listeners
   buildPage();
   frames.length = 0;
@@ -628,7 +630,8 @@ function harness({ hash = '', sessions = [], models = MODELS, storage = memorySt
   });
   h.app = createApp({
     document, window: win, storage, fetch: h.fetch, api, now: timers.now, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout,
-    setInterval: timers.setInterval, clearInterval: timers.clearInterval, confirm: (message) => { confirms.push(message); return h.answer; },
+    setInterval: timers.setInterval, clearInterval: timers.clearInterval,
+    ...(noConfirm ? {} : { confirm: (message) => { confirms.push(message); return h.answer; } }),
     ...(urls ? { URL: urls } : {}),
   });
   return h;
@@ -877,7 +880,8 @@ test('the status region says a thing only when it changes', async () => {
   assert.deepEqual(spoken, ['Queued', 'encode running', 'Report ready']);
 });
 
-test('a turn that the server refuses before its stream opens: the notice says why, its user turn is taken back, and the composer is as it was', async () => {
+test('a turn that the server refuses before its stream opens: the notice says why, its user turn is taken back, and the composer is as it was', async (t) => {
+  const logged = captureErrors(t);
   const h = await ready();
   $('prompt').value = 'beam 99';
   const cases = [
@@ -900,6 +904,7 @@ test('a turn that the server refuses before its stream opens: the notice says wh
     assert.equal($('stop').hidden, true);
     assert.equal($('conversation').hasAttribute('aria-busy'), false);
   }
+  assert.deepEqual(logged, []);   // a refusal, the network being down, and a cancel are what they say, not bugs to be logged
   h.api.refuse = null;
   const turn = h.app.send();   // the retry needs no re-entry, and clears the notice
   await flush();
@@ -2360,4 +2365,884 @@ test('dismissing a notice or removing the attached image does not leave focus on
   attach(imageFile());
   buttonOf($('preview'), 'Remove').click();
   assert.equal(document.activeElement, $('prompt'));   // focus that was elsewhere stays there
+});
+
+// ---- fix round 1/5 ---------------------------------------------------------------------------------------------------------------------
+// Written before the changes they cover, and run red first (the two Important defects are missing branches, which a mutation of the
+// existing code cannot find).
+
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+};
+const captureErrors = (t) => {
+  const logged = [];
+  const real = console.error;
+  console.error = (...args) => logged.push(args);
+  t.after(() => { console.error = real; });
+  return logged;
+};
+const GENERIC = 'Something went wrong — see the console';
+
+// I1: the watchdog starts when the server has the turn, not when Send is pressed ------------------------------------------------------------
+
+test('a slow upload is not silence: nothing is dropped while the server has not accepted the turn, and the 3 s clock starts at the accept', async () => {
+  const h = await ready();
+  const events = fullTurn();
+  $('prompt').value = 'beam 5';
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  h.timers.advance(10000);   // the POST has been going for 10 s: a big PNG over a tunnel, and the server decoding it
+  await flush();
+  assert.deepEqual(h.api.order, []);                   // not aborted
+  assert.equal($('notice').hidden, true);              // and nothing said
+  assert.equal($('send').disabled, true);              // the turn is simply pending
+  assert.equal($('stop').disabled, true);
+  assert.equal(h.timers.intervals, 0);                 // no stall check: there is nothing to be silent about yet
+  assert.equal(qa($('conversation'), '.turn.user').length, 1);   // and the user turn stays
+  assert.equal($('prompt').value, 'beam 5');           // the composer keeps its content while the upload is on its way
+
+  run.accept('m_a');
+  await flush();
+  assert.equal($('prompt').value, '');                 // and spends it when the server has the turn
+  assert.equal(h.timers.intervals, 1);                 // armed now
+  run.channel.push(events[0]);                         // message_start, 10 s after Send
+  await flush();
+  h.timers.advance(2900);
+  await flush();
+  assert.deepEqual(h.api.order, []);                   // 2.9 s after the accept: still the stream
+  h.timers.advance(100);
+  await flush();
+  assert.deepEqual(h.api.order, ['abort']);            // 3 s after it: handed to polling, as before
+  assert.equal(h.api.polls.length, 1);
+  assert.equal(h.api.polls[0].opts.after, 1);
+  h.api.polls[0].channel.push(...events.slice(1));
+  h.api.polls[0].channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal($('send').disabled, false);
+});
+
+test('an upload that is slow and then refused still says why, and a refusal after 10 s is a refusal like any other', async () => {
+  const h = await ready();
+  $('prompt').value = 'beam 99';
+  const turn = h.app.send();
+  await flush();
+  h.timers.advance(10000);
+  await flush();
+  assert.equal($('notice').hidden, true);
+  h.api.streams[0].fail(refusal(422, 'Invalid options: beam_size: Input should be less than or equal to 8'));
+  await turn;
+  assert.equal(q($('notice'), 'p').textContent, 'Invalid options: beam_size: Input should be less than or equal to 8');
+  assert.equal($('conversation').children.length, 0);
+  assert.equal($('prompt').value, 'beam 99');
+  assert.equal($('send').disabled, false);
+});
+
+test('a request that was aborted before the server gave an id says it was cancelled, never the browser\'s own words', async () => {
+  assert.equal(errorMessage(abortError()), 'The request was cancelled.');
+  assert.equal(errorMessage(new DOMException('signal is aborted without reason', 'AbortError')), 'The request was cancelled.');
+  const h = await ready();
+  h.api.refuse = new DOMException('signal is aborted without reason', 'AbortError');
+  await h.app.send();
+  assert.equal(q($('notice'), 'p').textContent, 'The request was cancelled.');
+  assert.doesNotMatch($('notice').textContent, /aborted/);
+  assert.equal($('send').disabled, false);
+  assert.equal($('conversation').children.length, 0);
+});
+
+test('a stream that closes before the server ever accepted the turn does not leave the page waiting for it', async () => {
+  const h = await ready();
+  h.api.silent = true;
+  $('prompt').value = 'beam 4';
+  const turn = h.app.send();
+  await flush();
+  h.api.streams[0].channel.end();   // a clean end: no header, no event
+  await turn;
+  assert.match(q($('notice'), 'p').textContent, /closed the connection before it accepted the turn/);
+  assert.equal($('send').disabled, false);
+  assert.equal($('stop').hidden, true);
+  assert.equal($('conversation').children.length, 0);   // the user turn is taken back
+  assert.equal($('prompt').value, 'beam 4');            // and the composer is as it was
+  assert.equal($('conversation').hasAttribute('aria-busy'), false);
+});
+
+// I2: a resumed queued turn keeps what the user sent ---------------------------------------------------------------------------------------
+
+test('a chat opened with a queued turn (no events yet) keeps the user\'s text and file name when its message_start arrives by polling', async () => {
+  const h = harness({
+    sessions: [sess('s_a', 'queued', 1)],
+    routes: {
+      'GET /v1/sessions/s_a': { ...sess('s_a', 'queued', 1), messages: [userMsg('u_a', 'beam 5 please', 'chest.png'), botMsg('m_a', 'running', START_DATA.options)] },
+      'GET /v1/messages/m_a': { ...botMsg('m_a', 'running'), events: [] },
+    },
+  });
+  await h.app.start();
+  await flush();
+  const shown = () => q($('conversation'), '.turn.user');
+  assert.equal(q(shown(), '.user-text').textContent, 'beam 5 please');
+  assert.equal(q(shown(), '.chip').textContent, 'chest.png');
+  assert.equal(h.api.polls.length, 1);
+  assert.equal(h.api.polls[0].opts.after, 0);
+  resetEvents();
+  h.api.polls[0].channel.push(startEv());   // the worker has started the turn
+  await flush();
+  nextFrame();
+  assert.equal(q(shown(), '.user-text')?.textContent, 'beam 5 please');   // the bubble was rebuilt with the options the server resolved ...
+  assert.equal(q(shown(), '.chip')?.textContent, 'chest.png');             // ... and kept what the user sent
+  assert.deepEqual(texts(qa(shown(), '.options .chip')), ['beam 5', '100 tok', 'cached', 'k 4/3']);
+  assert.equal(shown().getAttribute('aria-label'), 'Your message, turn 1');
+});
+
+// M1: Stop always settles the card, and a failed poll does not strand the page ------------------------------------------------------------
+
+async function strandedTurn() {   // a turn whose poll failed for good: the Retry notice is up and nothing follows the turn
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(...events.slice(0, 7));
+  await flush();
+  h.timers.advance(3000);   // 3 s of silence: polling
+  await flush();
+  h.api.polls[0].channel.fail(refusal(404, 'Message not found.', 'not_found_error'));
+  await turn;
+  await flush();
+  return { h, events };
+}
+
+test('Stop after a poll that failed for good follows the turn again from its last seq, so the card settles', async () => {
+  const { h } = await strandedTurn();
+  assert.equal(q($('notice'), 'p').textContent, 'Message not found.');
+  assert.equal(buttonOf($('notice'), 'Retry').hidden, false);
+  assert.equal($('send').disabled, true);
+  $('stop').click();
+  await flush();
+  assert.deepEqual(h.api.cancels.map((c) => c.messageId), ['m_a']);   // the server is asked to stop it
+  assert.equal(h.api.polls.length, 2);                                  // and, with nothing following the turn, the page follows it again
+  assert.equal(h.api.polls[1].opts.after, 7);
+  assert.equal($('notice').hidden, true);                               // the Retry notice has done its job
+  h.api.polls[1].channel.push(stopEv('aborted'));
+  h.api.polls[1].channel.end();
+  await flush();
+  assert.equal(cardOf().getAttribute('data-status'), 'aborted');
+  assert.equal(q(cardOf(), '.note.stopped').textContent, 'Turn stopped');
+  assert.equal($('send').disabled, false);
+  assert.equal($('stop').hidden, true);
+  assert.equal($('stop').textContent, 'Stop');
+  assert.equal($('stop').disabled, false);
+});
+
+test('dismissing the Retry notice does not leave Send disabled for ever: Stop still follows the turn to its end', async () => {
+  const { h } = await strandedTurn();
+  buttonOf($('notice'), '✕').click();   // the notice is dismissed, and with it the Retry
+  assert.equal($('notice').hidden, true);
+  assert.equal($('send').disabled, true);
+  assert.equal($('stop').hidden, false);
+  assert.equal($('stop').disabled, false);
+  $('stop').click();
+  await flush();
+  assert.equal(h.api.polls.length, 2);
+  h.api.polls[1].channel.push(stopEv('done', { report: 'Findings: finished meanwhile.', display_report: 'Findings: finished meanwhile.' }));   // it had ended on its own
+  h.api.polls[1].channel.end();
+  await flush();
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal($('send').disabled, false);
+});
+
+test('after a cancel and then a poll that fails, Stop is usable again, and so is the Retry', async () => {
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(...events.slice(0, 4));
+  await flush();
+  $('stop').click();   // the cancel goes through and the stream is dropped ...
+  await flush();
+  assert.equal($('stop').textContent, 'Stopping…');
+  h.api.polls[0].channel.fail(refusal(404, 'Message not found.', 'not_found_error'));   // ... and then the poll that should have brought the stop fails
+  await turn;
+  await flush();
+  assert.equal($('stop').textContent, 'Stop');   // not "Stopping…" for ever
+  assert.equal($('stop').disabled, false);
+  assert.equal(buttonOf($('notice'), 'Retry').hidden, false);
+  $('stop').click();
+  await flush();
+  assert.equal(h.api.cancels.length, 2);   // asked again: a cancel is idempotent on the server
+  assert.equal(h.api.polls.length, 2);
+  assert.equal(h.api.polls[1].opts.after, 4);
+  h.api.polls[1].channel.push(stopEv('aborted'));
+  h.api.polls[1].channel.end();
+  await flush();
+  assert.equal(cardOf().getAttribute('data-status'), 'aborted');
+  assert.equal($('send').disabled, false);
+});
+
+test('a cancel that fails after the turn has already ended shows nothing', async () => {
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(...events.slice(0, 5));
+  await flush();
+  const gate = deferred();
+  h.api.cancelGate = gate.promise;
+  h.api.cancelError = refusal(404, 'Message not found.', 'not_found_error');
+  $('stop').click();   // the cancel is on its way ...
+  await flush();
+  run.channel.push(...events.slice(5));   // ... and the turn ends on its own
+  run.channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal($('send').disabled, false);
+  gate.resolve();   // now the cancel fails: nothing it could say is true any more
+  await flush();
+  assert.equal($('notice').hidden, true);
+  assert.equal($('send').disabled, false);
+  assert.equal($('stop').hidden, true);
+  assert.equal($('stop').textContent, 'Stop');
+});
+
+// M2: a chat that cannot be opened can be opened again, and one bad turn does not blank it ----------------------------------------------------
+
+test('a chat that failed to open can be opened again: by its link, and by the Retry in the notice', async () => {
+  let fail = true;
+  const ok = doneSession('s_a', 'A', 'm_a');
+  const build = () => harness({
+    hash: '#/s/s_a', sessions: [sess('s_a', 'A', 1)],
+    routes: { ...ok, 'GET /v1/sessions/s_a': () => (fail ? refused(500, 'Could not read the session.') : ok['GET /v1/sessions/s_a']) },
+  });
+  let h = build();
+  await h.app.start();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Could not read the session.');
+  assert.equal(buttonOf($('notice'), 'Retry').hidden, false);
+  assert.equal($('conversation').children.length, 0);
+  assert.equal($('exports').hidden, true);   // no chat is open
+  const other = q($('session-list'), 'a');
+  assert.equal(h.fetch.to('GET', '/v1/sessions/s_a').length, 1);
+  fail = false;
+  other.click();   // the address is the same, so the browser fires no hashchange: the link itself must try again
+  await flush();
+  assert.equal(h.fetch.to('GET', '/v1/sessions/s_a').length, 2);
+  assert.equal($('conversation').children.length, 2);
+  assert.equal($('notice').hidden, true);
+  assert.equal($('exports').hidden, false);
+
+  fail = true;
+  h = build();
+  await h.app.start();
+  await flush();
+  fail = false;
+  buttonOf($('notice'), 'Retry').click();
+  await flush();
+  assert.equal(h.fetch.to('GET', '/v1/sessions/s_a').length, 2);
+  assert.equal($('conversation').children.length, 2);
+  assert.equal($('notice').hidden, true);
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_a');
+});
+
+test('one turn that cannot be loaded does not blank the chat: its card says so, with a Retry that loads it', async () => {
+  let failSecond = true;
+  const first = fullTurn('m_1');
+  const second = fullTurn('m_2');
+  const h = harness({
+    sessions: [sess('s_a', 'two turns', 2)],
+    routes: {
+      'GET /v1/sessions/s_a': { ...sess('s_a', 'two turns', 2), messages: [userMsg('u_1', 'first', 'a.png'), botMsg('m_1', 'done', START_DATA.options),
+                                                                           userMsg('u_2', 'second', 'b.png'), botMsg('m_2', 'done', START_DATA.options)] },
+      'GET /v1/messages/m_1': () => ({ ...botMsg('m_1', 'done'), events: rows(first) }),
+      'GET /v1/messages/m_2': () => (failSecond ? refused(500, 'Could not read the turn.') : { ...botMsg('m_2', 'done'), events: rows(second) }),
+    },
+  });
+  await h.app.start();
+  await flush();
+  const cards = () => qa($('conversation'), 'article.card');
+  assert.equal($('conversation').children.length, 4);
+  assert.equal(cards()[0].getAttribute('data-message-id'), 'm_1');
+  assert.equal(q($('conversation').children[2], '.user-text').textContent, 'second');
+  assert.match(cards()[1].textContent, /Couldn.t load this turn/);
+  assert.equal(cards()[1].getAttribute('aria-label'), 'Assistant report, turn 2');
+  assert.equal($('notice').hidden, true);   // the failure is on its card
+  assert.equal($('send').disabled, false);
+  buttonOf(cards()[1], 'Retry').click();   // still failing: it says so again and stays
+  await flush();
+  assert.equal(h.fetch.to('GET', '/v1/messages/m_2').length, 2);
+  assert.match(cards()[1].textContent, /Couldn.t load this turn/);
+  failSecond = false;
+  buttonOf(cards()[1], 'Retry').focus();
+  buttonOf(cards()[1], 'Retry').click();
+  await flush();
+  assert.equal(cards().length, 2);
+  assert.ok(cards()[1].contains(document.activeElement) && document.activeElement !== cards()[1], 'focus went into the card that replaced the Retry');
+  assert.equal(cards()[1].getAttribute('data-message-id'), 'm_2');
+  assert.equal(cards()[1].getAttribute('data-status'), 'done');
+  assert.equal(buttonOf($('conversation'), 'Retry'), undefined);
+  assert.equal($('send').disabled, false);
+});
+
+test('a last turn that could not be loaded and is still running is followed once it loads', async () => {
+  resetEvents();
+  const partial = [startEv({ message_id: 'm_2' }), stageStartEv('preprocess', 0)];
+  let failing = true;
+  const h = harness({
+    sessions: [sess('s_a', 'running', 1)],
+    routes: {
+      'GET /v1/sessions/s_a': { ...sess('s_a', 'running', 1), messages: [userMsg('u_2', 'second', 'b.png'), botMsg('m_2', 'running', START_DATA.options)] },
+      'GET /v1/messages/m_2': () => (failing ? refused(500, 'Could not read the turn.') : { ...botMsg('m_2', 'running'), events: rows(partial) }),
+    },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal(h.api.polls.length, 0);   // nothing is known of it yet
+  assert.equal($('send').disabled, false);
+  failing = false;
+  buttonOf(cardOf(), 'Retry').click();
+  await flush();
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_2');
+  assert.equal(h.api.polls.length, 1);
+  assert.equal(h.api.polls[0].opts.after, 2);
+  assert.equal($('send').disabled, true);
+  h.api.polls[0].channel.push(stopEv('done', { message_id: 'm_2' }));
+  h.api.polls[0].channel.end();
+  await flush();
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal($('send').disabled, false);
+});
+
+// M3: More cannot append a page twice -------------------------------------------------------------------------------------------------------
+
+test('More is off while its page loads, and a second click asks for nothing and appends nothing twice', async () => {
+  const gate = deferred();
+  const h = harness({
+    hash: '#/new',
+    routes: {
+      'GET /v1/sessions': async (url) => {
+        if (!url.includes('cursor=c1')) return { sessions: [sess('s_b', 'B', 1, 3), sess('s_a', 'A', 1, 2)], next_cursor: 'c1' };
+        await gate.promise;
+        return { sessions: [sess('s_z', 'z', 1, 1)], next_cursor: null };
+      },
+    },
+  });
+  await h.app.start();
+  await flush();
+  $('session-more').click();
+  $('session-more').click();   // a double click
+  assert.equal($('session-more').disabled, true);
+  await flush();
+  assert.equal(h.fetch.to('GET', '/v1/sessions?').filter((c) => c.url.includes('cursor=c1')).length, 1);
+  gate.resolve();
+  await flush();
+  assert.deepEqual(qa($('session-list'), 'li').map((li) => li.getAttribute('data-session')), ['s_b', 's_a', 's_z']);
+  assert.equal($('session-more').hidden, true);
+  assert.equal($('session-more').disabled, false);   // and it works again for a later page
+});
+
+// M4: /healthz has a timeout ------------------------------------------------------------------------------------------------------------------
+
+test('a /healthz that never answers is given up after 5 s: the strip says the server is restarting', async () => {
+  const h = harness({
+    routes: { 'GET /healthz': (url, init) => new Promise((_, reject) => init.signal?.addEventListener('abort', () => reject(abortError()), { once: true })) },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal($('health').textContent, '');   // still waiting
+  h.timers.advance(4999);
+  await flush();
+  assert.equal($('health').textContent, '');
+  h.timers.advance(1);
+  await flush();
+  assert.equal($('health').textContent, 'server restarting…');
+  assert.equal($('health').getAttribute('data-state'), 'down');
+  assert.deepEqual(h.timers.timeouts.map((t) => t.ms), [10000]);   // and the next check is scheduled as for any failure
+});
+
+// M5: unexpected exceptions ---------------------------------------------------------------------------------------------------------------------
+
+test('errorMessage says the server cannot be reached only for a network failure, and something else went wrong otherwise', () => {
+  const network = Object.assign(new TypeError('whatever the browser says'), { network: true });
+  assert.equal(errorMessage(network), 'Cannot reach the server. Check the connection and try again.');
+  assert.equal(errorMessage(new TypeError('Failed to fetch')), 'Cannot reach the server. Check the connection and try again.');   // what the browsers say
+  assert.equal(errorMessage(new TypeError('NetworkError when attempting to fetch resource.')), 'Cannot reach the server. Check the connection and try again.');
+  assert.equal(errorMessage(new TypeError('Load failed')), 'Cannot reach the server. Check the connection and try again.');
+  for (const words of ['fetch failed', 'network error', 'The network connection was lost.', 'The Internet connection appears to be offline.', 'Network request failed']) {
+    assert.equal(errorMessage(new TypeError(words)), 'Cannot reach the server. Check the connection and try again.', words);   // node, Chrome's body, Safari twice, React Native
+  }
+  assert.equal(errorMessage(new TypeError("Cannot read properties of undefined (reading 'delta')")), GENERIC);   // a bug of ours, not the network
+  assert.equal(errorMessage(new TypeError('x is not iterable')), GENERIC);
+  assert.equal(errorMessage(new Error('boom')), 'boom');   // other errors still say what they say
+});
+
+test('an event that breaks the reducer or the render says so, is logged, and neither stops the turn nor sends it to polling', async (t) => {
+  const logged = captureErrors(t);
+  const h = await ready();
+  const events = fullTurn();
+  const bad = ev('content_block_delta', { index: 0 });   // no delta: the reducer throws a TypeError
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(...events.slice(0, 4), bad, ...events.slice(4));
+  run.channel.end();
+  await turn;
+  assert.equal(q($('notice'), 'p').textContent, GENERIC);
+  assert.ok(logged.some(([e]) => e instanceof TypeError), 'it was logged');
+  assert.equal(h.api.polls.length, 0);                                  // the stream carried on, and was not abandoned
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal($('send').disabled, false);
+});
+
+test('a render failure while the turn ends still frees the composer', async (t) => {
+  const logged = captureErrors(t);
+  const h = await ready();
+  const proto = Object.getPrototypeOf(document.createElement('div'));
+  const original = proto.replaceWith;
+  let boom = false;
+  proto.replaceWith = function replaceWith(...nodes) {
+    if (boom && this.localName === 'article' && this.getAttribute('class') === 'card') throw new TypeError('render failed');
+    return original.apply(this, nodes);
+  };
+  t.after(() => { delete proto.replaceWith; });
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(...events.slice(0, 13));
+  await flush();
+  nextFrame();
+  boom = true;
+  run.channel.push(events[13]);   // message_stop: the final paint throws
+  run.channel.end();
+  await turn;
+  assert.equal($('send').disabled, false);   // restored although the paint threw
+  assert.equal($('stop').hidden, true);
+  assert.equal($('conversation').hasAttribute('aria-busy'), false);
+  assert.equal(q($('notice'), 'p').textContent, GENERIC);
+  assert.ok(logged.some(([e]) => e instanceof TypeError && e.message === 'render failed'));
+});
+
+test('something unexpected before the request leaves the composer as it was, and says so', async (t) => {
+  const logged = captureErrors(t);
+  let calls = 0;
+  const urls = { createObjectURL: () => { calls += 1; if (calls > 1) throw new TypeError('no object URLs'); return 'blob:fake/1'; }, revokeObjectURL() {} };
+  const h = harness({ urls, sessions: [sess('s_a', 'A', 0)], routes: EXISTING });
+  await h.app.start();
+  await flush();
+  attach(imageFile());   // the first object URL: the preview
+  $('prompt').value = 'beam 4';
+  await h.app.send();    // the second one, for the user turn, throws
+  assert.equal($('send').disabled, false);
+  assert.equal($('stop').hidden, true);
+  assert.equal(q($('notice'), 'p').textContent, GENERIC);
+  assert.equal($('conversation').children.length, 0);
+  assert.equal($('prompt').value, 'beam 4');
+  assert.equal($('preview').hidden, false);
+  assert.equal(h.api.streams.length, 0);
+  assert.ok(logged.some(([e]) => e instanceof TypeError && e.message === 'no object URLs'));
+});
+
+test('a chat the server answers with something the page cannot read is not reported as a network failure', async () => {
+  const h = harness({ hash: '#/s/s_a', sessions: [sess('s_a', 'A', 1)], routes: { 'GET /v1/sessions/s_a': { id: 's_a' } } });   // no "messages"
+  await h.app.start();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, GENERIC);
+  assert.doesNotMatch($('notice').textContent, /reach the server/);
+  const down = harness({ hash: '#/new', routes: { 'GET /v1/models': () => { throw new TypeError('a message no browser uses'); } } });
+  await down.app.start();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Cannot reach the server. Check the connection and try again.');   // a fetch that failed is the network, marked as such
+});
+
+// M6: accessibility -------------------------------------------------------------------------------------------------------------------------------
+
+test('a chat is drawn into #conversation while it is aria-busy, so a screen reader does not read the whole history as it arrives', async () => {
+  const h = harness({ sessions: [sess('s_b', 'B', 1)], routes: { ...doneSession('s_b', 'B', 'm_b') } });
+  const conversation = $('conversation');
+  const seen = [];
+  const replaceChildren = conversation.replaceChildren.bind(conversation);
+  conversation.replaceChildren = (...nodes) => { seen.push([nodes.length, conversation.getAttribute('aria-busy')]); return replaceChildren(...nodes); };
+  await h.app.start();
+  await flush();
+  assert.deepEqual(seen.filter(([n]) => n > 0), [[2, 'true']]);   // the user turn and the card went in while it was busy
+  assert.equal(conversation.hasAttribute('aria-busy'), false);    // and it is not left busy
+  assert.equal(conversation.children.length, 2);
+});
+
+test('after a Delete, focus goes to the chat that is now open, or to New chat when none is left', async () => {
+  const h = harness({
+    sessions: [sess('s_c', 'C'), sess('s_b', 'B'), sess('s_a', 'A')],
+    routes: {
+      ...doneSession('s_c', 'C', 'm_c'), ...doneSession('s_b', 'B', 'm_b'), ...doneSession('s_a', 'A', 'm_a2'),
+      'DELETE /v1/sessions/s_a': () => { h.sessions = h.sessions.filter((s) => s.id !== 's_a'); return new Response(null, { status: 204 }); },
+      'DELETE /v1/sessions/s_c': () => { h.sessions = h.sessions.filter((s) => s.id !== 's_c'); return new Response(null, { status: 204 }); },
+      'DELETE /v1/sessions/s_b': () => { h.sessions = h.sessions.filter((s) => s.id !== 's_b'); return new Response(null, { status: 204 }); },
+    },
+  });
+  await h.app.start();
+  await flush();
+  const row = (id) => qa($('session-list'), 'li').find((li) => li.getAttribute('data-session') === id);
+  const del = (id) => { const b = q(row(id), 'button.session-delete'); b.focus(); b.click(); };
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_c');
+  del('s_a');   // not the open chat: focus goes to the one that is open
+  await flush(12);
+  assert.equal(document.activeElement, q(row('s_c'), 'a'));
+  del('s_c');   // the open chat: B opens and its sidebar item gets focus
+  await flush(12);
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_b');
+  assert.equal(document.activeElement, q(row('s_b'), 'a'));
+  del('s_b');   // the last one
+  await flush(12);
+  assert.equal($('conversation').children.length, 0);
+  assert.equal(document.activeElement, $('new-session'));
+});
+
+// M7: polish -------------------------------------------------------------------------------------------------------------------------------------
+
+test('the accept clears what was sent from the note and the file, and keeps what was typed or attached since', async () => {
+  const h = await ready();
+  const events = fullTurn();
+  $('prompt').value = 'beam 5';
+  const turn = h.app.send();
+  await flush();   // the upload is on its way
+  $('prompt').value = 'beam 5 and a second thought';   // typed meanwhile
+  attach(imageFile('second.png'));                      // and another image chosen
+  h.api.streams[0].accept('m_a');
+  await flush();
+  assert.equal($('prompt').value, ' and a second thought');   // only what was sent is gone
+  assert.equal($('preview').hidden, false);
+  assert.match(q($('preview'), 'span').textContent, /^second\.png/);   // and the new attachment is still there
+  h.api.streams[0].channel.push(...events);
+  h.api.streams[0].channel.end();
+  await turn;
+
+  attach(imageFile('third.png'));   // the plain case: nothing changed since Send
+  $('prompt').value = 'beam 3';
+  const again = h.app.send();
+  await flush();
+  h.api.streams[1].accept('m_b');
+  await flush();
+  assert.equal($('prompt').value, '');
+  assert.equal($('preview').hidden, true);
+  h.api.streams[1].channel.push(stopEv('done', { message_id: 'm_b' }));
+  h.api.streams[1].channel.end();
+  await again;
+
+  attach(imageFile('fourth.png'));   // a note that was replaced, not added to, is the next turn's whole
+  $('prompt').value = 'greedy';
+  const third = h.app.send();
+  await flush();
+  $('prompt').value = 'tokens 30';
+  h.api.streams[2].accept('m_c');
+  await flush();
+  assert.equal($('prompt').value, 'tokens 30');
+  h.api.streams[2].channel.push(stopEv('done', { message_id: 'm_c' }));
+  h.api.streams[2].channel.end();
+  await third;
+});
+
+test('with no confirm() to ask, Delete does nothing rather than deleting unasked', async () => {
+  const h = harness({
+    noConfirm: true, sessions: [sess('s_b', 'B')],
+    routes: { ...doneSession('s_b', 'B', 'm_b'), 'DELETE /v1/sessions/s_b': () => new Response(null, { status: 204 }) },
+  });
+  await h.app.start();
+  await flush();
+  q($('session-list'), 'button.session-delete').click();
+  await flush();
+  assert.equal(h.fetch.to('DELETE', '/v1/sessions').length, 0);
+  assert.equal(qa($('session-list'), 'li').length, 1);
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_b');
+});
+
+test('a session id is never put into a selector: an odd one keeps focus through a rebuild and breaks nothing', async () => {
+  const odd = 's"] , [x';
+  const h = harness({ hash: '#/new', sessions: [sess(odd, 'odd one', 1), sess('s_ok', 'fine', 1)] });
+  await h.app.start();
+  await flush();
+  const row = (id) => qa($('session-list'), 'li').find((li) => li.getAttribute('data-session') === id);
+  q(row(odd), 'a').focus();
+  await h.app.refreshSessions();
+  assert.equal($('notice').hidden, true);
+  assert.equal(document.activeElement, q(row(odd), 'a'));
+  q(row(odd), 'button').focus();
+  await h.app.refreshSessions();
+  assert.equal(document.activeElement, q(row(odd), 'button'));
+});
+
+// hardening: the same changes, from the sides the first tests do not reach ---------------------------------------------------------------------
+
+test('a chat that cannot be made says why and frees the composer, whether the server refuses or the network is down', async () => {
+  let answer = refused(500, 'Could not create the session.');
+  const h = harness({ hash: '#/new', routes: { 'POST /v1/sessions': () => { if (answer instanceof Error) throw answer; return answer; } } });
+  await h.app.start();
+  await flush();
+  attach(imageFile());
+  $('prompt').value = 'beam 4';
+  await h.app.send();
+  assert.equal(q($('notice'), 'p').textContent, 'Could not create the session.');
+  assert.equal($('send').disabled, false);
+  assert.equal($('stop').hidden, true);
+  assert.equal($('conversation').children.length, 0);
+  assert.equal($('prompt').value, 'beam 4');
+  assert.equal($('preview').hidden, false);
+  assert.equal(h.api.streams.length, 0);
+  answer = new TypeError('Failed to fetch');
+  await h.app.send();
+  assert.equal(q($('notice'), 'p').textContent, 'Cannot reach the server. Check the connection and try again.');
+  assert.equal($('send').disabled, false);
+  assert.equal(h.fetch.to('POST', '/v1/sessions').length, 2);   // nothing was made, so the next Send asks again
+});
+
+test('a cancel that fails because the network does says so, whatever the browser calls its TypeError', async () => {
+  const h = await ready();
+  const turn = h.app.send();
+  await flush();
+  h.api.streams[0].accept('m_a');
+  await flush();
+  h.api.cancelError = new TypeError('x is not a function (the browser\'s own words are not the test)');
+  $('stop').click();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Cannot reach the server. Check the connection and try again.');
+  assert.equal($('stop').textContent, 'Stop');
+  assert.equal($('stop').disabled, false);
+  h.api.streams[0].channel.push(stopEv('done'));
+  h.api.streams[0].channel.end();
+  await turn;
+});
+
+test('an export whose body fails to arrive is a network failure, and saves nothing', async () => {
+  const made = [];
+  const h = harness({
+    urls: { createObjectURL: (b) => { made.push(b); return 'blob:x'; }, revokeObjectURL() {} }, sessions: [sess('s_a', 'A', 0)],
+    routes: { ...EXISTING, 'GET /v1/sessions/s_a/export': () => new Response(new ReadableStream({ start(controller) { controller.error(new TypeError('terminated')); } })) },
+  });
+  await h.app.start();
+  await flush();
+  qa($('exports'), 'button')[0].click();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Cannot reach the server. Check the connection and try again.');
+  assert.deepEqual(made, []);
+});
+
+test('a TypeError out of the stream or the poll is the network, and one out of the page\'s own handling of an event is not', async (t) => {
+  const logged = captureErrors(t);
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(...events.slice(0, 4));
+  run.channel.end();
+  await flush();                                    // the stream closed without an end: polling
+  const poll = h.api.polls[0];
+  poll.channel.push(ev('content_block_delta', { index: 0 }));   // an event that breaks the reducer, in the poll this time
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, GENERIC);       // a bug of the page's, said as one ...
+  assert.equal(buttonOf($('notice'), 'Retry').hidden, true);    // ... with no Retry: the poll did not fail
+  poll.channel.push(...events.slice(4));
+  poll.channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'done');   // and the poll carried on to the end
+  assert.ok(logged.some(([e]) => e instanceof TypeError));
+
+  const second = harness({ sessions: [sess('s_a', 'A', 0)], routes: EXISTING });
+  await second.app.start();
+  await flush();
+  attach(imageFile());
+  const again = second.app.send();
+  await flush();
+  second.api.streams[0].accept('m_a');
+  await flush();
+  second.api.streams[0].channel.push(...fullTurn().slice(0, 4));
+  second.api.streams[0].channel.end();
+  await flush();
+  second.api.polls[0].channel.fail(new TypeError('whatever the browser says'));   // the poll itself failed: that is the network
+  await again;
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Cannot reach the server. Check the connection and try again.');
+  assert.equal(buttonOf($('notice'), 'Retry').hidden, false);
+});
+
+test('Retry on a card that could not be loaded asks once, however often it is clicked while the answer is awaited', async () => {
+  const gate = deferred();
+  let calls = 0;
+  const h = harness({
+    sessions: [sess('s_a', 'A', 1)],
+    routes: {
+      'GET /v1/sessions/s_a': { ...sess('s_a', 'A', 1), messages: [userMsg('u_1', 'first', 'a.png'), botMsg('m_1', 'done', START_DATA.options)] },
+      'GET /v1/messages/m_1': async () => {
+        calls += 1;
+        if (calls === 1) return refused(500, 'Could not read the turn.');
+        await gate.promise;
+        return { ...botMsg('m_1', 'done'), events: rows(fullTurn('m_1')) };
+      },
+    },
+  });
+  await h.app.start();
+  await flush();
+  const retry = buttonOf(cardOf(), 'Retry');
+  retry.click();
+  retry.click();
+  retry.click();
+  await flush();
+  assert.equal(calls, 2);   // the first load, and one retry
+  gate.resolve();
+  await flush();
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal(calls, 2);
+});
+
+test('a stale Retry, from a card of a chat the user has left, resumes nothing in the chat now on screen', async () => {
+  resetEvents();
+  const partial = [startEv({ message_id: 'm_1' }), stageStartEv('preprocess', 0)];
+  let calls = 0;
+  const h = harness({
+    hash: '#/s/s_a', sessions: [sess('s_a', 'A', 1), sess('s_b', 'B', 1)],
+    routes: {
+      ...doneSession('s_b', 'B', 'm_b'),
+      'GET /v1/sessions/s_a': { ...sess('s_a', 'A', 1), messages: [userMsg('u_1', 'first', 'a.png'), botMsg('m_1', 'running', START_DATA.options)] },
+      'GET /v1/messages/m_1': () => { calls += 1; return calls === 1 ? refused(500, 'Could not read the turn.') : { ...botMsg('m_1', 'running'), events: rows(partial) }; },
+    },
+  });
+  await h.app.start();
+  await flush();
+  const stale = buttonOf(cardOf(), 'Retry');
+  h.win.location.hash = '#/s/s_b';   // the user leaves for another chat; this card goes with the old one
+  await flush();
+  assert.equal(q($('conversation'), '.user-text').textContent, 'from s_b');
+  stale.click();   // a click on the old card's button, which would now find the turn running
+  await flush();
+  assert.equal(calls, 2);                                   // it did ask ...
+  assert.equal(h.api.polls.length, 0);                      // ... and followed nothing
+  assert.equal($('send').disabled, false);                  // so this chat's composer is its own
+  assert.equal($('stop').hidden, true);
+  assert.equal(q($('conversation'), '.user-text').textContent, 'from s_b');
+  assert.equal($('conversation').children.length, 2);
+});
+
+test('Stop while a poll is already following the turn asks the server to cancel and starts no second poll', async () => {
+  resetEvents();
+  const partial = [startEv(), stageStartEv('preprocess', 0)];
+  const h = harness({
+    sessions: [sess('s_a', 'running', 1)],
+    routes: {
+      'GET /v1/sessions/s_a': { ...sess('s_a', 'running', 1), messages: [userMsg('u_a', '', 'chest.png'), botMsg('m_a', 'running', START_DATA.options)] },
+      'GET /v1/messages/m_a': { ...botMsg('m_a', 'running'), events: rows(partial) },
+    },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal(h.api.polls.length, 1);
+  $('stop').click();
+  await flush();
+  assert.deepEqual(h.api.cancels.map((c) => c.messageId), ['m_a']);
+  assert.equal(h.api.polls.length, 1);   // the poll that is there brings the stop
+  assert.equal($('stop').textContent, 'Stopping…');
+  h.api.polls[0].channel.push(stopEv('aborted'));
+  h.api.polls[0].channel.end();
+  await flush();
+  assert.equal(cardOf().getAttribute('data-status'), 'aborted');
+  assert.equal($('send').disabled, false);
+});
+
+test('something unexpected while the chat is made is not hidden: it is logged, said as ours, and the composer is freed', async (t) => {
+  const logged = captureErrors(t);
+  const h = harness({ hash: '#/new', routes: { 'POST /v1/sessions': { id: 's_new', title: '', mode: 'private', turns: 0, created_at: iso(3), updated_at: iso(3) } } });
+  await h.app.start();
+  await flush();
+  h.win.history.replaceState = () => { throw new TypeError('the address cannot be set'); };
+  attach(imageFile());
+  await h.app.send();
+  assert.equal(q($('notice'), 'p').textContent, GENERIC);
+  assert.ok(logged.some(([e]) => e instanceof TypeError && e.message === 'the address cannot be set'));
+  assert.equal($('send').disabled, false);
+  assert.equal($('stop').hidden, true);
+  assert.equal(h.api.streams.length, 0);
+  assert.equal($('prompt').value ?? '', '');
+  assert.equal($('preview').hidden, false);   // the image is still attached, for the next try
+});
+
+test('a turn in the middle of a chat that loads late and is found running is shown as it is, and only the last turn is ever followed', async () => {
+  resetEvents();
+  const partial = [startEv({ message_id: 'm_1' }), stageStartEv('preprocess', 0)];
+  const second = fullTurn('m_2');
+  let calls = 0;
+  const h = harness({
+    sessions: [sess('s_a', 'two', 2)],
+    routes: {
+      'GET /v1/sessions/s_a': { ...sess('s_a', 'two', 2), messages: [userMsg('u_1', 'first', 'a.png'), botMsg('m_1', 'running', START_DATA.options),
+                                                                     userMsg('u_2', 'second', 'b.png'), botMsg('m_2', 'done', START_DATA.options)] },
+      'GET /v1/messages/m_1': () => { calls += 1; return calls === 1 ? refused(500, 'Could not read the turn.') : { ...botMsg('m_1', 'running'), events: rows(partial) }; },
+      'GET /v1/messages/m_2': () => ({ ...botMsg('m_2', 'done'), events: rows(second) }),
+    },
+  });
+  await h.app.start();
+  await flush();
+  buttonOf(qa($('conversation'), 'article.card')[0], 'Retry').click();
+  await flush();
+  assert.equal(qa($('conversation'), 'article.card')[0].getAttribute('data-status'), 'running');   // shown as it was last heard of
+  assert.equal(h.api.polls.length, 0);                                                              // but it is not the last turn: not followed
+  assert.equal($('send').disabled, false);
+  assert.equal($('stop').hidden, true);
+});
+
+test('a link to another chat, while one failed to open, opens that one and does not try the failed one again', async () => {
+  const h = harness({
+    hash: '#/s/s_a', sessions: [sess('s_b', 'B', 1), sess('s_a', 'A', 1)],
+    routes: { ...doneSession('s_b', 'B', 'm_b'), 'GET /v1/sessions/s_a': () => refused(500, 'Could not read the session.') },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal(h.fetch.to('GET', '/v1/sessions/s_a').length, 1);
+  const link = qa($('session-list'), 'li').find((li) => li.getAttribute('data-session') === 's_b').querySelector('a');
+  link.click();                      // what the browser does first: the link's own handler, at the old address ...
+  h.win.location.hash = '#/s/s_b';   // ... and then the address changes
+  await flush();
+  assert.equal(q($('conversation'), '.user-text').textContent, 'from s_b');
+  assert.equal(h.fetch.to('GET', '/v1/sessions/s_a').length, 1);   // the one that failed was not asked for again on the way
+  assert.equal($('notice').hidden, true);
+});
+
+test('More can be used again for the next page, keeps focus while there are more pages, and hands it on at the last one', async () => {
+  const h = harness({
+    hash: '#/new',
+    routes: {
+      'GET /v1/sessions': (url) => {
+        if (url.includes('cursor=c2')) return { sessions: [sess('s_e', 'e', 1, 1)], next_cursor: null };
+        if (url.includes('cursor=c1')) return { sessions: [sess('s_c', 'c', 1, 2), sess('s_d', 'd', 1, 2)], next_cursor: 'c2' };
+        return { sessions: [sess('s_a', 'a', 1, 3), sess('s_b', 'b', 1, 3)], next_cursor: 'c1' };
+      },
+    },
+  });
+  await h.app.start();
+  await flush();
+  const rows = () => qa($('session-list'), 'li').map((li) => li.getAttribute('data-session'));
+  $('session-more').focus();
+  $('session-more').click();
+  await flush();
+  assert.deepEqual(rows(), ['s_a', 's_b', 's_c', 's_d']);
+  assert.equal($('session-more').hidden, false);
+  assert.equal($('session-more').disabled, false);
+  assert.equal(document.activeElement, $('session-more'));   // more pages to come: focus stays where it was
+  $('session-more').click();                                  // and the next page can be asked for
+  await flush();
+  assert.deepEqual(rows(), ['s_a', 's_b', 's_c', 's_d', 's_e']);
+  assert.equal($('session-more').hidden, true);
+  assert.equal(document.activeElement, qa($('session-list'), 'li a')[4]);   // the last page: the first row it added
 });
