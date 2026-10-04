@@ -6,7 +6,7 @@
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P4",
   "status": "P0-P3 complete 2026-10-03 (store, redaction, streaming API, OpenAPI on the tiny engine). P4 frontend next; P3-E doc follow-up first.",
-  "next_action": "P4-D (app/static/app.js wiring; P4-C follow-up commit first) via implementer with task-P4-D-rulings.md; then P4-E browser checklist (extend scripts/chat_ui_layout_check.py).",
+  "next_action": "P4-E (browser checklist with screenshots; scripts/chat_ui_browser_check.py) via implementer with .superpowers/sdd/CHAT_UI_PLAN/task-P4-E-rulings.md, preceded by the 'P4-D follow-up' commit listed in the SDD ledger. Paused 2026-10-05 on user instruction after P4-D + push.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -348,7 +348,7 @@
           "desc": "render.js: stage timeline, report card, label chips, provenance footer; every update re-renders from the view."
         },
         "P4-D": {
-          "done": false,
+          "done": true,
           "desc": "app.js: routing, sessions sidebar, minimal file picker, Stop (cancel then abort), settings drawer, exports, health strip, polling watchdog."
         },
         "P4-E": {
@@ -357,9 +357,10 @@
         }
       },
       "evidence": {
-        "commits": "1cb6c1b,45aca96,0157ed1",
-        "tests": "node 120/120; validate 1159 + Gate 2b; layout 88/0; 125/125 mutants; Chrome a11y-tree check",
-        "review": "clean after fix round 1 (disclosure buttons, spoken chip state, settled public stages, focus hooks, names)"
+        "commits": "64a4728,fed1fce,38f4b76",
+        "tests": "node 245/245 (app 118); validate + Gate 2b; layout 88/0; 220/220 mutants",
+        "review": "clean after fix round 1 (watchdog at accept, resumed turn text, poll/stop recovery, retries, a11y)",
+        "smoke": "headless Chrome: stream→done, reload-identical, Stop early, exports, 4 s/8 s slow upload completes, retry paths, hung /healthz gives up at 5 s"
       },
       "verdict": null
     },
@@ -553,7 +554,8 @@
     "2026-10-03: 2026-10-03: P3-E follow-up a3db46d (doc accuracy + preprocess read race) clean on re-review; P4 started.",
     "2026-10-04: P4-A complete.",
     "2026-10-04: P4-B complete.",
-    "2026-10-04: P4-C complete."
+    "2026-10-04: P4-C complete.",
+    "2026-10-05: P4-D complete; chat_ui pushed to origin; paused before P4-E on user instruction."
   ],
-  "last_updated": "2026-10-03T19:54:53+02:00"
+  "last_updated": "2026-10-04T06:02:51+02:00"
 }

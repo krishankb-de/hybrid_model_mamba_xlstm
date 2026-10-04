@@ -2773,7 +2773,7 @@ Verification is the P4-E browser checklist. Commit `"P4-C: card rendering"`.
 - **Stage settling:** a `done` turn with at least one recorded stage settles its pending stages as `skipped/not_run`, so a public turn has no pending score.
 - **Labels:** with labels off, "labels off" shows immediately.
 
-- [ ] **P4-D** `app.js`: routing, sessions sidebar, minimal file picker, Stop (cancel then abort), settings drawer, exports, health strip, polling watchdog.
+- [x] **P4-D** `app.js`: routing, sessions sidebar, minimal file picker, Stop (cancel then abort), settings drawer, exports, health strip, polling watchdog.
 
 **Files:** create `app/static/app.js`.
 
@@ -2787,6 +2787,25 @@ Verification is the P4-E browser checklist. Commit `"P4-C: card rendering"`.
 - Exports: buttons fetch `/v1/sessions/{id}/export?format=json|md` with auth headers and save via a Blob link.
 
 Commit `"P4-D: app wiring, sessions, drawer, stop, watchdog"`.
+
+*As built (P4-D, commits 64a4728, fed1fce and 38f4b76; the code is authoritative where it differs from the text above):*
+- **Structure.** `app.js` exports pure helpers and `createApp(env)`, and it starts only when `#composer` exists. Tests: `tests/frontend/app.test.mjs`, 118 tests.
+- **Replay.** `GET /v1/sessions/{id}` carries no events, so replay fetches `/v1/messages/{id}` for each assistant message. Each card fails on its own and gets its own Retry.
+- **Watchdog.**
+  - It counts events, not bytes; the server pings only after 15 s.
+  - It arms at accept, once `X-Message-Id` has arrived, so a slow upload waits instead of aborting.
+  - Stop does a cancel and then an abort. It is disabled until the turn is accepted.
+- **Drawer.**
+  - No API-base field, because the app is same-origin.
+  - The token is stored locally, with a hint saying so.
+  - `cached_decode` is disabled for cache-less models.
+  - `compile` is shown only when the server allows it.
+- **Accessibility.**
+  - `aria-busy` is set on `#conversation` while a turn streams and while a session opens.
+  - A `.visually-hidden` status region carries `statusText`.
+  - Esc returns focus to whatever opened the panel.
+  - After Delete, focus moves to the next session.
+- **Health.** `/healthz` has a 5 s timeout.
 
 - [ ] **P4-E** Browser checklist on the tiny engine, with screenshots in the evidence.
 
