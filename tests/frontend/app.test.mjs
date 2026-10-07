@@ -846,10 +846,11 @@ test('Send streams a turn: Send is off and Stop is on while it runs, the card fi
   assert.equal($('status').textContent, 'Report ready');
   assert.equal($('send').disabled, false);
   assert.equal($('stop').hidden, true);
-  assert.equal($('conversation').hasAttribute('aria-busy'), false);
+  assert.equal($('conversation').getAttribute('aria-busy'), 'true');   // taken off a frame later, not in the task that ends the turn
   assert.ok(h.fetch.to('GET', '/v1/sessions?').length >= 2, 'the sidebar was refreshed');
   nextFrame();
   assert.equal(cardOf().getAttribute('data-status'), 'done');   // a frame that was still queued changes nothing
+  assert.equal($('conversation').hasAttribute('aria-busy'), false);   // and that frame is the one that takes aria-busy off
 });
 
 test('the status region says a thing only when it changes', async () => {
@@ -902,6 +903,7 @@ test('a turn that the server refuses before its stream opens: the notice says wh
     assert.equal(q($('preview'), 'span').textContent.startsWith('chest.png'), true);
     assert.equal($('send').disabled, false);
     assert.equal($('stop').hidden, true);
+    nextFrame();   // aria-busy comes off a frame after the page stops being busy
     assert.equal($('conversation').hasAttribute('aria-busy'), false);
   }
   assert.deepEqual(logged, []);   // a refusal, the network being down, and a cancel are what they say, not bugs to be logged
@@ -1272,6 +1274,7 @@ test('a session opened with its last turn still running polls it from its last s
   assert.equal(cardOf().getAttribute('data-status'), 'done');
   assert.equal($('send').disabled, false);
   assert.equal($('stop').hidden, true);
+  nextFrame();   // aria-busy comes off a frame after the page stops being busy
   assert.equal($('conversation').hasAttribute('aria-busy'), false);
 });
 
@@ -1366,6 +1369,7 @@ test('leaving a chat with a turn running drops its stream and cancels nothing; c
   assert.equal(q($('conversation'), '.user-text').textContent, 'from s_b');
   assert.equal($('send').disabled, false);   // this view has no turn running
   assert.equal($('stop').hidden, true);
+  nextFrame();   // aria-busy comes off a frame after the page stops being busy
   assert.equal($('conversation').hasAttribute('aria-busy'), false);
   assert.equal(h.timers.intervals, 0);   // and no ticker left over
   run.channel.push(...events.slice(4, 9));   // what was already on the wire when the stream was dropped
@@ -2466,6 +2470,7 @@ test('a stream that closes before the server ever accepted the turn does not lea
   assert.equal($('stop').hidden, true);
   assert.equal($('conversation').children.length, 0);   // the user turn is taken back
   assert.equal($('prompt').value, 'beam 4');            // and the composer is as it was
+  nextFrame();   // aria-busy comes off a frame after the page stops being busy
   assert.equal($('conversation').hasAttribute('aria-busy'), false);
 });
 
@@ -2830,6 +2835,7 @@ test('a render failure while the turn ends still frees the composer', async (t) 
   await turn;
   assert.equal($('send').disabled, false);   // restored although the paint threw
   assert.equal($('stop').hidden, true);
+  nextFrame();   // aria-busy comes off a frame after the page stops being busy
   assert.equal($('conversation').hasAttribute('aria-busy'), false);
   assert.equal(q($('notice'), 'p').textContent, GENERIC);
   assert.ok(logged.some(([e]) => e instanceof TypeError && e.message === 'render failed'));
@@ -2878,6 +2884,7 @@ test('a chat is drawn into #conversation while it is aria-busy, so a screen read
   await h.app.start();
   await flush();
   assert.deepEqual(seen.filter(([n]) => n > 0), [[2, 'true']]);   // the user turn and the card went in while it was busy
+  nextFrame();   // aria-busy comes off a frame after the page stops being busy
   assert.equal(conversation.hasAttribute('aria-busy'), false);    // and it is not left busy
   assert.equal(conversation.children.length, 2);
 });
@@ -3245,4 +3252,332 @@ test('More can be used again for the next page, keeps focus while there are more
   assert.deepEqual(rows(), ['s_a', 's_b', 's_c', 's_d', 's_e']);
   assert.equal($('session-more').hidden, true);
   assert.equal(document.activeElement, qa($('session-list'), 'li a')[4]);   // the last page: the first row it added
+});
+
+// ---- P4-D follow-up ------------------------------------------------------------------------------------------------------------------------
+// Seven residuals of the P4-D re-review (task-P4-D-followup.md). Each test was written before its change and run red on the old code.
+
+// 1: an exception while the accepted turn is drawn must not lock the page ---------------------------------------------------------------------
+
+test('an exception while the accepted turn is drawn does not lock the page: the stall clock runs, Stop works, and the turn settles', async (t) => {
+  const logged = captureErrors(t);
+  const h = await ready();
+  const conversation = $('conversation');
+  const append = conversation.append.bind(conversation);
+  let boom = true;
+  conversation.append = (...nodes) => {   // the accepted turn's card is the first article.card to go in
+    if (boom && nodes.some((n) => n.getAttribute?.('class') === 'card')) { boom = false; throw new TypeError('append failed'); }
+    return append(...nodes);
+  };
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  h.api.streams[0].accept('m_a');   // the drawing in accept() throws
+  await flush();
+  assert.equal(h.timers.intervals, 1);          // the stall clock was armed before the drawing
+  assert.equal($('stop').disabled, false);      // and so was Stop: the server has the turn
+  assert.equal(q($('notice'), 'p').textContent, GENERIC);
+  assert.ok(logged.some(([e]) => e instanceof TypeError && e.message === 'append failed'), 'it was logged');
+  h.api.streams[0].channel.push(...events);
+  h.api.streams[0].channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'done');   // the paint put the card in
+  assert.equal($('send').disabled, false);
+  assert.equal($('stop').hidden, true);
+});
+
+test('when the accept fails and the stream then goes silent, the stall clock hands the turn to the poll, which settles it', async (t) => {
+  captureErrors(t);
+  const h = await ready();
+  const conversation = $('conversation');
+  const append = conversation.append.bind(conversation);
+  let boom = true;
+  conversation.append = (...nodes) => {
+    if (boom && nodes.some((n) => n.getAttribute?.('class') === 'card')) { boom = false; throw new TypeError('append failed'); }
+    return append(...nodes);
+  };
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  h.api.streams[0].accept('m_a');
+  await flush();
+  h.timers.advance(3000);   // 3 s without an event
+  await flush();
+  assert.equal(h.api.polls.length, 1);
+  assert.equal(h.api.polls[0].opts.after, 0);
+  h.api.polls[0].channel.push(...events);
+  h.api.polls[0].channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal($('send').disabled, false);
+});
+
+// 2: a notice belongs to the route it was raised on -----------------------------------------------------------------------------------------
+
+test('New chat after a chat failed to open clears that chat\'s notice and its Retry, and does not ask for the failed chat again', async () => {
+  const h = harness({ hash: '#/s/s_a', sessions: [sess('s_a', 'A', 1)], routes: { 'GET /v1/sessions/s_a': () => refused(500, 'Could not read the session.') } });
+  await h.app.start();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Could not read the session.');
+  assert.equal(buttonOf($('notice'), 'Retry').hidden, false);
+  $('new-session').click();   // #/new: another route
+  await flush();
+  assert.equal($('notice').hidden, true);
+  assert.equal(buttonOf($('notice'), 'Retry').hidden, true);
+  assert.equal(q($('notice'), 'p').textContent, '');
+  assert.equal(h.win.location.hash, '#/new');
+  assert.equal(h.fetch.to('GET', '/v1/sessions/s_a').length, 1);
+  assert.equal($('send').disabled, false);
+});
+
+test('a notice raised while the page starts on an empty chat is not cleared by the first route', async () => {
+  const h = harness({ routes: { 'GET /v1/models': refused(401, 'Missing or wrong token') } });   // the 401 notice comes before the route is handled
+  await h.app.start();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Enter the access token in Settings');
+  assert.equal($('notice').hidden, false);
+});
+
+// 3: the Retry of a card that could not be loaded says which turn ----------------------------------------------------------------------------
+
+test('the Retry of a failed card is named by its turn and starts with its visible text', async () => {
+  const h = harness({
+    sessions: [sess('s_a', 'two turns', 2)],
+    routes: {
+      'GET /v1/sessions/s_a': { ...sess('s_a', 'two turns', 2), messages: [userMsg('u_1', 'first', 'a.png'), botMsg('m_1', 'done', START_DATA.options),
+                                                                           userMsg('u_2', 'second', 'b.png'), botMsg('m_2', 'done', START_DATA.options)] },
+      'GET /v1/messages/m_1': () => refused(500, 'Could not read the turn.'),
+      'GET /v1/messages/m_2': () => refused(500, 'Could not read the turn.'),
+    },
+  });
+  await h.app.start();
+  await flush();
+  const retries = qa($('conversation'), 'article.card').map((card) => buttonOf(card, 'Retry'));
+  assert.deepEqual(retries.map((b) => b.getAttribute('aria-label')), ['Retry loading turn 1', 'Retry loading turn 2']);
+  for (const b of retries) assert.ok(b.getAttribute('aria-label').startsWith(b.textContent), 'label in name');
+  retries[1].click();   // still failing: the card is rebuilt, and is named again
+  await flush();
+  assert.equal(buttonOf(qa($('conversation'), 'article.card')[1], 'Retry').getAttribute('aria-label'), 'Retry loading turn 2');
+});
+
+// 4: a Retry that comes late follows nothing ---------------------------------------------------------------------------------------------------
+
+test('a Retry clicked after its turn was left starts no poller', async () => {
+  const gate = deferred();
+  let hold = false;
+  const h = await ready({ routes: { 'GET /v1/models': async () => { if (hold) await gate.promise; return MODELS; } } });
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  h.api.streams[0].accept('m_a');
+  await flush();
+  h.api.streams[0].channel.push(...events.slice(0, 7));
+  await flush();
+  h.timers.advance(3000);
+  await flush();
+  h.api.polls[0].channel.fail(refusal(404, 'Message not found.', 'not_found_error'));
+  await turn;
+  await flush();
+  const retry = buttonOf($('notice'), 'Retry');
+  assert.equal(retry.hidden, false);
+  hold = true;
+  const reload = h.app.reloadAll();   // a new token: the turn is left at once, and its chat is opened again when /v1/models answers
+  await flush();
+  assert.equal($('notice').hidden, false);   // so the Retry is still on screen for a moment
+  retry.click();
+  await flush();
+  assert.equal(h.api.polls.length, 1);   // and follows a turn nobody is looking at no more
+  gate.resolve();
+  await reload;
+  await flush();
+  assert.equal(h.api.polls.length, 1);
+});
+
+// 5: a failed Stop that did not matter is not left on screen -------------------------------------------------------------------------------
+
+test('a "couldn\'t stop" notice goes away when the turn ends by itself, whether the stream or the poll brings its end', async () => {
+  for (const via of ['stream', 'poll']) {
+    const h = await ready();
+    const events = fullTurn();
+    const turn = h.app.send();
+    await flush();
+    const run = h.api.streams[0];
+    run.accept('m_a');
+    await flush();
+    run.channel.push(...events.slice(0, 5));
+    await flush();
+    h.api.cancelError = refusal(404, 'Message not found.', 'not_found_error');
+    $('stop').click();
+    await flush();
+    assert.equal(q($('notice'), 'p').textContent, 'Message not found.', via);
+    assert.equal($('notice').hidden, false, via);
+    if (via === 'stream') {
+      run.channel.push(...events.slice(5));
+      run.channel.end();
+    } else {
+      h.timers.advance(3000);   // the stream goes quiet: the poll brings the end
+      await flush();
+      h.api.polls[0].channel.push(...events.slice(5));
+      h.api.polls[0].channel.end();
+    }
+    await turn;
+    assert.equal(cardOf().getAttribute('data-status'), 'done', via);
+    assert.equal($('notice').hidden, true, via);
+    assert.equal(q($('notice'), 'p').textContent, '', via);
+  }
+});
+
+test('a notice that replaced the "couldn\'t stop" one is still there when the turn ends', async (t) => {
+  captureErrors(t);
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(...events.slice(0, 4));
+  await flush();
+  h.api.cancelError = refusal(404, 'Message not found.', 'not_found_error');
+  $('stop').click();
+  await flush();
+  run.channel.push(ev('content_block_delta', { index: 0 }));   // an event that breaks the reducer: its own notice
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, GENERIC);
+  run.channel.push(...events.slice(4));
+  run.channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal(q($('notice'), 'p').textContent, GENERIC);   // not the failed Stop's, and not for the turn's end to clear
+  assert.equal($('notice').hidden, false);
+});
+
+test('a Stop that works takes down the notice of the Stop that failed before it', async () => {
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(...events.slice(0, 4));
+  await flush();
+  h.api.cancelError = refusal(404, 'Message not found.', 'not_found_error');
+  $('stop').click();
+  await flush();
+  assert.equal($('notice').hidden, false);
+  h.api.cancelError = null;   // the second try goes through
+  $('stop').click();
+  await flush();
+  assert.equal($('notice').hidden, true);   // "Stopping…" is true now, and the old complaint is not
+  assert.equal($('stop').textContent, 'Stopping…');
+  h.api.polls[0].channel.push(stopEv('aborted'));
+  h.api.polls[0].channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'aborted');
+  assert.equal($('notice').hidden, true);
+});
+
+// 6: the sidebar does not mark a chat that did not open ---------------------------------------------------------------------------------------
+
+test('a chat that failed to open is not marked as the current page in the sidebar, and is again when it opens', async () => {
+  let fail = true;
+  const ok = doneSession('s_a', 'A', 'm_a');
+  const h = harness({
+    hash: '#/s/s_a', sessions: [sess('s_b', 'B', 1), sess('s_a', 'A', 1)],
+    routes: { ...ok, 'GET /v1/sessions/s_a': () => (fail ? refused(500, 'Could not read the session.') : ok['GET /v1/sessions/s_a']) },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal(buttonOf($('notice'), 'Retry').hidden, false);
+  assert.equal(q($('session-list'), '[aria-current]'), null);   // nothing is open
+  assert.equal(qa($('session-list'), 'li').length, 2);          // and the list is still all there
+  fail = false;
+  buttonOf($('notice'), 'Retry').click();
+  await flush();
+  assert.equal(q($('session-list'), '[aria-current]').parentNode.getAttribute('data-session'), 's_a');
+});
+
+test('a failed open keeps the keyboard\'s place in the sidebar', async () => {
+  const h = harness({ hash: '#/s/s_a', sessions: [sess('s_a', 'A', 1)], routes: { 'GET /v1/sessions/s_a': () => refused(500, 'Could not read the session.') } });
+  await h.app.start();
+  await flush();
+  q(q($('session-list'), 'li'), 'a').focus();
+  q(q($('session-list'), 'li'), 'a').click();   // the same address: the link tries again, and fails again
+  await flush();
+  assert.equal(q($('session-list'), '[aria-current]'), null);
+  assert.equal(document.activeElement, q(q($('session-list'), 'li'), 'a'));
+});
+
+// 7: aria-busy comes off a frame after it went on ---------------------------------------------------------------------------------------------
+
+test('a chat that is drawn stays aria-busy until the next frame, so a screen reader sees the attribute come off', async () => {
+  const h = harness({ sessions: [sess('s_b', 'B', 1)], routes: { ...doneSession('s_b', 'B', 'm_b') } });
+  await h.app.start();
+  await flush();
+  assert.equal($('conversation').children.length, 2);
+  assert.equal($('conversation').getAttribute('aria-busy'), 'true');   // set, the chat drawn, and not yet taken off
+  nextFrame();
+  assert.equal($('conversation').hasAttribute('aria-busy'), false);
+});
+
+test('a turn that ends takes aria-busy off one frame later', async () => {
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  h.api.streams[0].accept('m_a');
+  await flush();
+  assert.equal($('conversation').getAttribute('aria-busy'), 'true');
+  h.api.streams[0].channel.push(...events);
+  h.api.streams[0].channel.end();
+  await turn;
+  assert.equal($('send').disabled, false);                              // the composer is free at once ...
+  assert.equal($('conversation').getAttribute('aria-busy'), 'true');   // ... and the attribute is seen to go a frame later
+  nextFrame();
+  assert.equal($('conversation').hasAttribute('aria-busy'), false);
+});
+
+test('a chat opened with its last turn running stays aria-busy after the frame that ends the drawing', async () => {
+  resetEvents();
+  const partial = [startEv(), stageStartEv('preprocess', 0)];
+  const h = harness({
+    sessions: [sess('s_a', 'running one', 1)],
+    routes: {
+      'GET /v1/sessions/s_a': { ...sess('s_a', 'running one', 1), messages: [userMsg('u_a', '', 'chest.png'), botMsg('m_a', 'running', START_DATA.options)] },
+      'GET /v1/messages/m_a': { ...botMsg('m_a', 'running'), events: rows(partial) },
+    },
+  });
+  await h.app.start();
+  await flush();
+  nextFrame();
+  assert.equal($('conversation').getAttribute('aria-busy'), 'true');   // the turn runs: the drawing's frame must not take it off
+  h.api.polls[0].channel.push(...fullTurn().slice(2, 3), stopEv('done'));
+  h.api.polls[0].channel.end();
+  await flush();
+  nextFrame();
+  assert.equal($('conversation').hasAttribute('aria-busy'), false);
+});
+
+test('aria-busy that was put on again before the frame is not taken off by the frame of the first', async () => {
+  const h = await ready();
+  const turn = h.app.send();   // busy on
+  await flush();
+  h.api.streams[0].accept('m_a');
+  await flush();
+  h.api.streams[0].channel.push(stopEv('done'));
+  h.api.streams[0].channel.end();
+  await turn;                  // busy off: the removal waits for a frame
+  attach(imageFile('second.png'));
+  const again = h.app.send();  // busy on again before that frame
+  await flush();
+  nextFrame();                 // the first turn's removal runs now
+  assert.equal($('conversation').getAttribute('aria-busy'), 'true');
+  h.api.streams[1].accept('m_b');
+  await flush();
+  h.api.streams[1].channel.push(stopEv('done', { message_id: 'm_b' }));
+  h.api.streams[1].channel.end();
+  await again;
+  nextFrame();
+  assert.equal($('conversation').hasAttribute('aria-busy'), false);
 });

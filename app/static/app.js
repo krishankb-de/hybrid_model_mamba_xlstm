@@ -340,6 +340,11 @@ export function createApp(env) {
   const cancelLater = (id) => (env.clearTimeout ? env.clearTimeout(id) : globalThis.clearTimeout(id));
   const every = (fn, ms) => (env.setInterval ? env.setInterval(fn, ms) : globalThis.setInterval(fn, ms));
   const cancelEvery = (id) => (env.clearInterval ? env.clearInterval(id) : globalThis.clearInterval(id));
+  // The next animation frame: env's, else the page's, else a timer (a page with none). A test hands one it runs by hand.
+  const frame = (fn) => {
+    const raf = env.requestAnimationFrame ?? win.requestAnimationFrame ?? globalThis.requestAnimationFrame;
+    return typeof raf === 'function' ? raf.call(globalThis, fn) : later(fn, 16);
+  };
   // Delete is the one thing this asks about, and it fails closed: with no way to ask, nothing is deleted.
   const confirmed = (message) => (env.confirm ? env.confirm(message) : typeof win.confirm === 'function' ? win.confirm(message) : false);
   const watchdog = createWatchdog({ now: env.now ?? (() => Date.now()) });
@@ -373,6 +378,8 @@ export function createApp(env) {
     healthFailures: 0,
     loadingMore: false,      // a page of the sidebar is being fetched: More is off, so it cannot be asked twice
     noticeRetry: null,
+    noticeOwner: null,       // the turn whose failed Stop the notice says, if it is that: the end of the turn takes it down
+    route: null,             // the route handleRoute showed last ('new' or 's/<id>'): a notice belongs to the route it was raised on
     missing: null,           // a session the server said it does not have: home never picks it
   };
 
@@ -397,10 +404,11 @@ export function createApp(env) {
 
   // ---- the notice above the composer and the live status ----------------------------------------------------------------------
 
-  function showNotice(message, retry = null) {
+  function showNotice(message, retry = null, owner = null) {
     ui.noticeText.textContent = message;
     ui.noticeRetry.hidden = !retry;
     state.noticeRetry = retry;
+    state.noticeOwner = owner;
     ui.notice.hidden = false;
   }
 
@@ -410,6 +418,7 @@ export function createApp(env) {
     ui.noticeText.textContent = '';
     ui.noticeRetry.hidden = true;
     state.noticeRetry = null;
+    state.noticeOwner = null;
   }
 
   // The status region says a thing only when it changes, so the same word is not read twice.
@@ -491,13 +500,20 @@ export function createApp(env) {
     ui.exports.hidden = !state.session.id;
   }
 
+  // aria-busy on #conversation goes on at once and comes off a frame after the page stops being busy: put on and taken off inside
+  // one task, the attribute would never reach assistive technology. A frame that finds a turn running again leaves it on.
+  function markBusy(on) {
+    if (on) ui.conversation.setAttribute('aria-busy', 'true');
+    else frame(() => { if (!state.busy) ui.conversation.removeAttribute('aria-busy'); });
+  }
+
   function setBusy(on) {
     const wasBusy = state.busy;
     state.busy = on;
     if (on) {
-      ui.conversation.setAttribute('aria-busy', 'true');
+      markBusy(true);
     } else {
-      ui.conversation.removeAttribute('aria-busy');
+      markBusy(false);
       ui.stop.disabled = false;
       ui.stop.textContent = 'Stop';
       if (wasBusy && (doc.activeElement === ui.stop || doc.activeElement === ui.send)) ui.prompt.focus();   // the control that had focus is going away
@@ -532,6 +548,7 @@ export function createApp(env) {
         state.turn = null;
         setBusy(false);
       }
+      if (state.noticeOwner === turn) clearNotice();   // "couldn't stop": the turn ended by itself
       detach(refreshSessions());
     }
   }
@@ -583,10 +600,10 @@ export function createApp(env) {
   }
 
   // Polls a turn that nothing is following (its poll failed for good), from the last seq the view has. Retry in the notice and
-  // Stop both come here, and both have seen to it that the turn is this view's, not over, and not streaming; one that is
-  // already being polled needs nothing.
+  // Stop both come here. A turn that was left or has ended is not followed, so a Retry that comes late starts nothing; one that
+  // is already being polled needs nothing.
   function follow(turn) {
-    if (turn.polling) return;
+    if (turn.left || turn.settled || turn.polling) return;
     if (watchdog.retry() !== 'poll') watchdog.resume();
     if (state.noticeRetry) clearNotice();
     detach(pollTurn(turn));
@@ -637,21 +654,27 @@ export function createApp(env) {
   }
 
   // The server has the turn. The composer's text and file that were sent are spent (what was typed or attached since Send is the
-  // next turn's, and stays), and the 3 s of silence that mean "poll instead" are counted from here.
+  // next turn's, and stays), and the 3 s of silence that mean "poll instead" are counted from here. Stop, the clock and the ticker
+  // come before any drawing, and the drawing is caught: a page that cannot draw its card still follows the turn to its end.
   function accept(turn, id) {
     if (turn.left) return;   // the user moved to another chat while the upload was in flight: its turn is theirs to find later
     turn.id = id;
     turn.view = initialView(id);
-    turn.card = renderAssistantCard(turn.view, cardCtx(turn.n));
-    ui.conversation.append(turn.card);
-    const typed = ui.prompt.value ?? '';
-    ui.prompt.value = typed.startsWith(turn.text) ? typed.slice(turn.text.length) : typed;
-    if (state.file === turn.file) clearFile();
     ui.stop.disabled = false;
-    scroller.toEnd(turn.card);
-    announce(statusText(turn.view));
     watchdog.arm();
     startTicker(turn);
+    try {
+      turn.card = renderAssistantCard(turn.view, cardCtx(turn.n));
+      ui.conversation.append(turn.card);
+      const typed = ui.prompt.value ?? '';
+      ui.prompt.value = typed.startsWith(turn.text) ? typed.slice(turn.text.length) : typed;
+      if (state.file === turn.file) clearFile();
+      scroller.toEnd(turn.card);
+      announce(statusText(turn.view));
+    } catch (err) {   // a card that is made but not yet in the page is put there by its first paint
+      report(err);
+      showNotice(GENERIC_ERROR);
+    }
   }
 
   // The turn never started (the request was refused, or the network was down): take its user turn back out, show why,
@@ -721,10 +744,11 @@ export function createApp(env) {
       if (turn.settled || turn.left || state.turn !== turn) return;   // it ended while the cancel was on its way: nothing to report
       ui.stop.disabled = false;
       ui.stop.textContent = 'Stop';
-      showNotice(errorMessage(markNetwork(err)));
+      showNotice(errorMessage(markNetwork(err)), null, turn);   // the turn's end takes it down again
       return;
     }
     if (turn.settled || turn.left) return;
+    if (state.noticeOwner === turn) clearNotice();   // an earlier Stop failed and this one did not
     if (turn.streaming) turn.controller?.abort();   // the poll that brings the turn's own message_stop starts as the stream unwinds
     else follow(turn);                              // nothing is following it (its poll failed for good): follow it again
   }
@@ -778,7 +802,7 @@ export function createApp(env) {
   function failedCard(turn, error) {
     return el('article', { class: 'card', 'aria-label': `Assistant report, turn ${turn.n}`, 'data-message-id': turn.id },
       el('p', { class: 'note error' }, `Couldn't load this turn. ${errorMessage(error)}`),
-      el('button', { type: 'button', onclick: () => detach(reloadTurn(turn)) }, 'Retry'));
+      el('button', { type: 'button', 'aria-label': `Retry loading turn ${turn.n}`, onclick: () => detach(reloadTurn(turn)) }, 'Retry'));
   }
 
   async function reloadTurn(turn) {
@@ -844,11 +868,11 @@ export function createApp(env) {
       }
       view.turns.push(turn);
     }
-    ui.conversation.setAttribute('aria-busy', 'true');   // a screen reader does not read the whole history as it goes in
+    markBusy(true);   // a screen reader does not read the whole history as it goes in
     try {
       ui.conversation.replaceChildren(...nodes);
     } finally {
-      ui.conversation.removeAttribute('aria-busy');
+      markBusy(false);
     }
     scroller.toEnd(nodes[nodes.length - 1]);
     const last = view.turns[view.turns.length - 1];
@@ -877,6 +901,7 @@ export function createApp(env) {
         showNotice(errorMessage(err));   // after the fallback has opened its chat, which clears the notices of the one before
       } else {
         state.session.id = null;   // nothing is open: its link (or the route) opens it again, and so does the Retry
+        renderSessions();          // and the sidebar does not mark it as the page
         showNotice(errorMessage(err), () => detach(openSession(id)));
       }
     } finally {
@@ -910,6 +935,9 @@ export function createApp(env) {
       setAddress(hash);
       route = parseRoute(hash);
     }
+    const key = route.kind === 'session' ? `s/${route.id}` : 'new';
+    if (state.route !== null && state.route !== key) clearNotice();   // a notice belongs to the route it was raised on
+    state.route = key;
     if (route.kind === 'session') {
       if (state.session.id !== route.id) await openSession(route.id);
     } else if (state.session.id !== null || state.session.turns.length) {
