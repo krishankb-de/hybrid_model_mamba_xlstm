@@ -1,0 +1,530 @@
+{
+  "result": {
+    "checks": 9,
+    "failures": []
+  },
+  "environment": {
+    "date": "2026-10-07",
+    "engine": "tiny (random weights, toy vocabulary; no checkpoint, no data)",
+    "tiny_step_delay_s": 0.02,
+    "image": "synthetic PNG (tests/app_helpers.png_bytes)",
+    "browser": "Chrome/146.0.7680.178 (headless)",
+    "python": "3.14.3",
+    "os": "Darwin",
+    "warm_up_turn_s": 0.87,
+    "viewports": {
+      "desktop": [
+        1280,
+        900
+      ],
+      "phone": [
+        375,
+        812
+      ]
+    },
+    "notes": [
+      "The tiny pipeline skips retrieve, label and score until P5-E, so the a11y check reads its label chips from a second tiny app whose home was seeded with one SYNTHETIC labelled turn (labelled_chips_*.png); the other checks run the live pipeline.",
+      "The settings drawer clamps the token budget to the server's 16-200, so the 422 of the error check is reached through the note's command ('tokens 500'), which the server applies on top of the drawer's options.",
+      "Every screenshot was confirmed by the page itself (a DOM rule per picture, true before and after the capture)."
+    ]
+  },
+  "checks": [
+    {
+      "name": "stream",
+      "status": "PASS",
+      "detail": "6 stages settled (3 done, 3 skipped); 40 snapshots, report 3 -> 247 chars; status ended on 'Report ready'; done in 1.3 s",
+      "seconds": 1.6,
+      "data": {
+        "stages": {
+          "preprocess": "done",
+          "encode": "done",
+          "retrieve": "skipped",
+          "generate": "done",
+          "label": "skipped",
+          "score": "skipped"
+        },
+        "stages_seen_running": [
+          "generate"
+        ],
+        "snapshots": 40,
+        "report_chars": [
+          3,
+          247
+        ],
+        "frames_recorded": 42,
+        "status_region": [
+          "Queued",
+          "generate running",
+          "Report ready"
+        ],
+        "aria_busy": [
+          [
+            true,
+            28
+          ],
+          [
+            false,
+            1294
+          ]
+        ],
+        "card_done_ms": 1291,
+        "token_budget": 40,
+        "seconds": 1.31
+      },
+      "console_errors": []
+    },
+    {
+      "name": "reload",
+      "status": "PASS",
+      "detail": "the card after Page.reload equals the live one (3999 characters of markup, the same six stage states); a reload mid-turn followed the running turn to the card another reload shows",
+      "seconds": 6.3,
+      "data": {
+        "markup_chars": 3999,
+        "text_chars": 920,
+        "stages": {
+          "preprocess": "done",
+          "encode": "done",
+          "retrieve": "skipped",
+          "generate": "done",
+          "label": "skipped",
+          "score": "skipped"
+        },
+        "mid_turn_reload": {
+          "found_running": {
+            "send": false,
+            "stop": true,
+            "busy": true
+          },
+          "ended": {
+            "send": true,
+            "stop": true
+          },
+          "followed_equals_replayed": true,
+          "markup_chars": 5422
+        }
+      },
+      "console_errors": []
+    },
+    {
+      "name": "sessions",
+      "status": "PASS",
+      "detail": "2 chats switched 4 times, each with its own card and user turn; leaving a running turn cancelled its stream (request aborted), nothing asked for it (49 samples), and it replays done",
+      "seconds": 7.8,
+      "data": {
+        "sessions": [
+          "s_01a1160c9eea000059c31d",
+          "s_01a1160ca24c00004280f0"
+        ],
+        "messages": {
+          "a": "m_01a1160c9f0f00015cc20d",
+          "b": "m_01a1160ca2730001fc24e1",
+          "b2": "m_01a1160ca8830001903bce"
+        },
+        "samples_while_away": 49,
+        "stream_request_cancelled": true,
+        "report_chars_of_turn_finished_while_away": 988
+      },
+      "console_errors": []
+    },
+    {
+      "name": "exports",
+      "status": "PASS",
+      "detail": "JSON parses (38136 bytes, 4 messages, logs end in message_stop done); Markdown (1339 bytes) has '## Turn 1' and '## Turn 2'",
+      "seconds": 2.5,
+      "data": {
+        "json": {
+          "file": "session-s_01a1160cbd610000cc7a80.json",
+          "bytes": 38136,
+          "messages": 4,
+          "events_per_turn": [
+            37,
+            37
+          ]
+        },
+        "markdown": {
+          "file": "session-s_01a1160cbd610000cc7a80.md",
+          "bytes": 1339,
+          "headings": [
+            "## Turn 1 — 2026-10-07 11:08:16 UTC",
+            "## Turn 2 — 2026-10-07 11:08:16 UTC"
+          ]
+        }
+      },
+      "console_errors": []
+    },
+    {
+      "name": "stop",
+      "status": "PASS",
+      "detail": "stopped after 3 of 150 snapshots (1 more by the time the card said aborted, 0.06 s after the press); no more afterwards; note 'Turn stopped'",
+      "seconds": 0.9,
+      "data": {
+        "budget": 150,
+        "snapshots_when_pressed": 2,
+        "snapshots_total": 3,
+        "seconds_to_aborted": 0.06,
+        "note": "Turn stopped",
+        "server_status": "aborted",
+        "stages": {
+          "preprocess": "done",
+          "encode": "done",
+          "retrieve": "skipped",
+          "generate": "skipped",
+          "label": "skipped",
+          "score": "skipped"
+        },
+        "skipped": [
+          "generate",
+          "label",
+          "retrieve",
+          "score"
+        ]
+      },
+      "console_errors": []
+    },
+    {
+      "name": "keyboard",
+      "status": "PASS",
+      "detail": "Tab visits 27 controls in DOM order, each with a focus ring; Enter sends; Enter and Space toggle a stage; Enter opens the drawer and Esc closes it to Settings",
+      "seconds": 1.1,
+      "data": {
+        "tab_stops": [
+          "#new-session",
+          "Export JSON",
+          "Export Markdown",
+          "chat: tokens 20",
+          "Delete chat: tokens 20",
+          "chat: tokens 150",
+          "Delete chat: tokens 150",
+          "chat: tokens 24",
+          "Delete chat: tokens 24",
+          "chat: tokens 24",
+          "Delete chat: tokens 24",
+          "chat: tokens 24",
+          "Delete chat: tokens 24",
+          "chat: tokens 24",
+          "Delete chat: tokens 24",
+          "chat: tokens 40",
+          "Delete chat: tokens 40",
+          "stage:preprocess",
+          "stage:encode",
+          "stage:generate",
+          "Copy report, turn 1",
+          "Show raw report, turn 1",
+          "model details, turn 1",
+          "#image-well",
+          "#prompt",
+          "#settings",
+          "#send"
+        ],
+        "every_stop_shows_a_focus_ring": true,
+        "stops_to_note_field": [
+          "#new-session",
+          "chat: tokens 150",
+          "Delete chat: tokens 150",
+          "chat: tokens 24",
+          "Delete chat: tokens 24",
+          "chat: tokens 24",
+          "Delete chat: tokens 24",
+          "chat: tokens 24",
+          "Delete chat: tokens 24",
+          "chat: tokens 24",
+          "Delete chat: tokens 24",
+          "chat: tokens 40",
+          "Delete chat: tokens 40",
+          "#image-well",
+          "Remove attached image",
+          "#prompt"
+        ],
+        "after_enter": {
+          "status": "done",
+          "focus": "prompt"
+        },
+        "stage_toggle": {
+          "Enter": {
+            "expanded": "true",
+            "open": true,
+            "focus": "stage:encode"
+          },
+          "Space": {
+            "expanded": "false",
+            "open": false,
+            "focus": "stage:encode"
+          }
+        },
+        "drawer": {
+          "opened": {
+            "hidden": false,
+            "expanded": "true",
+            "focus": "#drawer-close"
+          },
+          "closed": {
+            "hidden": true,
+            "expanded": "false",
+            "focus": "#settings"
+          }
+        }
+      },
+      "console_errors": []
+    },
+    {
+      "name": "narrow",
+      "status": "PASS",
+      "detail": "no horizontal overflow at 375 px in 5 states (empty chat, settled card, stage details open, sidebar open, drawer open)",
+      "seconds": 1.1,
+      "data": {
+        "viewport": [
+          375,
+          812
+        ],
+        "overflow": {
+          "empty chat": {
+            "document": [
+              375,
+              375
+            ],
+            "conversation": [
+              375,
+              375
+            ],
+            "composer": [
+              341,
+              341
+            ]
+          },
+          "settled card": {
+            "document": [
+              375,
+              375
+            ],
+            "conversation": [
+              360,
+              360
+            ],
+            "composer": [
+              341,
+              341
+            ]
+          },
+          "stage details open": {
+            "document": [
+              375,
+              375
+            ],
+            "conversation": [
+              360,
+              360
+            ],
+            "composer": [
+              341,
+              341
+            ]
+          },
+          "sidebar open": {
+            "document": [
+              375,
+              375
+            ],
+            "conversation": [
+              360,
+              360
+            ],
+            "composer": [
+              341,
+              341
+            ]
+          },
+          "drawer open": {
+            "document": [
+              375,
+              375
+            ],
+            "conversation": [
+              360,
+              360
+            ],
+            "composer": [
+              341,
+              341
+            ]
+          }
+        }
+      },
+      "console_errors": []
+    },
+    {
+      "name": "a11y",
+      "status": "PASS",
+      "detail": "stage buttons: their text, then state, with expanded; status region live=polite reads 'Report ready'; 14 chips read '<name>: positive|negative'; every control named; no text under AA contrast in 4 states",
+      "seconds": 2.6,
+      "data": {
+        "contrast_issues_under_aa": {
+          "settled card, light": [],
+          "drawer open, light": [],
+          "drawer open, dark": [],
+          "settled card, dark": []
+        },
+        "focusable_controls_named": 31,
+        "stage_buttons": [
+          {
+            "stage": "preprocess",
+            "visible": "preprocess · 2 ms",
+            "name": "preprocess · 2 ms, done, turn 1",
+            "expanded": false
+          },
+          {
+            "stage": "encode",
+            "visible": "encode · 0 ms",
+            "name": "encode · 0 ms, done, turn 1",
+            "expanded": false,
+            "expanded_after_click": true
+          },
+          {
+            "stage": "generate",
+            "visible": "generate · 749 ms",
+            "name": "generate · 749 ms, done, turn 1",
+            "expanded": false
+          }
+        ],
+        "skipped_stages": [
+          "–retrieve · skipped: gallery_unavailable",
+          "–label · skipped: labeler_unavailable",
+          "–score · skipped: no_reference"
+        ],
+        "status_region": {
+          "live": "polite",
+          "text": "Report ready",
+          "history": [
+            "Queued",
+            "generate running",
+            "Report ready"
+          ]
+        },
+        "chips_on_seeded_synthetic_turn": [
+          "Enlarged Cardiomediastinum: negative, matches reference",
+          "Cardiomegaly: positive, matches reference",
+          "Lung Opacity: negative, matches reference",
+          "Lung Lesion: negative, matches reference",
+          "Edema: positive, differs from reference",
+          "Consolidation: negative, matches reference",
+          "Pneumonia: negative, matches reference",
+          "Atelectasis: negative, matches reference",
+          "Pneumothorax: negative, matches reference",
+          "Pleural Effusion: negative, differs from reference",
+          "Pleural Other: negative, matches reference",
+          "Fracture: negative, matches reference",
+          "Support Devices: positive, matches reference",
+          "No Finding: negative, matches reference"
+        ]
+      },
+      "console_errors": []
+    },
+    {
+      "name": "error",
+      "status": "PASS",
+      "detail": "a server 422 showed the alert 'Invalid options: max_new_tokens: Input should be less than …', kept the note and the image, dismissed to the note field; the same composer then sent",
+      "seconds": 3.4,
+      "data": {
+        "http_status": 422,
+        "notice": "Invalid options: max_new_tokens: Input should be less than or equal to 200",
+        "composer_kept": true,
+        "dismissed": {
+          "hidden": true,
+          "prompt": "tokens 500",
+          "preview": true,
+          "focus": "prompt"
+        }
+      },
+      "console_errors": []
+    }
+  ],
+  "screenshots": [
+    {
+      "file": "streaming_1280x900_light.png",
+      "shows": "a turn that is running, its report part-written, and Stop shown",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 105827,
+      "page_confirmed": true
+    },
+    {
+      "file": "settled_1280x900_light.png",
+      "shows": "a finished turn: stages, the report, provenance",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 125895,
+      "page_confirmed": true
+    },
+    {
+      "file": "settled_1280x900_dark.png",
+      "shows": "the same finished turn in the dark colour scheme",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "dark",
+      "bytes": 128473,
+      "page_confirmed": true
+    },
+    {
+      "file": "stopped_1280x900_light.png",
+      "shows": "a turn that was stopped part-way: 'Turn stopped', the report so far",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 127004,
+      "page_confirmed": true
+    },
+    {
+      "file": "drawer_1280x900_light.png",
+      "shows": "the settings drawer open, focus inside it",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 160375,
+      "page_confirmed": true
+    },
+    {
+      "file": "settled_375x812_light.png",
+      "shows": "a finished turn on a phone-width page, from its top: the image, the stage pills, the report",
+      "viewport": [
+        375,
+        812
+      ],
+      "scheme": "light",
+      "bytes": 77826,
+      "page_confirmed": true
+    },
+    {
+      "file": "labelled_chips_1280x900_light.png",
+      "shows": "the 14 label chips of a SYNTHETIC labelled turn, filled for positive, with agreement marks",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 127639,
+      "page_confirmed": true
+    },
+    {
+      "file": "error_notice_1280x900_light.png",
+      "shows": "the dismissible notice above the composer, with the refused note and the image still in it",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 97139,
+      "page_confirmed": true
+    }
+  ]
+}

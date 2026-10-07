@@ -1,10 +1,10 @@
-"""CHAT_UI_PLAN.md P4-A fix round 1: a geometry check for the chat page. A local development tool; validate.sh does not
-run it.
+"""CHAT_UI_PLAN.md P4-A fix round 1, P4-E: a geometry check for the chat page. A local development tool; validate.sh does
+not run it.
 
 It starts the app (tiny engine, temporary home, free loopback port), or takes --url, and drives headless Chrome over the
-DevTools protocol with exact viewports (Emulation.setDeviceMetricsOverride) and an emulated colour scheme. Each case is
-one viewport in one scheme with the drawer closed or open (its `hidden` attribute removed in the page); six chips and a
-140-character unbroken word are injected, and Stop is shown and hidden. Checks:
+DevTools protocol (scripts/chat_ui_cdp.py) with exact viewports (Emulation.setDeviceMetricsOverride) and an emulated
+colour scheme. Each case is one viewport in one scheme with the drawer closed or open (its `hidden` attribute removed in the
+page); six chips and a 140-character unbroken word are injected, and Stop is shown and hidden. Checks:
 
   a  no horizontal overflow on the document, #conversation or #composer (scrollWidth <= clientWidth)
   b  the centre of #settings, #send and (shown) #stop hits the button itself, not an overlay
@@ -12,38 +12,40 @@ one viewport in one scheme with the drawer closed or open (its `hidden` attribut
   d  #conversation is at least 120 px tall on a viewport at least 568 px tall
   e  Settings, Send and Stop follow each other in DOM order, row by row and left to right
   f  the focus ring of #sidebar-toggle (shown at 800 px and below) lies inside the viewport
+  g  #stop and #drawer are rendered, with a size, when the case shows them, and are not rendered when it hides them; an
+     open drawer lies inside the viewport's width
 
 On the short viewports, where the page scrolls instead (667x375, 320x256), c and d give way to: the report keeps its
 natural height (no scroller of its own, at least 120 px), the composer is not capped, the banner stays at the top of
 the viewport while the page scrolls, and each button is hit-tested after it is scrolled into view.
 
+The tall-composer cases (one per width and scheme, 568 px tall) put a composer taller than the viewport on the page and pin
+the report's 120 px floor: #conversation keeps its 120 px, the composer stays inside the viewport and scrolls inside itself,
+and Settings and Send are still reachable by scrolling it.
+
     venv/bin/python scripts/chat_ui_layout_check.py [--url http://127.0.0.1:8000/]
 
 Prints one `FAIL ...` line per failure, then `RESULT {"cases": N, "failures": [...]}`. Exits 1 on any failure and 2 when
 Chrome or the app cannot be started. Chrome is $CHROME, else /Applications/Google Chrome.app/..., else one on PATH.
-Standard library only: the websocket client below is the little of RFC 6455 a DevTools session needs.
+Standard library only.
 """
 import argparse
-import base64
-import hashlib
 import json
 import os
-import shutil
-import socket
-import struct
-import subprocess
 import sys
-import tempfile
-import time
-import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from scripts.chat_ui_cdp import App, Browser, find_chrome  # noqa: E402
+
 WIDTHS = [320, 375, 800, 801, 820, 834, 900, 925, 1024, 1280]
 HEIGHTS = [568, 900]
 SHORT_VIEWPORTS = [(667, 375), (320, 256)]   # below 480 px tall the page scrolls instead of pinning the composer
+TALL_WIDTHS = [375, 801, 1280]               # the tall-composer cases: one column, the first two-column width, a wide page
+TALL_HEIGHT = 568
 SCHEMES = ["light", "dark"]
 MIN_REPORT_PX = 120
 MIN_TALL_PX = 568
@@ -51,7 +53,6 @@ CHIPS = ["beam 3", "100 tok", "cached", "k 4/3", "label on", "repair off"]
 LONG_WORD = "x" * 140
 REPORT_TEXT = ("The lungs are clear. There is no focal consolidation, pleural effusion or pneumothorax. The "
                "cardiomediastinal silhouette is within normal limits. No acute osseous abnormality is seen. ") * 3
-WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 INJECT_JS = """(args) => {
   const q = (s) => document.querySelector(s);
@@ -63,14 +64,42 @@ INJECT_JS = """(args) => {
   return true;
 }"""
 
+TALL_JS = """(args) => {
+  const filler = document.createElement('div');
+  filler.id = 'tall-filler';
+  filler.style.cssText = 'flex:1 0 100%;height:' + args.px + 'px';
+  document.querySelector('#composer').prepend(filler);
+  return true;
+}"""
+
+MEASURE_TALL_JS = """() => {
+  const q = (s) => document.querySelector(s);
+  const doc = document.documentElement;
+  const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+  window.scrollTo(0, 0);
+  const out = { doc: [doc.scrollWidth, doc.clientWidth], conversation: { ch: q('#conversation').clientHeight },
+                composer: { box: box(q('#composer')), sh: q('#composer').scrollHeight, ch: q('#composer').clientHeight }, hits: {} };
+  for (const s of ['#settings', '#send']) {   // the controls sit below the filler: reachable by scrolling the composer itself
+    const el = q(s), c = q('#composer');
+    const cb = box(c), eb = box(el);
+    c.scrollTop += (eb[1] + eb[3]) / 2 - (cb[1] + cb[3]) / 2;   // its own scroll, not the page's: the page does not scroll here
+    const b = box(el), x = (b[0] + b[2]) / 2, y = (b[1] + b[3]) / 2, top = document.elementFromPoint(x, y);
+    out.hits[s] = !!top && (top === el || el.contains(top));
+  }
+  return out;
+}"""
+
 MEASURE_JS = """(args) => {
   const q = (s) => document.querySelector(s);
   const doc = document.documentElement;
   const shown = (el) => el.getClientRects().length > 0;
+  const drawn = (el) => { const r = el.getBoundingClientRect(); return shown(el) && getComputedStyle(el).visibility !== 'hidden' && r.width > 0 && r.height > 0; };
   const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
   const name = (e) => !e ? null : (e.id ? '#' + e.id : e.tagName.toLowerCase());
   window.scrollTo(0, 0);
-  const out = { doc: [doc.scrollWidth, doc.clientWidth], boxes: {}, hits: {} };
+  const out = { doc: [doc.scrollWidth, doc.clientWidth], boxes: {}, hits: {}, rendered: {}, drawer: null };
+  for (const s of ['#stop', '#drawer']) out.rendered[s] = drawn(q(s));
+  if (out.rendered['#drawer']) out.drawer = box(q('#drawer'));
   for (const s of ['#conversation', '#composer']) {
     const el = q(s);
     out[s] = { sw: el.scrollWidth, cw: el.clientWidth, sh: el.scrollHeight, ch: el.clientHeight };
@@ -101,206 +130,19 @@ MEASURE_JS = """(args) => {
 }"""
 
 
-class WebSocket:
-    """A text-frame websocket client: the handshake, masked sends, and receives with fragments, pings and close."""
-
-    def __init__(self, url: str, timeout: float = 30.0) -> None:
-        parts = urlparse(url)
-        self.sock = socket.create_connection((parts.hostname, parts.port), timeout=timeout)
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        request = ("GET {} HTTP/1.1\r\nHost: {}:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-                   "Sec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\n\r\n")
-        self.sock.sendall(request.format(parts.path or "/", parts.hostname, parts.port, key).encode("ascii"))
-        head = b""
-        while b"\r\n\r\n" not in head:
-            chunk = self.sock.recv(4096)
-            if not chunk:
-                raise ConnectionError("DevTools closed the connection during the handshake")
-            head += chunk
-        head, self.buffer = head.split(b"\r\n\r\n", 1)
-        lines = head.decode("latin-1").split("\r\n")
-        if " 101 " not in lines[0]:
-            raise ConnectionError("DevTools refused the websocket: " + lines[0])
-        headers = {k.strip().lower(): v.strip() for k, v in (line.split(":", 1) for line in lines[1:] if ":" in line)}
-        accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode("ascii")).digest()).decode("ascii")
-        if headers.get("sec-websocket-accept") != accept:
-            raise ConnectionError("DevTools answered with a wrong Sec-WebSocket-Accept")
-
-    def _read(self, n: int) -> bytes:
-        while len(self.buffer) < n:
-            chunk = self.sock.recv(65536)
-            if not chunk:
-                raise ConnectionError("DevTools closed the connection")
-            self.buffer += chunk
-        data, self.buffer = self.buffer[:n], self.buffer[n:]
-        return data
-
-    def _send_frame(self, opcode: int, payload: bytes) -> None:
-        n = len(payload)
-        head = bytearray([0x80 | opcode])
-        if n < 126:
-            head.append(0x80 | n)
-        elif n < 65536:
-            head += bytes([0x80 | 126]) + struct.pack(">H", n)
-        else:
-            head += bytes([0x80 | 127]) + struct.pack(">Q", n)
-        mask = os.urandom(4)
-        self.sock.sendall(bytes(head) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
-
-    def send(self, text: str) -> None:
-        self._send_frame(0x1, text.encode("utf-8"))
-
-    def recv(self) -> str:
-        message = b""
-        while True:
-            b0, b1 = self._read(2)
-            fin, opcode, n = b0 & 0x80, b0 & 0x0F, b1 & 0x7F
-            if n == 126:
-                n = struct.unpack(">H", self._read(2))[0]
-            elif n == 127:
-                n = struct.unpack(">Q", self._read(8))[0]
-            mask = self._read(4) if b1 & 0x80 else b""
-            payload = self._read(n)
-            if mask:
-                payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-            if opcode == 0x8:
-                raise ConnectionError("DevTools closed the connection")
-            if opcode == 0x9:
-                self._send_frame(0xA, payload)   # answer a ping
-            elif opcode in (0x0, 0x1):
-                message += payload
-                if fin:
-                    return message.decode("utf-8")
-
-    def close(self) -> None:
-        try:
-            self.sock.close()
-        except OSError:
-            pass
-
-
-class Browser:
-    """A private headless Chrome and one DevTools session on its page."""
-
-    def __init__(self, chrome: str) -> None:
-        self.profile = tempfile.mkdtemp(prefix="chat_ui_layout_chrome_")
-        self.proc = subprocess.Popen(
-            [chrome, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-             "--remote-debugging-port=0", "--remote-allow-origins=*", "--user-data-dir=" + self.profile, "about:blank"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.ws: Optional[WebSocket] = None
-        self.next_id = 0
-        self.ws = WebSocket(self._page_url())
-        self.call("Page.enable")
-
-    def _page_url(self) -> str:
-        port_file = os.path.join(self.profile, "DevToolsActivePort")
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            if self.proc.poll() is not None:
-                raise RuntimeError("Chrome exited with status {}".format(self.proc.returncode))
-            try:
-                with open(port_file) as handle:
-                    port = int(handle.readline())
-                with urllib.request.urlopen("http://127.0.0.1:{}/json/list".format(port), timeout=2) as response:
-                    pages = [t for t in json.load(response) if t.get("type") == "page"]
-                if pages:
-                    return pages[0]["webSocketDebuggerUrl"]
-            except (OSError, ValueError):
-                pass
-            time.sleep(0.2)
-        raise RuntimeError("Chrome did not open a DevTools page within 30 s")
-
-    def call(self, method: str, **params: Any) -> Dict[str, Any]:
-        assert self.ws is not None
-        self.next_id += 1
-        self.ws.send(json.dumps({"id": self.next_id, "method": method, "params": params}))
-        while True:
-            message = json.loads(self.ws.recv())
-            if message.get("id") == self.next_id:
-                if "error" in message:
-                    raise RuntimeError("{} failed: {}".format(method, message["error"]))
-                return message.get("result", {})
-
-    def evaluate(self, expression: str) -> Any:
-        result = self.call("Runtime.evaluate", expression=expression, returnByValue=True, awaitPromise=True)
-        if "exceptionDetails" in result:
-            details = result["exceptionDetails"]
-            raise RuntimeError("page script failed: {}".format((details.get("exception") or {}).get("description")
-                                                                  or details.get("text")))
-        return result["result"].get("value")
-
-    def run(self, function: str, argument: Any) -> Any:
-        return self.evaluate("({})({})".format(function, json.dumps(argument)))
-
-    def open(self, url: str, width: int, height: int, scheme: str) -> None:
-        self.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=False)
-        self.call("Emulation.setEmulatedMedia", features=[{"name": "prefers-color-scheme", "value": scheme}])
-        self.call("Page.navigate", url=url)
-        deadline = time.time() + 15
-        marker = url.split("?", 1)[1]
-        while time.time() < deadline:   # the query is unique per case, so a stale page cannot pass for the new one
-            if self.evaluate("location.search.slice(1) + '|' + document.readyState") == marker + "|complete":
-                return
-            time.sleep(0.05)
-        raise RuntimeError("the page did not finish loading: " + url)
-
-    def key(self, key: str, code: str, keycode: int) -> None:
-        for kind in ("keyDown", "keyUp"):
-            self.call("Input.dispatchKeyEvent", type=kind, key=key, code=code, windowsVirtualKeyCode=keycode)
-
-    def close(self) -> None:
-        if self.ws is not None:
-            self.ws.close()
-        self.proc.kill()
-        try:
-            self.proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            pass
-        shutil.rmtree(self.profile, ignore_errors=True)
-
-
-def find_chrome() -> Optional[str]:
-    for candidate in (os.environ.get("CHROME"), MAC_CHROME, shutil.which("google-chrome"), shutil.which("chromium"),
-                      shutil.which("chromium-browser")):
-        if candidate and os.path.exists(candidate):
-            return candidate
-    return None
-
-
-def start_app() -> Tuple[subprocess.Popen, str, List[str]]:
-    """The app on a free loopback port, tiny engine, a temporary CHAT_HOME. -> (process, page url, paths to remove)."""
-    home = tempfile.mkdtemp(prefix="chat_ui_layout_home_")
-    log_path = os.path.join(home, "server.log")
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    log = open(log_path, "w")
-    proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "--factory", "app.server:create_app", "--host",
-                             "127.0.0.1", "--port", str(port), "--log-level", "warning"],
-                            cwd=REPO_ROOT, env=dict(os.environ, CHAT_HOME=home), stdout=log, stderr=subprocess.STDOUT)
-    url = "http://127.0.0.1:{}/".format(port)
-    deadline = time.time() + 90
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            break
-        try:
-            with urllib.request.urlopen(url + "healthz", timeout=2):
-                return proc, url, [home]
-        except OSError:
-            time.sleep(0.3)
-    proc.kill()
-    log.close()
-    with open(log_path) as handle:
-        tail = handle.read()[-1500:]
-    shutil.rmtree(home, ignore_errors=True)
-    raise RuntimeError("the app did not start: " + tail)
-
-
-def check_state(m: Dict[str, Any], width: int, height: int, scroll: bool) -> List[str]:
-    """The failures in one measurement of one state: what is wrong, in words."""
+def check_state(m: Dict[str, Any], width: int, height: int, scroll: bool, drawer_open: bool = False,
+                stop_shown: bool = False) -> List[str]:
+    """The failures in one measurement of one state: what is wrong, in words. drawer_open and stop_shown say what the case
+    shows: #drawer and #stop must be rendered, with a size, exactly then."""
     failures = []
+    for selector, claimed in (("#stop", stop_shown), ("#drawer", drawer_open)):
+        if claimed and not m["rendered"][selector]:
+            failures.append("{} is not rendered, but the case shows it".format(selector))
+        elif not claimed and m["rendered"][selector]:
+            failures.append("{} is rendered, but the case hides it".format(selector))
+    if drawer_open and m["drawer"] is not None and (m["drawer"][0] < -0.5 or m["drawer"][2] > width + 0.5):
+        failures.append("#drawer leaves the viewport's width: left {:.0f}, right {:.0f}, viewport {}".format(
+            m["drawer"][0], m["drawer"][2], width))
     for name, (sw, cw) in (("documentElement", m["doc"]), ("#conversation", (m["#conversation"]["sw"],
                                                                           m["#conversation"]["cw"])),
                            ("#composer", (m["#composer"]["sw"], m["#composer"]["cw"]))):
@@ -352,11 +194,31 @@ def check_state(m: Dict[str, Any], width: int, height: int, scroll: bool) -> Lis
     return failures
 
 
+def check_tall(m: Dict[str, Any], height: int) -> List[str]:
+    """The failures in a page whose composer is taller than the viewport: the report keeps its floor, the composer stays on
+    the page and scrolls inside itself, and its buttons can be scrolled to."""
+    failures = []
+    if m["doc"][0] > m["doc"][1]:
+        failures.append("documentElement overflows horizontally: scrollWidth {} > clientWidth {}".format(*m["doc"]))
+    if m["conversation"]["ch"] < MIN_REPORT_PX:
+        failures.append("the report area is {} px tall, under the {} px floor".format(m["conversation"]["ch"], MIN_REPORT_PX))
+    composer = m["composer"]
+    if composer["box"][3] > height + 0.5:
+        failures.append("#composer runs past the bottom of the viewport: {:.0f} > {}".format(composer["box"][3], height))
+    if composer["sh"] <= composer["ch"] + 1:
+        failures.append("#composer does not scroll inside itself: scrollHeight {} <= clientHeight {}".format(
+            composer["sh"], composer["ch"]))
+    for selector, reachable in sorted(m["hits"].items()):
+        if not reachable:
+            failures.append("{} cannot be reached by scrolling the composer".format(selector))
+    return failures
+
+
 def run_checks(browser: Browser, url: str) -> Tuple[int, List[str]]:
     """Every viewport in every scheme, drawer closed and open, Stop hidden and shown. A case is a viewport in a scheme
     with the drawer closed or open. -> (cases, failures); a failure seen in both schemes is reported once."""
     cases = 0
-    seen = {}   # type: Dict[Tuple[str, str, str, str], List[str]]   # (viewport, drawer, stop, failure) -> schemes
+    seen = {}   # type: Dict[Tuple[str, str, str], List[str]]   # (viewport, state, failure) -> schemes
     viewports = [(w, h, False) for h in HEIGHTS for w in WIDTHS] + [(w, h, True) for w, h in SHORT_VIEWPORTS]
     serial = 0
     for width, height, scroll in viewports:
@@ -373,10 +235,18 @@ def run_checks(browser: Browser, url: str) -> Tuple[int, List[str]]:
                     browser.evaluate("document.querySelector('#stop').hidden = {}".format(
                         "false" if stop == "shown" else "true"))
                     measured = browser.run(MEASURE_JS, {"scroll": scroll})
-                    for failure in check_state(measured, width, height, scroll):
-                        seen.setdefault(("{}x{}".format(width, height), drawer, stop, failure), []).append(scheme)
-    failures = ["{} {} drawer={} stop={}: {}".format(viewport, "+".join(schemes), drawer, stop, failure)
-                for (viewport, drawer, stop, failure), schemes in seen.items()]
+                    for failure in check_state(measured, width, height, scroll, drawer == "open", stop == "shown"):
+                        seen.setdefault(("{}x{}".format(width, height), "drawer={} stop={}".format(drawer, stop), failure), []).append(scheme)
+    for width in TALL_WIDTHS:   # a composer taller than the viewport: the report's floor
+        for scheme in SCHEMES:
+            serial += 1
+            cases += 1
+            browser.open("{}?case={}".format(url, serial), width, TALL_HEIGHT, scheme)
+            browser.run(INJECT_JS, {"chips": CHIPS, "word": LONG_WORD, "text": REPORT_TEXT})
+            browser.run(TALL_JS, {"px": TALL_HEIGHT})
+            for failure in check_tall(browser.run(MEASURE_TALL_JS, None), TALL_HEIGHT):
+                seen.setdefault(("{}x{}".format(width, TALL_HEIGHT), "tall composer", failure), []).append(scheme)
+    failures = ["{} {} {}: {}".format(viewport, "+".join(schemes), state, failure) for (viewport, state, failure), schemes in seen.items()]
     return cases, failures
 
 
@@ -389,14 +259,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     if chrome is None:
         print("ERROR no Chrome found: set $CHROME to its executable")
         return 2
-    app, cleanup = None, []   # type: Tuple[Optional[subprocess.Popen], List[str]]
-    browser = None
+    app = None  # type: Optional[App]
+    browser = None  # type: Optional[Browser]
     try:
         if args.url:
             url = args.url if args.url.endswith("/") else args.url + "/"
         else:
-            app, url, cleanup = start_app()
-        browser = Browser(chrome)
+            app = App()
+            url = app.url
+        browser = Browser(chrome, label="chat_ui_layout_chrome")
         cases, failures = run_checks(browser, url)
     except (OSError, RuntimeError) as exc:   # ConnectionError is an OSError
         print("ERROR {}".format(exc))
@@ -405,13 +276,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if browser is not None:
             browser.close()
         if app is not None:
-            app.terminate()
-            try:
-                app.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                app.kill()
-        for path in cleanup:
-            shutil.rmtree(path, ignore_errors=True)
+            app.stop()
     for failure in failures:
         print("FAIL " + failure)
     print("RESULT " + json.dumps({"cases": cases, "failures": failures}))
