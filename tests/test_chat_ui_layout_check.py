@@ -7,6 +7,7 @@ started, `display: none` mutants of #stop and #drawer that passed, and a report 
 """
 import json
 import os
+import signal
 import socket
 import subprocess
 import threading
@@ -14,6 +15,7 @@ import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 import pytest
@@ -147,6 +149,7 @@ class ScriptedSocket:
     def __init__(self, replies: Any) -> None:
         self.replies, self.sent = list(replies), []
         self.incoming = []   # type: Any
+        self.sock = SimpleNamespace(settimeout=lambda seconds: None)   # Browser.close shortens the wait for an answer
 
     def send(self, text: str) -> None:
         message = json.loads(text)
@@ -155,6 +158,9 @@ class ScriptedSocket:
 
     def recv(self) -> str:
         return self.incoming.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _browser(replies: Any) -> Browser:
@@ -185,6 +191,157 @@ def test_an_error_answer_raises_with_the_method_and_the_event_record_is_bounded(
     browser.call("Page.enable")
     kept = browser.events("Network.dataReceived")
     assert len(kept) == chat_ui_cdp.KEEP_EVENTS and kept[0] == {"n": 50}   # the oldest went first
+
+
+# ---- stopping what was started: politely first, SIGKILL last ------------------------------------------------------------------------------------
+
+POLITE = '#!/bin/sh\nmarker="$1"\nmkdir -p "$marker"\ntrap \'rm -rf "$marker"; exit 0\' TERM\nwhile :; do sleep 0.05; done\n'
+STUBBORN = '#!/bin/sh\nmarker="$1"\nmkdir -p "$marker"\ntrap \'\' TERM\nwhile :; do sleep 0.05; done\n'
+
+
+def _start(tmp_path: Path, body: str, name: str = "fake") -> Any:
+    """A fake Chrome or app: a shell script that makes a marker directory, then waits. A TERM that it handles removes the marker and
+    exits 0, as Chrome removes its singleton directory; one that it ignores leaves the marker, as a Chrome that hangs would."""
+    script = tmp_path / name
+    script.write_text(body)
+    script.chmod(0o755)
+    marker = tmp_path / (name + ".marker")
+    proc = subprocess.Popen(["/bin/sh", str(script), str(marker)], start_new_session=True)
+    assert _until(marker.exists), "the fake process did not start"
+    return proc, marker
+
+
+def _bare_browser(proc: Any, profile: Path, ws: Any = None) -> Browser:
+    browser = Browser.__new__(Browser)   # no Chrome: close() is under test, not the start
+    browser.proc, browser.ws, browser.profile, browser.next_id = proc, ws, str(profile), 0
+    browser.events_seen = deque(maxlen=chat_ui_cdp.KEEP_EVENTS)
+    profile.mkdir()
+    return browser
+
+
+def test_stop_group_asks_politely_first(tmp_path):
+    proc, marker = _start(tmp_path, POLITE)
+    started = time.time()
+    chat_ui_cdp.stop_group(proc)
+    assert proc.returncode == 0, "it was killed ({}), not asked".format(proc.returncode)   # the trap ran and exited; a SIGKILL says -9
+    assert not marker.exists()
+    assert time.time() - started < 3
+
+
+def test_stop_group_kills_what_ignores_term_once_the_wait_is_over(tmp_path):
+    proc, marker = _start(tmp_path, STUBBORN)
+    started = time.time()
+    chat_ui_cdp.stop_group(proc, term_wait=0.5)
+    took = time.time() - started
+    assert proc.returncode == -signal.SIGKILL
+    assert marker.exists()   # it never got to clean up: that is what SIGKILL costs, and why it is the last resort
+    assert 0.5 <= took < 4, took
+
+
+def test_stop_group_is_safe_on_nothing_and_signals_nothing_after_the_process_was_reaped(tmp_path):
+    chat_ui_cdp.stop_group(None)
+    proc = subprocess.Popen(["/bin/sh", "-c", "exit 3"], start_new_session=True)
+    proc.wait()
+    chat_ui_cdp.stop_group(proc)
+    assert proc.returncode == 3   # untouched: no signal went to a pid that may be someone else's now
+
+
+def test_closing_a_browser_stops_chrome_politely_first(tmp_path):
+    proc, marker = _start(tmp_path, POLITE, "chrome")
+    started = time.time()
+    _bare_browser(proc, tmp_path / "profile").close()
+    assert proc.returncode == 0, "Chrome was killed ({}), not asked".format(proc.returncode)
+    assert not marker.exists() and not (tmp_path / "profile").exists()
+    assert time.time() - started < 3
+
+
+def test_closing_a_browser_kills_a_chrome_that_ignores_term_within_the_wait(tmp_path, monkeypatch):
+    monkeypatch.setattr(chat_ui_cdp, "TERM_WAIT_S", 0.5)
+    proc, marker = _start(tmp_path, STUBBORN, "chrome")
+    started = time.time()
+    _bare_browser(proc, tmp_path / "profile").close()
+    assert proc.returncode == -signal.SIGKILL
+    assert not (tmp_path / "profile").exists()   # its profile goes whether or not it left politely
+    assert 0.5 <= time.time() - started < 4
+
+
+def test_closing_a_browser_asks_chrome_over_devtools_before_any_signal(tmp_path, monkeypatch):
+    monkeypatch.setattr(chat_ui_cdp, "CLOSE_WAIT_S", 0.2)   # this Chrome does not leave on Browser.close: the signals follow
+    proc, marker = _start(tmp_path, POLITE, "chrome")
+    ws = ScriptedSocket([[lambda i: {"id": i, "result": {}}]])
+    _bare_browser(proc, tmp_path / "profile", ws).close()
+    assert [m["method"] for m in ws.sent] == ["Browser.close"]
+    assert proc.returncode == 0 and not marker.exists()   # then TERM, not KILL
+
+
+def test_closing_a_browser_that_drops_the_connection_instead_of_answering_still_closes(tmp_path, monkeypatch):
+    monkeypatch.setattr(chat_ui_cdp, "CLOSE_WAIT_S", 0.2)
+
+    class Hangs(ScriptedSocket):
+        def recv(self) -> str:
+            raise ConnectionError("DevTools closed the connection")
+
+    proc, marker = _start(tmp_path, POLITE, "chrome")
+    _bare_browser(proc, tmp_path / "profile", Hangs([[]])).close()
+    assert proc.returncode == 0 and not (tmp_path / "profile").exists()
+
+
+def test_closing_a_browser_whose_chrome_has_gone_sends_nothing(tmp_path):
+    proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
+    proc.wait()
+    ws = ScriptedSocket([])
+    _bare_browser(proc, tmp_path / "profile", ws).close()
+    assert ws.sent == []
+
+
+def test_stopping_an_app_asks_politely_first_and_removes_the_home_it_made(tmp_path):
+    proc, marker = _start(tmp_path, POLITE, "app")
+    home = tmp_path / "home"
+    home.mkdir()
+    app = chat_ui_cdp.App.__new__(chat_ui_cdp.App)
+    app.proc, app.home, app.owns_home = proc, str(home), True
+    app.stop()
+    assert proc.returncode == 0 and not marker.exists()
+    assert not home.exists()
+
+
+def test_a_home_that_was_given_is_left_to_its_owner(tmp_path):
+    proc, marker = _start(tmp_path, POLITE, "app")
+    home = tmp_path / "home"
+    home.mkdir()
+    app = chat_ui_cdp.App.__new__(chat_ui_cdp.App)
+    app.proc, app.home, app.owns_home = proc, str(home), False
+    app.stop()
+    assert proc.returncode == 0 and home.exists()
+
+
+def test_exit_on_sigterm_turns_the_signal_into_a_system_exit_so_that_finally_runs():
+    before = signal.getsignal(signal.SIGTERM)
+    try:
+        chat_ui_cdp.exit_on_sigterm()
+        handler = signal.getsignal(signal.SIGTERM)
+        assert handler is not before
+        with pytest.raises(SystemExit) as raised:
+            handler(signal.SIGTERM, None)
+        assert raised.value.code == 128 + signal.SIGTERM
+    finally:
+        signal.signal(signal.SIGTERM, before)
+
+
+def test_both_checks_install_it_before_they_start_anything(monkeypatch):
+    from scripts import chat_ui_browser_check as browser_check
+    for module in (layout, browser_check):
+        monkeypatch.setattr(module, "find_chrome", lambda: None)   # main returns 2 at once: nothing was started
+        before = signal.getsignal(signal.SIGTERM)
+        try:
+            assert module.main([]) == 2
+            handler = signal.getsignal(signal.SIGTERM)
+            assert handler is not before, module.__name__
+            with pytest.raises(SystemExit):
+                handler(signal.SIGTERM, None)
+        finally:
+            signal.signal(signal.SIGTERM, before)
+            signal.alarm(0)
 
 
 # ---- the geometry check, on measurements ----------------------------------------------------------------------------------------------

@@ -48,7 +48,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from scripts.chat_ui_cdp import App, Browser, find_chrome  # noqa: E402
+from scripts.chat_ui_cdp import App, Browser, exit_on_sigterm, find_chrome  # noqa: E402
 from tests.app_helpers import png_bytes  # noqa: E402
 
 EVIDENCE_DIR = os.path.join(REPO_ROOT, "docs", "chat_ui", "evidence", "p4e")
@@ -60,6 +60,7 @@ EVIDENCE_FILES = ["streaming_1280x900_light.png", "settled_1280x900_light.png", 
                   "settled_375x812_light.png", "stopped_1280x900_light.png", "error_notice_1280x900_light.png",
                   "labelled_chips_1280x900_light.png", "checklist.json"]   # what a full run writes, and the only files it replaces
 STAGES = ["preprocess", "encode", "retrieve", "generate", "label", "score"]
+DETAILED = ("preprocess", "encode", "generate")   # the stages of the tiny pipeline that have a detail, so a disclosure button
 SETTLED = ("done", "skipped")  # what a stage of a finished turn can be
 CHEXBERT_14 = ["Enlarged Cardiomediastinum", "Cardiomegaly", "Lung Opacity", "Lung Lesion", "Edema", "Consolidation", "Pneumonia",
                "Atelectasis", "Pneumothorax", "Pleural Effusion", "Pleural Other", "Fracture", "Support Devices", "No Finding"]
@@ -538,6 +539,7 @@ def check_sessions(ctx: Context) -> Tuple[str, Dict[str, Any]]:
         expect(seen["ids"] == [msg_a], "the first chat shows {} while the second one's turn runs".format(seen["ids"]))
         expect(seen["send"] and seen["stop"], "the first chat's composer was locked by the other chat's turn")
         time.sleep(0.08)
+    expect(samples >= 1, "the turn ended before the other chat could be watched: nothing was sampled")   # else every assertion above is vacuous
     time.sleep(0.4)   # and a little longer: nothing may still arrive
     after = b.evaluate("({ ids: [...document.querySelectorAll('#conversation article.card')].map((c) => c.getAttribute('data-message-id')),"
                        " img: [...document.querySelectorAll('#conversation img')].length })")
@@ -659,8 +661,8 @@ def check_keyboard(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     b.set_files("#file", [ctx.images["a"]])   # the file dialog is the one thing a script cannot press a key in
     b.wait_for("!document.querySelector('#preview').hidden", what="the attached image")
     stops = []  # type: List[str]
-    b.evaluate("(%s)()" % FOCUSABLE_JS)
-    for _ in range(40):   # from the top of the page, Tab until the note field has focus
+    on_page = b.evaluate("(%s)()" % FOCUSABLE_JS)   # the tab stops of this page, in DOM order: the walk to the note field cannot need more
+    for _ in range(len(on_page) + 1):   # from the top of the page, Tab until the note field has focus
         b.key("Tab", "Tab", 9)
         stops.append(b.evaluate("window.__stop()"))
         if stops[-1] == "#prompt":
@@ -691,11 +693,13 @@ def check_keyboard(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     def at(name: str) -> int:
         expect(name in expected, "{} is not a tab stop (stops: {})".format(name, expected))
         return expected.index(name)
-    sidebar = [at("#new-session"), at("Export JSON"), at("Export Markdown")]
+    chats = [i for i, name in enumerate(expected) if name.startswith("chat: ")]
+    expect(chats, "no chat link is a tab stop: {}".format(expected))
+    sidebar = [at("#new-session"), at("Export JSON"), at("Export Markdown")] + chats
     stages = [at("stage:preprocess"), at("stage:encode"), at("stage:generate")]
     composer = [at("#image-well"), at("#prompt"), at("#settings"), at("#send")]
     expect(sidebar == sorted(sidebar) and max(sidebar) < min(stages) and max(stages) < min(composer) and composer == sorted(composer),
-           "the order is not sidebar, then the card's stage buttons, then the composer: {}".format(expected))
+           "the order is not sidebar (with its chats), then the card's stage buttons, then the composer: {}".format(expected))
     expect(any(s.startswith("Delete chat") for s in expected) and any(s.startswith("Copy report") for s in expected),
            "the chat's Delete or the card's Copy is not a tab stop: {}".format(expected))
     # A stage's details open and close from the keyboard, with the focus staying on the button.
@@ -729,7 +733,7 @@ def check_keyboard(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     expect(closed == {"hidden": True, "expanded": "false", "focus": "#settings"}, "Esc left {}".format(closed))
     return ("Tab visits {} controls in DOM order, each with a focus ring; Enter sends; Enter and Space toggle a stage; "
             "Enter opens the drawer and Esc closes it to Settings".format(len(expected)),
-            {"tab_stops": expected, "every_stop_shows_a_focus_ring": True, "stops_to_note_field": stops,
+            {"tab_stops": expected, "chat_links_among_them": len(chats), "every_stop_shows_a_focus_ring": True, "stops_to_note_field": stops,
              "after_enter": {"status": card["status"], "focus": "prompt"}, "stage_toggle": {"Enter": toggled[0], "Space": toggled[1]},
              "drawer": {"opened": opened, "closed": closed}})
 
@@ -832,27 +836,36 @@ def check_a11y(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     unnamed = [(Ax.role(n), n.get("backendDOMNodeId")) for n in exposed if not Ax.name(n).strip()]
     expect(not unnamed, "controls a user can focus have no accessible name: {}".format(unnamed))
     buttons = []
-    for stage, backend in zip(("preprocess", "encode", "generate"), b.backend_ids('#conversation li[data-stage] > button')):
+    ids = b.backend_ids('#conversation li[data-stage] > button')
+    expect(len(ids) == len(DETAILED), "{} stage buttons on the page, not {}".format(len(ids), len(DETAILED)))   # zip would stop at the shorter
+    for stage, backend in zip(DETAILED, ids):
         node = ax.by_backend.get(backend)
         expect(node is not None, "the {} button is not in the accessibility tree".format(stage))
         visible = b.evaluate("document.querySelector('#conversation li[data-stage=\"%s\"] > button').textContent" % stage)
+        expect(visible.strip(), "the {} button has no visible text".format(stage))   # an empty text is the start of every name
         name = Ax.name(node)
         expect(Ax.role(node) == "button", "the {} control is a {}, not a button".format(stage, Ax.role(node)))
         expect(name.startswith(visible) and len(name) > len(visible),
                "the {} button is named {!r}, which does not start with its text {!r} and add to it".format(stage, name, visible))
+        expect(name[:1].isalpha(), "the {} button is named {!r}: a glyph comes before its label".format(stage, name))
         expect(Ax.prop(node, "expanded") is False, "the {} button's expanded state is {!r}, not false".format(stage, Ax.prop(node, "expanded")))
         buttons.append({"stage": stage, "visible": visible, "name": name, "expanded": False})
+    expect(len(buttons) == len(DETAILED), "{} stage buttons were checked, not {}".format(len(buttons), len(DETAILED)))
     b.click('#conversation li[data-stage="encode"] > button')
     ax2 = Ax(b)
     opened = ax2.by_backend[b.backend_ids('#conversation li[data-stage="encode"] > button')[0]]
     expect(Ax.prop(opened, "expanded") is True, "after a click the encode button's expanded state is {!r}".format(Ax.prop(opened, "expanded")))
     buttons[1]["expanded_after_click"] = True
+    items = {}  # type: Dict[str, str]
+    for stage in STAGES:
+        li = ax2.by_backend[b.backend_ids('#conversation li[data-stage="%s"]' % stage)[0]]
+        items[stage] = ax2.text(li)
+    glyphed = {stage: spoken[:12] for stage, spoken in items.items() if not spoken[:1].isalpha()}
+    expect(not glyphed, "stage items read a glyph before their label (the ::before shape is part of what a screen reader hears): {}".format(glyphed))
     plain = []
     for stage in ("retrieve", "label", "score"):
-        li = ax2.by_backend[b.backend_ids('#conversation li[data-stage="%s"]' % stage)[0]]
-        spoken = ax2.text(li)
-        expect(stage in spoken and "skipped" in spoken, "the skipped {} stage reads as {!r}".format(stage, spoken))
-        plain.append(spoken)
+        expect(stage in items[stage] and "skipped" in items[stage], "the skipped {} stage reads as {!r}".format(stage, items[stage]))
+        plain.append(items[stage])
     status = [n for n in ax2.by_id.values() if Ax.role(n) == "status"]
     expect(len(status) >= 1, "no status region in the accessibility tree")
     region = next((n for n in status if ax2.text(n) == "Report ready"), None)
@@ -904,9 +917,10 @@ def check_a11y(ctx: Context) -> Tuple[str, Dict[str, Any]]:
         if seeded is not None:
             seeded.stop()
         shutil.rmtree(home, ignore_errors=True)
-    return ("stage buttons: their text, then state, with expanded; status region live=polite reads 'Report ready'; 14 chips read '<name>: positive|negative'; "
-            "every control named; no text under AA contrast in 4 states",
+    return ("stage buttons: their text, then state, with expanded, no glyph first; status region live=polite reads 'Report ready'; 14 chips read "
+            "'<name>: positive|negative'; every control named; no text under AA contrast in 4 states",
             {"contrast_issues_under_aa": faint, "focusable_controls_named": len(exposed), "stage_buttons": buttons, "skipped_stages": plain,
+             "stage_items_as_read": items,
              "status_region": {"live": "polite", "text": "Report ready", "history": said}, "chips_on_seeded_synthetic_turn": chips})
 
 
@@ -1031,6 +1045,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--no-evidence", action="store_true", help="run the checks and write no screenshots and no checklist.json")
     parser.add_argument("--timeout", type=int, default=420, help="seconds the whole run may take (default 420)")
     args = parser.parse_args(argv)
+    exit_on_sigterm()   # a SIGTERM runs the finally below, which stops Chrome and the app
     chrome = find_chrome()
     if chrome is None:
         print("ERROR no Chrome found: set $CHROME to its executable")
@@ -1039,11 +1054,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     def overrun(signum: int, frame: Any) -> None:
         raise Overrun("the browser check ran past its {} s limit".format(args.timeout))
 
-    def terminated(signum: int, frame: Any) -> None:
-        raise SystemExit(128 + signum)   # so that the finally below kills Chrome and the app
-
     signal.signal(signal.SIGALRM, overrun)
-    signal.signal(signal.SIGTERM, terminated)
     signal.alarm(args.timeout)
     out_dir = None if args.no_evidence else os.path.abspath(args.out)
     work = tempfile.mkdtemp(prefix="chat_ui_browser_check_")

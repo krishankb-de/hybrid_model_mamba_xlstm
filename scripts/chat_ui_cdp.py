@@ -5,8 +5,11 @@ imported by the app or run by validate.sh.
     scripts/chat_ui_layout_check.py    geometry at many viewports
     scripts/chat_ui_browser_check.py   the browser checklist, with screenshots
 
-Every process this module starts runs in a session of its own, so stopping it kills the whole group (Chrome's helpers
-included) and nothing outlives a failure path. Browser.close() and App.stop() are safe to call at any time, on an object whose
+Every process this module starts runs in a session of its own, so stopping it reaches the whole group (Chrome's helpers
+included) and nothing outlives a failure path. It is stopped politely first, and killed last: Chrome is asked to close over
+DevTools, then sent SIGTERM, and only a process that is still there after the wait gets SIGKILL. A Chrome that is killed
+leaves its singleton directory (com.google.Chrome.*, a SingletonSocket and a SingletonCookie) in $TMPDIR, one more on every
+run; one that leaves on request removes it. Browser.close() and App.stop() are safe to call at any time, on an object whose
 constructor failed half-way too. Standard library only: the websocket client is the little of RFC 6455 a DevTools session
 needs.
 """
@@ -31,6 +34,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 KEEP_EVENTS = 5000   # DevTools events kept per Browser (Browser.events): the oldest go first
+CLOSE_WAIT_S = 3.0   # how long Chrome has to exit after the DevTools Browser.close, before it is sent SIGTERM
+TERM_WAIT_S = 5.0    # how long a process has to exit after SIGTERM, before it is sent SIGKILL
 
 # The app as the checks run it. The uvicorn CLI cannot pass create_app its arguments (the step delay of the tiny engine is
 # one), so this is a three-line launcher. argv: home, step delay in seconds, port, and optionally a directory of static files.
@@ -129,8 +134,9 @@ class WebSocket:
 
 
 def kill_group(proc: Optional["subprocess.Popen"]) -> None:
-    """SIGKILL a process started with start_new_session=True and everything else in its session, then reap it. Safe on None
-    and on a process that is gone. The group is signalled before the process is reaped, while its pid cannot be anyone else's."""
+    """The last resort: SIGKILL a process started with start_new_session=True and everything else in its session, then reap it.
+    Safe on None and on a process that is gone. The group is signalled before the process is reaped, while its pid cannot be
+    anyone else's, and never after: a reaped leader's pid may belong to someone else by then."""
     if proc is None:
         return
     if proc.returncode is None:
@@ -146,6 +152,33 @@ def kill_group(proc: Optional["subprocess.Popen"]) -> None:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         pass
+
+
+def stop_group(proc: Optional["subprocess.Popen"], term_wait: Optional[float] = None) -> None:
+    """Stop a process started with start_new_session=True, and its session, politely first: SIGTERM to the group, a wait of up to
+    term_wait seconds (TERM_WAIT_S) for the process to go and clean up after itself, then SIGKILL for what is still there. Safe on
+    None and on a process that is gone (nothing is signalled once the process was reaped)."""
+    if proc is None:
+        return
+    if proc.poll() is None:   # poll() reaps a process that has already exited
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=TERM_WAIT_S if term_wait is None else term_wait)
+        except subprocess.TimeoutExpired:
+            pass
+    kill_group(proc)
+
+
+def exit_on_sigterm() -> None:
+    """Make SIGTERM raise SystemExit, so that a check's `finally` runs and stops Chrome and the app: left at its default, a SIGTERM
+    ends the process at once and orphans both (each runs in a session of its own, which the terminal's signals do not reach)."""
+    def handler(signum: int, frame: Any) -> None:
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, handler)
 
 
 def find_chrome() -> Optional[str]:
@@ -320,9 +353,24 @@ class Browser:
             self.call("Emulation.setEmulatedMedia", features=[{"name": "prefers-color-scheme", "value": scheme}])
 
     def close(self) -> None:
+        """Close Chrome as a user would, so that it removes what it made outside its profile: the DevTools Browser.close first (a wait
+        of CLOSE_WAIT_S for it to go), then SIGTERM to its group (TERM_WAIT_S), and SIGKILL only for what is still there. Then the
+        profile directory is removed. Safe on a half-built Browser and when called twice."""
+        proc = self.proc
         if self.ws is not None:
+            if proc is not None and proc.poll() is None:
+                try:
+                    self.ws.sock.settimeout(CLOSE_WAIT_S)   # a Chrome that does not answer is not waited for
+                    self.call("Browser.close")
+                except Exception:   # it may drop the connection instead of answering; anything else falls through to the signals
+                    pass
+                try:
+                    proc.wait(timeout=CLOSE_WAIT_S)
+                except subprocess.TimeoutExpired:
+                    pass
             self.ws.close()
-        kill_group(self.proc)
+            self.ws = None
+        stop_group(proc)
         shutil.rmtree(self.profile, ignore_errors=True)
 
 
@@ -381,6 +429,6 @@ class App:
             return ""
 
     def stop(self) -> None:
-        kill_group(self.proc)
+        stop_group(self.proc)   # uvicorn leaves on SIGTERM; its store is closed by the app's own shutdown
         if self.owns_home:
             shutil.rmtree(self.home, ignore_errors=True)

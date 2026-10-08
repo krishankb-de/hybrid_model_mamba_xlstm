@@ -39,7 +39,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from scripts.chat_ui_cdp import App, Browser, find_chrome  # noqa: E402
+from scripts.chat_ui_cdp import App, Browser, exit_on_sigterm, find_chrome  # noqa: E402
 
 WIDTHS = [320, 375, 800, 801, 820, 834, 900, 925, 1024, 1280]
 HEIGHTS = [568, 900]
@@ -255,6 +255,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--url", help="check this running app instead of starting one (its page URL, e.g. "
                                       "http://127.0.0.1:8000/)")
     args = parser.parse_args(argv)
+    exit_on_sigterm()   # a SIGTERM runs the finally below, which stops Chrome and the app
     chrome = find_chrome()
     if chrome is None:
         print("ERROR no Chrome found: set $CHROME to its executable")

@@ -580,7 +580,9 @@ export function createApp(env) {
         feed(turn, event);
       }
     } catch (err) {
-      if (turn.left || isAbort(err)) return;
+      // A poll that fails after the turn's own message_stop was read (the server stores that before it marks the message finished, so
+      // the poll that read it asks once more) has nothing left to ask: a Retry for a finished turn would be a button that does nothing.
+      if (turn.left || turn.settled || isAbort(err)) return;
       watchdog.failed();
       if (state.turn === turn) {   // Stop works again, whatever it said: pressing it follows the turn from here
         turn.stopping = false;
@@ -600,10 +602,11 @@ export function createApp(env) {
   }
 
   // Polls a turn that nothing is following (its poll failed for good), from the last seq the view has. Retry in the notice and
-  // Stop both come here. A turn that was left or has ended is not followed, so a Retry that comes late starts nothing; one that
-  // is already being polled needs nothing.
+  // Stop both come here. A turn that was left is not followed, so a Retry that comes late starts nothing; one that is already
+  // being polled needs nothing. (A turn that has ended never gets here: pollTurn offers no Retry for a failure after the end, and
+  // Stop looks at `settled` before it asks.)
   function follow(turn) {
-    if (turn.left || turn.settled || turn.polling) return;
+    if (turn.left || turn.polling) return;
     if (watchdog.retry() !== 'poll') watchdog.resume();
     if (state.noticeRetry) clearNotice();
     detach(pollTurn(turn));
@@ -653,9 +656,27 @@ export function createApp(env) {
     if (watchdog.ended(turn.view.status) === 'poll') await pollTurn(turn);
   }
 
-  // The server has the turn. The composer's text and file that were sent are spent (what was typed or attached since Send is the
-  // next turn's, and stays), and the 3 s of silence that mean "poll instead" are counted from here. Stop, the clock and the ticker
-  // come before any drawing, and the drawing is caught: a page that cannot draw its card still follows the turn to its end.
+  // The page's own work around a turn must not stop the turn, nor the work after it: a failure is logged and said, and the caller goes on.
+  function attempt(work) {
+    try {
+      work();
+    } catch (err) {
+      report(err);
+      showNotice(GENERIC_ERROR);
+    }
+  }
+
+  // What was sent is spent: the text of the note that was sent, and the file that was attached. What was typed or attached since
+  // Send is the next turn's, and stays.
+  function spendComposer(turn) {
+    const typed = ui.prompt.value ?? '';
+    ui.prompt.value = typed.startsWith(turn.text) ? typed.slice(turn.text.length) : typed;
+    if (state.file === turn.file) clearFile();
+  }
+
+  // The server has the turn: Stop works, and the 3 s of silence that mean "poll instead" are counted from here. Stop, the clock, the
+  // ticker and the spending of the composer come before any drawing, and each is guarded: a page that cannot draw its card still
+  // follows the turn to its end, and does not send the same note and image again at the next Send.
   function accept(turn, id) {
     if (turn.left) return;   // the user moved to another chat while the upload was in flight: its turn is theirs to find later
     turn.id = id;
@@ -663,18 +684,13 @@ export function createApp(env) {
     ui.stop.disabled = false;
     watchdog.arm();
     startTicker(turn);
-    try {
+    attempt(() => spendComposer(turn));
+    attempt(() => {   // a card that is made but not yet in the page is put there by its first paint
       turn.card = renderAssistantCard(turn.view, cardCtx(turn.n));
       ui.conversation.append(turn.card);
-      const typed = ui.prompt.value ?? '';
-      ui.prompt.value = typed.startsWith(turn.text) ? typed.slice(turn.text.length) : typed;
-      if (state.file === turn.file) clearFile();
       scroller.toEnd(turn.card);
       announce(statusText(turn.view));
-    } catch (err) {   // a card that is made but not yet in the page is put there by its first paint
-      report(err);
-      showNotice(GENERIC_ERROR);
-    }
+    });
   }
 
   // The turn never started (the request was refused, or the network was down): take its user turn back out, show why,

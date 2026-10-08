@@ -4,14 +4,14 @@
     "failures": []
   },
   "environment": {
-    "date": "2026-10-07",
+    "date": "2026-10-08",
     "engine": "tiny (random weights, toy vocabulary; no checkpoint, no data)",
     "tiny_step_delay_s": 0.02,
     "image": "synthetic PNG (tests/app_helpers.png_bytes)",
     "browser": "Chrome/146.0.7680.178 (headless)",
     "python": "3.14.3",
     "os": "Darwin",
-    "warm_up_turn_s": 0.87,
+    "warm_up_turn_s": 0.97,
     "viewports": {
       "desktop": [
         1280,
@@ -33,7 +33,7 @@
       "name": "stream",
       "status": "PASS",
       "detail": "6 stages settled (3 done, 3 skipped); 40 snapshots, report 3 -> 247 chars; status ended on 'Report ready'; done in 1.3 s",
-      "seconds": 1.6,
+      "seconds": 1.5,
       "data": {
         "stages": {
           "preprocess": "done",
@@ -60,27 +60,27 @@
         "aria_busy": [
           [
             true,
-            28
+            32
           ],
           [
             false,
-            1294
+            1247
           ]
         ],
-        "card_done_ms": 1291,
+        "card_done_ms": 1246,
         "token_budget": 40,
-        "seconds": 1.31
+        "seconds": 1.29
       },
       "console_errors": []
     },
     {
       "name": "reload",
       "status": "PASS",
-      "detail": "the card after Page.reload equals the live one (3999 characters of markup, the same six stage states); a reload mid-turn followed the running turn to the card another reload shows",
-      "seconds": 6.3,
+      "detail": "the card after Page.reload equals the live one (4002 characters of markup, the same six stage states); a reload mid-turn followed the running turn to the card another reload shows",
+      "seconds": 5.7,
       "data": {
-        "markup_chars": 3999,
-        "text_chars": 920,
+        "markup_chars": 4002,
+        "text_chars": 923,
         "stages": {
           "preprocess": "done",
           "encode": "done",
@@ -100,7 +100,7 @@
             "stop": true
           },
           "followed_equals_replayed": true,
-          "markup_chars": 5422
+          "markup_chars": 5420
         }
       },
       "console_errors": []
@@ -108,19 +108,19 @@
     {
       "name": "sessions",
       "status": "PASS",
-      "detail": "2 chats switched 4 times, each with its own card and user turn; leaving a running turn cancelled its stream (request aborted), nothing asked for it (49 samples), and it replays done",
-      "seconds": 7.8,
+      "detail": "2 chats switched 4 times, each with its own card and user turn; leaving a running turn cancelled its stream (request aborted), nothing asked for it (48 samples), and it replays done",
+      "seconds": 7.6,
       "data": {
         "sessions": [
-          "s_01a1160c9eea000059c31d",
-          "s_01a1160ca24c00004280f0"
+          "s_01a11b3e1ecd00000559b5",
+          "s_01a11b3e224000008f8a22"
         ],
         "messages": {
-          "a": "m_01a1160c9f0f00015cc20d",
-          "b": "m_01a1160ca2730001fc24e1",
-          "b2": "m_01a1160ca8830001903bce"
+          "a": "m_01a11b3e1ef00001ceb420",
+          "b": "m_01a11b3e22640001d32c56",
+          "b2": "m_01a11b3e28330001591e15"
         },
-        "samples_while_away": 49,
+        "samples_while_away": 48,
         "stream_request_cancelled": true,
         "report_chars_of_turn_finished_while_away": 988
       },
@@ -129,12 +129,12 @@
     {
       "name": "exports",
       "status": "PASS",
-      "detail": "JSON parses (38136 bytes, 4 messages, logs end in message_stop done); Markdown (1339 bytes) has '## Turn 1' and '## Turn 2'",
-      "seconds": 2.5,
+      "detail": "JSON parses (38137 bytes, 4 messages, logs end in message_stop done); Markdown (1339 bytes) has '## Turn 1' and '## Turn 2'",
+      "seconds": 2.4,
       "data": {
         "json": {
-          "file": "session-s_01a1160cbd610000cc7a80.json",
-          "bytes": 38136,
+          "file": "session-s_01a11b3e3c5b0000fc6055.json",
+          "bytes": 38137,
           "messages": 4,
           "events_per_turn": [
             37,
@@ -142,11 +142,11 @@
           ]
         },
         "markdown": {
-          "file": "session-s_01a1160cbd610000cc7a80.md",
+          "file": "session-s_01a11b3e3c5b0000fc6055.md",
           "bytes": 1339,
           "headings": [
-            "## Turn 1 — 2026-10-07 11:08:16 UTC",
-            "## Turn 2 — 2026-10-07 11:08:16 UTC"
+            "## Turn 1 — 2026-10-08 11:20:25 UTC",
+            "## Turn 2 — 2026-10-08 11:20:26 UTC"
           ]
         }
       },
@@ -155,13 +155,13 @@
     {
       "name": "stop",
       "status": "PASS",
-      "detail": "stopped after 3 of 150 snapshots (1 more by the time the card said aborted, 0.06 s after the press); no more afterwards; note 'Turn stopped'",
-      "seconds": 0.9,
+      "detail": "stopped after 2 of 150 snapshots (0 more by the time the card said aborted, 0.05 s after the press); no more afterwards; note 'Turn stopped'",
+      "seconds": 0.8,
       "data": {
         "budget": 150,
         "snapshots_when_pressed": 2,
-        "snapshots_total": 3,
-        "seconds_to_aborted": 0.06,
+        "snapshots_total": 2,
+        "seconds_to_aborted": 0.05,
         "note": "Turn stopped",
         "server_status": "aborted",
         "stages": {
@@ -185,7 +185,7 @@
       "name": "keyboard",
       "status": "PASS",
       "detail": "Tab visits 27 controls in DOM order, each with a focus ring; Enter sends; Enter and Space toggle a stage; Enter opens the drawer and Esc closes it to Settings",
-      "seconds": 1.1,
+      "seconds": 1.0,
       "data": {
         "tab_stops": [
           "#new-session",
@@ -216,6 +216,7 @@
           "#settings",
           "#send"
         ],
+        "chat_links_among_them": 7,
         "every_stop_shows_a_focus_ring": true,
         "stops_to_note_field": [
           "#new-session",
@@ -270,7 +271,7 @@
       "name": "narrow",
       "status": "PASS",
       "detail": "no horizontal overflow at 375 px in 5 states (empty chat, settled card, stage details open, sidebar open, drawer open)",
-      "seconds": 1.1,
+      "seconds": 1.0,
       "data": {
         "viewport": [
           375,
@@ -354,8 +355,8 @@
     {
       "name": "a11y",
       "status": "PASS",
-      "detail": "stage buttons: their text, then state, with expanded; status region live=polite reads 'Report ready'; 14 chips read '<name>: positive|negative'; every control named; no text under AA contrast in 4 states",
-      "seconds": 2.6,
+      "detail": "stage buttons: their text, then state, with expanded, no glyph first; status region live=polite reads 'Report ready'; 14 chips read '<name>: positive|negative'; every control named; no text under AA contrast in 4 states",
+      "seconds": 2.4,
       "data": {
         "contrast_issues_under_aa": {
           "settled card, light": [],
@@ -380,22 +381,31 @@
           },
           {
             "stage": "generate",
-            "visible": "generate · 749 ms",
-            "name": "generate · 749 ms, done, turn 1",
+            "visible": "generate · 720 ms",
+            "name": "generate · 720 ms, done, turn 1",
             "expanded": false
           }
         ],
         "skipped_stages": [
-          "–retrieve · skipped: gallery_unavailable",
-          "–label · skipped: labeler_unavailable",
-          "–score · skipped: no_reference"
+          "retrieve · skipped: gallery_unavailable",
+          "label · skipped: labeler_unavailable",
+          "score · skipped: no_reference"
         ],
+        "stage_items_as_read": {
+          "preprocess": "preprocess · 2 ms",
+          "encode": "encode · 0 mspatch_grid197, 32pooled_dim16prefix_tokens4devicecpuone_passtrue",
+          "retrieve": "retrieve · skipped: gallery_unavailable",
+          "generate": "generate · 720 ms",
+          "label": "label · skipped: labeler_unavailable",
+          "score": "score · skipped: no_reference"
+        },
         "status_region": {
           "live": "polite",
           "text": "Report ready",
           "history": [
             "Queued",
             "generate running",
+            "Working",
             "Report ready"
           ]
         },
@@ -422,7 +432,7 @@
       "name": "error",
       "status": "PASS",
       "detail": "a server 422 showed the alert 'Invalid options: max_new_tokens: Input should be less than …', kept the note and the image, dismissed to the note field; the same composer then sent",
-      "seconds": 3.4,
+      "seconds": 3.2,
       "data": {
         "http_status": 422,
         "notice": "Invalid options: max_new_tokens: Input should be less than or equal to 200",
@@ -446,7 +456,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 105827,
+      "bytes": 106601,
       "page_confirmed": true
     },
     {
@@ -457,7 +467,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 125895,
+      "bytes": 125594,
       "page_confirmed": true
     },
     {
@@ -468,7 +478,7 @@
         900
       ],
       "scheme": "dark",
-      "bytes": 128473,
+      "bytes": 128211,
       "page_confirmed": true
     },
     {
@@ -479,7 +489,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 127004,
+      "bytes": 127018,
       "page_confirmed": true
     },
     {
@@ -490,7 +500,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 160375,
+      "bytes": 160575,
       "page_confirmed": true
     },
     {
@@ -501,7 +511,7 @@
         812
       ],
       "scheme": "light",
-      "bytes": 77826,
+      "bytes": 77482,
       "page_confirmed": true
     },
     {
@@ -512,7 +522,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 127639,
+      "bytes": 127736,
       "page_confirmed": true
     },
     {
@@ -523,7 +533,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 97139,
+      "bytes": 97786,
       "page_confirmed": true
     }
   ]

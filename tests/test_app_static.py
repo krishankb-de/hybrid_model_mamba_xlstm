@@ -372,3 +372,17 @@ def test_visually_hidden_is_the_standard_one_pixel_clipped_box():
         assert re.search(r"(?<![\w-])" + declaration, rule), declaration
     assert re.search(r"clip-path:\s*inset\(\s*50%\s*\)|(?<![\w-])clip:\s*rect\(", rule)   # clipped to nothing
     assert not re.search(r"display:\s*none|visibility:\s*hidden", rule)   # either would hide it from a screen reader too
+
+
+def test_the_stage_glyphs_have_empty_alt_text_after_a_fallback_so_that_no_screen_reader_hears_them():
+    """The shapes before a stage's label (open circle, dot, tick, dash, cross) are decoration: the state is also said in words
+    (render.js). Left as plain `content`, Chrome puts them in the accessible name ("tick preprocess ..."). `content: "x" / ""` gives
+    each empty alt text; the declaration before it is what an engine without alt text keeps (it drops the one it cannot read)."""
+    glyphs = [(h, b) for _, h, b in _walk(_stylesheet())
+              if re.fullmatch(r"\.timeline > li(\[data-state=\"\w+\"\])?::before", h) and re.search(r"(?<![\w-])content:", b)]
+    assert len(glyphs) == 5, [h for h, _ in glyphs]   # the pending shape and the four states (the pulse of a running one has no content)
+    for selector, declarations in glyphs:
+        contents = re.findall(r'(?<![\w-])content:\s*("[^"]*")(?:\s*/\s*("[^"]*"))?\s*;', declarations)
+        assert len(contents) == 2, (selector, declarations)
+        (plain, plain_alt), (shape, alt) = contents
+        assert plain_alt == "" and alt == '""' and plain == shape and plain != '""', (selector, contents)   # a fallback, then the same shape with empty alt text

@@ -260,7 +260,9 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   background: var(--card);
   color: var(--muted);
 }
-.timeline > li::before { content: "○"; }
+/* The state glyphs are shapes: the state is also said in words (render.js), so each has empty alt text and is left out of the accessible
+   name. Of each pair of declarations the first is for engines that do not know alt text. */
+.timeline > li::before { content: "○"; content: "○" / ""; }
 #conversation .timeline > li > button {   /* the control of a stage that has a detail: it reads as the label, inside the pill */
   min-height: 24px;
   padding: 0 2px;
@@ -273,13 +275,13 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 }
 #conversation .timeline > li > button:hover:not(:disabled) { background: none; text-decoration: underline; text-underline-offset: 2px; }
 .timeline > li[data-state="running"] { border-color: var(--accent); color: var(--accent); }
-.timeline > li[data-state="running"]::before { content: "●"; }
+.timeline > li[data-state="running"]::before { content: "●"; content: "●" / ""; }
 .timeline > li[data-state="done"] { color: var(--fg); }
-.timeline > li[data-state="done"]::before { content: "✓"; color: var(--ok); }
+.timeline > li[data-state="done"]::before { content: "✓"; content: "✓" / ""; color: var(--ok); }
 .timeline > li[data-state="skipped"] { border-style: dashed; font-style: italic; }
-.timeline > li[data-state="skipped"]::before { content: "–"; }
+.timeline > li[data-state="skipped"]::before { content: "–"; content: "–" / ""; }
 .timeline > li[data-state="error"] { border-color: var(--bad); color: var(--bad); }
-.timeline > li[data-state="error"]::before { content: "✕"; }
+.timeline > li[data-state="error"]::before { content: "✕"; content: "✕" / ""; }
 .timeline > li > table { display: none; flex: 1 1 100%; }
 .timeline > li.open { flex: 1 1 100%; border-radius: var(--radius); }
 .timeline > li.open > table { display: table; }

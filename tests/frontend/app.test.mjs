@@ -3581,3 +3581,127 @@ test('aria-busy that was put on again before the frame is not taken off by the f
   nextFrame();
   assert.equal($('conversation').hasAttribute('aria-busy'), false);
 });
+
+// ---- P4-E fix round 1 ----------------------------------------------------------------------------------------------------------------------
+// Written before the changes they cover, and run red first (task-P4-E-fix1.md, M1 and M2).
+
+// M1: a poll that fails after the turn's own end was read ----------------------------------------------------------------------------------
+
+test('a poll that fails after the turn\'s message_stop was read says nothing: a finished turn is offered no Retry', async () => {
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(...events.slice(0, 5));
+  await flush();
+  h.timers.advance(3000);   // silence: the poll takes over
+  await flush();
+  const poll = h.api.polls[0];
+  poll.channel.push(...events.slice(5));   // up to and including message_stop
+  await flush();
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal($('send').disabled, false);
+  // the server stores message_stop before it marks the message finished: the poll that read it asks once more, and that request fails
+  poll.channel.fail(refusal(404, 'Message not found.', 'not_found_error'));
+  await turn;
+  await flush();
+  assert.equal($('notice').hidden, true);                       // nothing to say about a turn that is over
+  assert.equal(buttonOf($('notice'), 'Retry').hidden, true);
+  assert.equal(h.api.polls.length, 1);
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal($('send').disabled, false);
+  assert.equal($('stop').hidden, true);
+});
+
+test('a poll that fails while the turn is still running still offers its Retry', async () => {
+  const { h } = await strandedTurn();   // the poll failed for good, and the turn has not ended
+  assert.equal(q($('notice'), 'p').textContent, 'Message not found.');
+  assert.equal(buttonOf($('notice'), 'Retry').hidden, false);
+});
+
+// M2: what was sent is spent before the card is drawn -----------------------------------------------------------------------------------------
+
+test('an exception while the accepted turn is drawn still spends what was sent, so the next Send does not send it again', async (t) => {
+  captureErrors(t);
+  const h = await ready();
+  const conversation = $('conversation');
+  const append = conversation.append.bind(conversation);
+  let boom = true;
+  conversation.append = (...nodes) => {   // the accepted turn's card is the first article.card to go in
+    if (boom && nodes.some((n) => n.getAttribute?.('class') === 'card')) { boom = false; throw new TypeError('append failed'); }
+    return append(...nodes);
+  };
+  $('prompt').value = 'beam 5';
+  const turn = h.app.send();
+  await flush();
+  assert.equal($('prompt').value, 'beam 5');   // until the server has the turn
+  h.api.streams[0].accept('m_a');   // the drawing throws
+  await flush();
+  assert.equal($('prompt').value, '');          // the note that was sent is spent
+  assert.equal($('preview').hidden, true);      // and so is the image
+  h.api.streams[0].channel.push(...fullTurn());
+  h.api.streams[0].channel.end();
+  await turn;
+  assert.equal($('send').disabled, false);
+  assert.equal($('prompt').value, '');
+  assert.equal($('preview').hidden, true);
+  const again = h.app.send();   // nothing is left to send twice
+  await flush();
+  const second = h.api.streams[1];
+  assert.equal(second.opts.form.get('image'), null);
+  assert.equal(second.opts.form.get('text'), '');
+  second.accept('m_b');
+  await flush();
+  second.channel.push(stopEv('done', { message_id: 'm_b' }));
+  second.channel.end();
+  await again;
+});
+
+test('a failure while what was sent is spent does not stop the card from being drawn, nor the turn from being followed', async (t) => {
+  const logged = captureErrors(t);
+  const h = await ready();
+  const events = fullTurn();
+  const prompt = $('prompt');
+  prompt.value = 'beam 5';
+  Object.defineProperty(prompt, 'value', { get: () => 'beam 5', set: () => { throw new TypeError('the note refuses to change'); } });
+  const turn = h.app.send();
+  await flush();
+  h.api.streams[0].accept('m_a');   // spending the note throws
+  await flush();
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_a');   // the card is drawn all the same
+  assert.equal(q($('notice'), 'p').textContent, GENERIC);
+  assert.ok(logged.some(([e]) => e instanceof TypeError && e.message === 'the note refuses to change'), 'it was logged');
+  assert.equal(h.timers.intervals, 1);
+  h.api.streams[0].channel.push(...events);
+  h.api.streams[0].channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal($('send').disabled, false);
+});
+
+test('what was typed or attached since Send stays when the drawing of the accepted turn fails', async (t) => {
+  captureErrors(t);
+  const h = await ready();
+  const conversation = $('conversation');
+  const append = conversation.append.bind(conversation);
+  let boom = true;
+  conversation.append = (...nodes) => {
+    if (boom && nodes.some((n) => n.getAttribute?.('class') === 'card')) { boom = false; throw new TypeError('append failed'); }
+    return append(...nodes);
+  };
+  $('prompt').value = 'beam 5';
+  const turn = h.app.send();
+  await flush();
+  $('prompt').value = 'beam 5 and a second thought';   // typed while the upload was on its way
+  attach(imageFile('second.png'));
+  h.api.streams[0].accept('m_a');
+  await flush();
+  assert.equal($('prompt').value, ' and a second thought');   // only what was sent is gone
+  assert.match(q($('preview'), 'span').textContent, /^second\.png/);
+  h.api.streams[0].channel.push(...fullTurn());
+  h.api.streams[0].channel.end();
+  await turn;
+});
