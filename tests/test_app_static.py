@@ -237,7 +237,8 @@ def test_text_and_control_colours_are_readable_in_both_palettes(scheme):
     pairs = [("--fg", "--bg", 7), ("--fg", "--card", 7), ("--muted", "--bg", 4.5), ("--muted", "--card", 4.5),
              ("--accent", "--bg", 4.5), ("--accent", "--card", 4.5), ("--on-accent", "--accent", 4.5),
              ("--ok", "--bg", 4.5), ("--ok", "--card", 4.5), ("--warn", "--bg", 4.5), ("--warn", "--card", 4.5),
-             ("--bad", "--bg", 4.5), ("--bad", "--card", 4.5), ("--control", "--bg", 3), ("--control", "--card", 3)]
+             ("--bad", "--bg", 4.5), ("--bad", "--card", 4.5), ("--control", "--bg", 3), ("--control", "--card", 3),
+             ("--muted", "--soft", 4.5)]   # a disabled setting in the drawer: muted text on the soft fill
     for fore, back, least in pairs:   # WCAG 2: 7 for body text, 4.5 for text, 3 for the border of a control
         for name in (fore, back):
             assert re.fullmatch(r"#[0-9a-f]{6}", tokens[name]), (scheme, name)   # #rrggbb keeps this check honest
@@ -248,6 +249,19 @@ def test_body_sets_an_explicit_background_and_colour():
     body = " ".join(b for h, b in _stylesheet() if h == "body")
     assert re.search(r"(?<![\w-])background(-color)?:\s*var\(--bg\)", body)
     assert re.search(r"(?<![\w-])color:\s*var\(--fg\)", body)
+
+
+def test_a_disabled_setting_in_the_drawer_looks_disabled():
+    rule = " ".join(b for _, h, b in _walk(_stylesheet()) if h == "#drawer input:disabled, #drawer select:disabled")
+    assert re.search(r"border-style:\s*dashed", rule) and re.search(r"color:\s*var\(--muted\)", rule)
+    assert re.search(r"cursor:\s*not-allowed", rule) and re.search(r"background:\s*var\(--soft\)", rule)
+    assert any(h == "#drawer .check:has(:disabled)" and "var(--muted)" in b for _, h, b in _walk(_stylesheet()))   # and its checkbox's words
+
+
+def test_the_rerun_hint_is_a_row_of_the_composer_that_wraps_a_long_file_name():
+    rule = " ".join(b for _, h, b in _walk(_stylesheet()) if h == "#rerun-hint")
+    assert re.search(r"flex:\s*1\s+0\s+100%", rule) and re.search(r"overflow-wrap:\s*anywhere", rule)   # a row of its own that never widens it
+    assert re.search(r"margin:\s*0", rule)   # a gap, not a margin: nothing is left when it is hidden
 
 
 def test_the_hidden_attribute_beats_display_rules():

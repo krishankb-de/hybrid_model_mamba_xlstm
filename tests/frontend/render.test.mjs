@@ -978,13 +978,24 @@ test('no builder writes to the view, the labels list or the ctx object it is giv
 test('the options read as small chips: beam, tokens, cached, k images/reports', () => {
   assert.deepEqual(optionChips({ decode: 'beam', beam_size: 3, max_new_tokens: 100, cached_decode: true, k_images: 4, k_reports: 3 }),
                    ['beam 3', '100 tok', 'cached', 'k 4/3']);   // the brief's example
-  assert.deepEqual(optionChips(tinyView().options), ['beam 3', '16 tok', 'cached', 'k 4/3']);
+  assert.deepEqual(optionChips(tinyView().options), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text']);   // this recorded turn ran with Display repair off
   assert.deepEqual(optionChips({ decode: 'greedy', beam_size: 3, max_new_tokens: 150, cached_decode: false, k_images: 0, k_reports: 10,
                                  label: false, display_repair: true, compile: true, reference: 'a note', test_row: 17 }),
-                   ['greedy', '150 tok', 'uncached', 'k 0/10', 'labels off', 'repair on', 'compiled', 'reference', 'test row 17']);
-  assert.deepEqual(optionChips({ decode: 'beam', beam_size: 5, reference: '', test_row: null, label: true, display_repair: false, compile: false }), ['beam 5']);
+                   ['greedy', '150 tok', 'uncached', 'k 0/10', 'labels off', 'compiled', 'reference', 'test row 17']);   // repair on is the default: no chip
+  assert.deepEqual(optionChips({ decode: 'beam', beam_size: 5, reference: '', test_row: null, label: true, display_repair: false, compile: false }),
+                   ['beam 5', 'raw text']);
   assert.deepEqual(optionChips(null), []);
   assert.deepEqual(optionChips({}), []);
+});
+
+test('Display repair has a chip only when it is off, and only a real false is a choice', () => {
+  const base = { decode: 'beam', beam_size: 3 };
+  assert.deepEqual(optionChips({ ...base, display_repair: true }), ['beam 3']);                 // the default says nothing
+  assert.deepEqual(optionChips({ ...base, display_repair: false }), ['beam 3', 'raw text']);   // the report as the decoder wrote it
+  for (const unsaid of [undefined, null, 0, '', 'no', 'false', [], {}]) {
+    assert.deepEqual(optionChips({ ...base, display_repair: unsaid }), ['beam 3'], String(unsaid));   // a turn that does not say: no claim
+  }
+  assert.equal(optionChips({ ...base, display_repair: false }).includes('repair on'), false);   // the old chip is gone
 });
 
 test('the user turn shows the note, the thumbnail and the option chips', async () => {
@@ -995,7 +1006,7 @@ test('the user turn shows the note, the thumbnail and the option chips', async (
   assert.equal(turn.localName, 'article');
   assert.ok(turn.classList.contains('turn') && turn.classList.contains('user'));
   assert.equal(q(turn, '.user-text').textContent, 'beam 5\nplease');
-  assert.deepEqual(texts(qa(turn, '.options .chip')), ['beam 3', '16 tok', 'cached', 'k 4/3']);
+  assert.deepEqual(texts(qa(turn, '.options .chip')), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text']);
   const img = q(turn, 'img');
   assert.equal(img.getAttribute('alt'), 'Uploaded X-ray: chest.png');
   await tick();

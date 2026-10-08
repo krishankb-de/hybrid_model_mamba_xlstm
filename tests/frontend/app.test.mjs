@@ -9,7 +9,7 @@ import { ShimEvent, installDom, serialize } from './dom_shim.mjs';
 import {
   BOUNDS, CLIENT_KEY, DEFAULT_SETTINGS, HEALTH_MS, HEALTH_SLOW_MS, SETTINGS_KEY, STALL_MS, browserStorage,
   checkImageFile, chosenCard, clientId, createApp, createWatchdog, errorMessage, exportFilename, healthText, loadSettings,
-  nearBottom, nextHealthDelay, optionsFromSettings, parseRoute, saveSettings, sessionDate, sessionMeta, sessionTitle,
+  nearBottom, nextHealthDelay, optionsFromSettings, parseRoute, saveSettings, serverHas, sessionDate, sessionMeta, sessionTitle,
   userTurnMessage,
 } from '../../app/static/app.js';
 import { applyEvent, initialView } from '../../app/static/state.js';
@@ -48,8 +48,8 @@ test('loadSettings gives the defaults for no storage, an empty one, a broken one
   }
   assert.deepEqual(DEFAULT_SETTINGS, {
     model: '', decode: 'beam', beam_size: 3, max_new_tokens: 100, cached_decode: true, compile: false, k_images: 4, k_reports: 3,
-    label: true, display_repair: false, token: '',
-  });   // the published protocol, and nothing else
+    label: true, display_repair: true, token: '',
+  });   // the published protocol, but for Display repair: it only changes what is shown, so the page has it on (the server's default stays off)
   assert.notEqual(loadSettings(undefined), DEFAULT_SETTINGS);   // a fresh object each time: the caller may change it
 });
 
@@ -107,10 +107,10 @@ const CARD_PLAIN = { name: 'hybrid_150m_v2_rrg', cached_decode_available: false 
 const MODELS = { default_model: 'hybrid_150m_m3_rrg', mode: 'private', allow_compile: false, models: [CARD_CACHED, CARD_PLAIN] };
 const OPTION_KEYS = ['beam_size', 'cached_decode', 'compile', 'decode', 'display_repair', 'k_images', 'k_reports', 'label', 'max_new_tokens'];
 
-test('optionsFromSettings sends exactly the keys of the server Options that the drawer sets, at the published defaults', () => {
+test('optionsFromSettings sends exactly the keys of the server Options that the drawer sets, at the published defaults (Display repair on)', () => {
   const options = optionsFromSettings(DEFAULT_SETTINGS, MODELS);
   assert.deepEqual(options, { decode: 'beam', beam_size: 3, max_new_tokens: 100, cached_decode: true, compile: false, k_images: 4, k_reports: 3,
-                              label: true, display_repair: false });   // no model: the server's default runs
+                              label: true, display_repair: true });   // no model: the server's default runs
   assert.deepEqual(Object.keys(optionsFromSettings({ ...DEFAULT_SETTINGS, model: CARD_PLAIN.name }, MODELS)).sort(), [...OPTION_KEYS, 'model'].sort());
   for (const key of ['reference', 'test_row', 'retrieval_k', 'token']) assert.equal(key in options, false, key);   // extra="forbid" would refuse them
   assert.doesNotThrow(() => JSON.stringify(options));
@@ -590,7 +590,7 @@ const SHA = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
 const START_DATA = {
   message_id: 'm_a', user_message_id: 'u_a', session_id: 's_a', mode: 'private', model: TINY_CARD,
   options: { model: 'tiny', decode: 'beam', beam_size: 5, max_new_tokens: 100, cached_decode: true, compile: false, k_images: 4, k_reports: 3,
-             label: true, reference: null, display_repair: false, test_row: null },
+             label: true, reference: null, display_repair: true, test_row: null },
   image: { sha256: SHA, filename: 'chest.png', source: 'upload', urls: {} },
 };
 const ev = (event, data = {}) => ({ event, data: { ...data, seq: ++eventCount } });
@@ -664,7 +664,8 @@ test('the ids the script adds to the page are unique, and an existing status reg
   await flush();
   const ids = qa(document.body, '[id]').map((n) => n.getAttribute('id'));
   assert.equal(new Set(ids).size, ids.length, 'no id twice');
-  for (const added of ['drawer-close', 'models-section', 'exports', 'session-more', 'notice', 'cached-note', 'status']) assert.ok(ids.includes(added), added);
+  for (const added of ['drawer-close', 'models-section', 'exports', 'session-more', 'notice', 'cached-note', 'status', 'apply-note', 'running-note',
+                       'retrieval-note', 'labels-note', 'rerun-hint']) assert.ok(ids.includes(added), added);
   assert.equal($('status').getAttribute('class'), 'existing');   // the one that was there
   assert.equal($('status').parentNode, document.body);
   const fresh = harness();   // none there: the page makes a visually hidden, polite one
@@ -706,7 +707,7 @@ test('start with no hash opens the newest session and replays it: its user turn,
   assert.equal(q(user, '.user-text').textContent, 'beam 5\nplease');
   assert.equal(q(user, '.chip').textContent, 'chest.png');                                // a replayed upload: its file name, until P6-B
   assert.equal(qa(user, 'img').length, 0);
-  assert.deepEqual(texts(qa(user, '.options .chip')), ['beam 3', '16 tok', 'cached', 'k 4/3']);   // the options the assistant row carries
+  assert.deepEqual(texts(qa(user, '.options .chip')), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text']);   // the options the assistant row carries (this turn ran with Display repair off)
   assert.equal(user.getAttribute('aria-label'), 'Your message, turn 1');
   const replayed = fixture.reduce(applyEvent, initialView(botId));
   const fresh = renderAssistantCard(replayed, { copy() {}, showModels() {}, turn: 1, ui: new Map() });
@@ -809,7 +810,7 @@ test('Send streams a turn: Send is off and Stop is on while it runs, the card fi
   assert.equal(run.opts.form.get('text'), 'beam 5');
   assert.equal(run.opts.form.get('image').name, 'chest.png');
   assert.deepEqual(JSON.parse(run.opts.form.get('options')), { decode: 'beam', beam_size: 3, max_new_tokens: 100, cached_decode: true, compile: false,
-                                                                 k_images: 4, k_reports: 3, label: true, display_repair: false });
+                                                                 k_images: 4, k_reports: 3, label: true, display_repair: true });
   assert.equal(typeof run.opts.clientId, 'string');
   assert.equal(run.opts.token, '');
   assert.equal($('send').disabled, true);
@@ -1647,10 +1648,11 @@ test('decode, labels and display repair are settings too; greedy has no beam to 
   labels.checked = false;
   change(labels);
   const repair = control('Display repair');
-  repair.checked = true;
+  assert.equal(repair.checked, true);   // on by default
+  repair.checked = false;
   change(repair);
-  assert.deepEqual([saved(h).label, saved(h).display_repair], [false, true]);
-  assert.deepEqual(chipsText().slice(-2), ['labels off', 'repair on']);
+  assert.deepEqual([saved(h).label, saved(h).display_repair], [false, false]);
+  assert.deepEqual(chipsText().slice(-2), ['labels off', 'raw text']);
   const mode = control('Mode');
   assert.equal(mode.value, 'private');
   assert.equal(mode.hasAttribute('readonly'), true);
@@ -3704,4 +3706,218 @@ test('what was typed or attached since Send stays when the drawing of the accept
   h.api.streams[0].channel.push(...fullTurn());
   h.api.streams[0].channel.end();
   await turn;
+});
+
+
+// ---- P4-F: settings that visibly apply --------------------------------------------------------------------------------------------
+
+const typeInto = (input, value) => { input.value = value; input.dispatchEvent(new ShimEvent('input', { bubbles: true })); };   // what a key does to a number field
+const NO_STAGES = { ...MODELS, features: { retrieval: false, labels: false } };   // what /v1/models says of a server with no gallery and no labeller
+
+test('Display repair is on by default in the page (the server keeps it off), and a stored choice wins', () => {
+  assert.equal(DEFAULT_SETTINGS.display_repair, true);
+  assert.equal(optionsFromSettings(DEFAULT_SETTINGS, MODELS).display_repair, true);
+  const off = loadSettings(memoryStorage({ [SETTINGS_FILE]: JSON.stringify({ display_repair: false }) }));
+  assert.equal(off.display_repair, false);
+  assert.equal(optionsFromSettings(off, MODELS).display_repair, false);
+});
+
+test('the composer chips say nothing of Display repair while it is on, and "raw text" when it is off', async () => {
+  const h = harness({ models: MODELS });
+  await h.app.start();
+  await flush();
+  const repair = control('Display repair');
+  assert.equal(repair.checked, true);
+  assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3']);
+  repair.checked = false;
+  change(repair);
+  assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3', 'raw text']);
+  assert.equal(saved(h).display_repair, false);
+  repair.checked = true;
+  change(repair);
+  assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3']);
+});
+
+test('a number field applies a whole number inside its bounds as it is typed, and leaves a half-typed value for change to clamp', async () => {
+  const h = harness({ models: MODELS });
+  await h.app.start();
+  await flush();
+  $('settings').click();   // the drawer is open, as it is for whoever types in it
+  const tokens = control('Token budget');
+  assert.equal(tokens.getAttribute('data-setting'), 'max_new_tokens');   // a stable hook for the browser check
+  tokens.focus();
+  typeInto(tokens, '1');    // on the way to 150, and below the bound of 16
+  typeInto(tokens, '15');
+  assert.equal(tokens.value, '15');   // not clamped to 16 under the hand that is typing
+  assert.equal(chipsText()[1], '100 tok');
+  assert.equal(h.storage.data.has(SETTINGS_KEY), false);   // nothing was applied, so nothing was stored
+  typeInto(tokens, '150');
+  assert.equal(chipsText()[1], '150 tok');   // at once: no blur and no Enter
+  assert.equal(saved(h).max_new_tokens, 150);
+  assert.deepEqual([tokens.value, document.activeElement === tokens], ['150', true]);
+  for (const half of ['', '1e', '16.5', '-20', 'x']) {
+    typeInto(tokens, half);
+    assert.deepEqual([chipsText()[1], saved(h).max_new_tokens], ['150 tok', 150], half);   // not a whole number inside the bounds: waits
+  }
+  typeInto(tokens, '250');   // a whole number, above the bound
+  assert.deepEqual([tokens.value, chipsText()[1]], ['250', '150 tok']);
+  change(tokens);
+  assert.deepEqual([tokens.value, chipsText()[1], saved(h).max_new_tokens], ['200', '200 tok', 200]);   // change still clamps, as before
+  typeInto(tokens, '0120');   // applied, and the field is not rewritten while it is being typed in ...
+  assert.deepEqual([tokens.value, chipsText()[1]], ['0120', '120 tok']);
+  change(tokens);
+  assert.equal(tokens.value, '120');   // ... until change writes the setting back
+  typeInto(control('Beam size'), '5');
+  typeInto(control(/k_images/), '0');
+  typeInto(control(/k_reports/), '10');
+  assert.deepEqual(chipsText(), ['beam 5', '120 tok', 'cached', 'k 0/10']);   // every number field, not only the budget
+  typeInto(control(/k_reports/), '11');   // above the bound of 10
+  assert.equal(chipsText().at(-1), 'k 0/10');
+});
+
+test('the drawer says that changes apply from the next Send, and while a turn runs that the running turn keeps the settings it started with', async () => {
+  const h = await ready({ options: { models: MODELS } });
+  const [head, applies, running] = $('drawer').children;
+  assert.equal(head.getAttribute('class'), 'drawer-head');
+  assert.deepEqual([applies.getAttribute('id'), applies.textContent, applies.hidden], ['apply-note', 'Changes apply from your next Send.', false]);   // first, always
+  assert.deepEqual([running.getAttribute('id'), running.textContent, running.hidden],
+                   ['running-note', 'The running turn keeps the settings it started with.', true]);
+  const turn = h.app.send();
+  await flush();
+  assert.equal(running.hidden, false);   // from Send, before the server has answered
+  h.api.streams[0].accept('m_a');
+  await flush();
+  typeInto(control('Token budget'), '64');   // the settings keep changing while it runs
+  assert.equal(chipsText()[1], '64 tok');   // for the next Send
+  assert.deepEqual(texts(qa(q($('conversation'), '.turn.user'), '.options .chip')).slice(0, 2), ['beam 3', '100 tok']);   // and the running turn is not touched
+  h.api.streams[0].channel.push(...fullTurn());
+  h.api.streams[0].channel.end();
+  await turn;
+  assert.deepEqual([running.hidden, applies.hidden], [true, false]);
+});
+
+test('with no new image and an earlier one in the chat, the composer says that Send re-runs it; not in an empty chat, with a new image, or while a turn runs', async () => {
+  const empty = harness({ sessions: [] });
+  await empty.app.start();
+  await flush();
+  assert.equal($('rerun-hint').hidden, true);   // nothing to re-run in an empty chat
+  const h = harness({ sessions: [sess('s_a', 'A')], routes: doneSession('s_a', 'A', 'm_a') });
+  await h.app.start();
+  await flush();
+  const hint = $('rerun-hint');
+  assert.equal(hint.hidden, false);
+  assert.equal(hint.textContent, 'No new image: Send re-runs s_a.png with these settings.');
+  assert.deepEqual(['role', 'aria-live', 'aria-atomic'].filter((a) => hint.hasAttribute(a)), []);   // information, not an alert
+  assert.equal($('send').getAttribute('aria-describedby'), 'rerun-hint');   // Send says what it will do, to whoever reaches it by tab
+  const rowsOfComposer = $('composer').children;
+  assert.equal(rowsOfComposer[rowsOfComposer.indexOf($('image-well')) + 1], hint);   // next to the image well
+  attach(imageFile('new.png'));
+  assert.equal(hint.hidden, true);   // Send sends this one
+  assert.equal($('send').hasAttribute('aria-describedby'), false);   // a hidden note is still read out if it is named
+  buttonOf($('preview'), 'Remove').click();
+  assert.equal(hint.hidden, false);   // removed: Send re-runs again
+  assert.equal($('send').getAttribute('aria-describedby'), 'rerun-hint');
+  attach(imageFile('second.png'));
+  const turn = h.app.send();
+  await flush();
+  assert.equal(hint.hidden, true);   // a turn runs
+  h.api.streams[0].accept('m_b');
+  await flush();
+  assert.equal(hint.hidden, true);
+  h.api.streams[0].channel.push(...fullTurn('m_b'));
+  h.api.streams[0].channel.end();
+  await turn;
+  assert.equal(hint.hidden, false);
+  assert.equal(hint.textContent, 'No new image: Send re-runs second.png with these settings.');   // the newest image of the chat
+  const rerun = h.app.send();   // and Send with no new image does what the hint says
+  await flush();
+  assert.equal(h.api.streams[1].opts.form.get('image'), null);
+  assert.deepEqual(h.api.streams[1].opts.sessionId, 's_a');
+  h.api.streams[1].accept('m_c');
+  await flush();
+  h.api.streams[1].channel.push(...fullTurn('m_c'));
+  h.api.streams[1].channel.end();
+  await rerun;
+  assert.equal(hint.textContent, 'No new image: Send re-runs second.png with these settings.');   // a re-run does not change which image is the newest
+});
+
+test('the re-run hint names the newest image of the chat, not the newest turn', async () => {
+  resetEvents();
+  const question = [startEv({ message_id: 'm_3', image: null }), ev('warning', { code: 'not_a_command', message: 'This is a report generator.' }),
+                    stopEv('done', { message_id: 'm_3' })];
+  const h = harness({
+    sessions: [sess('s_a', 'three turns', 3)],
+    routes: {
+      'GET /v1/sessions/s_a': { ...sess('s_a', 'three turns', 3), messages: [
+        userMsg('u_1', '', 'first.png'), botMsg('m_1'), userMsg('u_2', '', 'second.png'), botMsg('m_2'), userMsg('u_3', 'is it pneumonia?'), botMsg('m_3')] },
+      'GET /v1/messages/m_1': () => ({ ...botMsg('m_1'), events: rows(fullTurn('m_1')) }),
+      'GET /v1/messages/m_2': () => ({ ...botMsg('m_2'), events: rows(fullTurn('m_2')) }),
+      'GET /v1/messages/m_3': () => ({ ...botMsg('m_3'), events: rows(question) }),
+    },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal($('rerun-hint').hidden, false);
+  assert.equal($('rerun-hint').textContent, 'No new image: Send re-runs second.png with these settings.');   // the question after it had no image
+});
+
+test('a server with no retrieval gallery and no labeller: those controls are disabled and say why, and the chips leave out k', async () => {
+  const h = harness({ models: NO_STAGES });
+  await h.app.start();
+  await flush();
+  const retrieval = $('retrieval-note');
+  const labels = $('labels-note');
+  assert.equal(retrieval.textContent, 'This server has no retrieval gallery, so similar X-rays and matching reports are skipped.');
+  assert.equal(labels.textContent, 'This server has no CheXbert labeller, so labels are skipped.');
+  assert.deepEqual([retrieval.hidden, labels.hidden], [false, false]);
+  for (const [field, note] of [[/k_images/, 'retrieval-note'], [/k_reports/, 'retrieval-note'], ['CheXbert labels', 'labels-note']]) {
+    const input = control(field);
+    assert.deepEqual([input.disabled, input.getAttribute('aria-describedby')], [true, note], String(field));
+  }
+  assert.equal(control('CheXbert labels').checked, false);   // nothing to switch on
+  assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached']);   // no "k 4/3" for a stage that is skipped
+  // What is sent is what the user chose: the server skips the stages, and says so in the turn.
+  const sent = optionsFromSettings(loadSettings(h.storage), NO_STAGES);
+  assert.deepEqual([sent.k_images, sent.k_reports, sent.label], [4, 3, true]);
+  // The notes' places: after the field they explain.
+  const drawer = $('drawer').children;
+  assert.equal(drawer[drawer.indexOf(labelled(/k_reports/)) + 1], retrieval);
+  assert.equal(drawer[drawer.indexOf(labelled('CheXbert labels')) + 1], labels);
+});
+
+test('a server that runs the stages, and an older one that does not say, leave those controls available', async () => {
+  const cases = [['it runs both', { ...MODELS, features: { retrieval: true, labels: true } }], ['an older server', MODELS],
+                 ['empty features', { ...MODELS, features: {} }], ['features of the wrong type', { ...MODELS, features: 'none' }],
+                 ['null features', { ...MODELS, features: null }]];
+  for (const [name, models] of cases) {
+    const h = harness({ models });
+    await h.app.start();
+    await flush();
+    for (const field of [/k_images/, /k_reports/, 'CheXbert labels']) {
+      assert.deepEqual([control(field).disabled, control(field).hasAttribute('aria-describedby')], [false, false], `${name}: ${field}`);
+    }
+    assert.deepEqual([$('retrieval-note').hidden, $('labels-note').hidden], [true, true], name);
+    assert.equal(control('CheXbert labels').checked, true, name);
+    assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3'], name);
+  }
+  const half = harness({ models: { ...MODELS, features: { retrieval: true, labels: false } } });   // each stage on its own
+  await half.app.start();
+  await flush();
+  assert.deepEqual([control(/k_images/).disabled, control('CheXbert labels').disabled], [false, true]);
+  assert.deepEqual([$('retrieval-note').hidden, $('labels-note').hidden], [true, false]);
+  const other = harness({ models: { ...MODELS, features: { retrieval: false, labels: true } } });
+  await other.app.start();
+  await flush();
+  assert.deepEqual([control(/k_reports/).disabled, control('CheXbert labels').disabled], [true, false]);
+  assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached']);
+});
+
+test('serverHas is false only where the server says that a stage is not there', () => {
+  assert.equal(serverHas(NO_STAGES, 'retrieval'), false);
+  assert.equal(serverHas(NO_STAGES, 'labels'), false);
+  assert.equal(serverHas({ features: { retrieval: false, labels: true } }, 'labels'), true);
+  for (const models of [null, undefined, MODELS, [], 'x', 3, { features: null }, { features: {} }, { features: [] }, { features: 'no' },
+                        { features: { retrieval: true } }, { features: { retrieval: 0 } }, { features: { retrieval: 'false' } }]) {
+    assert.equal(serverHas(models, 'retrieval'), true, JSON.stringify(models));   // not told: available, as an older server is
+  }
 });

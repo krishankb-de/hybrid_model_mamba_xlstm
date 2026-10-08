@@ -57,6 +57,16 @@ def test_openapi_documents_every_v1_route(client):
             assert op.get("summary"), path
 
 
+def test_the_models_route_documents_its_features_and_its_example_has_the_real_keys(client):
+    op = client.get("/openapi.json").json()["paths"]["/v1/models"]["get"]
+    assert "`features`" in op["description"] and "retrieval" in op["description"] and "labels" in op["description"]
+    example = op["responses"]["200"]["content"]["application/json"]["example"]
+    live = client.get("/v1/models").json()
+    assert set(example) == set(live)                                  # the example cannot drift from the answer
+    assert set(example["features"]) == set(live["features"]) == {"retrieval", "labels"}
+    assert set(example["models"][0]) <= set(live["models"][0])        # and the card it shows is made of real card fields
+
+
 def test_curl_walkthrough_options_validate():
     from app.schemas import Options
     Options(**{"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "cached_decode": True, "compile": False,

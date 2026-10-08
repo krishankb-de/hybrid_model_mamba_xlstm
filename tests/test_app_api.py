@@ -571,6 +571,32 @@ def test_cached_decode_on_a_model_without_a_cache_is_a_422_in_the_engines_own_wo
         assert _stage_ends(frames)["generate"]["detail"]["cached_decode"] is False
 
 
+def test_models_says_which_stages_this_server_runs_from_what_its_pipeline_has(tmp_path):
+    # P4-F: the drawer disables the controls of a stage the server skips; true only where the pipeline really runs it
+    with TestClient(create_app(engine="tiny", home=str(tmp_path))) as c:
+        features = c.get("/v1/models").json()["features"]
+        assert features == {"retrieval": False, "labels": False}    # no gallery and no labeller until P5-E builds them
+        pipeline = c.app.state.worker.pipeline
+        pipeline.gallery = object()
+        assert c.get("/v1/models").json()["features"] == {"retrieval": True, "labels": False}
+        pipeline.labeler = object()
+        assert c.get("/v1/models").json()["features"] == {"retrieval": True, "labels": True}
+        pipeline.gallery = None
+        assert c.get("/v1/models").json()["features"] == {"retrieval": False, "labels": True}   # each follows its own stage
+        sid = c.post("/v1/sessions", json={}).json()["id"]    # and the answer changes nothing about a turn's options
+        assert _turn(c, sid, options={"max_new_tokens": 16})[-1]["data"]["status"] == "done"
+
+
+def test_features_are_two_booleans_in_every_mode_and_beside_the_old_keys(tmp_path):
+    with TestClient(create_app(engine="tiny", home=str(tmp_path / "a"))) as c:
+        listed = c.get("/v1/models").json()
+        assert {"default_model", "mode", "allow_compile", "models"} <= set(listed)   # additive: nothing it had is gone
+    with TestClient(create_app(engine="tiny", home=str(tmp_path / "b"), mode="public", token="t")) as c:
+        listed = c.get("/v1/models", headers={"Authorization": "Bearer t"}).json()
+        assert set(listed["features"]) == {"retrieval", "labels"}
+        assert all(isinstance(v, bool) for v in listed["features"].values())          # no path, no id: a yes or a no
+
+
 def test_compile_is_refused_unless_the_server_allows_it(tmp_path):
     with TestClient(create_app(engine="tiny", home=str(tmp_path / "a"))) as c:
         assert c.get("/v1/models").json()["allow_compile"] is False

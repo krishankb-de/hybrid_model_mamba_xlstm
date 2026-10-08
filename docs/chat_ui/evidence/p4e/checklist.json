@@ -1,6 +1,6 @@
 {
   "result": {
-    "checks": 9,
+    "checks": 10,
     "failures": []
   },
   "environment": {
@@ -11,7 +11,7 @@
     "browser": "Chrome/146.0.7680.178 (headless)",
     "python": "3.14.3",
     "os": "Darwin",
-    "warm_up_turn_s": 0.97,
+    "warm_up_turn_s": 0.81,
     "viewports": {
       "desktop": [
         1280,
@@ -25,6 +25,8 @@
     "notes": [
       "The tiny pipeline skips retrieve, label and score until P5-E, so the a11y check reads its label chips from a second tiny app whose home was seeded with one SYNTHETIC labelled turn (labelled_chips_*.png); the other checks run the live pipeline.",
       "The settings drawer clamps the token budget to the server's 16-200, so the 422 of the error check is reached through the note's command ('tokens 500'), which the server applies on top of the drawer's options.",
+      "Display repair is on by default in the page (the server's own default stays off), so the reports in every picture are the repaired display copy; the settings check runs 200 tokens to show that none of its sentences repeats on the card or in any frame of the stream, while Show raw keeps the decoder's whole text (the tiny model repeats one sentence about a dozen times).",
+      "The tiny server runs no retrieval gallery and no labeller, so its /v1/models says features retrieval and labels are false: the drawer disables k_images, k_reports and CheXbert labels with a note, and the composer chips leave out k (settings_*.png).",
       "Every screenshot was confirmed by the page itself (a DOM rule per picture, true before and after the capture)."
     ]
   },
@@ -32,8 +34,8 @@
     {
       "name": "stream",
       "status": "PASS",
-      "detail": "6 stages settled (3 done, 3 skipped); 40 snapshots, report 3 -> 247 chars; status ended on 'Report ready'; done in 1.3 s",
-      "seconds": 1.5,
+      "detail": "6 stages settled (3 done, 3 skipped); 30 snapshots, report 3 -> 205 chars; status ended on 'Report ready'; done in 1.1 s",
+      "seconds": 1.3,
       "data": {
         "stages": {
           "preprocess": "done",
@@ -46,12 +48,12 @@
         "stages_seen_running": [
           "generate"
         ],
-        "snapshots": 40,
+        "snapshots": 30,
         "report_chars": [
           3,
-          247
+          205
         ],
-        "frames_recorded": 42,
+        "frames_recorded": 35,
         "status_region": [
           "Queued",
           "generate running",
@@ -60,27 +62,27 @@
         "aria_busy": [
           [
             true,
-            32
+            34
           ],
           [
             false,
-            1247
+            1133
           ]
         ],
-        "card_done_ms": 1246,
+        "card_done_ms": 1130,
         "token_budget": 40,
-        "seconds": 1.29
+        "seconds": 1.14
       },
       "console_errors": []
     },
     {
       "name": "reload",
       "status": "PASS",
-      "detail": "the card after Page.reload equals the live one (4002 characters of markup, the same six stage states); a reload mid-turn followed the running turn to the card another reload shows",
+      "detail": "the card after Page.reload equals the live one (3934 characters of markup, the same six stage states); a reload mid-turn followed the running turn to the card another reload shows",
       "seconds": 5.7,
       "data": {
-        "markup_chars": 4002,
-        "text_chars": 923,
+        "markup_chars": 3934,
+        "text_chars": 855,
         "stages": {
           "preprocess": "done",
           "encode": "done",
@@ -100,7 +102,7 @@
             "stop": true
           },
           "followed_equals_replayed": true,
-          "markup_chars": 5420
+          "markup_chars": 4084
         }
       },
       "console_errors": []
@@ -108,33 +110,33 @@
     {
       "name": "sessions",
       "status": "PASS",
-      "detail": "2 chats switched 4 times, each with its own card and user turn; leaving a running turn cancelled its stream (request aborted), nothing asked for it (48 samples), and it replays done",
-      "seconds": 7.6,
+      "detail": "2 chats switched 4 times, each with its own card and user turn; leaving a running turn cancelled its stream (request aborted), nothing asked for it (45 samples), and it replays done",
+      "seconds": 7.0,
       "data": {
         "sessions": [
-          "s_01a11b3e1ecd00000559b5",
-          "s_01a11b3e224000008f8a22"
+          "s_01a11d2044f10000628a8d",
+          "s_01a11d20480100005cd356"
         ],
         "messages": {
-          "a": "m_01a11b3e1ef00001ceb420",
-          "b": "m_01a11b3e22640001d32c56",
-          "b2": "m_01a11b3e28330001591e15"
+          "a": "m_01a11d2045150001aeaa4e",
+          "b": "m_01a11d2048250001071970",
+          "b2": "m_01a11d204d900001d85c68"
         },
-        "samples_while_away": 48,
+        "samples_while_away": 45,
         "stream_request_cancelled": true,
-        "report_chars_of_turn_finished_while_away": 988
+        "report_chars_of_turn_finished_while_away": 171
       },
       "console_errors": []
     },
     {
       "name": "exports",
       "status": "PASS",
-      "detail": "JSON parses (38137 bytes, 4 messages, logs end in message_stop done); Markdown (1339 bytes) has '## Turn 1' and '## Turn 2'",
-      "seconds": 2.4,
+      "detail": "JSON parses (37283 bytes, 4 messages, logs end in message_stop done); Markdown (1561 bytes) has '## Turn 1' and '## Turn 2'",
+      "seconds": 2.2,
       "data": {
         "json": {
-          "file": "session-s_01a11b3e3c5b0000fc6055.json",
-          "bytes": 38137,
+          "file": "session-s_01a11d20604a0000359069.json",
+          "bytes": 37283,
           "messages": 4,
           "events_per_turn": [
             37,
@@ -142,11 +144,11 @@
           ]
         },
         "markdown": {
-          "file": "session-s_01a11b3e3c5b0000fc6055.md",
-          "bytes": 1339,
+          "file": "session-s_01a11d20604a0000359069.md",
+          "bytes": 1561,
           "headings": [
-            "## Turn 1 — 2026-10-08 11:20:25 UTC",
-            "## Turn 2 — 2026-10-08 11:20:26 UTC"
+            "## Turn 1 — 2026-10-08 20:07:03 UTC",
+            "## Turn 2 — 2026-10-08 20:07:04 UTC"
           ]
         }
       },
@@ -155,12 +157,12 @@
     {
       "name": "stop",
       "status": "PASS",
-      "detail": "stopped after 2 of 150 snapshots (0 more by the time the card said aborted, 0.05 s after the press); no more afterwards; note 'Turn stopped'",
+      "detail": "stopped after 3 of 150 snapshots (1 more by the time the card said aborted, 0.05 s after the press); no more afterwards; note 'Turn stopped'",
       "seconds": 0.8,
       "data": {
         "budget": 150,
         "snapshots_when_pressed": 2,
-        "snapshots_total": 2,
+        "snapshots_total": 3,
         "seconds_to_aborted": 0.05,
         "note": "Turn stopped",
         "server_status": "aborted",
@@ -185,7 +187,7 @@
       "name": "keyboard",
       "status": "PASS",
       "detail": "Tab visits 27 controls in DOM order, each with a focus ring; Enter sends; Enter and Space toggle a stage; Enter opens the drawer and Esc closes it to Settings",
-      "seconds": 1.0,
+      "seconds": 0.9,
       "data": {
         "tab_stops": [
           "#new-session",
@@ -356,7 +358,7 @@
       "name": "a11y",
       "status": "PASS",
       "detail": "stage buttons: their text, then state, with expanded, no glyph first; status region live=polite reads 'Report ready'; 14 chips read '<name>: positive|negative'; every control named; no text under AA contrast in 4 states",
-      "seconds": 2.4,
+      "seconds": 2.7,
       "data": {
         "contrast_issues_under_aa": {
           "settled card, light": [],
@@ -381,8 +383,8 @@
           },
           {
             "stage": "generate",
-            "visible": "generate · 720 ms",
-            "name": "generate · 720 ms, done, turn 1",
+            "visible": "generate · 651 ms",
+            "name": "generate · 651 ms, done, turn 1",
             "expanded": false
           }
         ],
@@ -395,7 +397,7 @@
           "preprocess": "preprocess · 2 ms",
           "encode": "encode · 0 mspatch_grid197, 32pooled_dim16prefix_tokens4devicecpuone_passtrue",
           "retrieve": "retrieve · skipped: gallery_unavailable",
-          "generate": "generate · 720 ms",
+          "generate": "generate · 651 ms",
           "label": "label · skipped: labeler_unavailable",
           "score": "score · skipped: no_reference"
         },
@@ -405,7 +407,6 @@
           "history": [
             "Queued",
             "generate running",
-            "Working",
             "Report ready"
           ]
         },
@@ -432,7 +433,7 @@
       "name": "error",
       "status": "PASS",
       "detail": "a server 422 showed the alert 'Invalid options: max_new_tokens: Input should be less than …', kept the note and the image, dismissed to the note field; the same composer then sent",
-      "seconds": 3.2,
+      "seconds": 3.0,
       "data": {
         "http_status": 422,
         "notice": "Invalid options: max_new_tokens: Input should be less than or equal to 200",
@@ -442,6 +443,170 @@
           "prompt": "tokens 500",
           "preview": true,
           "focus": "prompt"
+        }
+      },
+      "console_errors": []
+    },
+    {
+      "name": "settings",
+      "status": "PASS",
+      "detail": "typed 150 (1, 15 not clamped; chips and stored setting at 150 before any blur) and the turn ran it; re-run hint named xray_a.png, hidden with an image attached; typed 200 and the re-run of the same X-ray used it; at 200 tokens the card has 23 words and 0 repeated sentences (raw: 184 words, 13 repeated), none in 33 frames of the stream; Show raw is the decoder's text",
+      "seconds": 9.8,
+      "data": {
+        "drawer_before": {
+          "server_features": {
+            "retrieval": false,
+            "labels": false
+          },
+          "apply_note": "Changes apply from your next Send.",
+          "retrieval_note": {
+            "hidden": false,
+            "text": "This server has no retrieval gallery, so similar X-rays and matching reports are skipped."
+          },
+          "labels_note": {
+            "hidden": false,
+            "text": "This server has no CheXbert labeller, so labels are skipped."
+          },
+          "k_fields_disabled": true,
+          "labels_disabled": true,
+          "chips": [
+            "beam 3",
+            "100 tok",
+            "cached"
+          ],
+          "display_repair_checked": true
+        },
+        "first_send": {
+          "typed_states": [
+            {
+              "value": "1",
+              "focused": true,
+              "stored": null,
+              "chips": [
+                "beam 3",
+                "100 tok",
+                "cached"
+              ]
+            },
+            {
+              "value": "15",
+              "focused": true,
+              "stored": null,
+              "chips": [
+                "beam 3",
+                "100 tok",
+                "cached"
+              ]
+            },
+            {
+              "value": "150",
+              "focused": true,
+              "stored": 150,
+              "chips": [
+                "beam 3",
+                "150 tok",
+                "cached"
+              ]
+            }
+          ],
+          "chips_of_turn": [
+            "beam 3",
+            "150 tok",
+            "cached",
+            "k 4/3"
+          ],
+          "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 150 tok · 4016 ms · cpu · model detailstiny random-init model",
+          "rerun_hint": "No new image: Send re-runs xray_a.png with these settings."
+        },
+        "rerun": {
+          "typed_states": [
+            {
+              "value": "2",
+              "focused": true,
+              "stored": 150,
+              "chips": [
+                "beam 3",
+                "150 tok",
+                "cached"
+              ]
+            },
+            {
+              "value": "20",
+              "focused": true,
+              "stored": 20,
+              "chips": [
+                "beam 3",
+                "20 tok",
+                "cached"
+              ]
+            },
+            {
+              "value": "200",
+              "focused": true,
+              "stored": 200,
+              "chips": [
+                "beam 3",
+                "200 tok",
+                "cached"
+              ]
+            }
+          ],
+          "chips_of_turn": [
+            "beam 3",
+            "200 tok",
+            "cached",
+            "k 4/3"
+          ],
+          "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 200 tok · 5350 ms · cpu · model detailstiny random-init model",
+          "image": {
+            "sha256": "6984124968a6154a82ee0a32057c2e8029e176ee959abd3784e63351d8f5fa24",
+            "filename": "xray_a.png",
+            "source": "previous",
+            "urls": {
+              "original": "/v1/messages/m_01a11d209a9100003a3dc1/image?variant=original",
+              "thumb": "/v1/messages/m_01a11d209a9100003a3dc1/image?variant=thumb",
+              "model_input": "/v1/messages/m_01a11d209a9100003a3dc1/image?variant=model_input"
+            }
+          },
+          "options": {
+            "model": "tiny",
+            "decode": "beam",
+            "beam_size": 3,
+            "max_new_tokens": 200,
+            "cached_decode": true,
+            "compile": false,
+            "k_images": 4,
+            "k_reports": 3,
+            "label": true,
+            "reference": null,
+            "display_repair": true,
+            "test_row": null
+          },
+          "skipped_stages": {
+            "retrieve": "gallery_unavailable",
+            "label": "labeler_unavailable",
+            "score": "no_reference"
+          }
+        },
+        "clean_display_at_200_tokens": {
+          "words": {
+            "card": 23,
+            "raw_report": 184
+          },
+          "sentences": {
+            "card": 3,
+            "raw_report": 17
+          },
+          "repeated_sentences": {
+            "card": 0,
+            "raw_report": 13,
+            "worst_stream_frame": 0,
+            "worst_stored_snapshot": 0
+          },
+          "stream_frames_seen": 33,
+          "stored_snapshots": 200,
+          "truncated_mid_sentence": true,
+          "show_raw_equals_decoder_report": true
         }
       },
       "console_errors": []
@@ -456,7 +621,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 106601,
+      "bytes": 106385,
       "page_confirmed": true
     },
     {
@@ -467,7 +632,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 125594,
+      "bytes": 125161,
       "page_confirmed": true
     },
     {
@@ -478,7 +643,7 @@
         900
       ],
       "scheme": "dark",
-      "bytes": 128211,
+      "bytes": 126968,
       "page_confirmed": true
     },
     {
@@ -489,7 +654,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 127018,
+      "bytes": 131848,
       "page_confirmed": true
     },
     {
@@ -500,7 +665,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 160575,
+      "bytes": 168270,
       "page_confirmed": true
     },
     {
@@ -511,7 +676,7 @@
         812
       ],
       "scheme": "light",
-      "bytes": 77482,
+      "bytes": 80542,
       "page_confirmed": true
     },
     {
@@ -522,7 +687,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 127736,
+      "bytes": 133024,
       "page_confirmed": true
     },
     {
@@ -533,7 +698,18 @@
         900
       ],
       "scheme": "light",
-      "bytes": 97786,
+      "bytes": 97419,
+      "page_confirmed": true
+    },
+    {
+      "file": "settings_1280x900_light.png",
+      "shows": "the drawer with its notes, the re-run hint under the image well, and the chips at the typed budget",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 204817,
       "page_confirmed": true
     }
   ]

@@ -60,10 +60,12 @@ export function parseRoute(hash) {
 export const BOUNDS = Object.freeze({   // the server's bounds (app/schemas.py Options)
   beam_size: [1, 8], max_new_tokens: [16, 200], k_images: [0, 12], k_reports: [0, 10],
 });
-// The published protocol, as every Options default has it. model '' is the server's default; token is the access token.
+// The published protocol, as every Options default has it, but for display_repair: on here, off in the server's Options (its API
+// contract). It changes only what is shown. The report is the decoder's own text either way, and Show raw shows that text. model ''
+// is the server's default; token is the access token.
 export const DEFAULT_SETTINGS = Object.freeze({
   model: '', decode: 'beam', beam_size: 3, max_new_tokens: 100, cached_decode: true, compile: false,
-  k_images: 4, k_reports: 3, label: true, display_repair: false, token: '',
+  k_images: 4, k_reports: 3, label: true, display_repair: true, token: '',
 });
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -71,6 +73,12 @@ const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 function clampInt(value, [low, high], fallback) {
   const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
   return Number.isFinite(n) ? Math.min(high, Math.max(low, Math.round(n))) : fallback;
+}
+
+// A whole number inside the bounds, as that number; null for anything else (half typed, out of range, not a number).
+function wholeNumber(value, [low, high]) {
+  const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
+  return Number.isInteger(n) && n >= low && n <= high ? n : null;
 }
 
 // Anything in, a complete settings object out: a key that is missing or of the wrong type takes its default, a number is
@@ -111,6 +119,13 @@ export function saveSettings(storage, settings) {
     storage.setItem(SETTINGS_KEY, JSON.stringify(sanitize(settings)));
     return true;
   } catch { return false; }
+}
+
+// Does the server run this stage ('retrieval' or 'labels')? GET /v1/models says in `features`; false means its pipeline skips the stage.
+// A server that does not say (an older one, or before /v1/models has answered) is taken to run it: a control is not disabled on a guess.
+export function serverHas(models, feature) {
+  const features = isObject(models) ? models.features : null;
+  return !(isObject(features) && features[feature] === false);
 }
 
 const cardsOf = (models) => (Array.isArray(models) ? models : Array.isArray(models?.models) ? models.models : []).filter(isObject);
@@ -498,6 +513,28 @@ export function createApp(env) {
     ui.send.disabled = state.busy || state.loading;
     ui.stop.hidden = !state.busy;
     ui.exports.hidden = !state.session.id;
+    fields.runningNote.hidden = !state.busy;
+    syncRerun();
+  }
+
+  // The file name of the newest user turn that had an image: the one a text-only turn runs again (the server's rule, post_message).
+  function newestImage() {
+    const turns = state.session.turns;
+    for (let i = turns.length - 1; i >= 0; i--) if (turns[i].image?.filename) return turns[i].image.filename;
+    return '';
+  }
+
+  // Under the image well, when Send with no new image would run the chat's last X-ray again: with a file attached, in an empty chat
+  // and while a turn runs (or a chat loads) it says nothing. Information, not an alert.
+  function syncRerun() {
+    const name = state.file || state.busy || state.loading ? '' : newestImage();
+    ui.rerun.hidden = !name;
+    if (name) {
+      ui.rerun.textContent = `No new image: Send re-runs ${name} with these settings.`;
+      ui.send.setAttribute('aria-describedby', 'rerun-hint');   // Send says what it will do, to whoever reaches it by tab
+    } else {
+      ui.send.removeAttribute('aria-describedby');   // a hidden note that is still named would still be read out
+    }
   }
 
   // aria-busy on #conversation goes on at once and comes off a frame after the page stops being busy: put on and taken off inside
@@ -1145,26 +1182,33 @@ export function createApp(env) {
     fields.storageNote.hidden = ok;
   }
 
-  function update(patch) {
+  // sync false leaves the drawer's controls as they are: the field being typed in is not rewritten under the hand that types.
+  function update(patch, { sync = true } = {}) {
     state.settings = sanitize({ ...state.settings, ...patch });
     persist();
-    syncDrawer();
+    if (sync) syncDrawer();
     renderChips();
   }
 
   function buildDrawer() {
     const number = (key) => {
-      const input = el('input', { type: 'number', min: BOUNDS[key][0], max: BOUNDS[key][1], step: 1, inputmode: 'numeric' });
+      const input = el('input', { type: 'number', min: BOUNDS[key][0], max: BOUNDS[key][1], step: 1, inputmode: 'numeric', 'data-setting': key });
+      // While it is typed in, a whole number inside the bounds applies at once, so that the chips follow the keys. Anything else waits
+      // for change, which clamps: the "1" on the way to "150" is below the bound and must not be clamped under the hand that types it.
+      input.addEventListener('input', () => {
+        const n = wholeNumber(input.value, BOUNDS[key]);
+        if (n !== null && n !== state.settings[key]) update({ [key]: n }, { sync: false });
+      });
       input.addEventListener('change', () => update({ [key]: clampInt(input.value, BOUNDS[key], state.settings[key]) }));
       return input;
     };
     const choice = (key, ...options) => {
-      const select = el('select', {}, ...options.map(([value, label]) => el('option', { value }, label)));
+      const select = el('select', { 'data-setting': key }, ...options.map(([value, label]) => el('option', { value }, label)));
       select.addEventListener('change', () => update({ [key]: select.value }));
       return select;
     };
     const toggle = (key) => {
-      const input = el('input', { type: 'checkbox' });
+      const input = el('input', { type: 'checkbox', 'data-setting': key });
       input.addEventListener('change', () => update({ [key]: !!input.checked }));
       return input;
     };
@@ -1180,8 +1224,13 @@ export function createApp(env) {
     fields.compileRow = el('label', { class: 'check' }, fields.compile, 'Compile the model (torch.compile)');
     fields.kImages = number('k_images');
     fields.kReports = number('k_reports');
+    fields.retrievalNote = el('p', { class: 'note', id: 'retrieval-note', hidden: true },
+      'This server has no retrieval gallery, so similar X-rays and matching reports are skipped.');
     fields.label = toggle('label');
+    fields.labelsNote = el('p', { class: 'note', id: 'labels-note', hidden: true }, 'This server has no CheXbert labeller, so labels are skipped.');
     fields.repair = toggle('display_repair');
+    fields.applyNote = el('p', { class: 'hint', id: 'apply-note' }, 'Changes apply from your next Send.');
+    fields.runningNote = el('p', { class: 'hint', id: 'running-note', hidden: true }, 'The running turn keeps the settings it started with.');
     fields.mode = el('input', { type: 'text', readonly: true });
     fields.token = el('input', { type: 'password', autocomplete: 'off', spellcheck: 'false' });
     fields.token.addEventListener('change', () => {
@@ -1195,6 +1244,7 @@ export function createApp(env) {
     ui.modelsSection = el('section', { id: 'models-section', 'aria-label': 'Models' });
     ui.drawer.replaceChildren(
       el('div', { class: 'drawer-head' }, el('h2', {}, 'Settings'), ui.drawerClose),
+      fields.applyNote, fields.runningNote,
       el('label', {}, 'Model', fields.model),
       el('label', {}, 'Decode', fields.decode),
       el('label', {}, 'Beam size', fields.beam),
@@ -1202,8 +1252,8 @@ export function createApp(env) {
       el('label', { class: 'check' }, fields.cached, 'Cached decode'), fields.cachedNote,
       fields.compileRow,
       el('label', {}, 'Similar images (k_images)', fields.kImages),
-      el('label', {}, 'Matching reports (k_reports)', fields.kReports),
-      el('label', { class: 'check' }, fields.label, 'CheXbert labels'),
+      el('label', {}, 'Matching reports (k_reports)', fields.kReports), fields.retrievalNote,
+      el('label', { class: 'check' }, fields.label, 'CheXbert labels'), fields.labelsNote,
       el('label', { class: 'check' }, fields.repair, 'Display repair'),
       el('label', {}, 'Mode', fields.mode),
       el('label', {}, 'Access token', fields.token),
@@ -1223,6 +1273,11 @@ export function createApp(env) {
     syncDrawer();
   }
 
+  // aria-describedby names a note only while the note is shown: a hidden element that is named is still read out.
+  function describe(field, id, on) {
+    if (on) field.setAttribute('aria-describedby', id); else field.removeAttribute('aria-describedby');
+  }
+
   function syncDrawer() {
     const s = state.settings;
     const card = chosenCard(s, state.models);
@@ -1237,15 +1292,27 @@ export function createApp(env) {
     fields.cachedNote.hidden = cachedOk;
     fields.compileRow.hidden = state.models?.allow_compile !== true;
     fields.compile.checked = s.compile && state.models?.allow_compile === true;
+    const retrieval = serverHas(state.models, 'retrieval');
+    const labelling = serverHas(state.models, 'labels');
     fields.kImages.value = String(s.k_images);
     fields.kReports.value = String(s.k_reports);
-    fields.label.checked = s.label;
+    for (const field of [fields.kImages, fields.kReports]) {   // a stage the server skips has nothing to set; the note says so
+      field.disabled = !retrieval;
+      describe(field, 'retrieval-note', !retrieval);
+    }
+    fields.retrievalNote.hidden = retrieval;
+    fields.label.disabled = !labelling;
+    fields.label.checked = labelling && s.label;
+    describe(fields.label, 'labels-note', !labelling);
+    fields.labelsNote.hidden = labelling;
     fields.repair.checked = s.display_repair;
     fields.mode.value = text(state.models?.mode) || '—';
   }
 
   function renderChips() {
-    ui.chips.replaceChildren(...optionChips(optionsFromSettings(state.settings, state.models)).map((c) => el('span', {}, c)));
+    const options = optionsFromSettings(state.settings, state.models);
+    if (!serverHas(state.models, 'retrieval')) { delete options.k_images; delete options.k_reports; }   // that stage is skipped: no "k 4/3" to show
+    ui.chips.replaceChildren(...optionChips(options).map((c) => el('span', {}, c)));
   }
 
   async function refreshModels() {
@@ -1278,6 +1345,7 @@ export function createApp(env) {
     state.file = null;
     ui.preview.replaceChildren();
     ui.preview.hidden = true;
+    syncControls();   // with no file attached, Send may be a re-run
   }
 
   function attach(file) {
@@ -1293,6 +1361,7 @@ export function createApp(env) {
       el('span', {}, `${file.name || 'image'}${kb}`),
       el('button', { type: 'button', 'aria-label': 'Remove attached image', onclick: () => clearFile() }, 'Remove'));
     ui.preview.hidden = false;
+    syncControls();   // a new image: Send sends it
   }
 
   function wireComposer() {
@@ -1344,7 +1413,10 @@ export function createApp(env) {
     ui.noticeRetry = el('button', { type: 'button', hidden: true, onclick: () => state.noticeRetry?.() }, 'Retry');
     ui.notice = el('div', { id: 'notice', role: 'alert', hidden: true }, ui.noticeText, ui.noticeRetry,
       el('button', { type: 'button', 'aria-label': 'Dismiss', onclick: () => clearNotice() }, '✕'));
-    ui.composer.replaceChildren(ui.notice, ...Array.from(ui.composer.children));
+    ui.rerun = el('p', { id: 'rerun-hint', hidden: true });
+    const rows = Array.from(ui.composer.children);
+    rows.splice(rows.indexOf(ui.well) + 1, 0, ui.rerun);   // next to the image well
+    ui.composer.replaceChildren(ui.notice, ...rows);
 
     ui.exports = el('div', { id: 'exports', role: 'group', 'aria-label': 'Export this chat', hidden: true },
       el('button', { type: 'button', 'data-format': 'json', onclick: () => detach(exportSession('json')) }, 'Export JSON'),

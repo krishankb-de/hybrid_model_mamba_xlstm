@@ -402,7 +402,8 @@ export function renderProvenance(view, ctx) {
 const IMAGE_URL = /^(?:blob:|data:image\/(?:png|jpeg|webp|gif);base64,)/;
 const usable = (url) => typeof url === 'string' && IMAGE_URL.test(url);
 
-// The resolved options as small chips: beam 3 · 100 tok · cached · k 4/3, and what else deviates from the defaults.
+// The resolved options as small chips: beam 3 · 100 tok · cached · k 4/3, and what else deviates from the defaults. Display repair is
+// on by default in the page, so only its being off is said: "raw text", the report as the decoder wrote it.
 export function optionChips(options) {
   if (!isObject(options)) return [];
   const o = options;
@@ -412,7 +413,7 @@ export function optionChips(options) {
     o.cached_decode === true ? 'cached' : o.cached_decode === false ? 'uncached' : null,
     str(o.k_images) || str(o.k_reports) ? `k ${str(o.k_images) || NONE}/${str(o.k_reports) || NONE}` : null,
     o.label === false ? 'labels off' : null,
-    o.display_repair === true ? 'repair on' : null,
+    o.display_repair === false ? 'raw text' : null,
     o.compile === true ? 'compiled' : null,
     typeof o.reference === 'string' && o.reference ? 'reference' : null,
     Number.isInteger(o.test_row) ? `test row ${o.test_row}` : null,

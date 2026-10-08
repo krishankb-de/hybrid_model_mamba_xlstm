@@ -11,7 +11,7 @@
  * Hooks the scripts use: the hidden attribute (drawer, preview, stop, viewer), body.sidebar-open (the off-canvas
  * sidebar; a click on its scrim lands on the body), #image-well.dragging, ol.timeline li[data-state] and li.open,
  * .provisional, and the .card and .chip helpers (render.js). app.js builds the rows of #session-list, #exports,
- * #session-more, #notice, the contents of #drawer and #health[data-state="down"], styled below.
+ * #session-more, #notice, #rerun-hint (under the image well), the contents of #drawer and #health[data-state="down"], styled below.
  *
  * System fonts only and no url(): the page makes no request but to its own /static/ files.
  */
@@ -394,6 +394,15 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 
 #prompt { min-height: 3.25rem; max-height: 40vh; resize: vertical; }
 
+#rerun-hint {   /* "No new image: Send re-runs <file> with these settings.": a row of its own, under the image well; information, not an alert */
+  flex: 1 0 100%;
+  min-width: 0;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;   /* a long file name wraps instead of widening the composer */
+}
+
 #chips { display: flex; flex-wrap: wrap; gap: 4px; color: var(--muted); font-size: 0.75rem; overflow-wrap: anywhere; }
 #chips:empty { display: none; }
 #chips > * { padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; line-height: 1.6; }
@@ -438,6 +447,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .drawer-head h2 { margin: 0; }
 #drawer-close { flex: none; min-width: 40px; padding: 0; }
 #drawer .check { display: flex; align-items: center; gap: 8px; }   /* a checkbox, then its words */
+/* A setting that cannot be used (k_images on a server with no gallery, beam size under greedy, cached decode with no cache) must look it:
+   dashed, muted and on the soft fill (still 4.5:1), not the field it is when it works. */
+#drawer input:disabled, #drawer select:disabled { border-style: dashed; background: var(--soft); color: var(--muted); cursor: not-allowed; }
+#drawer .check:has(:disabled) { color: var(--muted); }
 #drawer .note, #drawer .hint { margin: 4px 0 0; color: var(--muted); font-size: 0.8125rem; }
 #drawer h3 { margin: 20px 0 4px; }
 #drawer h4 { margin: 12px 0 4px; color: var(--muted); font-size: 0.875rem; }

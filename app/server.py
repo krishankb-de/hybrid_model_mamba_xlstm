@@ -72,6 +72,11 @@ UPLOAD_MB = MAX_UPLOAD_BYTES // (1024 * 1024)
 # form's fields become one body model), so it is the field's own `examples`; P8-E's README walkthrough copies it.
 OPTIONS_EXAMPLE = ('{"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "cached_decode": true, "compile": false, '
                    '"k_images": 4, "k_reports": 3, "label": true, "reference": null, "display_repair": false}')
+# GET /v1/models as /docs shows it (test_app_openapi pins its keys to the real answer): `features` says which stages this server
+# runs, so a client can tell a skipped stage from one it switched off.
+MODELS_EXAMPLE = {"default_model": "hybrid_150m_m3_rrg", "mode": "private", "allow_compile": False,
+                  "features": {"retrieval": False, "labels": False},
+                  "models": [{"name": "hybrid_150m_m3_rrg", "prefix_k": 32, "cached_decode_available": True, "device": "cpu"}]}
 
 
 def _option_ranges() -> str:
@@ -463,12 +468,19 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         return {"status": "ok", "mode": mode, "default_model": default_model, "turns_in_flight": worker.in_flight,
                 "queue_cap": queue_cap}
 
-    @app.get("/v1/models", summary="List models", responses=_refusals({}, client_id=False),
+    @app.get("/v1/models", summary="List models",
+             responses={200: {"description": "The models, the default, and the stages this server runs.",
+                              "content": {"application/json": {"example": MODELS_EXAMPLE}}},
+                        **_refusals({}, client_id=False)},
              description="The models this server can run, each with its card (checkpoint, device, architecture "
-                         "settings, whether decoding can be cached), and the default model, the mode and whether "
-                         "`compile` is allowed. In public mode a card names its checkpoint by file name only.")
+                         "settings, whether decoding can be cached), and the default model, the mode, whether "
+                         "`compile` is allowed and, in `features`, whether it runs the retrieval and labels stages. "
+                         "In public mode a card names its checkpoint by file name only.")
     def list_models():
+        pipeline = worker.pipeline   # a gallery and a labeller are what P5-E gives it: until then it has neither
         return {"default_model": default_model, "mode": mode, "allow_compile": allow_compile,
+                "features": {"retrieval": getattr(pipeline, "gallery", None) is not None,
+                             "labels": getattr(pipeline, "labeler", None) is not None},
                 "models": [redact_card(e.card(), mode) for e in engines.values()]}
 
     @app.post("/v1/sessions", summary="Create a session",

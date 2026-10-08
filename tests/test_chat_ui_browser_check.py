@@ -103,8 +103,29 @@ def test_the_ax_reader_reads_the_text_a_screen_reader_would_and_not_what_is_hidd
 
 # ---- the lists the script keeps about itself ---------------------------------------------------------------------------------------------
 
-def test_the_checks_are_the_nine_of_the_brief_in_order():
-    assert [name for name, _ in check.CHECKS] == ["stream", "reload", "sessions", "exports", "stop", "keyboard", "narrow", "a11y", "error"]
+def test_the_checks_are_the_ten_in_order():
+    assert [name for name, _ in check.CHECKS] == ["stream", "reload", "sessions", "exports", "stop", "keyboard", "narrow", "a11y", "error",
+                                                  "settings"]   # P4-F added the tenth
+
+
+def test_repeated_counts_the_sentences_that_repeat_an_earlier_one_by_the_repairs_key():
+    assert check.repeated("The heart is normal. The lungs are clear.") == 0
+    assert check.repeated("The heart is normal. the HEART is   normal. The lungs are clear. The heart is normal.") == 2   # case and whitespace
+    assert check.repeated("Findings: no effusion. Findings: no effusion. Findings: no") == 1   # a fragment is not a sentence yet
+    assert check.repeated("") == 0
+
+
+def test_budget_chip_finds_the_token_chip_of_the_composer():
+    assert check.budget_chip(["beam 3", "150 tok", "cached"]) == "150 tok"
+    assert check.budget_chip(["beam 3", "cached"]) is None
+
+
+def test_the_settings_check_types_the_budgets_the_brief_names_and_reads_the_notes_the_page_has():
+    assert (check.FIRST_BUDGET, check.SECOND_BUDGET) == (150, 200)   # 1 -> 15 -> 150 is the half-typed value of the brief; 200 is the longest run
+    source = (Path(__file__).resolve().parents[1] / "app" / "static" / "app.js").read_text()
+    for note in (check.APPLY_NOTE, check.RUNNING_NOTE, check.RETRIEVAL_NOTE, check.LABELS_NOTE):
+        assert note in source, note   # the check asks the page for exactly the words the page has
+    assert check.BUDGET_FIELD == '#drawer input[data-setting="max_new_tokens"]' and 'data-setting' in source
 
 
 def test_every_screenshot_the_script_takes_has_a_rule_and_a_file_it_declares():

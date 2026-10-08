@@ -3,7 +3,7 @@ run it.
 
 It starts the app (tiny engine: random weights, a toy vocabulary, 20 ms between decoding steps; a temporary home; a free
 loopback port), or takes --url, and drives headless Chrome over the DevTools protocol (scripts/chat_ui_cdp.py) with real
-mouse and key events. The image is a synthetic PNG (tests/app_helpers.png_bytes): nothing here is MIMIC-derived. Nine checks,
+mouse and key events. The image is a synthetic PNG (tests/app_helpers.png_bytes): nothing here is MIMIC-derived. Ten checks,
 one `CHECK <name> PASS|FAIL <detail>` line each:
 
   stream    a turn streams: all six stages settle, the report grows over many snapshots, then the card says done
@@ -16,6 +16,10 @@ one `CHECK <name> PASS|FAIL <detail>` line each:
   a11y      the accessibility tree: stage buttons named from their text with their expanded state, label chips that say
             positive or negative, a status region that says "Report ready"
   error     a server 422 shows the dismissible notice and keeps the composer as it was
+  settings  (P4-F) a budget typed into the drawer shows in the composer chips before any blur, and in the next turn's chips and
+            card; a Send with no new image re-runs the last X-ray under a hint that says so and uses the budget typed since; the
+            drawer says when changes apply and what this server skips; at 200 tokens with the page's default (Display repair on)
+            no sentence repeats on the settled card or in any frame of the stream, and Show raw still has the decoder's whole text
 
 No check passes while the page logged a console error or threw. Chips: the tiny pipeline skips retrieval, labelling and
 scoring until P5-E, so the a11y check reads its chips from a second tiny app whose home was seeded with one SYNTHETIC
@@ -49,6 +53,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from scripts.chat_ui_cdp import App, Browser, exit_on_sigterm, find_chrome  # noqa: E402
+from scripts.repair_generations import split_sentences  # noqa: E402
 from tests.app_helpers import png_bytes  # noqa: E402
 
 EVIDENCE_DIR = os.path.join(REPO_ROOT, "docs", "chat_ui", "evidence", "p4e")
@@ -58,7 +63,8 @@ DESKTOP = (1280, 900)
 PHONE = (375, 812)
 EVIDENCE_FILES = ["streaming_1280x900_light.png", "settled_1280x900_light.png", "settled_1280x900_dark.png", "drawer_1280x900_light.png",
                   "settled_375x812_light.png", "stopped_1280x900_light.png", "error_notice_1280x900_light.png",
-                  "labelled_chips_1280x900_light.png", "checklist.json"]   # what a full run writes, and the only files it replaces
+                  "labelled_chips_1280x900_light.png", "settings_1280x900_light.png",
+                  "checklist.json"]   # what a full run writes, and the only files it replaces
 STAGES = ["preprocess", "encode", "retrieve", "generate", "label", "score"]
 DETAILED = ("preprocess", "encode", "generate")   # the stages of the tiny pipeline that have a detail, so a disclosure button
 SETTLED = ("done", "skipped")  # what a stage of a finished turn can be
@@ -87,9 +93,14 @@ CARD_JS = """() => {
 # Watches the page's own DOM, so that no render between two polls is missed: every distinct state of the newest card, and every
 # thing the status region says. The recorder lives in the page and goes with it.
 RECORD_JS = """() => {
-  const rec = { t0: performance.now(), frames: [], said: [], texts: new Set(), busy: [] };
+  const rec = { t0: performance.now(), frames: [], said: [], texts: new Set(), shown: new Set(), busy: [] };
   window.__rec = rec;
   const last = () => { const all = document.querySelectorAll('#conversation article.card'); return all[all.length - 1] || null; };
+  // the report as the card says it: each section's header and body joined back into the text the server sent
+  const said = (c) => [...c.querySelectorAll('.report-body .report-section')].map((s) => {
+    const h = s.querySelector('h3'), p = s.querySelector('p');
+    return (h ? h.textContent + ': ' : '') + (p ? p.textContent : '');
+  }).join(' ');
   let key = null;
   new MutationObserver(() => {
     const c = last();
@@ -97,12 +108,13 @@ RECORD_JS = """() => {
     const body = c.querySelector('.report-body');
     const frame = { t: Math.round(performance.now() - rec.t0), status: c.getAttribute('data-status'),
                     stages: [...c.querySelectorAll('.timeline > li')].map((l) => l.getAttribute('data-state')),
-                    report: body ? body.textContent : '' };
-    const k = frame.status + '|' + frame.stages.join(',') + '|' + frame.report;
+                    report: body ? body.textContent : '', shown: said(c) };
+    const k = frame.status + '|' + frame.stages.join(',') + '|' + frame.report + '|' + frame.shown;
     if (k === key) return;
     key = k;
     rec.frames.push(frame);
     if (frame.status === 'running' && frame.report) rec.texts.add(frame.report);
+    if (frame.status === 'running' && frame.shown) rec.shown.add(frame.shown);
   }).observe(document.querySelector('#conversation'), { subtree: true, childList: true, attributes: true, characterData: true });
   new MutationObserver(() => rec.busy.push({ t: Math.round(performance.now() - rec.t0),
                                               on: document.querySelector('#conversation').hasAttribute('aria-busy') }))
@@ -119,7 +131,7 @@ PROGRESS_JS = """() => {
 
 RECORDED_JS = """() => {
   const r = window.__rec;
-  return { frames: r.frames, said: r.said, texts: [...r.texts], busy: r.busy };
+  return { frames: r.frames, said: r.said, texts: [...r.texts], shown: [...r.shown], busy: r.busy };
 }"""
 
 # The tab stops of the page in the order the DOM has them, and the one that has focus, in the same words.
@@ -164,6 +176,69 @@ MESSAGE_JS = """async (id) => {
 
 HEALTH_JS = """async () => (await (await fetch('/healthz')).json())"""
 
+MODELS_JS = """async () => (await (await fetch('/v1/models')).json())"""
+
+# The settings drawer as it reads at the moment, and the composer's chips beside it (P4-F).
+DRAWER_JS = """() => {
+  const q = (s) => document.querySelector(s);
+  const note = (id) => { const n = q('#' + id); return n ? { hidden: n.hidden, text: n.textContent } : null; };
+  const field = (setting) => { const f = q('#drawer [data-setting="' + setting + '"]');
+    return f ? { disabled: f.disabled, checked: f.checked, value: f.value, describedby: f.getAttribute('aria-describedby') } : null; };
+  return { open: !q('#drawer').hidden, second: q('#drawer').children[1] ? q('#drawer').children[1].id : null,
+           apply: note('apply-note'), running: note('running-note'), retrieval: note('retrieval-note'), labels: note('labels-note'),
+           rerun: note('rerun-hint'), k_images: field('k_images'), k_reports: field('k_reports'), label: field('label'),
+           repair: field('display_repair'), chips: [...document.querySelectorAll('#chips span')].map((s) => s.textContent) };
+}"""
+
+# One number field of the drawer while it is typed in: its text, whether it has focus, the chips, and the setting that is stored.
+FIELD_JS = """(selector) => {
+  const f = document.querySelector(selector);
+  let stored = null;
+  try {
+    stored = (JSON.parse(localStorage.getItem('cxrchat.settings') || 'null') || {})[f.getAttribute('data-setting')];
+  } catch (e) { stored = 'unreadable'; }
+  return { value: f.value, focused: document.activeElement === f, stored: stored === undefined ? null : stored,
+           chips: [...document.querySelectorAll('#chips span')].map((s) => s.textContent) };
+}"""
+
+# The newest user turn and card: what the turn says it used (chips, provenance) and whether it carried an image of its own.
+TURN_JS = """() => {
+  const users = [...document.querySelectorAll('#conversation .turn.user')];
+  const cards = [...document.querySelectorAll('#conversation article.card')];
+  const u = users[users.length - 1], c = cards[cards.length - 1];
+  const prov = c ? c.querySelector('.provenance') : null;
+  return { users: users.length, cards: cards.length, id: c ? c.getAttribute('data-message-id') : null,
+           chips: u ? [...u.querySelectorAll('.options .chip')].map((x) => x.textContent) : null,
+           image: !!(u && u.querySelector('img')), provenance: prov ? prov.textContent : '' };
+}"""
+
+# The newest card's report as the page shows it (sections joined back into text), and the raw text when Show raw is on.
+SHOWN_JS = """() => {
+  const cards = [...document.querySelectorAll('#conversation article.card')];
+  const c = cards[cards.length - 1];
+  if (!c) return null;
+  const shown = [...c.querySelectorAll('.report-body .report-section')].map((s) => {
+    const h = s.querySelector('h3'), p = s.querySelector('p');
+    return (h ? h.textContent + ': ' : '') + (p ? p.textContent : '');
+  }).join(' ');
+  const raw = c.querySelector('.report-raw');
+  const toggle = c.querySelector('[data-action="raw"]');
+  return { shown, raw: raw ? raw.textContent : null, pressed: toggle ? toggle.getAttribute('aria-pressed') : null,
+           truncated: !!c.querySelector('.note.truncated') };
+}"""
+
+# A message as the server stored it: what it was asked, the image it used, every snapshot streamed, and the two reports.
+LOG_JS = """async (id) => {
+  const body = await (await fetch('/v1/messages/' + id + '?after=0')).json();
+  const first = (name) => body.events.find((e) => e.event === name);
+  const start = first('message_start'), stop = first('message_stop');
+  return { status: body.status, options: start ? start.data.options : null, image: start ? start.data.image : null,
+           snapshots: body.events.filter((e) => e.event === 'content_block_delta').map((e) => e.data.delta.text),
+           skipped: Object.fromEntries(body.events.filter((e) => e.event === 'stage_end' && e.data.skipped).map((e) => [e.data.stage, e.data.skipped])),
+           report: stop ? stop.data.report : null, display: stop ? stop.data.display_report : null,
+           truncated: stop ? stop.data.truncated_mid_sentence : null };
+}"""
+
 # A text that is too faint on purpose: Chrome's contrast audit reports it, so that its silence about everything else is a result and
 # not an audit that did not run. It is put on the page for the audit and taken off again.
 CANARY_JS = """() => {
@@ -189,6 +264,9 @@ SHOT_RULES = {
                     "&& !document.querySelector('#preview').hidden",
     "labelled_chips": "return document.querySelectorAll('#conversation li.chip.label').length === 14 "
                       "&& document.querySelectorAll('#conversation li.chip.label.positive').length > 0",
+    "settings": "const d = document.querySelector('#drawer'), r = document.querySelector('#rerun-hint'); "
+                "return !d.hidden && !document.querySelector('#apply-note').hidden && !r.hidden && r.textContent.indexOf('No new image') === 0 "
+                "&& [...document.querySelectorAll('#chips span')].some((c) => c.textContent === '200 tok')",
 }
 
 
@@ -964,8 +1042,199 @@ def check_error(ctx: Context) -> Tuple[str, Dict[str, Any]]:
             {"http_status": statuses[-1][1], "notice": notice["text"], "composer_kept": True, "dismissed": dismissed})
 
 
+# ---- settings (P4-F) -------------------------------------------------------------------------------------------------------------
+
+BUDGET_FIELD = '#drawer input[data-setting="max_new_tokens"]'
+APPLY_NOTE = "Changes apply from your next Send."
+RUNNING_NOTE = "The running turn keeps the settings it started with."
+RETRIEVAL_NOTE = "This server has no retrieval gallery, so similar X-rays and matching reports are skipped."
+LABELS_NOTE = "This server has no CheXbert labeller, so labels are skipped."
+FIRST_BUDGET, SECOND_BUDGET = 150, 200   # typed in the drawer: the first Send's, then the re-run's (200 is the longest the server allows)
+RERUN_HINT = "No new image: Send re-runs xray_a.png with these settings."
+
+
+def repeated(text: str) -> int:
+    """How many sentences of the text repeat an earlier one (the repair's key: lower case, whitespace normalised)."""
+    keys = [s.lower() for s in split_sentences(text)]
+    return len(keys) - len(set(keys))
+
+
+def budget_chip(chips: List[str]) -> Optional[str]:
+    return next((c for c in chips if c.endswith(" tok")), None)
+
+
+def retype(b: Browser, selector: str, digits: str) -> List[Dict[str, Any]]:
+    """Click a number field of the drawer, clear it with the keys a user presses (End, then Backspace), and type the digits one key at a
+    time. -> the field after each digit: its text, whether it has focus, the composer chips, and the stored setting."""
+    b.click(selector)
+    b.key("End", "End", 35)
+    for _ in range(8):
+        b.key("Backspace", "Backspace", 8)
+    states = []  # type: List[Dict[str, Any]]
+    for ch in digits:
+        b.type_text(ch)
+        states.append(b.run(FIELD_JS, selector))
+    return states
+
+
+def type_budget(b: Browser, digits: str, chips: List[str], stored: List[Optional[int]]) -> List[Dict[str, Any]]:
+    """Type a budget into the drawer and check what the page did after every key: the field says what was typed (a half-typed value is not
+    clamped), keeps focus, and the composer chips and the stored setting are what they should be before any blur."""
+    states = retype(b, BUDGET_FIELD, digits)
+    typed = [digits[:i + 1] for i in range(len(digits))]
+    expect([t["value"] for t in states] == typed, "the field read {} while {} was typed".format([t["value"] for t in states], digits))
+    expect(all(t["focused"] for t in states), "the field lost focus while it was typed in: {}".format([t["focused"] for t in states]))
+    expect([budget_chip(t["chips"]) for t in states] == chips,
+           "the chips read {}, not {}, as {} was typed".format([budget_chip(t["chips"]) for t in states], chips, typed))
+    expect([t["stored"] for t in states] == stored,
+           "the stored setting went {}, not {}, as {} was typed".format([t["stored"] for t in states], stored, typed))
+    return states
+
+
+def finished_card(b: Browser, cards: int, timeout: float = 60.0) -> Dict[str, Any]:
+    """The newest card once it is the `cards`-th and its turn is over."""
+    return b.wait_for("(() => { const c = (%s)(); return c && c.cards === %d && c.status !== 'running' ? c : null; })()" % (CARD_JS, cards),
+                      timeout, "turn {} to end".format(cards))
+
+
+def forget_settings(b: Browser) -> None:
+    try:
+        b.evaluate("localStorage.removeItem('cxrchat.settings')")
+    except RuntimeError:   # no page of the app is open (yet): nothing of it is stored
+        pass
+
+
+def check_drawer_before_anything_changes(drawer: Dict[str, Any], features: Dict[str, bool]) -> None:
+    """The drawer as a fresh page shows it: when changes apply, the page's defaults, and a stage the server does not run switched off with
+    its reason (one it does run is left alone), as /v1/models says."""
+    retrieval, labelling = features["retrieval"], features["labels"]
+    expect(drawer["second"] == "apply-note" and drawer["apply"] == {"hidden": False, "text": APPLY_NOTE},
+           "the first line under the drawer's title is {} / {}, not {!r}".format(drawer["second"], drawer["apply"], APPLY_NOTE))
+    expect(drawer["running"] == {"hidden": True, "text": RUNNING_NOTE}, "the running-turn line is {} before any turn".format(drawer["running"]))
+    expect(drawer["repair"]["checked"] and not drawer["repair"]["disabled"], "Display repair is not on by default: {}".format(drawer["repair"]))
+    expect(not {"raw text", "repair on"} & set(drawer["chips"]),
+           "the chips say something about Display repair while it is on: {}".format(drawer["chips"]))
+    for name in ("k_images", "k_reports"):
+        expect(drawer[name]["disabled"] == (not retrieval) and drawer[name]["describedby"] == (None if retrieval else "retrieval-note"),
+               "{} is {} on a server whose retrieval is {}".format(name, drawer[name], retrieval))
+    expect(drawer["retrieval"] == {"hidden": retrieval, "text": RETRIEVAL_NOTE},
+           "the retrieval note is {} on a server whose retrieval is {}".format(drawer["retrieval"], retrieval))
+    label = drawer["label"]
+    expect(label["disabled"] == (not labelling) and label["describedby"] == (None if labelling else "labels-note") and (labelling or not label["checked"]),
+           "CheXbert labels is {} on a server whose labelling is {}".format(label, labelling))
+    expect(drawer["labels"] == {"hidden": labelling, "text": LABELS_NOTE},
+           "the labels note is {} on a server whose labelling is {}".format(drawer["labels"], labelling))
+    expect(bool([c for c in drawer["chips"] if c.startswith("k ")]) == retrieval,
+           "the composer chips {} on a server whose retrieval is {}: k belongs to them only when the stage runs".format(drawer["chips"], retrieval))
+    expect(drawer["rerun"]["hidden"], "the re-run hint is shown in an empty chat: {}".format(drawer["rerun"]))
+
+
+def check_clean_display(b: Browser, log: Dict[str, Any], rec: Dict[str, Any]) -> Dict[str, Any]:
+    """The 200-token re-run, run with the page's default (Display repair on): no sentence repeats on the card, in any snapshot the server
+    stored or in any frame of the card that was seen while it streamed, and Show raw is the decoder's whole text. -> what was measured."""
+    page = b.evaluate("(%s)()" % SHOWN_JS)
+    shown, report = page["shown"], log["report"]
+    expect(page["pressed"] == "false" and page["raw"] is None, "the card starts on the raw text: {}".format(page["pressed"]))
+    expect(" ".join(shown.split()) == " ".join(log["display"].split()), "the card shows {!r}, not the display report {!r}".format(shown, log["display"]))
+    expect(repeated(shown) == 0, "the settled card repeats {} sentence(s): {!r}".format(repeated(shown), one_line(shown, 300)))
+    expect(repeated(report) >= 5, "the decoder's own report repeats only {} sentence(s): the case is not the user's".format(repeated(report)))
+    stored_bad = [t for t in log["snapshots"] if repeated(t)]
+    expect(len(log["snapshots"]) == SECOND_BUDGET and not stored_bad,
+           "{} stored snapshots, {} of them repeat a sentence".format(len(log["snapshots"]), len(stored_bad)))
+    frames_bad = [t for t in rec["shown"] if repeated(t)]
+    expect(len(rec["shown"]) >= 10 and not frames_bad, "{} frames of the stream were seen; {} repeat a sentence".format(len(rec["shown"]), len(frames_bad)))
+    expect(len(shown.split()) * 2 < len(report.split()),
+           "the clean report ({} words) is not much shorter than the raw one ({})".format(len(shown.split()), len(report.split())))
+    b.click('#conversation > article.card:last-child [data-action="raw"]')
+    raw = b.wait_for("(() => { const r = (%s)(); return r && r.raw !== null ? r : null; })()" % SHOWN_JS, 5, "Show raw to show the raw text")
+    expect(raw["pressed"] == "true" and raw["raw"] == report, "Show raw shows {!r}, not the decoder's report".format(one_line(raw["raw"], 200)))
+    expect(repeated(raw["raw"]) >= 5, "Show raw has only {} repeated sentence(s)".format(repeated(raw["raw"])))
+    return {"words": {"card": len(shown.split()), "raw_report": len(report.split())},
+            "sentences": {"card": len(split_sentences(shown)), "raw_report": len(split_sentences(report))},
+            "repeated_sentences": {"card": repeated(shown), "raw_report": repeated(report), "worst_stream_frame": max(repeated(t) for t in rec["shown"]),
+                                   "worst_stored_snapshot": max(repeated(t) for t in log["snapshots"])},
+            "stream_frames_seen": len(rec["shown"]), "stored_snapshots": len(log["snapshots"]),
+            "truncated_mid_sentence": log["truncated"], "show_raw_equals_decoder_report": True}
+
+
+def check_settings(ctx: Context) -> Tuple[str, Dict[str, Any]]:
+    b = ctx.browser
+    ctx.open("#/new")
+    forget_settings(b)   # the page's defaults, whatever an earlier check left in this browser
+    try:
+        return settings_walk(ctx)
+    finally:
+        forget_settings(b)
+
+
+def settings_walk(ctx: Context) -> Tuple[str, Dict[str, Any]]:
+    b = ctx.browser
+    ctx.open("#/new")   # a fresh load, which reads the defaults
+    b.click("#settings")
+    b.wait_for("!document.querySelector('#drawer').hidden", what="the drawer")
+    features = b.evaluate("(%s)()" % MODELS_JS)["features"]
+    expect(set(features) == {"retrieval", "labels"} and all(isinstance(v, bool) for v in features.values()), "/v1/models says features {}".format(features))
+    drawer = b.evaluate("(%s)()" % DRAWER_JS)
+    check_drawer_before_anything_changes(drawer, features)
+    # -- a budget typed with real keys: "1" and "15" are below the bound of 16 and are not clamped; "150" is in force before any blur
+    ctx.attach("a")
+    typed = type_budget(b, str(FIRST_BUDGET), ["100 tok", "100 tok", "150 tok"], [None, None, FIRST_BUDGET])
+    # -- Send: the drawer says that the running turn keeps its settings, and the turn used the typed budget
+    ctx.send()
+    b.wait_for("!document.querySelector('#running-note').hidden", 10, "the drawer to say that a turn is running")
+    first = finished_card(b, 1)
+    expect(first["status"] == "done", "the first turn ended {}".format(first["status"]))
+    one = b.evaluate("(%s)()" % TURN_JS)
+    expect("150 tok" in one["chips"], "the new turn's chips are {}, without 150 tok".format(one["chips"]))
+    expect("150 tok" in one["provenance"].split(" · "), "the card's footer is {!r}, without 150 tok".format(one["provenance"]))
+    after = b.evaluate("(%s)()" % DRAWER_JS)
+    expect(after["running"]["hidden"], "the drawer still says a turn is running after it ended")
+    expect(after["rerun"] == {"hidden": False, "text": RERUN_HINT}, "after the turn the re-run hint is {}, not {!r}".format(after["rerun"], RERUN_HINT))
+    # -- the hint belongs to Send with no image: an attached one hides it, removing that image brings it back
+    ctx.attach("b")
+    expect(b.evaluate("(%s)()" % DRAWER_JS)["rerun"]["hidden"], "the re-run hint stays while an image is attached")
+    b.click("#preview button")
+    b.wait_for("document.querySelector('#preview').hidden", what="the attached image to go")
+    expect(b.evaluate("(%s)()" % DRAWER_JS)["rerun"] == {"hidden": False, "text": RERUN_HINT},
+           "the re-run hint did not come back with the image removed")
+    # -- no new image, a different budget: typed over the first, in force at once, and used by the re-run of the same X-ray
+    typed2 = type_budget(b, str(SECOND_BUDGET), ["150 tok", "20 tok", "200 tok"], [FIRST_BUDGET, 20, SECOND_BUDGET])
+    ctx.shot("settings", "settings", "the drawer with its notes, the re-run hint under the image well, and the chips at the typed budget", DESKTOP)
+    b.run(RECORD_JS, None)
+    ctx.send()
+    b.wait_for("!document.querySelector('#running-note').hidden", 10, "the drawer to say that the second turn is running")
+    second = finished_card(b, 2)
+    expect(second["status"] == "done", "the re-run ended {}".format(second["status"]))
+    two = b.evaluate("(%s)()" % TURN_JS)
+    expect(two["users"] == 2 and two["cards"] == 2 and not two["image"], "the re-run is not a turn without an image of its own: {}".format(two))
+    expect("200 tok" in two["chips"] and "200 tok" in two["provenance"].split(" · "),
+           "the re-run's chips {} and footer {!r} do not say 200 tok".format(two["chips"], two["provenance"]))
+    log = b.evaluate("(%s)(%s)" % (LOG_JS, json.dumps(two["id"])))
+    expect(log["image"]["source"] == "previous" and log["image"]["filename"] == "xray_a.png", "the re-run used {}, not the last X-ray".format(log["image"]))
+    expect(log["options"]["max_new_tokens"] == SECOND_BUDGET and log["options"]["display_repair"] is True, "the server ran with {}".format(log["options"]))
+    skips = {"score": "no_reference"}
+    skips.update({} if features["retrieval"] else {"retrieve": "gallery_unavailable"})
+    skips.update({} if features["labels"] else {"label": "labeler_unavailable"})
+    expect(log["skipped"] == skips, "the stages the server skipped are {}, not {}: the drawer and the pipeline disagree".format(log["skipped"], skips))
+    clean = check_clean_display(b, log, b.evaluate("(%s)()" % RECORDED_JS))
+    return ("typed 150 (1, 15 not clamped; chips and stored setting at 150 before any blur) and the turn ran it; re-run hint named xray_a.png, hidden with "
+            "an image attached; typed 200 and the re-run of the same X-ray used it; at 200 tokens the card has {} words and {} repeated sentences (raw: {} "
+            "words, {} repeated), none in {} frames of the stream; Show raw is the decoder's text".format(
+                clean["words"]["card"], clean["repeated_sentences"]["card"], clean["words"]["raw_report"], clean["repeated_sentences"]["raw_report"],
+                clean["stream_frames_seen"]),
+            {"drawer_before": {"server_features": features, "apply_note": drawer["apply"]["text"], "retrieval_note": drawer["retrieval"],
+                               "labels_note": drawer["labels"], "k_fields_disabled": drawer["k_images"]["disabled"] and drawer["k_reports"]["disabled"],
+                               "labels_disabled": drawer["label"]["disabled"], "chips": drawer["chips"],
+                               "display_repair_checked": drawer["repair"]["checked"]},
+             "first_send": {"typed_states": typed, "chips_of_turn": one["chips"], "footer": one["provenance"], "rerun_hint": after["rerun"]["text"]},
+             "rerun": {"typed_states": typed2, "chips_of_turn": two["chips"], "footer": two["provenance"], "image": log["image"],
+                       "options": log["options"], "skipped_stages": log["skipped"]},
+             "clean_display_at_200_tokens": clean})
+
+
 CHECKS = [("stream", check_stream), ("reload", check_reload), ("sessions", check_sessions), ("exports", check_exports),
-          ("stop", check_stop), ("keyboard", check_keyboard), ("narrow", check_narrow), ("a11y", check_a11y), ("error", check_error)]
+          ("stop", check_stop), ("keyboard", check_keyboard), ("narrow", check_narrow), ("a11y", check_a11y), ("error", check_error),
+          ("settings", check_settings)]
 
 
 def run_check(ctx: Context, name: str, fn: Callable[[Context], Tuple[str, Dict[str, Any]]]) -> Dict[str, Any]:
@@ -1035,6 +1304,11 @@ def environment(browser: Browser, app: Optional[App], warm: Optional[float]) -> 
                       "whose home was seeded with one SYNTHETIC labelled turn (labelled_chips_*.png); the other checks run the live pipeline.",
                       "The settings drawer clamps the token budget to the server's 16-200, so the 422 of the error check is reached through "
                       "the note's command ('tokens 500'), which the server applies on top of the drawer's options.",
+                      "Display repair is on by default in the page (the server's own default stays off), so the reports in every picture are the "
+                      "repaired display copy; the settings check runs 200 tokens to show that none of its sentences repeats on the card or in any "
+                      "frame of the stream, while Show raw keeps the decoder's whole text (the tiny model repeats one sentence about a dozen times).",
+                      "The tiny server runs no retrieval gallery and no labeller, so its /v1/models says features retrieval and labels are false: the "
+                      "drawer disables k_images, k_reports and CheXbert labels with a note, and the composer chips leave out k (settings_*.png).",
                       "Every screenshot was confirmed by the page itself (a DOM rule per picture, true before and after the capture)."]}
 
 
