@@ -18,10 +18,11 @@ import torch.nn.functional as F
 from PIL import Image
 from pydantic import ValidationError
 
-from app.engine import Cancelled, build_engine, file_sha256, git_provenance, tensor_sha256
+from app.engine import Cancelled, build_engine, file_sha256, git_provenance, stream_view, tensor_sha256
 from app.schemas import Options
 from app.tiny import (TINY_VOCAB, TinyTokenizer, TinyTower, tiny_decoder, tiny_decoder_config,
                       tiny_prefix_mapper)
+from scripts.repair_generations import repair_report, split_sentences
 from tests.app_helpers import png_bytes
 
 EMPTY = torch.zeros((1, 0), dtype=torch.long)   # report generation seeds with no BOS
@@ -428,6 +429,21 @@ class _FixedText:
     ("The heart is normal.  The lungs\nare", True, "The heart is normal."),      # cut mid-sentence: the repair drops it
     ("The lungs are", True, "The lungs are"),     # no complete sentence at all: nothing to repair to, flag stays true
     ("", False, ""),
+    # P4-F: the display copy drops every repeated sentence (dedup="all"), and the flag still says only "cut off"
+    ("The heart is normal. The heart is normal. The lungs are clear.", False,
+     "The heart is normal. The lungs are clear."),                                  # consecutive repeats
+    ("The heart is normal. The lungs are clear. The heart is normal. The lungs are clear.", False,
+     "The heart is normal. The lungs are clear."),                                  # an A B A B loop: consecutive dedup cannot see it
+    ("The heart is normal. the HEART is   normal.\nThe lungs are clear.", False,
+     "The heart is normal. The lungs are clear."),                                  # same key as the repair: case and whitespace
+    ("Findings: The heart is normal. Findings: The heart is normal. Impression: Clear.", False,
+     "Findings: The heart is normal. Impression: Clear."),                          # a repeat after a header
+    ("heart size Findings: no effusion. heart size Findings: no effusion. heart size Findings: no effusion.", False,
+     "heart size Findings: no effusion."),                                          # the tiny model's own loop: a header inside the sentence
+    ("The heart is normal. The heart is normal. The lungs", True, "The heart is normal."),   # repeats and a cut-off fragment
+    ("The heart is normal. The lungs are clear. The heart is normal. The lungs", True,
+     "The heart is normal. The lungs are clear."),                                  # ... whose fragment starts the next repeat
+    ("The heart is normal. The heart is normal.", False, "The heart is normal."),   # repeats only: nothing cut off
 ])
 def test_truncated_flag_and_display_repair_follow_the_text(text, truncated, display):
     eng = build_engine("tiny")
@@ -438,6 +454,146 @@ def test_truncated_flag_and_display_repair_follow_the_text(text, truncated, disp
     assert plain.report == rep.report == " ".join(text.split())
     assert plain.display_report == plain.report and rep.display_report == display
     assert plain.truncated_mid_sentence is truncated and rep.truncated_mid_sentence is truncated
+
+
+def test_the_display_copy_is_the_published_repair_with_every_repeat_dropped_and_the_raw_report_is_untouched():
+    text = "Findings: The heart is normal. Impression: The lungs are clear. Findings: The heart is normal. Impression: The lungs"
+    eng = build_engine("tiny")
+    eng.tokenizer = _FixedText(text)
+    _, rep = eng.generate(_encoded(eng), Options(max_new_tokens=16, display_repair=True), _noop, threading.Event())
+    assert rep.report == text                                                       # R2: the decoder's text, byte for byte
+    assert rep.display_report == repair_report(text, dedup="all", truncate=True)[0]
+    assert rep.display_report == "Findings: The heart is normal. Impression: The lungs are clear."
+
+
+# ---- P4-F: the stream view, what the live card shows of a snapshot ----------------------------------------------------------
+
+def _repeats(text):
+    """How many of the text's sentences repeat an earlier one (the repair's key: case-insensitive, whitespace-normalised)."""
+    keys = [s.lower() for s in split_sentences(text)]
+    return len(keys) - len(set(keys))
+
+
+def test_stream_view_keeps_a_text_with_no_repeats_whole_including_its_fragment():
+    for text in ("The heart is normal. The lungs are clear. No pleural",
+                 "Findings: The heart is normal. Impression: Clear.",
+                 "The heart", "The heart is normal.", "Findings:"):
+        assert stream_view(text) == text, text
+    assert stream_view("") == "" and stream_view("  \n ") == ""
+    assert stream_view("The heart is   normal.\nThe lungs") == "The heart is normal. The lungs"   # whitespace normalised, as the dumps are
+
+
+def test_stream_view_drops_a_sentence_that_repeats_one_already_shown():
+    assert stream_view("The heart is normal. The lungs are clear. The heart is normal.") == "The heart is normal. The lungs are clear."
+    assert stream_view("The heart is normal. the HEART is   normal.") == "The heart is normal."      # the repair's key
+    assert stream_view("The heart is normal. The heart is normal. The heart is normal. The lungs are clear.") == (
+        "The heart is normal. The lungs are clear.")
+    loop = "The heart is normal. The lungs are clear. The heart is normal. The lungs are clear."       # period 2: A B A B
+    assert stream_view(loop) == "The heart is normal. The lungs are clear."
+    assert stream_view("Findings: The heart is normal. Findings: The heart is normal.") == "Findings: The heart is normal."
+
+
+def test_stream_view_drops_a_growing_repeat_so_that_a_repeat_never_flickers_into_view():
+    shown = "The heart is normal. The lungs are clear."
+    repeat = "The heart is normal."
+    for n in range(1, len(repeat) + 1):         # every prefix of the repeat, mid-word ones included (a token can end inside a word)
+        assert stream_view(shown + " " + repeat[:n]) == shown, repeat[:n]
+    header = "Findings: The heart is normal."
+    for n in range(1, len(header) + 1):
+        assert stream_view(header + " " + header[:n]) == header, header[:n]
+
+
+def test_stream_view_keeps_a_new_fragment_and_shows_a_repeat_that_turns_out_to_differ():
+    shown = "The heart is normal."
+    assert stream_view(shown + " The lungs") == shown + " The lungs"           # not a start of a repeat: it grows token by token
+    assert stream_view(shown + " The heart is") == shown                         # still a start of one
+    assert stream_view(shown + " The heart is mildly") == shown + " The heart is mildly"   # it differs now: shown at once
+    assert stream_view(shown + " The heart is normal and") == shown + " The heart is normal and"   # longer than the sentence it began as
+    assert stream_view("Findings: The heart is normal. Findings: The lungs") == "Findings: The heart is normal. Findings: The lungs"
+
+
+def test_stream_view_agrees_with_the_display_copy_once_the_report_is_whole():
+    for text in ("The heart is normal. The lungs are clear. The heart is normal. The lungs are clear.",
+                 "Findings: no effusion. Findings: no effusion. Impression: Clear. Findings: no effusion.",
+                 "The heart is normal. The heart is normal. The heart is normal."):
+        assert stream_view(text) == repair_report(text, dedup="all", truncate=True)[0], text
+        assert stream_view(stream_view(text)) == stream_view(text)               # nothing left to drop
+
+
+def _views(text):
+    words = text.split()
+    return [stream_view(" ".join(words[:n])) for n in range(1, len(words) + 1)]
+
+
+def test_stream_view_only_ever_grows_by_appending_as_a_repeating_report_is_written():
+    text = ("and heart and heart without. catheter acute right large heart without. catheter acute right large heart without. "
+            "catheter acute stable is bilateral Findings: endotracheal there clear and heart without. "
+            "catheter acute stable is bilateral Findings: endotracheal there clear and heart without. "
+            "catheter acute stable is bilateral Findings: endotracheal there clear and heart")
+    views = _views(text)
+    assert all(_repeats(v) == 0 for v in views)                                 # not one frame of it repeats
+    assert all(b.startswith(a) for a, b in zip(views, views[1:]))               # and a frame never takes back what an earlier one said
+    assert views[-1] == ("and heart and heart without. catheter acute right large heart without. "
+                         "catheter acute stable is bilateral Findings: endotracheal there clear and heart without.")
+
+
+def test_stream_view_does_not_flash_a_list_marker_at_the_start_of_a_repeat():
+    # "1." is not the end of a sentence (a list marker), so it is the start of the next one: held back like any other start of
+    # a repeat. Taken as a finished sentence of its own it would show for one step and then vanish.
+    text = "1. Heart size is normal. 2. Lungs are clear. 1. Heart size is normal. 2. Lungs are clear. 1. Heart"
+    views = _views(text)
+    assert all(b.startswith(a) for a, b in zip(views, views[1:])) and all(_repeats(v) == 0 for v in views)
+    assert views[-1] == "1. Heart size is normal. 2. Lungs are clear."
+    assert stream_view("Seen by Dr. Smith. Seen by Dr.") == "Seen by Dr. Smith."   # an abbreviation does not end a sentence either
+
+
+class _GrowingText:
+    """A tokenizer for a report written one word per step: n ids decode to the first n words of one text."""
+
+    def __init__(self, text):
+        self.words = text.split()
+
+    def decode(self, ids, skip_special_tokens=True):
+        return " ".join(self.words[:len(ids)])
+
+
+def test_the_stream_is_the_stream_view_with_repair_on_and_the_raw_snapshot_without_it():
+    text = ("The heart is normal. The lungs are clear. The heart is normal. The lungs are clear. "
+            "Findings: no effusion. Findings: no effusion. Findings: no")
+    words = text.split()
+    assert len(words) >= 16                                                      # Options: at least 16 tokens
+    eng = build_engine("tiny")
+    eng.tokenizer = _GrowingText(text)
+    enc = _encoded(eng)
+    raw, shown = [], []
+    _, plain = eng.generate(enc, Options(max_new_tokens=len(words)), lambda step, t: raw.append(t), threading.Event())
+    _, rep = eng.generate(enc, Options(max_new_tokens=len(words), display_repair=True), lambda step, t: shown.append(t),
+                          threading.Event())
+    assert raw == [" ".join(words[:n]) for n in range(1, len(words) + 1)]       # repair off: the snapshots are exactly as before
+    assert shown == [stream_view(t) for t in raw]                                # repair on: each is the stream view of the raw one
+    assert any(a != b for a, b in zip(raw, shown)) and all(_repeats(t) == 0 for t in shown)
+    assert all(b.startswith(a) for a, b in zip(shown, shown[1:]))                # it grows by appending, never flickers
+    assert plain.report == rep.report == text                                    # R2: the same tokens, the same text
+    assert plain.display_report == plain.report
+    assert rep.display_report == repair_report(text, dedup="all", truncate=True)[0] == (
+        "The heart is normal. The lungs are clear. Findings: no effusion.")
+    assert rep.truncated_mid_sentence is True and plain.truncated_mid_sentence is True
+
+
+def test_the_users_case_200_tokens_with_repair_on_shows_no_repeated_sentence_anywhere():
+    eng = build_engine("tiny")
+    enc = _encoded(eng)
+    raw_snaps, shown = [], []
+    _, plain = eng.generate(enc, Options(max_new_tokens=200), lambda step, t: raw_snaps.append(t), threading.Event())
+    _, rep = eng.generate(enc, Options(max_new_tokens=200, display_repair=True), lambda step, t: shown.append(t),
+                          threading.Event())
+    assert len(plain.token_ids) == len(rep.token_ids) == 200                     # decoding still runs the whole budget
+    assert plain.token_ids == rep.token_ids and plain.report == rep.report       # R2: byte-identical to the published decoder
+    assert _repeats(plain.report) >= 5 and max(_repeats(t) for t in raw_snaps) >= 5   # the user's case: it does repeat
+    assert _repeats(rep.display_report) == 0                                     # the settled card
+    assert len(shown) == 200 and all(_repeats(t) == 0 for t in shown)            # and not one snapshot of the stream
+    assert 0 < len(rep.display_report.split()) < len(plain.report.split()) / 2   # a clean report, not an empty one
+    assert plain.display_report == plain.report                                  # repair off changes nothing
 
 
 def test_tiny_step_delay_paces_the_stream_and_a_cancel_cuts_the_pause_short():

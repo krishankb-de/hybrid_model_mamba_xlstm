@@ -23,6 +23,7 @@ from PIL import Image
 from app.imaging import load_upload, model_input_image, model_transform
 from app.schemas import DISCLAIMER  # noqa: F401  (the one copy lives in app.schemas; engine keeps the name)
 from app.tiny import TinyTokenizer, TinyTower, tiny_decoder, tiny_prefix_mapper
+from scripts.repair_generations import is_sentence_end, repair_report, split_sentences   # stdlib only: no decoding code
 
 if TYPE_CHECKING:
     from app.schemas import Options
@@ -64,6 +65,39 @@ class Generated:
 
 class Cancelled(Exception):
     """The turn's cancel event was set; generation stopped at a step boundary."""
+
+
+def _finished(sentence: str) -> bool:
+    """Did split_sentences close this sentence, rather than leave it as the text after its last boundary?"""
+    return is_sentence_end(sentence.rsplit(" ", 1)[-1])
+
+
+def stream_view(text: str) -> str:
+    """What the live card shows of a raw snapshot while display repair is on (CHAT_UI_PLAN.md P4-F).
+
+    The decoder has no stop condition (scripts/repair_generations.py), so a report fills its token budget and then repeats
+    itself. The settled card shows repair_report(report, dedup="all", truncate=True); this is the same view of a text that is
+    still being written, so that a repeat is on the screen at no moment, however the text grows:
+      * a sentence that repeats one already shown is dropped (repair_report's key: lower case, whitespace normalised);
+      * a trailing sentence that is not finished and is the start of one already shown is held back, so that a repeat does
+        not flicker into view a word at a time and out again once it is one;
+      * any other trailing fragment is kept, so that the text still grows token by token.
+    A pure function of the snapshot, built on the repair's own split_sentences: the trailing fragment is whatever follows the
+    last sentence end it found (a header, a list marker or an abbreviation does not end one), so what is held back and what
+    is dropped use the same rules as the display copy.
+    """
+    sentences = split_sentences(text)
+    fragment = sentences.pop() if sentences and not _finished(sentences[-1]) else None
+    seen = set()
+    shown = []   # type: List[str]
+    for sentence in sentences:
+        key = sentence.lower()
+        if key not in seen:
+            seen.add(key)
+            shown.append(sentence)
+    if fragment is not None and not any(key.startswith(fragment.lower()) for key in seen):
+        shown.append(fragment)
+    return " ".join(shown)
 
 
 def _ms(t0: float) -> float:
@@ -179,7 +213,6 @@ class Engine:
     def generate(self, enc: Encoded, opts: "Options", on_snapshot: Callable[[int, str], None],
                  cancel: threading.Event) -> Tuple[StageResult, Generated]:
         from scripts.evaluate_report_generation import beam_search_decode
-        from scripts.repair_generations import repair_report
 
         if opts.cached_decode and not self.decoder.supports_cached_decode():
             raise ValueError("{} has no O(1) decode cache; set cached_decode=false.".format(self.name))
@@ -193,7 +226,8 @@ class Engine:
                 raise Cancelled()
             if not first:
                 first.append(time.perf_counter())
-            on_snapshot(step, self._decode_text(ids))
+            text = self._decode_text(ids)
+            on_snapshot(step, stream_view(text) if opts.display_repair else text)   # only what is shown changes, never the report
 
         beam = 1 if opts.decode == "greedy" else opts.beam_size
         empty = torch.zeros((1, 0), dtype=torch.long, device=self.device)   # no BOS, as in training
@@ -207,8 +241,11 @@ class Engine:
         decoded = time.perf_counter()
         ids = out[0].tolist()
         report = self._decode_text(ids)
-        repaired, stats = repair_report(report, dedup="none", truncate=True)
-        # With no complete sentence at all the repair keeps the original and reports a fallback, not a truncation.
+        # The display copy drops every repeated sentence and the cut-off ending ("all", not "consecutive": a degenerate beam
+        # loops with period 2 or more, which only "all" sees). Decoding itself is the published protocol, so `report` is not touched.
+        repaired, stats = repair_report(report, dedup="all", truncate=True)
+        # Cut off means truncation only, whatever dedup dropped. With no complete sentence at all the repair keeps the
+        # original and reports a fallback, not a truncation.
         truncated = stats.get("sentences_truncated", 0) > 0 or (bool(report) and stats.get("fallbacks", 0) > 0)
         start = first[0] if first else t0
         detail = {"decode": opts.decode, "beam_size": beam, "tokens": len(ids), "stopped": "budget",
