@@ -4,9 +4,9 @@
   "branch": "chat_ui",
   "base": "h100_efficiency @ 5c45527 (2026-09-30, 'SLURM: partition aisc-batch renamed to pot-hpi-aisc-batch')",
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
-  "current_phase": "P4",
-  "status": "P0-P3 complete 2026-10-03 (store, redaction, streaming API, OpenAPI on the tiny engine). P4 frontend next; P3-E doc follow-up first.",
-  "next_action": "P4-E (browser checklist with screenshots; scripts/chat_ui_browser_check.py) via implementer with .superpowers/sdd/CHAT_UI_PLAN/task-P4-E-rulings.md, preceded by the 'P4-D follow-up' commit listed in the SDD ledger. Paused 2026-10-05 on user instruction after P4-D. Push pending: run `git push -u origin chat_ui` (blocked for the agent by the permission classifier).",
+  "current_phase": "P5",
+  "status": "P0-P4 complete 2026-10-08 (store, redaction, streaming API, browser UI on the tiny engine; browser checklist 9/9). P5 labels and retrieval backend next; P4-E follow-up carried to P6-F.",
+  "next_action": "P5-A (app/labels.py names, client, rule labeller, agreement + app/labeler.py service) via a fresh implementer per SDD; read the ledger tail .superpowers/sdd/CHAT_UI_PLAN/progress.md for carried items (P5-E: score.reference_chexbert_14, _previous_image for test rows, check 8 to a live labelled turn). P4 closed 2026-10-08; the agent cannot push (permission classifier) - the user pushes chat_ui.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -333,7 +333,7 @@
     },
     "P4": {
       "title": "Frontend shell (laptop, tiny engine)",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "P4-A": {
           "done": true,
@@ -352,15 +352,19 @@
           "desc": "app.js: routing, sessions sidebar, minimal file picker, Stop (cancel then abort), settings drawer, exports, health strip, polling watchdog."
         },
         "P4-E": {
-          "done": false,
+          "done": true,
           "desc": "Browser checklist on the tiny engine, with screenshots in the evidence."
         }
       },
       "evidence": {
-        "commits": "64a4728,fed1fce,38f4b76",
+        "commits": "fca9f6f..cf7f12a",
         "tests": "node 245/245 (app 118); validate + Gate 2b; layout 88/0; 220/220 mutants",
         "review": "clean after fix round 1 (watchdog at accept, resumed turn text, poll/stop recovery, retries, a11y)",
-        "smoke": "headless Chrome: stream→done, reload-identical, Stop early, exports, 4 s/8 s slow upload completes, retry paths, hung /healthz gives up at 5 s"
+        "smoke": "headless Chrome: stream→done, reload-identical, Stop early, exports, 4 s/8 s slow upload completes, retry paths, hung /healthz gives up at 5 s",
+        "test": "tests/test_chat_ui_layout_check.py",
+        "check": "scripts/chat_ui_browser_check.py RESULT checks 9 failures 0",
+        "layout": "94 cases 0 failures",
+        "evidence": "docs/chat_ui/evidence/p4e/checklist.json"
       },
       "verdict": null
     },
@@ -555,7 +559,9 @@
     "2026-10-04: P4-A complete.",
     "2026-10-04: P4-B complete.",
     "2026-10-04: P4-C complete.",
-    "2026-10-05: P4-D complete; push to origin NOT done (blocked by the Claude Code permission classifier; user to run `git push -u origin chat_ui`); paused before P4-E on user instruction."
+    "2026-10-05: P4-D complete; push to origin NOT done (blocked by the Claude Code permission classifier; user to run `git push -u origin chat_ui`); paused before P4-E on user instruction.",
+    "2026-10-08: P4-E browser checklist 9/9 on the tiny engine (stream, reload, switch, exports, stop, keyboard, 375 px, AX tree, 422 notice); shared CDP harness with graceful Chrome stop; 8 screenshots + checklist.json; review clean after 2 fix rounds",
+    "2026-10-08: current_phase -> P5"
   ],
-  "last_updated": "2026-10-04T06:02:51+02:00"
+  "last_updated": "2026-10-08T18:12:21+02:00"
 }

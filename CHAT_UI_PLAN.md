@@ -2543,7 +2543,7 @@ Commit `"P4-A: page shell + styles"`.
   - Chips sit on their own row, and the action row wraps.
   - At ≤ 480 px height the document scrolls.
 - **Caching.** `/` and `/static/*` send `Cache-Control: no-cache`.
-- **Geometry check.** `scripts/chat_ui_layout_check.py` is a CDP geometry check: 88 cases, run locally, not by `validate.sh`.
+- **Geometry check.** `scripts/chat_ui_layout_check.py` is a CDP geometry check, run locally and not by `validate.sh`. It had 88 cases; P4-E brings it to 94.
 
 - [x] **P4-B** `api.js` (SSE parser, stream, poll, cancel, image loader) and `state.js` (reducers, replay); `node --test` with a recorded fixture; `validate.sh` gains the node gate.
 
@@ -2807,9 +2807,43 @@ Commit `"P4-D: app wiring, sessions, drawer, stop, watchdog"`.
   - After Delete, focus moves to the next session.
 - **Health.** `/healthz` has a 5 s timeout.
 
-- [ ] **P4-E** Browser checklist on the tiny engine, with screenshots in the evidence.
+- [x] **P4-E** Browser checklist on the tiny engine, with screenshots in the evidence.
 
 Run `venv/bin/python -m app.server --engine tiny --home /tmp/cxrchat_dev` (CLI from P7-B; until then `venv/bin/uvicorn --factory app.server:create_app`), open `http://127.0.0.1:8000`, and check: a turn streams with all six stages; the report fills step by step, then settles; reload shows the identical card; a second session switches cleanly; JSON and Markdown exports download and open; Stop aborts within a step; keyboard-only use works (Tab order, Enter, Esc); 375 px wide works with no horizontal scroll; screen-reader labels on timeline steps and chips. Record screenshots and the checklist in the evidence. Commit `"P4-E: browser checklist (tiny engine)"`.
+
+*As built (P4-E, commits fca9f6f, cdde87a, c542ff2 and cf7f12a; the code is authoritative where it differs from the text above):*
+- **Script.** `scripts/chat_ui_browser_check.py` starts `create_app(engine="tiny")` in-process on a free loopback port (there is no CLI until P7-B), or takes `--url`.
+  - It prints one `CHECK <name> PASS|FAIL` line per item, then `RESULT {"checks": 9, "failures": []}`.
+  - It exits 1 when a check fails, and 2 on a start failure or overrun.
+  - It is run locally, not by `validate.sh`.
+- **The nine checks:**
+  - **stream:** six stages; the report grows over ≥ 3 snapshots; the card ends `done`.
+  - **reload:** the card is identical after reload.
+  - **switch:** switching sessions shows each session's own card, with no leaked stream.
+  - **exports:** the JSON export parses; the Markdown export has `## Turn 1`.
+  - **stop:** the turn ends `aborted` with fewer than 150 deltas.
+  - **keyboard:** Tab order (including the chat links), Enter, and Esc, which returns focus to Settings.
+  - **375 px:** no horizontal overflow.
+  - **AX tree:** stage names start with their visible text; chip state is exposed; the status region reads "Report ready"; no name starts with a CSS glyph.
+  - **error:** a real 422 from the note command `tokens 500` shows the notice, and the composer keeps its contents.
+- **Check 8's chips** come from one synthetic labelled turn, seeded through `Store`'s public methods in a second tiny app, because the tiny pipeline skips `label` and `score` until P5-E.
+  - The turn is marked SYNTHETIC in its text, its card and its file name.
+  - It is replaced by a live turn at P5-E.
+- **Harness.** `scripts/chat_ui_cdp.py` holds the shared CDP client, the Chrome launcher and the app runner.
+  - Stop is graceful: CDP `Browser.close`, then SIGTERM to the group, then SIGKILL as the fallback, with one 3 s close deadline. No signal goes to a reaped process.
+  - Both checks share one SIGTERM handler.
+  - The layout check now has 94 cases. They assert that `#stop` and the open `#drawer` are rendered, and pin the 120 px report floor under a tall composer.
+- **Evidence** (`docs/chat_ui/evidence/p4e/`): 8 PNGs plus `checklist.json`. The PNGs cover streaming, settled (light and dark), the drawer, 375×812, the stopped card, the error notice and the labelled chips. They come from the tiny engine and a synthetic image, so they hold no MIMIC data.
+- **Page fixes.** The checks found no new UI defect. Review fixes:
+  - `accept()` can no longer lock the page.
+  - The composer is spent before `accept()`'s DOM work.
+  - The route change clears the notice.
+  - Retry buttons are named per turn.
+  - `pollTurn` ignores a poll failure once the turn has settled.
+  - `aria-current` is dropped from a session that failed to open.
+  - The `aria-busy` clear waits one frame.
+  - The CSS stage glyphs carry empty alt text.
+- **Tests.** Node: 265. Harness: Chrome-free pytest in `tests/test_chat_ui_{browser,layout}_check.py`.
 
 ### P5 — Labels and retrieval backend
 
