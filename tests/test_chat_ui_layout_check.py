@@ -9,14 +9,14 @@ import json
 import os
 import signal
 import socket
+import struct
 import subprocess
 import threading
 import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import pytest
 
@@ -44,13 +44,20 @@ def _until(predicate, seconds: float = 5.0) -> bool:
     return predicate()
 
 
+def _record_killpg(monkeypatch) -> List[Any]:
+    """Every os.killpg the harness makes is recorded, not delivered."""
+    sent = []   # type: List[Any]
+    monkeypatch.setattr(chat_ui_cdp.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    return sent
+
+
 # ---- the harness ------------------------------------------------------------------------------------------------------------------
 
 def _fake_chrome(tmp_path: Path) -> Path:
     """A "Chrome" that starts, records its pid and profile directory, and never opens a DevTools page."""
     script = tmp_path / "chrome"
     script.write_text('#!/bin/sh\necho $$ > "{pid}"\nfor a in "$@"; do case "$a" in --user-data-dir=*) '
-                      'echo "${{a#--user-data-dir=}}" > "{profile}";; esac; done\nexec sleep 300\n'.format(
+                      'echo "${{a#--user-data-dir=}}" > "{profile}";; esac; done\nexec sleep 30\n'.format(
                           pid=tmp_path / "pid", profile=tmp_path / "profile"))
     script.chmod(0o755)
     return script
@@ -99,7 +106,7 @@ def test_a_devtools_connection_that_fails_after_chrome_started_closes_chrome(tmp
         thread.start()
     script = tmp_path / "chrome"
     script.write_text('#!/bin/sh\necho $$ > "{pid}"\nfor a in "$@"; do case "$a" in --user-data-dir=*) d="${{a#--user-data-dir=}}"; '
-                      'echo "$d" > "{profile}"; echo {port} > "$d/DevToolsActivePort";; esac; done\nexec sleep 300\n'.format(
+                      'echo "$d" > "{profile}"; echo {port} > "$d/DevToolsActivePort";; esac; done\nexec sleep 30\n'.format(
                           pid=tmp_path / "pid", profile=tmp_path / "profile", port=http.server_address[1]))
     script.chmod(0o755)
     try:
@@ -126,7 +133,7 @@ def test_a_chrome_that_exits_at_once_leaves_no_profile_directory(tmp_path):
 
 def test_kill_group_takes_the_children_with_it(tmp_path):
     child_file = tmp_path / "child"
-    proc = subprocess.Popen(["/bin/sh", "-c", 'sleep 300 & echo $! > "{}"; wait'.format(child_file)], start_new_session=True)
+    proc = subprocess.Popen(["/bin/sh", "-c", 'sleep 30 & echo $! > "{}"; wait'.format(child_file)], start_new_session=True)
     assert _until(lambda: child_file.exists() and child_file.read_text().strip())
     child = int(child_file.read_text())
     assert _alive(child)
@@ -135,12 +142,14 @@ def test_kill_group_takes_the_children_with_it(tmp_path):
     assert _until(lambda: not _alive(child)), "the child of the process outlived it"
 
 
-def test_kill_group_is_safe_on_nothing_and_on_a_process_that_has_gone():
+def test_kill_group_is_safe_on_nothing_and_on_a_process_that_has_gone(monkeypatch):
+    sent = _record_killpg(monkeypatch)
     kill_group(None)
     proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
     proc.wait()
     kill_group(proc)   # reaped already: no signal goes to a pid that may be someone else's
     kill_group(proc)
+    assert sent == [], "a signal went to the group of a process that was already reaped: {}".format(sent)
 
 
 class ScriptedSocket:
@@ -149,7 +158,6 @@ class ScriptedSocket:
     def __init__(self, replies: Any) -> None:
         self.replies, self.sent = list(replies), []
         self.incoming = []   # type: Any
-        self.sock = SimpleNamespace(settimeout=lambda seconds: None)   # Browser.close shortens the wait for an answer
 
     def send(self, text: str) -> None:
         message = json.loads(text)
@@ -195,20 +203,61 @@ def test_an_error_answer_raises_with_the_method_and_the_event_record_is_bounded(
 
 # ---- stopping what was started: politely first, SIGKILL last ------------------------------------------------------------------------------------
 
-POLITE = '#!/bin/sh\nmarker="$1"\nmkdir -p "$marker"\ntrap \'rm -rf "$marker"; exit 0\' TERM\nwhile :; do sleep 0.05; done\n'
-STUBBORN = '#!/bin/sh\nmarker="$1"\nmkdir -p "$marker"\ntrap \'\' TERM\nwhile :; do sleep 0.05; done\n'
+FAKE_STEPS = 300   # a fake waits this many 50 ms steps and ends by itself: 15 s, about 18 s with the forks (measured). One whose test
+                   # never got to stop it, because pytest was itself SIGKILLed and no finalizer ran, goes soon after
 
 
-def _start(tmp_path: Path, body: str, name: str = "fake") -> Any:
-    """A fake Chrome or app: a shell script that makes a marker directory, then waits. A TERM that it handles removes the marker and
-    exits 0, as Chrome removes its singleton directory; one that it ignores leaves the marker, as a Chrome that hangs would."""
+def _fake(on_term: str, steps: int = FAKE_STEPS) -> str:
+    """A fake Chrome or app, as the text of a shell script. The TERM trap comes first and the marker directory second: a test that waits
+    for the marker then knows the trap is in place (a TERM that comes earlier kills a shell that has none, at once). Then it waits, for
+    at most `steps` x 50 ms. on_term is the trap's action: a TERM that is handled removes the marker and exits 0, as Chrome removes its
+    singleton directory; one that is ignored (an empty action) leaves the marker, as a Chrome that hangs would."""
+    return ('#!/bin/sh\nmarker="$1"\ntrap \'{on_term}\' TERM\nmkdir -p "$marker"\n'
+            'i=0\nwhile [ "$i" -lt {steps} ]; do sleep 0.05; i=$((i + 1)); done\n').format(on_term=on_term, steps=steps)
+
+
+POLITE = _fake('rm -rf "$marker"; exit 0')
+STUBBORN = _fake('')
+
+_STARTED = []   # type: List[subprocess.Popen]   # what _start has started and the end of its test has not yet seen to
+_REAL_KILLPG = os.killpg   # kept from before any test patches os.killpg: the clean-up below must not be one of its victims
+
+
+def _start(tmp_path: Path, body: str, name: str = "fake", env: Optional[Dict[str, str]] = None, ready: Optional[float] = 5.0) -> Any:
+    """Starts a fake (see _fake) in a session of its own and returns it with its marker directory. ready is how long to wait for the
+    marker, in seconds (None: do not wait). The fake is registered before anything can fail, so that the clean-up below finds it."""
     script = tmp_path / name
     script.write_text(body)
     script.chmod(0o755)
     marker = tmp_path / (name + ".marker")
-    proc = subprocess.Popen(["/bin/sh", str(script), str(marker)], start_new_session=True)
-    assert _until(marker.exists), "the fake process did not start"
+    proc = subprocess.Popen(["/bin/sh", str(script), str(marker)], start_new_session=True, env=env)
+    _STARTED.append(proc)
+    if ready is not None:
+        assert _until(marker.exists, ready), "the fake process did not start"
     return proc, marker
+
+
+def _kill_the_fakes() -> None:
+    """SIGKILL, with its group, every fake that is still running, and forget them all."""
+    while _STARTED:
+        proc = _STARTED.pop()
+        if proc.poll() is None:   # not reaped yet, so the pid is still this process's own
+            try:
+                _REAL_KILLPG(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+
+
+@pytest.fixture(autouse=True)
+def _no_fake_outlives_its_test():
+    """The fakes wait, and STUBBORN ignores TERM: a test that failed before it stopped its fake used to leave it running (a shell that
+    forks a sleep twenty times a second, for ever). Whatever a test started and did not see to is killed when the test ends."""
+    yield
+    _kill_the_fakes()
 
 
 def _bare_browser(proc: Any, profile: Path, ws: Any = None) -> Browser:
@@ -217,6 +266,55 @@ def _bare_browser(proc: Any, profile: Path, ws: Any = None) -> Browser:
     browser.events_seen = deque(maxlen=chat_ui_cdp.KEEP_EVENTS)
     profile.mkdir()
     return browser
+
+
+@pytest.mark.parametrize("body, handles_term", [(POLITE, True), (STUBBORN, False)], ids=["polite", "stubborn"])
+def test_a_fake_has_its_trap_in_place_before_it_makes_its_marker(tmp_path, body, handles_term):
+    """A test waits for the marker before it sends TERM, so the trap has to be installed first. mkdir is slowed here by a shim on PATH
+    and the TERM comes while it runs: a fake with its trap in place meets it (polite: handles it and exits 0 once mkdir is done;
+    stubborn: ignores it and goes on); one without a trap dies of it at once (-15)."""
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    entered = tmp_path / "entered"
+    (shim / "mkdir").write_text('#!/bin/sh\n: > "{}"\nsleep 1\nexec /bin/mkdir "$@"\n'.format(entered))
+    (shim / "mkdir").chmod(0o755)
+    proc, marker = _start(tmp_path, body, env=dict(os.environ, PATH=str(shim) + os.pathsep + os.environ["PATH"]), ready=None)
+    assert _until(entered.exists), "the fake never reached mkdir"
+    assert not marker.exists()   # the marker does not exist yet: that is the window
+    proc.send_signal(signal.SIGTERM)
+    if handles_term:
+        assert proc.wait(timeout=5) == 0, "the TERM found no trap"
+    else:
+        assert _until(marker.exists), "the TERM was fatal to a fake that ignores it: its trap came too late"
+        assert proc.poll() is None
+
+
+def test_a_fake_ends_by_itself(tmp_path):
+    """Its wait is bounded: one whose test never got to stop it goes by itself (the finalizer cannot run in a pytest that is SIGKILLed)."""
+    assert FAKE_STEPS * 0.05 * 1.5 <= 30   # at most 30 s, even where the forks of the sleeps cost half as much again
+    proc, marker = _start(tmp_path, _fake("", steps=4), "short")
+    assert proc.wait(timeout=5) == 0   # nobody sent it anything
+    assert marker.exists()
+
+
+def test_the_clean_up_kills_a_fake_that_ignores_term_and_forgets_it(tmp_path):
+    proc, _ = _start(tmp_path, STUBBORN)
+    _kill_the_fakes()
+    assert proc.returncode == -signal.SIGKILL
+    assert _STARTED == []
+
+
+def test_a_fake_that_never_comes_up_is_cleaned_up_too(tmp_path):
+    with pytest.raises(AssertionError, match="did not start"):
+        _start(tmp_path, "#!/bin/sh\nexec sleep 20\n", "mute", ready=0.2)   # it never makes its marker
+    (proc,) = _STARTED   # registered before the wait that failed
+    assert proc.poll() is None
+    _kill_the_fakes()
+    assert proc.returncode == -signal.SIGKILL
+
+
+def test_the_clean_up_is_wired_in_for_every_test_of_this_file(request):
+    assert "_no_fake_outlives_its_test" in request.fixturenames
 
 
 def test_stop_group_asks_politely_first(tmp_path):
@@ -238,12 +336,28 @@ def test_stop_group_kills_what_ignores_term_once_the_wait_is_over(tmp_path):
     assert 0.5 <= took < 4, took
 
 
-def test_stop_group_is_safe_on_nothing_and_signals_nothing_after_the_process_was_reaped(tmp_path):
+def test_stop_group_is_safe_on_nothing_and_signals_nothing_after_the_process_was_reaped(monkeypatch):
+    """Once its leader is reaped a group's pid may be anyone's: nothing may be signalled then, whatever the order of the calls. (A
+    stop_group that signals without looking would send TERM and KILL to a stranger's group, and a returncode check cannot see that.)"""
+    sent = _record_killpg(monkeypatch)
     chat_ui_cdp.stop_group(None)
-    proc = subprocess.Popen(["/bin/sh", "-c", "exit 3"], start_new_session=True)
-    proc.wait()
-    chat_ui_cdp.stop_group(proc)
-    assert proc.returncode == 3   # untouched: no signal went to a pid that may be someone else's now
+    gone = subprocess.Popen(["/bin/sh", "-c", "exit 3"], start_new_session=True)
+    gone.wait()
+    chat_ui_cdp.stop_group(gone)
+    chat_ui_cdp.stop_group(gone, term_wait=0.1)
+    assert gone.returncode == 3   # untouched
+    assert sent == [], "a signal went to the group of a process that was already reaped: {}".format(sent)
+
+
+def test_the_killpg_patch_sees_what_stop_group_sends_to_a_process_that_is_still_there(monkeypatch):
+    """The control for the two tests that assert `sent == []`: the same patch does record what is sent to a live process, TERM first and
+    then, nothing having been delivered, KILL of its group (and the process is finished off by Popen.kill)."""
+    sent = _record_killpg(monkeypatch)
+    live = subprocess.Popen(["/bin/sh", "-c", "exec sleep 20"], start_new_session=True)
+    _STARTED.append(live)
+    chat_ui_cdp.stop_group(live, term_wait=0.1)
+    assert sent == [(live.pid, signal.SIGTERM), (live.pid, signal.SIGKILL)]
+    assert live.returncode == -signal.SIGKILL
 
 
 def test_closing_a_browser_stops_chrome_politely_first(tmp_path):
@@ -284,6 +398,54 @@ def test_closing_a_browser_that_drops_the_connection_instead_of_answering_still_
     proc, marker = _start(tmp_path, POLITE, "chrome")
     _bare_browser(proc, tmp_path / "profile", Hangs([[]])).close()
     assert proc.returncode == 0 and not (tmp_path / "profile").exists()
+
+
+def _server_frame(text: str, opcode: int = 0x1) -> bytes:
+    """One unmasked websocket frame, as DevTools sends it: FIN set, a payload under 64 KiB."""
+    payload = text.encode("utf-8")
+    n = len(payload)
+    head = bytes([0x80 | opcode, n]) if n < 126 else bytes([0x80 | opcode, 126]) + struct.pack(">H", n)
+    return head + payload
+
+
+def _devtools_that_never_answers(peer: socket.socket, stop: threading.Event, kind: str, seconds: float) -> None:
+    """kind: "events" (a stream of events), "pings" (a stream of pings, which never make a message) or "silence". It hangs up after
+    `seconds` (or when stop is set), so a deadline that is missing fails a test instead of hanging it."""
+    end = time.monotonic() + seconds
+    try:
+        while kind != "silence" and not stop.is_set() and time.monotonic() < end:
+            peer.sendall(_server_frame(json.dumps({"method": "Network.dataReceived", "params": {}})) if kind == "events"
+                         else _server_frame("ping", opcode=0x9))
+            time.sleep(0.02)
+        stop.wait(max(0.0, end - time.monotonic()))
+    except OSError:   # the other end closed
+        pass
+    finally:
+        peer.close()
+
+
+@pytest.mark.parametrize("kind", ["events", "pings", "silence"])
+def test_the_devtools_step_of_close_ends_at_its_deadline_however_much_the_peer_sends(tmp_path, monkeypatch, kind):
+    """A socket timeout is per read, so a peer that keeps sending (events, pings) and never answers Browser.close would hold close() for
+    as long as it likes. A real WebSocket on a socketpair (no handshake, no Chrome) and a peer that talks for 6 s: close() must still
+    be done within a second or so of CLOSE_WAIT_S, and have asked Chrome to leave by TERM, not KILL."""
+    monkeypatch.setattr(chat_ui_cdp, "CLOSE_WAIT_S", 0.3)
+    mine, theirs = socket.socketpair()
+    ws = chat_ui_cdp.WebSocket.__new__(chat_ui_cdp.WebSocket)
+    ws.sock, ws.buffer = mine, b""
+    stop = threading.Event()
+    peer = threading.Thread(target=_devtools_that_never_answers, args=(theirs, stop, kind, 6.0), daemon=True)
+    proc, marker = _start(tmp_path, POLITE, "chrome")
+    peer.start()
+    started = time.monotonic()
+    try:
+        _bare_browser(proc, tmp_path / "profile", ws).close()
+        took = time.monotonic() - started
+    finally:
+        stop.set()
+        peer.join(timeout=5)
+    assert took < 2.0, "close() took {:.1f} s: the peer held DevTools open past CLOSE_WAIT_S".format(took)
+    assert proc.returncode == 0 and not marker.exists()
 
 
 def test_closing_a_browser_whose_chrome_has_gone_sends_nothing(tmp_path):

@@ -7,11 +7,11 @@ imported by the app or run by validate.sh.
 
 Every process this module starts runs in a session of its own, so stopping it reaches the whole group (Chrome's helpers
 included) and nothing outlives a failure path. It is stopped politely first, and killed last: Chrome is asked to close over
-DevTools, then sent SIGTERM, and only a process that is still there after the wait gets SIGKILL. A Chrome that is killed
-leaves its singleton directory (com.google.Chrome.*, a SingletonSocket and a SingletonCookie) in $TMPDIR, one more on every
-run; one that leaves on request removes it. Browser.close() and App.stop() are safe to call at any time, on an object whose
-constructor failed half-way too. Standard library only: the websocket client is the little of RFC 6455 a DevTools session
-needs.
+DevTools (it has CLOSE_WAIT_S in all, by the clock, to answer and go), then sent SIGTERM, and only a process that is still there
+after the wait gets SIGKILL. A Chrome that is killed leaves its singleton directory (com.google.Chrome.*, a SingletonSocket and
+a SingletonCookie) in $TMPDIR, one more on every run; one that leaves on request removes it. Browser.close() and App.stop() are
+safe to call at any time, on an object whose constructor failed half-way too. Standard library only: the websocket client is the
+little of RFC 6455 a DevTools session needs.
 """
 import base64
 import hashlib
@@ -34,7 +34,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 KEEP_EVENTS = 5000   # DevTools events kept per Browser (Browser.events): the oldest go first
-CLOSE_WAIT_S = 3.0   # how long Chrome has to exit after the DevTools Browser.close, before it is sent SIGTERM
+CLOSE_WAIT_S = 3.0   # how long, in all, Chrome has to answer the DevTools Browser.close and to exit, before it is sent SIGTERM
 TERM_WAIT_S = 5.0    # how long a process has to exit after SIGTERM, before it is sent SIGKILL
 
 # The app as the checks run it. The uvicorn CLI cannot pass create_app its arguments (the step delay of the tiny engine is
@@ -52,7 +52,10 @@ uvicorn.run(server.create_app(engine="tiny", home=sys.argv[1], tiny_step_delay_s
 
 
 class WebSocket:
-    """A text-frame websocket client: the handshake, masked sends, and receives with fragments, pings and close."""
+    """A text-frame websocket client: the handshake, masked sends, and receives with fragments, pings and close. With .deadline set (a
+    time.monotonic() value) no wait for the peer's data goes past it, however much the peer sends meanwhile."""
+
+    deadline = None  # type: Optional[float]
 
     def __init__(self, url: str, timeout: float = 30.0) -> None:
         parts = urlparse(url)
@@ -80,8 +83,18 @@ class WebSocket:
             self.close()
             raise
 
+    def _arm(self) -> None:
+        """Before a wait for the peer's data: with a deadline, cut the wait off at it. A socket timeout alone is per read, so a peer that
+        keeps sending (events, pings) and never answers would never time out."""
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("DevTools did not answer in time")
+            self.sock.settimeout(remaining)
+
     def _read(self, n: int) -> bytes:
         while len(self.buffer) < n:
+            self._arm()
             chunk = self.sock.recv(65536)
             if not chunk:
                 raise ConnectionError("DevTools closed the connection")
@@ -353,19 +366,20 @@ class Browser:
             self.call("Emulation.setEmulatedMedia", features=[{"name": "prefers-color-scheme", "value": scheme}])
 
     def close(self) -> None:
-        """Close Chrome as a user would, so that it removes what it made outside its profile: the DevTools Browser.close first (a wait
-        of CLOSE_WAIT_S for it to go), then SIGTERM to its group (TERM_WAIT_S), and SIGKILL only for what is still there. Then the
-        profile directory is removed. Safe on a half-built Browser and when called twice."""
+        """Close Chrome as a user would, so that it removes what it made outside its profile: the DevTools Browser.close first (Chrome has
+        CLOSE_WAIT_S in all, by the clock, to answer it and to go), then SIGTERM to its group (TERM_WAIT_S), and SIGKILL only for what is
+        still there. Then the profile directory is removed. Safe on a half-built Browser and when called twice."""
         proc = self.proc
         if self.ws is not None:
             if proc is not None and proc.poll() is None:
+                deadline = time.monotonic() + CLOSE_WAIT_S
+                self.ws.deadline = deadline   # however much DevTools sends meanwhile, the wait for its answer ends here
                 try:
-                    self.ws.sock.settimeout(CLOSE_WAIT_S)   # a Chrome that does not answer is not waited for
                     self.call("Browser.close")
-                except Exception:   # it may drop the connection instead of answering; anything else falls through to the signals
+                except Exception:   # it may drop the connection, or never answer (TimeoutError); either way the signals follow
                     pass
                 try:
-                    proc.wait(timeout=CLOSE_WAIT_S)
+                    proc.wait(timeout=max(0.0, deadline - time.monotonic()))
                 except subprocess.TimeoutExpired:
                     pass
             self.ws.close()
