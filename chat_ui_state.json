@@ -5,8 +5,8 @@
   "base": "h100_efficiency @ 5c45527 (2026-09-30, 'SLURM: partition aisc-batch renamed to pot-hpi-aisc-batch')",
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P5",
-  "status": "P0-P4 complete 2026-10-08 (store, redaction, streaming API, browser UI on the tiny engine; browser checklist 9/9). P5 labels and retrieval backend next; P4-E follow-up carried to P6-F.",
-  "next_action": "P5-A (app/labels.py names, client, rule labeller, agreement + app/labeler.py service) via a fresh implementer per SDD; read the ledger tail .superpowers/sdd/CHAT_UI_PLAN/progress.md for carried items (P5-E: score.reference_chexbert_14, _previous_image for test rows, check 8 to a live labelled turn). P4 closed 2026-10-08; the agent cannot push (permission classifier) - the user pushes chat_ui.",
+  "status": "P0-P4 complete 2026-10-08 (store, redaction, streaming API, browser UI on the tiny engine; browser checklist 10/10; P4-F clean display + settings feedback from the user's test). P5 labels and retrieval backend next.",
+  "next_action": "P5-A (app/labels.py names, client, rule labeller, agreement + app/labeler.py service) via a fresh implementer per SDD; read the ledger tail .superpowers/sdd/CHAT_UI_PLAN/progress.md for carried items (P5-E: score.reference_chexbert_14, _previous_image for test rows, check 8 to a live labelled turn, set /v1/models features; P6-A: composer layout with the re-run hint). The agent cannot push (permission classifier) - the user pushes chat_ui.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -354,6 +354,10 @@
         "P4-E": {
           "done": true,
           "desc": "Browser checklist on the tiny engine, with screenshots in the evidence."
+        },
+        "P4-F": {
+          "done": true,
+          "desc": "Clean report display and settings that visibly apply. Added 2026-10-08 after the user's own test on the tiny dev server."
         }
       },
       "evidence": {
@@ -364,7 +368,10 @@
         "test": "tests/test_chat_ui_layout_check.py",
         "check": "scripts/chat_ui_browser_check.py RESULT checks 9 failures 0",
         "layout": "94 cases 0 failures",
-        "evidence": "docs/chat_ui/evidence/p4e/checklist.json"
+        "evidence": "docs/chat_ui/evidence/p4e/checklist.json",
+        "p4f_tests": "tests/test_app_engine.py (stream_view, 200-token user case), tests/frontend/app.test.mjs",
+        "p4f_check": "scripts/chat_ui_browser_check.py RESULT checks 10 failures 0",
+        "p4f_commits": "86e62f8..cbd5ac2"
       },
       "verdict": null
     },
@@ -561,7 +568,8 @@
     "2026-10-04: P4-C complete.",
     "2026-10-05: P4-D complete; push to origin NOT done (blocked by the Claude Code permission classifier; user to run `git push -u origin chat_ui`); paused before P4-E on user instruction.",
     "2026-10-08: P4-E browser checklist 9/9 on the tiny engine (stream, reload, switch, exports, stop, keyboard, 375 px, AX tree, 422 notice); shared CDP harness with graceful Chrome stop; 8 screenshots + checklist.json; review clean after 2 fix rounds",
-    "2026-10-08: current_phase -> P5"
+    "2026-10-08: current_phase -> P5",
+    "2026-10-08: P4-F (user's own test): clean report display (dedup=all + stream view; raw report unchanged, R2), UI repair default on, live chips, drawer + re-run hints, /v1/models features with disabled fields; 10th browser check 'settings'; review approved"
   ],
-  "last_updated": "2026-10-08T18:12:21+02:00"
+  "last_updated": "2026-10-08T23:28:38+02:00"
 }

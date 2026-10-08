@@ -247,6 +247,10 @@ score       {"rouge_l","bleu_1","bleu_4","chexbert_14_micro_f1"?,"exact_match_14
 
 *Added at P4-C (2026-10-04):* `score.reference_chexbert_14` holds the reference's own 14 labels (P5-E already labels the reference for the CheXbert parts). The UI uses it to mark agree/disagree on each label chip; without it, the chips show no marks. It is private-mode only, because public mode drops the whole score event.
 
+*Added at P4-F (2026-10-08):*
+- **Display repair.** With `display_repair` on, each `content_block_delta.text` is the *stream view* of the current best beam: repeated sentences are dropped, and so is the start of a repeat. `display_report` is `repair_report(report, dedup="all", truncate=True)`. `message_stop.report` is always the raw protocol text.
+- **Server features.** `GET /v1/models` also returns `features: {"retrieval": bool, "labels": bool}`. Each is true only when the pipeline actually runs that stage. P5-E must set them when it wires the gallery and the labeller.
+
 ### 6.4 Store (`CHAT_HOME/chat.db`)
 
 ```sql
@@ -2844,6 +2848,55 @@ Run `venv/bin/python -m app.server --engine tiny --home /tmp/cxrchat_dev` (CLI f
   - The `aria-busy` clear waits one frame.
   - The CSS stage glyphs carry empty alt text.
 - **Tests.** Node: 265. Harness: Chrome-free pytest in `tests/test_chat_ui_{browser,layout}_check.py`.
+
+- [x] **P4-F** Clean report display and settings that visibly apply. Added 2026-10-08 after the user's own test on the tiny dev server.
+
+The user reported two problems.
+
+**Every report runs to the token budget and repeats itself.**
+- The cause is the published protocol: `beam_search_decode` has no stop condition, and the model never learned an end-of-report token (V5-D). The real model behaves the same way: at 200 tokens, 17.9% of its sentences are repeats.
+- The display repair used `dedup="none"`, so turning repair on never removed a repeat.
+- The user's decision was "Clean display": decoding stays exactly the published protocol, and only the display changes.
+
+**Changed settings seemed not to apply.**
+- Settings did reach the server. What was missing was feedback.
+- The composer chips changed only when a field was committed.
+- Nothing said when a change takes effect.
+- Nothing said that Send with no new image re-runs the last X-ray.
+- k_images, k_reports and the CheXbert labels toggle did nothing, because those stages are skipped until P5-E, and nothing said so.
+
+Commit `"P4-F: clean report display (dedup + stream view)"` and `"P4-F: settings feedback, re-run hint, server features"`.
+
+*As built (P4-F, commits 86e62f8 and cbd5ac2; the code is authoritative):*
+- **Display copy.** `display_report = repair_report(report, dedup="all", truncate=True)`. `report` and `truncated_mid_sentence` are unchanged (R2).
+- **Stream view.** With `display_repair` on, each `content_block_delta.text` is `stream_view(raw)` (`app/engine.py`):
+  - sentences already shown are dropped;
+  - the start of a repeat is held back;
+  - a new fragment is kept;
+  - it is built on `split_sentences` from `scripts/repair_generations.py`.
+- **User's case** (tiny engine, 200 tokens): the card falls from 173 words to 23, and repeated sentences from 13 to 0. No streamed snapshot repeats.
+- **UI defaults and chips.**
+  - Display repair is on by default in the UI only. `Options.display_repair` stays `False` for API clients.
+  - "Show raw" shows the protocol text.
+  - The chip reads `raw text` when repair is off.
+  - The composer chips follow a number field as it is typed: whole in-bounds values on `input`; `change` still clamps.
+- **Hints.**
+  - The drawer says "Changes apply from your next Send.", and, while a turn runs, "The running turn keeps the settings it started with."
+  - With no new image in a chat that has one, the composer says "No new image: Send re-runs <file> with these settings."
+- **Server features.**
+  - `GET /v1/models` gains `features: {retrieval, labels}`, which are true only when the pipeline has a gallery or a labeller (both false until P5-E).
+  - The drawer disables k_images, k_reports and CheXbert labels when the feature is off, each with a one-line reason.
+  - The composer drops the `k` chip when retrieval is off.
+- **Browser check.** A 10th check, `settings`, uses real typing. It checks:
+  - the chips update before the field loses focus;
+  - the turn's chips and the card's token count show the new value;
+  - a re-run with no image uses a new budget;
+  - the hint appeared.
+- **Test counts.** Layout: 94 cases. Node: 275.
+- **Known limits, carried:**
+  - On a stopped or streaming card with repair on, "Show raw" shows the stream view.
+  - A header glued to a sentence ("Findings: X.") does not dedup a later "X.".
+  - A browser that stored `display_repair: false` keeps it.
 
 ### P5 — Labels and retrieval backend
 
