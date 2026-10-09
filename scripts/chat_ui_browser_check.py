@@ -17,10 +17,11 @@ one `CHECK <name> PASS|FAIL <detail>` line each:
             positive or negative, a status region that says "Report ready"
   error     a server 422 shows the dismissible notice and keeps the composer as it was
   settings  (P4-F, P4-G) the drawer is a form that ends in Save, and says what it took. A click into a field that holds a value selects
-            all of it, and a budget typed with real keys replaces it (it is not appended) and shows in the composer chips before any
-            blur; Enter saves, closes the drawer to Settings and says "Settings saved." for about 4 seconds; "300" and "8" are refused
-            with the line "Enter a whole number from 16 to 200." under the field (never snapped to 200 or 16), the drawer stays open
-            and Enter changes nothing; the Save button saves. A default turn (the stop switch on) ends by itself with stopped "repeat",
+            all of it (the first click after a Tab places the caret), and a budget typed with real keys replaces it (it is not appended)
+            and shows in the composer chips before any blur; Enter saves, closes the drawer to Settings and says "Settings saved." for
+            about 4 seconds; "300" and "8" are refused with the line "Enter a whole number from 16 to 200." under the field (never
+            snapped to 200 or 16; the valid 30 on the way to 300 applies, and the setting goes back to the value it had before the
+            typing), the drawer stays open, Enter changes nothing and leaves the bad text selected; the Save button saves. A default turn (the stop switch on) ends by itself with stopped "repeat",
             fewer tokens than its budget and no budget note; a Send with no new image re-runs the last X-ray under a hint that says so
             and uses the budget typed since; with the switch off, at 200 tokens with the page's default (Display repair on) no
             sentence repeats on the settled card or in any frame of the stream, and Show raw still has the decoder's whole text
@@ -285,7 +286,9 @@ SHOT_RULES = {
     "streaming": "const c = document.querySelector('#conversation article.card'); return !!c && c.getAttribute('data-status') === 'running' "
                  "&& !!c.querySelector('.report-body') && !document.querySelector('#stop').hidden",
     "settled": "const c = document.querySelector('#conversation article.card'); return !!c && c.getAttribute('data-status') === 'done' "
-               "&& !!c.querySelector('.report-body') && document.querySelector('#stop').hidden",
+               "&& !!c.querySelector('.report-body') && document.querySelector('#stop').hidden "
+               "&& !!c.querySelector('.report .note[data-stopped=\"repeat\"]') "
+               "&& ![...document.querySelectorAll('#chips span, #conversation .turn.user .options .chip')].some((x) => x.textContent === 'full budget')",
     "drawer": "return !document.querySelector('#drawer').hidden && document.querySelector('#settings').getAttribute('aria-expanded') === 'true'",
     "stopped": "const c = document.querySelector('#conversation article.card'); return !!c && c.getAttribute('data-status') === 'aborted' "
                "&& !!c.querySelector('.note.stopped')",
@@ -300,6 +303,8 @@ SHOT_RULES = {
     "drawer_error": "const e = document.querySelector('#max_new_tokens-error'), f = document.querySelector('#drawer input[data-setting=\"max_new_tokens\"]'); "
                     "return !document.querySelector('#drawer').hidden && !e.hidden && e.textContent.indexOf('Enter a whole number') === 0 "
                     "&& f.getAttribute('aria-invalid') === 'true' && document.activeElement === f "
+                    "&& [...document.querySelectorAll('#chips span')].some((c) => c.textContent === '120 tok') "
+                    "&& ![...document.querySelectorAll('#chips span')].some((c) => c.textContent === '30 tok') "
                     "&& document.querySelector('#drawer-save').getBoundingClientRect().bottom <= innerHeight",
 }
 
@@ -536,14 +541,24 @@ def check_stream(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     expect("generate running" in said, "the status region never said 'generate running': {}".format(said))
     controls = b.evaluate("({ send: !document.querySelector('#send').disabled, stop: document.querySelector('#stop').hidden })")
     expect(controls == {"send": True, "stop": True}, "after the turn Send/Stop are {}".format(controls))
-    ctx.shot("settled", "settled", "a finished turn: stages, the report, provenance", DESKTOP)
+    # The settled pair is shot from a turn run with the page's own settings (the stop switch on), not from the long turn above: it ends by
+    # itself, and its card says why, with no chip that says the switch is off.
+    ctx.stop_default()
+    ctx.open("#/new")
+    own = ctx.run_turn("a")
+    expect(own["status"] == "done", "the turn run with the page's own settings ended {}".format(own["status"]))
+    own_page, own_turn = b.evaluate("(%s)()" % SHOWN_JS), b.evaluate("(%s)()" % TURN_JS)
+    expect(own_page["notes"] == [REPEAT_NOTE] and "full budget" not in own_turn["chips"] and "full budget" not in b.evaluate("(%s)()" % DRAWER_JS)["chips"],
+           "the page's own turn says {} with chips {}: it should say {!r} and no full budget".format(own_page["notes"], own_turn["chips"], REPEAT_NOTE))
+    ctx.shot("settled", "settled", "a finished turn run with the page's own settings: stages, the report, the note that says why it stopped, provenance", DESKTOP)
     b.set_viewport(DESKTOP[0], DESKTOP[1], "dark")
     ctx.shot("settled", "settled", "the same finished turn in the dark colour scheme", DESKTOP, "dark")
     b.set_viewport(DESKTOP[0], DESKTOP[1], "light")
     states = {s: final["stages"][s] for s in STAGES}
     data = {"stages": states, "stages_seen_running": seen_running, "snapshots": len(texts), "report_chars": [len(texts[0]), len(texts[-1])],
             "frames_recorded": len(frames), "status_region": said, "aria_busy": [[x["on"], x["t"]] for x in busy[-2:]], "card_done_ms": done_at,
-            "token_budget": STREAM_TOKENS, "seconds": round(elapsed, 2)}
+            "token_budget": STREAM_TOKENS, "seconds": round(elapsed, 2),
+            "settled_pair_from_a_default_turn": {"notes": own_page["notes"], "chips": own_turn["chips"], "footer": own_page["footer"]}}
     done = sum(1 for v in states.values() if v == "done")
     return ("{} stages settled ({} done, {} skipped); {} snapshots, report {} -> {} chars; status ended on 'Report ready'; done in {:.1f} s".format(
         len(states), done, len(states) - done, len(texts), len(texts[0]), len(texts[-1]), elapsed), data)
@@ -1134,19 +1149,27 @@ def budget_chip(chips: List[str]) -> Optional[str]:
     return next((c for c in chips if c.endswith(" tok")), None)
 
 
+def settled_where_it_began(states: List[Dict[str, Any]], before: int) -> bool:
+    """After a text that is not a whole number inside the bounds, the chips and the stored setting are the value the field had before the
+    typing began (the valid prefix of a too-big number, 30 of 300, applies on the way and goes back)."""
+    return bool(states) and budget_chip(states[-1]["chips"]) == "{} tok".format(before) and states[-1]["stored"] == before
+
+
 def errors_shown(states: List[Dict[str, Any]]) -> List[bool]:
     """Whether the line under the field was showing after each key."""
     return [not (state["error"] or {}).get("hidden", True) for state in states]
 
 
-def click_and_type(b: Browser, selector: str, digits: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+def click_and_type(b: Browser, selector: str, digits: str, click: bool = True) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """What a user does: a real click into a number field of the drawer, then the digits one key at a time over whatever it holds. The
     field is given up first (a click on the drawer's title), as it is when a user comes back to it: a click in a field that has focus puts
-    the caret where it lands, like any other, and only the focus a click gives selects the whole value.
+    the caret where it lands, like any other, and only the focus a click gives selects the whole value. click False: no click at all, the
+    keys go to the field that already has focus (what a refused Enter leaves).
     -> the field as the click left it (its text, whether it has focus, what is selected), and the field after each digit: its text,
     focus, the composer chips, the stored setting, and whether the line under it is showing."""
-    b.click("#drawer h2")
-    b.click(selector)
+    if click:
+        b.click("#drawer h2")
+        b.click(selector)
     clicked = b.run(FIELD_JS, selector)
     states = []  # type: List[Dict[str, Any]]
     for ch in digits:
@@ -1155,14 +1178,15 @@ def click_and_type(b: Browser, selector: str, digits: str) -> Tuple[Dict[str, An
     return clicked, states
 
 
-def type_budget(b: Browser, digits: str, replaces: str, chips: List[str], stored: List[Optional[int]], errors: List[bool]) -> Dict[str, Any]:
+def type_budget(b: Browser, digits: str, replaces: str, chips: List[str], stored: List[Optional[int]], errors: List[bool], click: bool = True) -> Dict[str, Any]:
     """Click into the budget field, which holds `replaces`, and type the digits. The click selects the whole value, so the field reads the
     digits and not the digits after the old value (100 and 150 typed as one text is 100150, which is out of range); and after every key
     the field says what was typed and keeps focus, the chips and the stored setting move only for a whole number inside the bounds, and
     the line under the field shows while the text is not one. Nothing is clamped: a text that is not right changes nothing."""
-    clicked, states = click_and_type(b, BUDGET_FIELD, digits)
+    clicked, states = click_and_type(b, BUDGET_FIELD, digits, click)
     expect(clicked["focused"] and clicked["value"] == replaces and clicked["selected"] == replaces,
-           "the click left the field {} (it held {!r}): its whole value should be selected, so that typing replaces it".format(clicked, replaces))
+           "{} left the field {} (it held {!r}): its whole value should be selected, so that typing replaces it".format(
+               "the click" if click else "the refused Enter", clicked, replaces))
     typed = [digits[:i + 1] for i in range(len(digits))]
     expect([t["value"] for t in states] == typed,
            "the field read {} while {} was typed over {!r}: a value that is appended reads {!r}".format([t["value"] for t in states], digits, replaces, replaces + digits))
@@ -1231,6 +1255,22 @@ def check_drawer_before_anything_changes(drawer: Dict[str, Any], features: Dict[
     expect(drawer["rerun"]["hidden"], "the re-run hint is shown in an empty chat: {}".format(drawer["rerun"]))
 
 
+def check_tab_then_click(b: Browser) -> Dict[str, Any]:
+    """Tab into the budget field (it is selected whole), then click it: that click places the caret, like any click in a field that has
+    focus. The guard that keeps the mouseup of a click from undoing the selection is for the click that gave the field its focus, and
+    does not swallow the first click after a Tab (which would leave the whole value selected, as if nothing had been clicked)."""
+    b.click("#drawer h2")
+    b.click('#drawer input[data-setting="beam_size"]')   # the field before it in the form
+    b.key("Tab", "Tab", 9)
+    tabbed = b.run(FIELD_JS, BUDGET_FIELD)
+    expect(tabbed["focused"] and tabbed["selected"] == "100", "Tab left the budget field as {}: it should have focus, with its whole value selected".format(tabbed))
+    b.click(BUDGET_FIELD)
+    clicked = b.run(FIELD_JS, BUDGET_FIELD)
+    expect(clicked["focused"] and clicked["selected"] == "" and clicked["value"] == "100",
+           "the first click after a Tab left the field as {}: it should place the caret (nothing selected), not keep the selection".format(clicked))
+    return {"selected_by_tab": tabbed["selected"], "selected_after_the_click": clicked["selected"], "value": clicked["value"]}
+
+
 def check_the_enter_that_saves(b: Browser) -> Dict[str, Any]:
     """Enter has just been pressed in the budget field, holding a whole number inside the bounds: the form submitted, which is Save. The
     drawer is closed and focus is back on Settings, the setting is stored, and "Settings saved." is on the page for about 4 seconds."""
@@ -1253,10 +1293,11 @@ def check_the_enter_that_saves(b: Browser) -> Dict[str, Any]:
             "region": region, "seconds_on_page": round(lasted, 1)}
 
 
-def check_a_refused_enter(b: Browser, before: Dict[str, Any], typed: str) -> Dict[str, Any]:
+def check_a_refused_enter(b: Browser, before: Dict[str, Any], typed: str, began_at: int) -> Dict[str, Any]:
     """Enter pressed in the budget field holding a text that is not a whole number inside the bounds: the drawer stays open on that field,
-    the line under it says what it takes, the text is as typed, and nothing changed (not the chips, not the stored setting, no
-    confirmation): Enter did not snap it to 200 or to 16."""
+    the line under it says what it takes, the text is as typed and is selected whole (so that the next key replaces it), and nothing changed
+    (not the chips, not the stored setting, no confirmation): Enter did not snap it to 200 or to 16. The setting is the value the field
+    had before the typing began, `began_at`, however many whole numbers the typing passed through."""
     after = b.run(FIELD_JS, BUDGET_FIELD)
     expect(after["drawerOpen"] and after["focused"], "after Enter on {!r} the drawer is {} and focus is on {!r}".format(
         typed, "open" if after["drawerOpen"] else "closed", after["active"]))
@@ -1265,9 +1306,13 @@ def check_a_refused_enter(b: Browser, before: Dict[str, Any], typed: str) -> Dic
            "the line under the field is {} (aria-invalid {!r}), not {!r}".format(after["error"], after["invalid"], BUDGET_ERROR))
     expect(after["chips"] == before["chips"] and after["stored"] == before["stored"],
            "Enter changed the chips {} -> {} or the stored setting {} -> {}".format(before["chips"], after["chips"], before["stored"], after["stored"]))
+    expect(budget_chip(after["chips"]) == "{} tok".format(began_at) and after["stored"] == began_at,
+           "after Enter on {!r} the chips say {} and {} is stored, not the {} that the field had before the typing".format(
+               typed, budget_chip(after["chips"]), after["stored"], began_at))
+    expect(after["selected"] == typed, "the refused Enter left {!r} selected in the field, not the whole text {!r}".format(after["selected"], typed))
     expect(after["saved"] == "", "the page says {!r} although the form was refused".format(after["saved"]))
-    return {"typed": typed, "drawer_open": True, "field_kept_as_typed": True, "error": after["error"]["text"], "chips": after["chips"],
-            "stored": after["stored"], "saved_message": after["saved"]}
+    return {"typed": typed, "drawer_open": True, "field_kept_as_typed": True, "text_selected": True, "error": after["error"]["text"],
+            "chips": after["chips"], "stored": after["stored"], "began_at": began_at, "saved_message": after["saved"]}
 
 
 def check_repeat_stop(log: Dict[str, Any], page: Dict[str, Any], budget: int) -> Dict[str, Any]:
@@ -1345,6 +1390,8 @@ def settings_walk(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     drawer = b.evaluate("(%s)()" % DRAWER_JS)
     check_drawer_before_anything_changes(drawer, features)
     ctx.attach("a")
+    # -- a Tab into the budget selects it whole; the first click after the Tab places the caret
+    tab_click = check_tab_then_click(b)
     # -- the user's own flow, with real keys. A click into the budget selects "100", so 1, 2, 0 typed over it read 120 (the old page left the
     # caret after the 100, and 150 typed there was 100150, which Enter silently made 200). 1 and 12 are below the bound of 16: not applied,
     # and the line under the field says so. Enter in the field is Save.
@@ -1352,21 +1399,29 @@ def settings_walk(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     press_enter(b)
     saved_by_enter = check_the_enter_that_saves(b)
     # -- a number that is too big, typed key by key over the 120 that the field holds. The 30 on the way is a whole number inside the bounds
-    # and applies like any other (the chips follow the keys); 300 does not, and changes nothing. Enter then saves nothing and says why.
+    # and applies like any other (the chips follow the keys); 300 is not, and the setting goes back to the 120 it was before the typing
+    # began. Enter then saves nothing, says why, and leaves the bad text selected.
     b.click("#settings")
     b.wait_for("!document.querySelector('#drawer').hidden", what="the drawer, opened again")
-    refused_300 = type_budget(b, "300", str(ENTER_BUDGET), ["{} tok".format(ENTER_BUDGET), "30 tok", "30 tok"], [ENTER_BUDGET, 30, 30], [True, False, True])
+    refused_300 = type_budget(b, "300", str(ENTER_BUDGET), ["{} tok".format(ENTER_BUDGET), "30 tok", "{} tok".format(ENTER_BUDGET)],
+                              [ENTER_BUDGET, 30, ENTER_BUDGET], [True, False, True])
+    expect(settled_where_it_began(refused_300["states"], ENTER_BUDGET),
+           "after 300 the chips say {} and {} is stored, not the {} that the field had before the typing".format(
+               budget_chip(refused_300["states"][-1]["chips"]), refused_300["states"][-1]["stored"], ENTER_BUDGET))
     before = b.run(FIELD_JS, BUDGET_FIELD)
     press_enter(b)
-    enter_on_300 = check_a_refused_enter(b, before, "300")
-    ctx.shot("drawer_error", "drawer_error", "the drawer with 300 typed in the token budget: the line under the field, the red border, the chips unchanged, Save in sight", DESKTOP)
-    # -- 8 has no whole number on the way to it: the setting the field had stays exactly as it was
-    refused_8 = type_budget(b, "8", "300", ["30 tok"], [30], [True])
+    enter_on_300 = check_a_refused_enter(b, before, "300", ENTER_BUDGET)
+    ctx.shot("drawer_error", "drawer_error", "the drawer with 300 typed in the token budget: the line under the field, the red border, the chips at the 120 it had before", DESKTOP)
+    # -- 8 has no whole number on the way to it: the setting stays where it was. No click first: the refused Enter selected the text, so the
+    # key replaces it
+    refused_8 = type_budget(b, "8", "300", ["{} tok".format(ENTER_BUDGET)], [ENTER_BUDGET], [True], click=False)
+    expect(settled_where_it_began(refused_8["states"], ENTER_BUDGET), "after 8 the chips and the stored setting are not the {} the field had".format(ENTER_BUDGET))
     before = b.run(FIELD_JS, BUDGET_FIELD)
     press_enter(b)
-    enter_on_8 = check_a_refused_enter(b, before, "8")
-    # -- put right, and saved with the Save button this time
-    fixed = type_budget(b, str(FIRST_BUDGET), "8", ["30 tok", "30 tok", "{} tok".format(FIRST_BUDGET)], [30, 30, FIRST_BUDGET], [True, True, False])
+    enter_on_8 = check_a_refused_enter(b, before, "8", ENTER_BUDGET)
+    # -- put right (a click into the field that holds the bad 8 selects it), and saved with the Save button this time
+    fixed = type_budget(b, str(FIRST_BUDGET), "8", ["{} tok".format(ENTER_BUDGET), "{} tok".format(ENTER_BUDGET), "{} tok".format(FIRST_BUDGET)],
+                        [ENTER_BUDGET, ENTER_BUDGET, FIRST_BUDGET], [True, True, False])
     b.click(SAVE_BUTTON)
     b.wait_for("document.querySelector('#drawer').hidden", 5, "the drawer to close on Save")
     by_button = b.run(FIELD_JS, BUDGET_FIELD)
@@ -1423,8 +1478,9 @@ def settings_walk(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     expect(log["skipped"] == skips, "the stages the server skipped are {}, not {}: the drawer and the pipeline disagree".format(log["skipped"], skips))
     clean = check_clean_display(b, log, b.evaluate("(%s)()" % RECORDED_JS))
     return ("a click into the budget selected it and 1-2-0 typed over it read 120 (not 100120); Enter saved it, closed the drawer to Settings and the page said "
-            "'Settings saved.' for {:.1f} s; 300 and 8 were refused with the line under the field (300 on its way applied 30, 8 changed nothing; Enter "
-            "changed nothing); the Save button saved 150; a default turn stopped on a repeat after {} of its {} tokens with the quiet note and no budget "
+            "'Settings saved.' for {:.1f} s; 300 and 8 were refused with the line under the field (300 passed through the valid 30 and went back to the "
+            "120 it started from, 8 changed nothing, Enter changed nothing and left the text selected); a Tab then a click placed the caret; the Save "
+            "button saved 150; a default turn stopped on a repeat after {} of its {} tokens with the quiet note and no budget "
             "note; with the switch off, at 200 tokens the card has {} words and {} repeated sentences (raw: {} words, {} repeated), none in {} frames of "
             "the stream; Show raw is the decoder's text".format(
                 saved_by_enter["seconds_on_page"], stopped["tokens"], FIRST_BUDGET, clean["words"]["card"], clean["repeated_sentences"]["card"],
@@ -1434,6 +1490,7 @@ def settings_walk(ctx: Context) -> Tuple[str, Dict[str, Any]]:
                                "labels_disabled": drawer["label"]["disabled"], "chips": drawer["chips"],
                                "display_repair_checked": drawer["repair"]["checked"], "number_field_labels": drawer["ranges"],
                                "stop_switch": {"checked": drawer["stop"]["checked"], "hint": drawer["stop_hint"]["text"]}, "save_button": drawer["save"]},
+             "tab_then_click": tab_click,
              "enter_saves": {"typed": entered, "after_enter": saved_by_enter},
              "refused_300": {"typed": refused_300, "after_enter": enter_on_300},
              "refused_8": {"typed": refused_8, "after_enter": enter_on_8},
@@ -1521,7 +1578,8 @@ def environment(browser: Browser, app: Optional[App], warm: Optional[float]) -> 
                       "The tiny model never writes an end-of-report token and loops after about 20 tokens, so a default turn ends by itself near 21 tokens "
                       "(the settings check measures it); the checks that need a long turn (stream, reload, sessions, stop) store the switch off before the "
                       "page loads, and every check starts from the page's defaults.",
-                      "Display repair on means the reports in every picture are the repaired display copy; the settings check runs 200 tokens, with the stop "
+                      "The settled pictures (light and dark) are shot from a turn run with the page's own settings, so they show the note that says why "
+                      "it stopped and no 'full budget' chip. Display repair on means the reports in every picture are the repaired display copy; the settings check runs 200 tokens, with the stop "
                       "switch off, to show that none of its sentences repeats on the card or in any frame of the stream, while Show raw keeps the decoder's "
                       "whole text (the tiny model repeats one sentence about a dozen times).",
                       "The tiny server runs no retrieval gallery and no labeller, so its /v1/models says features retrieval and labels are false: the "

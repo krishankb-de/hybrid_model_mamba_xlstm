@@ -418,6 +418,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   font-weight: 500;
   overflow-wrap: anywhere;
 }
+#saved[data-state="warn"] { color: var(--warn); }   /* "Browser storage is unavailable...": Save closed, and this is not a confirmation */
 #saved:empty {   /* a live region has to be there before its first message, so it is not display: none; it takes no room and shows nothing */
   position: absolute;
   width: 1px;

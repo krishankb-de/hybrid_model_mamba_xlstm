@@ -3759,11 +3759,11 @@ test('a number field applies a whole number inside its bounds as it is typed, an
   assert.deepEqual([tokens.value, document.activeElement === tokens], ['150', true]);
   for (const bad of ['', '1e', '16.5', '-20', 'x', '250', '15']) {
     typeInto(tokens, bad);
-    assert.deepEqual([chipsText()[1], saved(h).max_new_tokens, tokens.value], ['150 tok', 150, bad], bad);   // not a whole number inside the bounds: waits
-    assert.equal($('max_new_tokens-error').hidden, false, bad);                                               // and says so
+    assert.deepEqual([chipsText()[1], saved(h).max_new_tokens, tokens.value], ['100 tok', 100, bad], bad);   // not a whole number inside the bounds: the setting is what it was before this edit
+    assert.equal($('max_new_tokens-error').hidden, false, bad);                                               // and the line says so
   }
-  change(tokens);   // leaving the field does not clamp it: 15 stays 15 and the setting stays 150
-  assert.deepEqual([tokens.value, chipsText()[1], saved(h).max_new_tokens], ['15', '150 tok', 150]);
+  change(tokens);   // leaving the field does not clamp it: 15 stays 15, and the setting stays the 100 it was before the edit
+  assert.deepEqual([tokens.value, chipsText()[1], saved(h).max_new_tokens], ['15', '100 tok', 100]);
   typeInto(tokens, '0120');   // applied, and the field is not rewritten while it is being typed in ...
   assert.deepEqual([tokens.value, chipsText()[1]], ['0120', '120 tok']);
   assert.equal($('max_new_tokens-error').hidden, true);
@@ -3773,8 +3773,8 @@ test('a number field applies a whole number inside its bounds as it is typed, an
   typeInto(control(SIMILAR), '0');
   typeInto(control(MATCHING), '10');
   assert.deepEqual(chipsText(), ['beam 5', '120 tok', 'cached', 'k 0/10']);   // every number field, not only the budget
-  typeInto(control(MATCHING), '11');   // above the bound of 10
-  assert.equal(chipsText().at(-1), 'k 0/10');
+  typeInto(control(MATCHING), '11');   // above the bound of 10: the setting goes back to the 3 it was before this edit, not the 10 typed on the way
+  assert.equal(chipsText().at(-1), 'k 0/3');
 });
 
 test('the drawer says that changes apply from the next Send, and while a turn runs that the running turn keeps the settings it started with', async () => {
@@ -3998,27 +3998,40 @@ test('a Send carries the stop switch as the drawer has it', async () => {
   await turn;
 });
 
-test('a number field selects its whole value when it gets focus, by Tab or by a click, and the first mouseup after the focus does not undo it', async () => {
+test('a number field selects its whole value when it gets focus; the mouseup of the click that gave it focus does not undo that, and a Tab leaves the first click alone', async () => {
   await withDrawerOpen();
   const tokens = control(BUDGET);
   assert.equal(tokens.value, '100');
-  assert.equal(mouse(tokens, 'mouseup').defaultPrevented, false);   // no focus yet: nothing to guard
-  tokens.focus();   // Tab, or the focus that a click gives
+  assert.equal(mouse(tokens, 'mouseup').defaultPrevented, false);   // nothing pressed it and it has no focus: nothing to guard
+  tokens.focus();   // a Tab: the whole value is selected
   assert.deepEqual([tokens.selectionStart, tokens.selectionEnd], [0, 3]);
   tokens.selectionStart = tokens.selectionEnd = 3;   // the caret at the end of "100", where a click leaves it
-  assert.equal(mouse(tokens, 'mouseup').defaultPrevented, true);    // else the browser puts the caret back, and "150" is typed after "100"
-  assert.equal(mouse(tokens, 'mouseup').defaultPrevented, false);   // once: a click in a field that has focus places the caret as it always does
+  mouse(tokens, 'pointerdown');   // the first click after the Tab, in a field that has focus: it places the caret, as any click does there
+  mouse(tokens, 'mousedown');
+  assert.equal(mouse(tokens, 'mouseup').defaultPrevented, false);
   tokens.blur();
-  mouse(tokens, 'mousedown');   // a whole click on a field that has no focus: mousedown, then focus, then mouseup
+  mouse(tokens, 'pointerdown');   // a click on a field that has no focus: pointerdown, mousedown, then focus, then mouseup
+  mouse(tokens, 'mousedown');
   tokens.focus();
   assert.deepEqual([tokens.selectionStart, tokens.selectionEnd], [0, 3]);
+  assert.equal(mouse(tokens, 'mouseup').defaultPrevented, true);    // else the browser puts the caret back, and "150" is typed after "100"
+  assert.equal(mouse(tokens, 'mouseup').defaultPrevented, false);   // once: the next click in the field places the caret as it always does
+  tokens.blur();
+  mouse(tokens, 'mousedown');   // a browser with no pointer events: mousedown alone is the click
+  tokens.focus();
   assert.equal(mouse(tokens, 'mouseup').defaultPrevented, true);
   tokens.blur();
-  tokens.focus();   // focus that nothing clicked, and the field is given up before any mouse button comes up: nothing stays armed
+  mouse(tokens, 'pointerdown');   // a press that never gave the field focus (dragged away) is not left armed for the focus of a later Tab
+  mouse(tokens, 'mouseup');
+  tokens.focus();
+  assert.equal(mouse(tokens, 'mouseup').defaultPrevented, false);
+  tokens.blur();
+  tokens.focus();   // and a Tab that is followed by a mouseup of its own (a click begun elsewhere) is not a click on the field
   tokens.blur();
   assert.equal(mouse(tokens, 'mouseup').defaultPrevented, false);
   for (const [label, value] of [[BEAM, '3'], [SIMILAR, '4'], [MATCHING, '3']]) {   // every number field, not only the budget
     const field = control(label);
+    mouse(field, 'pointerdown');
     field.focus();
     assert.deepEqual([field.selectionStart, field.selectionEnd], [0, value.length], label);
     assert.equal(mouse(field, 'mouseup').defaultPrevented, true, label);
@@ -4145,12 +4158,13 @@ test('closing the drawer with an invalid field (the close button, Esc or Setting
     const tokens = control(BUDGET);
     tokens.focus();
     typeInto(tokens, '150');
+    change(tokens);   // Enter, or leaving the field: 150 is the setting the next edit starts from
     typeInto(control(BEAM), '5');
     typeInto(tokens, '300');
     assert.equal($('max_new_tokens-error').hidden, false, name);
     close();
     assert.equal($('drawer').hidden, true, name);
-    assert.equal(tokens.value, '150', name);   // the saved value: not the 100 it started with, not the 300
+    assert.equal(tokens.value, '150', name);   // the saved value: not the 100 it started with, not the 300, not a 30 on the way to it
     assert.deepEqual([$('max_new_tokens-error').hidden, tokens.hasAttribute('aria-invalid'), tokens.hasAttribute('aria-describedby')], [true, false, false], name);
     assert.deepEqual([saved(h).max_new_tokens, saved(h).beam_size, chipsText().slice(0, 2)], [150, 5, ['beam 5', '150 tok']], name);
     assert.equal($('saved').textContent, '', name);   // closed, not saved
@@ -4159,19 +4173,24 @@ test('closing the drawer with an invalid field (the close button, Esc or Setting
   }
 });
 
-test('Save when the browser will not store the settings shows the storage note and does not say "saved"; the settings still apply in this tab', async () => {
-  await withDrawerOpen({ storage: brokenStorage() });
+test('Save when the browser will not store the settings closes like any Save and says so beside the chips, never "saved"; the settings still apply in this tab', async () => {
+  const h = await withDrawerOpen({ storage: brokenStorage() });
   const note = qa($('drawer'), '.hint').find((n) => n.textContent.startsWith('Browser storage'));
   assert.deepEqual([note.textContent, note.hidden], [STORAGE_NOTE, true]);   // nothing has been tried yet
   save().click();
-  assert.equal(note.hidden, false);          // the existing note, shown
-  assert.equal($('saved').textContent, '');  // and no claim that anything was saved
-  assert.equal($('drawer').hidden, false);   // the note is in the drawer, so the drawer stays open
-  assert.equal($('status').textContent, STORAGE_NOTE);   // and a screen reader is told
+  assert.equal($('drawer').hidden, true);   // closed, as on success: a Save that leaves the drawer open looks dead
+  assert.equal(document.activeElement, $('settings'));
+  assert.deepEqual([$('saved').textContent, $('saved').getAttribute('data-state')], [STORAGE_NOTE, 'warn']);   // the storage note in the visible region, in the warning's colour
+  assert.notEqual($('saved').textContent, SAVED);
+  assert.equal(note.hidden, false);   // and the existing note in the drawer, for when it is opened again
+  h.timers.advance(4100);
+  assert.deepEqual([$('saved').textContent, $('saved').hasAttribute('data-state')], ['', false]);   // for as long as a confirmation stays, and the colour goes with it
+  $('settings').click();
   typeInto(control(BUDGET), '150');
   assert.equal(chipsText()[1], '150 tok');   // the settings still apply for this page
   save().click();
-  assert.deepEqual([note.hidden, $('saved').textContent, $('drawer').hidden], [false, '', false]);
+  assert.deepEqual([$('drawer').hidden, $('saved').textContent], [true, STORAGE_NOTE]);
+  assert.equal(chipsText()[1], '150 tok');
 });
 
 test('a second Save restarts the 4 seconds, and an earlier timer does not take the new message down', async () => {
@@ -4219,4 +4238,118 @@ test('the confirmation is a polite status region right after the composer chips,
   assert.equal(region.classList.contains('visually-hidden'), false);   // it is for the eye too
   assert.equal($('status').getAttribute('class'), 'visually-hidden');   // the page's own status line stays what it was
   assert.notEqual($('status'), region);
+});
+
+// ---- P4-G fix round 1 -------------------------------------------------------------------------------------------------------------
+
+// The setting of one number field as the page holds it: what the chips say and what is stored (null while nothing has been stored).
+const chipOf = (key) => ({ beam_size: () => chipsText()[0], max_new_tokens: () => chipsText().find((c) => c.endsWith(' tok')),
+                           k_images: () => chipsText().at(-1), k_reports: () => chipsText().at(-1) })[key]();
+const storedOf = (h, key) => (h.storage.data.has(SETTINGS_KEY) ? saved(h)[key] : null);
+const typedKeys = (input, text) => { for (let n = 1; n <= text.length; n++) typeInto(input, text.slice(0, n)); };
+
+test('a number typed key by key goes back to what the setting was before the edit when it stops being a number the setting can take: 300 over 100 is 100, 30, 100', async () => {
+  // [label, key, the keys, chips and stored after each key]: every prefix of a too-big number that is itself a number inside the bounds
+  // ("30" of 300, "1" of 12, "25" of 250) used to stay in force, and be stored, under the line that says the whole is wrong
+  const cases = [
+    [BUDGET, 'max_new_tokens', '300', ['100 tok', '30 tok', '100 tok'], [null, 30, 100]],
+    [BUDGET, 'max_new_tokens', '250', ['100 tok', '25 tok', '100 tok'], [null, 25, 100]],
+    [BEAM, 'beam_size', '12', ['beam 1', 'beam 3'], [1, 3]],
+    [SIMILAR, 'k_images', '13', ['k 1/3', 'k 4/3'], [1, 4]],
+    [MATCHING, 'k_reports', '20', ['k 4/2', 'k 4/3'], [2, 3]],
+  ];
+  for (const focused of [true, false]) {   // a field that had focus when the first key came, and an input that no focus came before
+    for (const [label, key, text, chips, stored] of cases) {
+      const h = await withDrawerOpen();
+      const field = control(label);
+      if (focused) field.focus();
+      const seen = [];
+      for (let n = 1; n <= text.length; n++) {
+        typeInto(field, text.slice(0, n));
+        seen.push([chipOf(key), storedOf(h, key)]);
+      }
+      const name = `${label} ${text}${focused ? '' : ' (no focus)'}`;
+      assert.deepEqual(seen.slice(-chips.length).map((x) => x[0]), chips, name);   // the chips follow the keys, and end where they began
+      assert.deepEqual(seen.slice(-stored.length).map((x) => x[1]), stored, name);   // so does the stored setting
+      assert.equal(field.value, text, name);               // the field is left as typed
+      assert.equal($(`${key}-error`).hidden, false, name);   // under its line
+      assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3'], name);   // every setting is what it was before the edit
+    }
+  }
+});
+
+test('Enter or Save while a number is wrong keeps the setting it was before the edit, with the line showing', async () => {
+  const h = await withDrawerOpen();
+  const tokens = control(BUDGET);
+  tokens.focus();
+  typedKeys(tokens, '300');
+  assert.deepEqual([chipOf('max_new_tokens'), storedOf(h, 'max_new_tokens')], ['100 tok', 100]);
+  press(tokens, 'Enter');
+  assert.deepEqual([$('drawer').hidden, $('max_new_tokens-error').hidden, tokens.value, chipOf('max_new_tokens'), storedOf(h, 'max_new_tokens')],
+                   [false, false, '300', '100 tok', 100]);   // the value stays 100: Enter did not apply a 30, nor a 200
+  save().click();
+  assert.deepEqual([$('drawer').hidden, $('max_new_tokens-error').hidden, tokens.value, chipOf('max_new_tokens'), storedOf(h, 'max_new_tokens'), $('saved').textContent],
+                   [false, false, '300', '100 tok', 100, '']);
+  typedKeys(tokens, '30');   // Backspace: the 30 on the way is applied again, and is a number the setting can take
+  assert.deepEqual([chipOf('max_new_tokens'), $('max_new_tokens-error').hidden], ['30 tok', true]);
+});
+
+test('a stray digit after a number that was fine takes the setting back to what it was before the edit, Backspace applies it again, and a committed edit is the next one\'s start', async () => {
+  const h = await withDrawerOpen();
+  const tokens = control(BUDGET);
+  tokens.focus();
+  typeInto(tokens, '150');
+  assert.deepEqual([chipOf('max_new_tokens'), storedOf(h, 'max_new_tokens')], ['150 tok', 150]);
+  typeInto(tokens, '1500');   // a stray 0
+  assert.deepEqual([chipOf('max_new_tokens'), storedOf(h, 'max_new_tokens'), tokens.value, $('max_new_tokens-error').hidden], ['100 tok', 100, '1500', false]);
+  typeInto(tokens, '150');    // Backspace
+  assert.deepEqual([chipOf('max_new_tokens'), storedOf(h, 'max_new_tokens'), $('max_new_tokens-error').hidden], ['150 tok', 150, true]);
+  change(tokens);             // Enter, or leaving the field: committed, and the next edit starts from 150
+  typeInto(tokens, '1500');
+  assert.deepEqual([chipOf('max_new_tokens'), storedOf(h, 'max_new_tokens')], ['150 tok', 150]);
+  tokens.blur();              // leaving the field with the wrong text in it ends that edit too
+  typeInto(tokens, '20');     // a new edit: it applies ...
+  assert.equal(chipOf('max_new_tokens'), '20 tok');
+  typeInto(tokens, '2000');   // ... and goes back to the 150 this edit started from
+  assert.deepEqual([chipOf('max_new_tokens'), storedOf(h, 'max_new_tokens')], ['150 tok', 150]);
+  tokens.focus();             // focus begins an edit as well: it starts from what the setting is now
+  typeInto(tokens, '30');
+  typeInto(tokens, '3000');
+  assert.equal(chipOf('max_new_tokens'), '150 tok');
+  typeInto(tokens, '40');     // applies, in the edit that began at the focus
+  tokens.blur();              // which ends with the blur alone, with no change before it
+  typeInto(tokens, '4000');   // the next edit starts from the 40 the setting is now, not from the 150 before the one that ended
+  assert.equal(chipOf('max_new_tokens'), '40 tok');
+});
+
+test('a refused Enter or Save in a field that already has focus selects the bad text again, so that the next key replaces it, and says the same message again', async () => {
+  await withDrawerOpen();
+  const tokens = control(BUDGET);
+  tokens.focus();
+  typeInto(tokens, '200150');
+  tokens.selectionStart = tokens.selectionEnd = 6;   // the caret at the end, where the typing left it
+  const status = $('status');
+  const written = [];
+  const original = status.replaceChildren.bind(status);
+  status.replaceChildren = (...nodes) => { written.push(nodes.map(String).join('')); return original(...nodes); };
+  press(tokens, 'Enter');
+  assert.deepEqual([tokens.selectionStart, tokens.selectionEnd], [0, 6]);   // no focus event comes to a field that has focus, so the page selects it itself
+  tokens.selectionStart = tokens.selectionEnd = 6;
+  press(tokens, 'Enter');   // refused again, with the very same words
+  save().click();           // and once more, from Save
+  assert.deepEqual([tokens.selectionStart, tokens.selectionEnd], [0, 6]);
+  assert.deepEqual(written.filter(Boolean), [FIELD_ERROR(16, 200), FIELD_ERROR(16, 200), FIELD_ERROR(16, 200)]);   // every refusal is said, the identical ones too
+  assert.equal(status.textContent, FIELD_ERROR(16, 200));
+});
+
+test('opening the drawer again takes a confirmation that is still showing down, and its timer with it', async () => {
+  const h = await withDrawerOpen();
+  save().click();
+  assert.equal($('saved').textContent, SAVED);
+  assert.equal(h.timers.timeouts.filter((t) => t.ms === 4000).length, 1);   // the 4 s that will take it down
+  $('settings').click();   // reopened within the 4 s: the message is about a Save that is behind the user now
+  assert.deepEqual([$('saved').textContent, $('saved').hasAttribute('data-state')], ['', false]);
+  assert.equal(h.timers.timeouts.filter((t) => t.ms === 4000).length, 0);
+  $('drawer-close').click();
+  assert.equal($('saved').textContent, '');   // closing says nothing: it is not a Save
 });

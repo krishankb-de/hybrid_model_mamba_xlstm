@@ -111,9 +111,11 @@ def test_form_fields_and_the_client_id_header_are_described(client):
 
 def test_the_options_description_says_what_stop_on_repeat_does_and_that_leaving_it_out_decodes_the_whole_budget(client):   # P4-G
     text = _body_schema(client.get("/openapi.json").json())["properties"]["options"]["description"]
-    about = text.split("`stop_on_repeat`", 1)[1].split(".")[0:2]      # the sentence or two that follow its name
-    about = " ".join(about)
-    assert "repeat" in about and "stopped" in about and "max_new_tokens" in about and "published protocol" in about, about
+    about = text.split("`stop_on_repeat`", 1)[1].split(".")[0]   # its own sentence
+    assert "first sentence" in about and "word for word" in about, about   # it stops at the first verbatim repeat, not at a likeness
+    assert "`stopped: repeat`" in about, about                              # and the generate stage says so
+    assert "`truncated_mid_sentence` is false" in about and "raw `report`" in about, about   # a repeat stop is no cut-off, whatever the raw text ends in
+    assert "max_new_tokens" in about and "published protocol" in about, about   # left out, the whole budget is decoded
 
 
 def test_the_streaming_route_documents_its_event_stream(client, monkeypatch):

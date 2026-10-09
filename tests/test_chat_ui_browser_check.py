@@ -148,11 +148,32 @@ def test_budget_note_is_the_card_note_of_a_budget_stop_with_repair_on():
 
 
 def test_the_drawer_check_reads_a_typed_field_as_the_page_should_have_it():
+    # "300" typed key by key over 120: 3 is not a number the setting can take, 30 is (it applies), 300 is not (it goes back to the 120)
     states = [{"value": v, "focused": True, "stored": s, "chips": ["beam 3", c], "error": {"hidden": h, "text": check.BUDGET_ERROR}, "invalid": i}
-              for v, s, c, h, i in (("3", 120, "120 tok", False, "true"), ("30", 30, "30 tok", True, None), ("300", 30, "30 tok", False, "true"))]
-    assert [check.budget_chip(t["chips"]) for t in states] == ["120 tok", "30 tok", "30 tok"]
+              for v, s, c, h, i in (("3", 120, "120 tok", False, "true"), ("30", 30, "30 tok", True, None), ("300", 120, "120 tok", False, "true"))]
+    assert [check.budget_chip(t["chips"]) for t in states] == ["120 tok", "30 tok", "120 tok"]
     assert check.errors_shown(states) == [True, False, True]   # the line is shown while the text is not a whole number inside the bounds
     assert check.errors_shown([{"error": {"hidden": True}}]) == [False]
+
+
+def test_a_wrong_text_leaves_the_setting_where_it_was_before_the_typing_began():   # P4-G fix 1
+    states = [{"stored": 120, "chips": ["beam 3", "120 tok"]}, {"stored": 30, "chips": ["beam 3", "30 tok"]}, {"stored": 120, "chips": ["beam 3", "120 tok"]}]
+    assert check.settled_where_it_began(states, 120) is True
+    assert check.settled_where_it_began(states[:2], 120) is False   # the 30 on the way is not where it began
+    assert check.settled_where_it_began([dict(states[-1], stored=30)], 120) is False   # chips back, the stored copy left at 30
+    assert check.settled_where_it_began([dict(states[-1], chips=["beam 3", "30 tok"])], 120) is False   # stored back, the chips left at 30
+    assert check.settled_where_it_began([], 120) is False   # nothing typed is nothing shown
+
+
+def test_the_drawer_error_picture_asks_for_the_chips_it_captions():
+    rule = check.SHOT_RULES["drawer_error"]
+    assert "'{} tok'".format(check.ENTER_BUDGET) in rule and "'30 tok'" in rule   # at the value the field began with, and not at the 30 on the way
+
+
+def test_the_settled_pictures_ask_for_a_turn_run_with_the_pages_own_settings():
+    rule = check.SHOT_RULES["settled"]
+    assert 'data-stopped="repeat"' in rule and "'full budget'" in rule   # the note that says why it stopped, and no chip that says the switch is off
+    assert "#chips span" in rule and ".turn.user .options .chip" in rule   # in the composer and in the user's own turn
 
 
 def test_the_stop_off_script_writes_the_one_setting_and_nothing_else():

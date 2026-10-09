@@ -115,9 +115,11 @@ TEXT_DOC = ("A command that changes this turn's options, or a note kept with the
 OPTIONS_DOC = ("The turn's options as a JSON object with the keys " + ", ".join(Options.model_fields) + ". A key left "
                "out takes its default, the published protocol; the ranges are " + _option_ranges() + ". An unknown "
                "key or a value out of range is a 422, and anything that is not a JSON object a 400. `stop_on_repeat` ends "
-               "decoding as soon as a sentence repeats an earlier one, and the generate stage then reports `stopped: "
-               "repeat`; left out, the whole `max_new_tokens` is decoded, as in the published protocol. `reference` and "
-               "`test_row` work in private mode only. A command in `text` is applied on top.")
+               "decoding at the first sentence that repeats an earlier one word for word (case and spacing aside): the "
+               "generate stage then reports `stopped: repeat`, and `truncated_mid_sentence` is false even when the raw "
+               "`report` ends in the start of the next sentence; left out, the whole `max_new_tokens` is decoded, as in "
+               "the published protocol. `reference` and `test_row` work in private mode only. A command in `text` is "
+               "applied on top.")
 REFUSALS = {   # what a status means in the reference; a route that can answer it declares it with _refusals()
     400: "The request is malformed: `options` is not a JSON object, or in public mode `X-Client-Id` is missing or "
          "invalid.",

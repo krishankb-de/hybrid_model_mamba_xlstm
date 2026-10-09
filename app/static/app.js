@@ -452,9 +452,11 @@ export function createApp(env) {
     state.noticeOwner = null;
   }
 
-  // The status region says a thing only when it changes, so the same word is not read twice.
-  function announce(message) {
-    if (message === state.said) return;
+  // The status region says a thing only when it changes, so the same word is not read twice. again: a message that is news every time
+  // (a refusal) is said again, the same words too.
+  function announce(message, again = false) {
+    if (message === state.said && !again) return;
+    if (again) ui.status.textContent = '';   // a live region reads what is put into it: empty, then the words, so that the same words are new
     state.said = message;
     ui.status.textContent = message;
   }
@@ -1163,6 +1165,7 @@ export function createApp(env) {
     if (ui.drawer.hidden) {
       const from = doc.activeElement;
       state.drawerOpener = from && from !== doc.body ? from : ui.settings;
+      clearSaved();   // "Settings saved." that is still on the page is about a Save that is behind the user now
       ui.drawer.hidden = false;
       ui.settings.setAttribute('aria-expanded', 'true');
       ui.drawerClose.focus();
@@ -1228,27 +1231,36 @@ export function createApp(env) {
     syncDrawer();
   }
 
-  // "Settings saved." in the visible live region beside the chips, for SAVED_MS; a second Save starts the time over.
-  function confirmSaved(message) {
+  // The visible live region beside the chips, emptied (and its timer stopped).
+  function clearSaved() {
     if (state.savedTimer !== null) cancelLater(state.savedTimer);
+    state.savedTimer = null;
+    ui.saved.textContent = '';
+    ui.saved.removeAttribute('data-state');
+  }
+
+  // "Settings saved." in that region for SAVED_MS; a second Save starts the time over. warn: where the browser would not store the settings
+  // the same region says that instead (the storage note), in the warning's colour, and never "saved".
+  function confirmSaved(message, warn = false) {
+    clearSaved();
     ui.saved.textContent = message;
-    state.savedTimer = later(() => {
-      state.savedTimer = null;
-      ui.saved.textContent = '';
-    }, SAVED_MS);
+    if (warn) ui.saved.setAttribute('data-state', 'warn');
+    state.savedTimer = later(clearSaved, SAVED_MS);
   }
 
   // Save, which is the form's submit: Enter in a text field submits it too. Every number field the page lets the user edit must hold a
   // whole number inside its bounds, else nothing is stored and the drawer stays open on the first that does not (with every wrong
-  // field's line showing). Otherwise the settings are stored, the drawer closes to where it was opened from, and the page says so. Where
-  // the browser will not store them, the note under the fields says that instead, the settings still apply in this tab, and the drawer
-  // stays open: the note is in it.
+  // field's line showing). Otherwise the settings are stored, the drawer closes to where it was opened from, and the page says so beside
+  // the chips. Where the browser will not store them, the drawer closes all the same (one that stays open looks dead), the settings still
+  // apply in this tab, and what the page says beside the chips is the storage note, in the warning's colour, and never "saved".
   function saveDrawer() {
     const wrong = NUMBER_KEYS.filter((key) => !fields.inputs[key].disabled && wholeNumber(fields.inputs[key].value, BOUNDS[key]) === null);
     if (wrong.length) {
       for (const key of wrong) showDraft(key, true);
-      fields.inputs[wrong[0]].focus();
-      announce(rangeMessage(wrong[0]));
+      const first = fields.inputs[wrong[0]];
+      first.focus();
+      first.select();   // a field that already has focus gets no focus event, so its bad text is selected here: the next key replaces it
+      announce(rangeMessage(wrong[0]), true);   // a refusal is news every time, the same words too
       return false;
     }
     const patch = {};
@@ -1256,18 +1268,17 @@ export function createApp(env) {
       if (!fields.inputs[key].disabled) patch[key] = wholeNumber(fields.inputs[key].value, BOUNDS[key]);
       showDraft(key, false);
     }
-    if (!update(patch)) {
-      announce(STORAGE_TEXT);
-      return false;
-    }
+    const stored = update(patch);
     closeDrawer();
-    confirmSaved(SAVED_TEXT);
+    confirmSaved(stored ? SAVED_TEXT : STORAGE_TEXT, !stored);
     return true;
   }
 
   function buildDrawer() {
     // A number field: a whole number inside the bounds applies at once, so that the chips follow the keys; anything else stays as typed,
-    // with its line under it, until it is right or the drawer closes. Nothing is clamped (the "1" on the way to "150" is not 16).
+    // with its line under it, until it is right or the drawer closes. Nothing is clamped (the "1" on the way to "150" is not 16), and
+    // nothing wrong is left in force: the "30" on the way to "300" does apply, and when the text stops being a number the setting can take,
+    // the setting goes back to what it was before this edit (an edit runs from the focus, or the first key, to the change or the blur).
     const number = (key) => {
       const input = el('input', { type: 'number', min: BOUNDS[key][0], max: BOUNDS[key][1], step: 1, inputmode: 'numeric', 'data-setting': key });
       fields.inputs[key] = input;
@@ -1277,28 +1288,45 @@ export function createApp(env) {
         showDraft(key, n === null);
         return n;
       };
+      let before;   // the setting when this edit began; undefined between edits
+      const begin = () => { if (before === undefined) before = state.settings[key]; };
       input.addEventListener('input', () => {
+        begin();   // here as well as at the focus: a key can come with no focus event before it
         const n = read();
-        if (n !== null && n !== state.settings[key]) update({ [key]: n }, { sync: false });
+        if (n !== null) {
+          if (n !== state.settings[key]) update({ [key]: n }, { sync: false });
+        } else if (state.settings[key] !== before) {
+          update({ [key]: before }, { sync: false });
+        }
       });
       input.addEventListener('change', () => {
         const n = read();
         if (n !== null) update({ [key]: n });   // writes the number back as the setting has it: "0120" is 120
+        before = undefined;                      // committed: the next edit starts from what the setting is now
       });
       // Typing replaces what the field holds: it is selected whole when it gets focus, by Tab or by a click. A click ends in a mouseup,
-      // which would put the caret back and undo that, so the first mouseup after the focus is cancelled (the click that gave the field
-      // focus, when there was one); without this, "150" is typed after the "100" that was there, and 100150 is out of range. Later clicks
-      // in the field place the caret as they always do.
-      let guard = false;
+      // which would put the caret back and undo that, so the mouseup of the click that gave the field its focus is cancelled; without
+      // this, "150" is typed after the "100" that was there, and 100150 is out of range. Only that click: the first click after a Tab, and
+      // every later click in a field that has focus, place the caret as they always do.
+      let pressed = false;   // a pointer went down on the field while it had no focus: the focus that follows is that click's
+      let guard = false;     // and the mouseup after it must not put the caret back over the selection
+      const down = () => { pressed = doc.activeElement !== input; };
+      input.addEventListener('pointerdown', down);
+      input.addEventListener('mousedown', down);   // a browser with no pointer events
       input.addEventListener('focus', () => {
         input.select();
-        guard = true;
+        guard = pressed;
+        pressed = false;
+        begin();
       });
       input.addEventListener('mouseup', (event) => {
         if (guard) event.preventDefault();
-        guard = false;
+        guard = pressed = false;
       });
-      input.addEventListener('blur', () => { guard = false; });
+      input.addEventListener('blur', () => {
+        guard = pressed = false;
+        before = undefined;
+      });
       return input;
     };
     const choice = (key, ...options) => {

@@ -434,3 +434,7 @@ def test_the_saved_line_is_a_row_of_the_composer_that_takes_no_room_while_it_is_
     assert re.search(r"flex:\s*1\s+0\s+100%", shown) and re.search(r"color:\s*var\(--ok\)", shown)   # a row of its own, in the confirming colour
     assert re.search(r"position:\s*absolute", empty)   # out of the flex row, so that it leaves no gap ...
     assert not re.search(r"display:\s*none|visibility:\s*hidden", empty)   # ... and still in the accessibility tree, a live region before its first message
+
+
+def test_a_confirmation_that_is_a_warning_is_in_the_warning_colour():   # P4-G fix 1: Save with refused storage says so in the same region
+    assert re.search(r"color:\s*var\(--warn\)", _rule('#saved[data-state="warn"]'))

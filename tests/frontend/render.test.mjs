@@ -478,21 +478,36 @@ test('the card says why the report ended: a repeat stop gets a quiet note and no
   assert.deepEqual(notes(finished({ truncated: true, options: { display_repair: true }, generate: { stopped: 'repeat', tokens: 21 } })), [REPEAT]);
   assert.deepEqual(notes(finished({ truncated: true, options: { display_repair: false }, generate: { stopped: 'repeat', tokens: 21 } })), [REPEAT]);
 
-  const budget = finished({ truncated: true, options: { display_repair: true }, generate: { stopped: 'budget', tokens: 200 } });
+  // a report cut off by the budget, and what the repair shows of it: the unfinished last sentence is left out of the card
+  const cutOff = { report: 'Findings: The lungs are clear. Impression: No acute', display: 'Findings: The lungs are clear.' };
+  const budget = finished({ ...cutOff, truncated: true, options: { display_repair: true }, generate: { stopped: 'budget', tokens: 200 } });
   assert.deepEqual(notes(budget), ['Reached the 200-token budget; the unfinished last sentence is hidden (Show raw shows it).']);
   assert.ok(q(renderReport(budget), '.note.truncated'));
-  assert.deepEqual(notes(finished({ truncated: true, options: { display_repair: true }, generate: { stopped: 'budget', tokens: 100 } })),
+  assert.deepEqual(notes(finished({ ...cutOff, truncated: true, options: { display_repair: true }, generate: { stopped: 'budget', tokens: 100 } })),
                    ['Reached the 100-token budget; the unfinished last sentence is hidden (Show raw shows it).']);   // the number is the tokens decoded
-  assert.deepEqual(notes(finished({ truncated: true, options: { display_repair: false }, generate: { stopped: 'budget', tokens: 100 } })),
+  assert.deepEqual(notes(finished({ ...cutOff, truncated: true, options: { display_repair: false }, generate: { stopped: 'budget', tokens: 100 } })),
                    ['Report stopped at the token budget mid-sentence']);   // repair off: the unfinished sentence is on the card, as the existing note says
-  assert.deepEqual(notes(finished({ truncated: true, generate: { stopped: 'budget', tokens: 100 } })), ['Report stopped at the token budget mid-sentence']);   // a turn that does not say
-  assert.deepEqual(notes(finished({ truncated: false, options: { display_repair: true }, generate: { stopped: 'budget', tokens: 100 } })), []);   // nothing was hidden: nothing to say
-  assert.deepEqual(notes(finished({ truncated: true, options: { display_repair: true }, generate: { stopped: undefined, tokens: 64 } })),
+  assert.deepEqual(notes(finished({ ...cutOff, truncated: true, generate: { stopped: 'budget', tokens: 100 } })), ['Report stopped at the token budget mid-sentence']);   // a turn that does not say
+  assert.deepEqual(notes(finished({ ...cutOff, truncated: false, options: { display_repair: true }, generate: { stopped: 'budget', tokens: 100 } })), []);   // nothing was hidden: nothing to say
+  assert.deepEqual(notes(finished({ ...cutOff, truncated: true, options: { display_repair: true }, generate: { stopped: undefined, tokens: 64 } })),
                    ['Reached the 64-token budget; the unfinished last sentence is hidden (Show raw shows it).']);   // a log from before the stop reason: it was the budget
-  assert.deepEqual(notes(finished({ truncated: true, options: { display_repair: true }, generate: { stopped: 'budget', tokens: undefined } })),
+  assert.deepEqual(notes(finished({ ...cutOff, truncated: true, options: { display_repair: true }, generate: { stopped: 'budget', tokens: undefined } })),
                    ['Reached the token budget; the unfinished last sentence is hidden (Show raw shows it).']);   // no number to give
-  assert.deepEqual(notes(finished({ truncated: true, options: { display_repair: true }, generate: { stopped: 'eos', tokens: 87 } })),
+  assert.deepEqual(notes(finished({ ...cutOff, truncated: true, options: { display_repair: true }, generate: { stopped: 'eos', tokens: 87 } })),
                    ['Report stopped at the token budget mid-sentence']);   // any other reason keeps the plain note
+});
+
+test('with the repair on, the budget note says what is hidden only when the card does hide something: no complete sentence is kept as it is (P4-G fix 1)', () => {
+  const notes = (view) => texts(qa(renderReport(view), '.note'));
+  const PLAIN = ['Report stopped at the token budget mid-sentence'];
+  const repair = { options: { display_repair: true }, generate: { stopped: 'budget', tokens: 16 }, truncated: true };
+  // the repair has no complete sentence to cut back to, keeps the text as it is and calls that a fallback: the card shows all of it
+  assert.deepEqual(notes(finished({ ...repair, report: 'The lungs are clear and the heart', display: 'The lungs are clear and the heart' })), PLAIN);
+  assert.deepEqual(notes(finished({ ...repair, report: 'The lungs   are\nclear', display: 'The lungs are clear' })), PLAIN);   // spacing alone hides nothing
+  assert.deepEqual(notes(finished({ ...repair, report: 'The lungs are clear. The heart', display: 'The lungs are clear.' })),
+                   ['Reached the 16-token budget; the unfinished last sentence is hidden (Show raw shows it).']);   // a sentence left out: say so
+  assert.deepEqual(notes(finished({ ...repair, report: 'The lungs are clear. The lungs are clear. The heart', display: 'The lungs are clear.' })),
+                   ['Reached the 16-token budget; the unfinished last sentence is hidden (Show raw shows it).']);   // repeats and a fragment left out
 });
 
 test('the recorded turn keeps its budget note, and a card that has not reached generate has no reason to give yet', () => {

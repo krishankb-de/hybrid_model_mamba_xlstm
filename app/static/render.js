@@ -56,6 +56,7 @@ const isPrimitive = (v) => v === null || (typeof v !== 'object' && typeof v !== 
 const turnOf = (cx) => (Number.isInteger(cx?.turn) && cx.turn > 0 ? cx.turn : null);
 const named = (text, cx) => (turnOf(cx) ? `${text}, turn ${turnOf(cx)}` : text);
 const path = (...parts) => parts.map(str).filter(Boolean).join(' ');   // "retrieve report_matches 2 report"
+const squeezed = (t) => str(t).split(/\s+/).filter(Boolean).join(' ');   // a text as the dumps have it: its whitespace in single spaces
 
 // The view with every field present: what a builder reads, so a field that is missing is the empty value.
 function whole(view) {
@@ -247,7 +248,10 @@ function reportNote(v) {
   const stopped = str(generate.stopped);
   if (stopped === 'repeat') return el('p', { class: 'note', 'data-stopped': 'repeat' }, 'Stopped when the model began repeating itself.');
   if (!v.truncated) return null;
-  if (!(isObject(v.options) && v.options.display_repair === true && (stopped === 'budget' || stopped === ''))) {
+  // The card hides something only if the repair left something out of it: with no complete sentence to cut back to, the repair keeps the
+  // text as it is, and the card shows all of it.
+  const hides = squeezed(v.displayReport) !== squeezed(v.report);
+  if (!(isObject(v.options) && v.options.display_repair === true && (stopped === 'budget' || stopped === '') && hides)) {
     return el('p', { class: 'note truncated' }, 'Report stopped at the token budget mid-sentence');
   }
   const budget = isNum(generate.tokens) ? `${generate.tokens}-token budget` : 'token budget';
