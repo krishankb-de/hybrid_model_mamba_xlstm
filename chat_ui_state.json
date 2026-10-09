@@ -5,8 +5,8 @@
   "base": "h100_efficiency @ 5c45527 (2026-09-30, 'SLURM: partition aisc-batch renamed to pot-hpi-aisc-batch')",
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P5",
-  "status": "P0-P4 complete 2026-10-09 (tiny-engine browser UI; P4-F clean display; P4-G stop on repeat + Settings Save). P9-G (learned stop condition) approved 2026-10-09 and scheduled before P5; P9-G1 committed, its review pending.",
-  "next_action": "1) Review P9-G1 (EOS target flag; committed by the controller after the implementer hit a rate limit: 41 focused tests + validate.sh green, no implementer report). Dispatch an SDD task reviewer on the P9-G1 diff (brief: `bash .superpowers/sdd/CHAT_UI_PLAN/brief.sh P9-G1`; the rulings are in CHAT_UI_PLAN.md under P9-G1). 2) P9-G2: EOS-stop decoders + engine (implementer + review; rulings under P9-G2). 3) P9-G3: H100 training job (new wrapper, outputs in CHAT_HOME/models; prediction first, R4). 4) P5 while it trains, then P9-G4 evaluation. The agent cannot push (permission classifier): the user pushes chat_ui.",
+  "status": "P0-P4 complete 2026-10-09. P9-G (learned stop condition, approved 2026-10-09): G1 (EOS target flag) and G2 (EOS-stop decoders: top-hypothesis stop, soft stop, no EOS first; engine eos_trained) done and reviewed; G3 wrapper + preflight reviewed (22fa8c2, 0bb201d), prediction recorded, submission next; G4 rulings written.",
+  "next_action": "1) Submit P9-G3 from a clean committed tree: bash scripts/chat_remote.sh sync && bash scripts/chat_remote.sh submit scripts/train_report_eos_h100.sh; record the job id (note); read results only with chat_remote.sh state <id> / summary logs/chat_report_eos_<id>.log (R7). 2) While it trains: P9-G4 laptop part (implementer + review; rulings under P9-G4; brief: brief.sh P9-G4 --contracts), then P5-A onward. 3) When G3 prints DONE + RESULT: tick P9-G3 with the job id and metrics, submit the G4 chain (decode -> CheXbert -> compare), record its prediction first (R4). The agent cannot push (permission classifier): the user pushes chat_ui.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -135,7 +135,8 @@
     "P2-E": "engine vs script same CPU node 0/20; GPU engine-uncached vs published 0/20; GPU engine-cached vs published 0/20; CPU encode 0.3-1 s",
     "P5-B": "towers identical and no img_proj (85%); test-split R@1/5/10 equal to evaluate_cxr_retrieval.py to every digit (90%); 45-90 min on one H100",
     "P5-C": "0 mismatches vs published y_true and refs.txt on 2,663 test rows (85%); f1chexbert stays on CPU (55%) -> 8 CPU shards of ~1 h (0.16 s/report x ~150-190k groups), else 15-45 min on one H100",
-    "P5-F": "50/50 self-retrieval at rank 1; live CPU own-rank == build rank on >=48/50; labeller == published labels 100/100"
+    "P5-F": "50/50 self-retrieval at rank 1; live CPU own-rank == build rank on >=48/50; labeller == published labels 100/100",
+    "P9-G3": "preflight code eos_flag true + module_in_cwd true; recipe ok with changed = the 6 root-derived keys (checkpoint_dir, experiment_name, log_dir, output_dir, trainer.default_root_dir, wandb.name), added = [dataset.report_eos_target], removed = [] (80%); wall 1.1-1.8 h for 12,000 steps on 4 H100 (published ~1.3 h); final val/lm_loss within 0.03 of the published run's last value, slightly higher more likely (one more target per report); DONE written with steps 12000"
   },
   "decisions": {
     "branch": "chat_ui, cut from h100_efficiency @ 5c45527 (has cached decode, E6/E7 decode verification, ISBI neighbour code, partition rename)",
@@ -518,7 +519,7 @@
     },
     "P9": {
       "title": "Demo and close",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "P9-A": {
           "done": false,
@@ -545,11 +546,11 @@
           "desc": "(optional, U5 \"a mix between the two\") Compare mode: one image decoded by both the Mamba-3 and the 13D decoders, the two reports and label sets side by side ..."
         },
         "P9-G1": {
-          "done": false,
+          "done": true,
           "desc": "(laptop) An EOS target behind a new flag. The flag is dataset.report_eos_target, default false."
         },
         "P9-G2": {
-          "done": false,
+          "done": true,
           "desc": "(laptop) EOS-stop decoders and the engine."
         },
         "P9-G3": {
@@ -565,7 +566,15 @@
           "desc": "(laptop, then cluster) The EOS model in the UI."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "p9g1_commit": "3a15159",
+        "p9g1_test": "tests/test_report_eos_target.py (41 pass; reviewer RED: 12 EOS tests fail with _eos_row disabled)",
+        "p9g1_parity": "tests/test_willi_parity.py::test_no_yaml_turns_the_report_eos_target_on",
+        "p9g2_commits": "1fcae9c,f417165,cc96a6a,6136cf1",
+        "p9g2_test": "tests/test_beam_search_eos.py::test_exact_ties_break_as_in_the_published_decoder_ids_and_stream (231 in file)",
+        "p9g2_engine": "tests/test_app_engine.py::test_a_report_that_ended_before_the_repeat_is_kept_when_stop_on_repeat_fires",
+        "p9g2_stress": "re-review 1152 quantised-logit runs, 0 mismatches vs published"
+      },
       "verdict": null
     }
   },
@@ -603,9 +612,12 @@
     "2026-10-08: P4-E browser checklist 9/9 on the tiny engine (stream, reload, switch, exports, stop, keyboard, 375 px, AX tree, 422 notice); shared CDP harness with graceful Chrome stop; 8 screenshots + checklist.json; review clean after 2 fix rounds",
     "2026-10-08: current_phase -> P5",
     "2026-10-08: P4-F (user's own test): clean report display (dedup=all + stream view; raw report unchanged, R2), UI repair default on, live chips, drawer + re-run hints, /v1/models features with disabled fields; 10th browser check 'settings'; review approved",
-    "2026-10-09: P4-G stop condition (stop_on_repeat: UI default on, server off = published protocol; 200 tok/17.9 s -> 21 tok/2.3 s on tiny) + Settings drawer with Save, ranges, select-on-focus, revert-on-invalid; review clean after 1 fix round"
+    "2026-10-09: P4-G stop condition (stop_on_repeat: UI default on, server off = published protocol; 200 tok/17.9 s -> 21 tok/2.3 s on tiny) + Settings drawer with Save, ranges, select-on-focus, revert-on-invalid; review clean after 1 fix round",
+    "2026-10-09: P9-G1 EOS target flag (default off) reviewed clean, no fix round",
+    "2026-10-09: P9-G2 EOS-stop decoders (top-hypothesis stop, soft stop, no EOS first, published-first candidates) + engine eos_trained; review clean after fix rounds 0-1",
+    "2026-10-09: 2026-10-09: P9-G1/G2 ticked (reviewed clean); P9-G2 rulings amended in the plan (top-hypothesis stop, soft stop, no EOS first, published-first candidates); P9-G3 as-built + R4 prediction recorded before submission; P9-G4 rulings added; P9-G5 carried items"
   ],
-  "last_updated": "2026-10-09T14:24:41+02:00",
+  "last_updated": "2026-10-09T22:11:39+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -647,7 +659,14 @@
       "dom_shim implicit submission fires no change before submit (real order covered by the browser check)",
       "the select-on-focus guard can stay armed after a drag-out/right-click/pointercancel (at most one swallowed click)",
       "announce(msg, true) re-read by assistive tech is unverified",
-      "a header glued to a sentence ('Findings: X.') does not dedup a later 'X.' (repair_report key)"
+      "a header glued to a sentence ('Findings: X.') does not dedup a later 'X.' (repair_report key)",
+      "P9-G1: class docstring \"fits in max_length\" -> \"fits with room for one more token\"; the + override test matches Hydra error text",
+      "P9-G2: no test pairs a non-empty prompt with a step-0 EOS; argmax-frame test [1] variant cannot discriminate; inert [:2*beam] cap; wording nits (cached docstring \"as the published pair do\", parser message with no mode, dangling docstring line erg:538-540)"
+    ],
+    "P9-G5": [
+      "UI copy for eos_trained models: render.js \"full budget\" chip and app.js:1360 stop-switch hint (\"always decodes the whole token budget\") are wrong for an EOS model",
+      "golden driver card line prints eos_trained",
+      "optional final engine snapshot: the last stream frame is not the report after a soft stop that returns a finished report while the answer was live, or after a late win (message_stop.display_report settles the card)"
     ]
   }
 }

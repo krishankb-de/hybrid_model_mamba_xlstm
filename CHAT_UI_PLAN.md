@@ -3896,7 +3896,7 @@ What it means for the plan:
 - The training step then masks every `attention_mask == 0` position (`hybrid_xmamba/training/lightning_module.py:1634-1640`, on `ImageTextDataset`'s right-padded tokens in `scripts/train_contrastive.py`).
 - So no end-of-report token is ever a target, and the model cannot learn to stop (V5-D).
 
-- [ ] **P9-G1** (laptop) An EOS target behind a new flag. The flag is `dataset.report_eos_target`, default `false`.
+- [x] **P9-G1** (laptop) An EOS target behind a new flag. The flag is `dataset.report_eos_target`, default `false`.
   - When it is on, each report that fits in `max_length` ends with exactly one EOS whose `attention_mask` is 1, so it is supervised. The padding after it stays masked.
   - A report cut by `max_length` gets no EOS, because the budget, not the report, ended it.
   - Off is byte-identical to today: the same `input_ids` and `attention_mask` for every row.
@@ -3916,7 +3916,16 @@ What it means for the plan:
   - **Tests.**
     - `tests/test_report_eos_target.py`: synthetic text, and flag-off byte parity for short, exact-fit and over-long texts.
     - `tests/test_willi_parity.py`: no yaml under `configs/` sets the flag.
-- [ ] **P9-G2** (laptop) EOS-stop decoders and the engine.
+
+  *As built (3a15159; reviewed clean, no fix round):*
+  - **Code.** `ImageTextDataset._eos_row` builds the flag-on row. The flag-off path is the original tokenizer call, verbatim. A non-boolean flag, or a missing eos/pad id with the flag on, raises.
+  - **Tests.** `tests/test_report_eos_target.py` has 41 tests, run with a fake tokenizer and with the real GPT-2. They include `_step`'s masking end to end.
+  - **The review's RED check.** With `_eos_row` disabled, the 12 tests that need an EOS fail.
+  - **Parked for the final review:**
+    - the class docstring says "fits in max_length" where the rule is "fits with room for one more token";
+    - the `+` test matches Hydra's error text.
+  - **A note for P9-G3 and G4.** The flag also gives the validation split an EOS target, so the EOS run's `val/lm_loss` is not exactly comparable with the published run's.
+- [x] **P9-G2** (laptop) EOS-stop decoders and the engine.
   - `beam_search_decode_eos` and a cached twin live beside the published decoders, which stay byte-identical (R3).
   - A beam that emits EOS is finished and set aside. Decoding ends when the best `beam_size` candidates are all finished, or at the budget.
   - The finished score uses the same length penalty as the published decoders.
@@ -3947,6 +3956,42 @@ What it means for the plan:
     - `Engine.generate` uses the EOS decoders for such a model and reports `stopped: "eos"`, with no card note.
     - `stop_on_repeat` stays as a backstop.
     - The tiny engine stays `eos_trained: false`. A scripted tiny decoder drives the `"eos"` path end to end.
+
+  *Amended (controller, 2026-10-09, fix rounds 0 and 1). These rules replace the Hugging Face-style stop above.*
+  - **Why they changed.** The HF rule can put "budget" on the card with fewer tokens than the budget. It can also drop a natural ending when the repeat backstop fires, and the stream can run past the report's end.
+  - **Stopping, OpenNMT-style.** After each step's walk:
+    - the *answer* is the best of finished ∪ live, by normalised score, with ties going to finished;
+    - `on_step` receives the answer;
+    - decoding stops right after the first step whose answer is finished;
+    - at the budget, the full-length live answer is returned with `ended_by_eos` false.
+    So the stop label is always truthful, and the stream's last frame is the report.
+  - **Candidates.** They are built published-first: the published `topk(beam)` call, then the extras from the wider `topk(2*beam)`. That way exact ties break as in the published decoders. The cached twin's frame is `tokens[argmax(scores)]`, as published.
+  - **No EOS as the first generated token**, as with HF's `min_new_tokens=1`. A turn never ends with an empty report.
+  - **The soft stop.** `StopDecoding` is defined in `hybrid_xmamba/models/hybrid_lm.py`; the engine's `_RepeatStop` subclasses it.
+    - Raised from `on_step`, it returns the best finished hypothesis if one exists; otherwise it propagates.
+    - So a natural ending survives the repeat backstop, with `stopped: "eos"`.
+    - Every other exception, `Cancelled` included, propagates.
+  - **`--stop-at-eos`** works with `--checkpoint --decode beam` only. With `--retrieval-baseline`, `--smoke-test` or hyp/ref mode it fails, instead of being silently ignored. The script prints `EOS stop: k/n reports ended at the end-of-report token, m were cut at max_new_tokens=B`.
+
+  *As built (1fcae9c, f417165, cc96a6a, 6136cf1; reviewed clean after fix rounds 0 and 1):*
+  - **Tests:**
+    - `tests/test_beam_search_eos.py` (231) covers:
+      - parity on tiny and real weights;
+      - 54 exact-tie runs comparing ids and the stream;
+      - an independent oracle;
+      - scripted EOS cases;
+      - the soft stop;
+      - step 0;
+      - the parser.
+    - Also engine (120), API, OpenAPI and node tests.
+  - **Mutation checks.** 27 mutants in fix 0 and 15 in fix 1, all killed.
+  - **The re-review's stress run.** 1,152 runs with quantised logits (beams 1–8, cached and uncached) gave 0 mismatches against the published decoders in ids or stream.
+  - **R3.** The published decoders are byte-identical; the AST was compared with 7a21925.
+  - **Parked for the final review:**
+    - no test pairs a non-empty prompt with an EOS at step 0 (the code is correct, and the engine never passes a prompt);
+    - the `[1]` variant of the argmax-frame test cannot discriminate;
+    - the `[:2*beam]` cap is inert;
+    - three wording nits.
 - [ ] **P9-G3** (cluster) The training job.
   - The recipe is the published `h100_report_gen_m3_tower13d_s42` (`hybrid_150m_m3_rrg`, the same tower, Mamba-3 backbone, data and seed 42), with only `dataset.report_eos_target=true`.
   - It writes to a new directory outside `MAIN_REPO` (R8): `CHAT_HOME/models/report_gen_m3_eos_s42/`. Checkpoints are MIMIC-derived (Class R), so they stay on the cluster.
@@ -3961,6 +4006,36 @@ What it means for the plan:
     - `HF_HUB_OFFLINE=1`.
   - **Its output** goes under `CHAT_HOME/models/report_gen_m3_eos_s42/`, never `MAIN_REPO/outputs`.
   - **Tests.** Parity tests for the wrapper go in `tests/test_willi_parity.py`.
+
+  *As built (22fa8c2, 0bb201d; wrapper review approved, minors fixed in round 1):*
+  - **The recipe.** `scripts/train_report_eos_h100.sh` holds it as plain assignments, so a stray env var cannot change it. One `OVERRIDES` array feeds both the preflight and the trainer. It equals the published wrapper's list, with the V3-chain decoder values: `hybrid_150m_m3_rrg`, the Stage-0 m3 checkpoint, the 13D tower, 4 GPUs, 12,000 steps, seed 42, `save_top_k=0`, `aux_lambda=0`, `prefix_k=32`. The only additions:
+    - `experiment_name=report_gen_m3_eos_s42`;
+    - `output_dir=${OUT_DIR}`;
+    - `+dataset.report_eos_target=true`;
+    - `hydra.run.dir=${OUT_DIR}/hydra`. Without it, Hydra writes a dated dir into `./outputs`, which is the thesis checkout.
+  - **SLURM.** `--gpus=4`, `--time=04:00:00`, `--requeue`, `--open-mode=append`, job name `chat_report_eos`.
+  - **The job log (R7).** It carries only `===`, `RESULT` and `ERROR` lines. Its first line is `=== sync <sha> <clean|dirty> ===`, read from `.sync_stamp`. The trainer's output goes to `OUT_DIR/train.log`; the result script's stderr goes to `result.err`.
+  - **The preflight** (`scripts/report_eos_preflight.py`). It runs on the compute node before training and stops the job on either of two checks:
+    - **(a) Code version.** `ImageTextDataset` must be imported through the trainer's own route (`load_mimic_cxr.__globals__`), have `_eos_row`, and resolve inside the cwd tree (`CLUSTER_REPO`), not the thesis checkout.
+    - **(b) Recipe.** Hydra compose of the same overrides is compared with the published run's `resolved_config`.
+      - Changed keys are allowed only when the new roots explain them. On the laptop configs that gives six: `checkpoint_dir`, `experiment_name`, `log_dir`, `output_dir`, `trainer.default_root_dir`, `wandb.name`.
+      - The only added key allowed is `dataset.report_eos_target`. Nothing may be removed.
+      - Unchanged roots fail, because they would overwrite the published run.
+  - **DONE.** `OUT_DIR/DONE` is written only when:
+    - training exited 0;
+    - no `interrupt.ckpt` is newer than this attempt's start;
+    - `last.ckpt` exists and is newer than that start;
+    - `steps == 12000`. `steps` is the largest TensorBoard stamp + 1, because Lightning stamps from zero; a test pins this against the real module.
+
+    An existing DONE refuses a rerun (R8).
+  - **The result line.** `scripts/report_eos_result.py` prints one RESULT with `steps`, `wall_s`, this run's last `val/lm_loss`, the published run's last `val/lm_loss` and `ckpt_exists`.
+  - **Tests.** `tests/test_report_eos_preflight.py`, `tests/test_report_eos_job.py` and 8 parity tests. Together they hold 110 tests, including a bash 3.2 sandbox rehearsal of the real wrapper.
+
+  **Prediction (R4), recorded before submission:**
+  - **Preflight.** `RESULT {"preflight":"code","eos_flag":true,"module_in_cwd":true}`. The recipe check reports `ok:true`, with exactly the six root-derived keys as `changed`, `added = [dataset.report_eos_target]` and nothing removed. Confidence 80%. The likeliest failure is a launch value that differs from the transcription; it shows as a named key before any training.
+  - **Wall time.** 1.1–1.8 h for 12,000 steps on 4 H100. The published run took about 1.3 h.
+  - **Final `val/lm_loss`.** Within 0.03 of the published run's last value, slightly higher more likely than lower: one more target per report.
+  - **DONE.** Written, with `steps:12000`.
 - [ ] **P9-G4** (cluster) The evaluation job, on the official test split (n = 2,663).
   - The EOS model is decoded with the EOS-stop beam search (beam 3, budget 200, so the model, not the budget, ends the report).
   - The baseline is the published Mamba-3 run, decoded with the published protocol.
@@ -3971,11 +4046,33 @@ What it means for the plan:
     - repeated sentences per report.
   - **Gate:** no metric significantly worse than the published run.
   - Prediction: the cut-at-budget share falls from 301/400 (V5-D) to under 10%.
+
+  *Rulings (controller, 2026-10-09):*
+  - **Three jobs, chained with `--dependency=afterok`.** The controller submits them; the implementer only writes them.
+  - **(1) The decode job.** A new GPU wrapper, `scripts/eval_report_eos_h100.sh`. It runs `evaluate_report_generation.py` with `--cached-decode --stop-at-eos --decode beam --beam-size 3 --max-new-tokens 200 --prefix-k 32` on `test.parquet`, with `--num-samples 999999`.
+    - Input: the EOS checkpoint under `CHAT_HOME/models/report_gen_m3_eos_s42/`.
+    - Output: `results/chat_report_eos_test_split_s42`.
+    - It refuses without the training's `DONE`, or if the dump already exists (R8).
+    - The raw output goes to `eval.log` in the dump dir. The job log carries only `===`, `RESULT` and `ERROR` lines, including the sync line.
+  - **(2) CheXbert scoring.** The thesis wrapper `score_chexbert_h100.sh` is used unchanged, but only if every line of its log that `SUMMARY_PATTERN` matches is free of text. Otherwise a thin chat wrapper takes its place.
+  - **(3) The comparison.** A new CPU wrapper, `scripts/eval_report_eos_compare_h100.sh`.
+    - It runs `bootstrap_compare.py` unchanged: EOS dump against `results/report_gen_m3_test_split_s42`, with per-label CIs.
+    - It also runs a new `scripts/report_eos_stats.py` on both dumps' hyps. That reports mean length, empty reports, repeated sentences per report (`repair_generations`, `dedup="all"`) and the share with an unterminated last sentence.
+    - It prints RESULT lines, numbers only, ending with `RESULT {"gate":"pass"|"fail","worse":[…]}`. "worse" lists every metric whose 95% CI of (EOS − published) lies entirely below 0.
+  - **Tests.** Parity tests, unit tests and a sandbox rehearsal, as in P9-G3.
 - [ ] **P9-G5** (laptop, then cluster) The EOS model in the UI.
   - The model appears in `MODEL_CHECKPOINTS` as a selectable model. Its card names the EOS training and links the G4 numbers.
   - The published checkpoints and numbers are unchanged.
   - Making it the *default* model is the user's decision, once they have seen the G4 numbers.
   - Verify a real turn on the cluster: it shows similar X-rays (once P5-E and P6-C are done) and a report that ends with `stopped: "eos"`.
+  - *Carried from P9-G2 (controller, 2026-10-09):*
+    - **UI copy for an `eos_trained` model.** The `full budget` chip in `render.js`, and the stop-switch hint at `app.js:1360` ("Off: … always decodes the whole token budget"), are wrong for such a model. With the switch off, it still ends at its EOS.
+    - **The golden driver's card line** should print `eos_trained`.
+    - **An optional final engine snapshot.** In two cases the stream's last frame is not the report:
+      - a soft stop that returns a finished report while the answer was live;
+      - a late win.
+
+      `message_stop.display_report` settles the card in both.
 
 ---
 
