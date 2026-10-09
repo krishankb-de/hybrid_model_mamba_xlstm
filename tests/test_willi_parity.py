@@ -6924,3 +6924,326 @@ def test_train_report_eos_wrapper_passes_the_bash_syntax_check():
         done = subprocess.run([shell, "-n", str(REPO_ROOT / "scripts" / "train_report_eos_h100.sh")],
                               capture_output=True, text=True)
         assert done.returncode == 0, (shell, done.stderr)
+
+
+# ── CHAT_UI_PLAN.md P9-G4: the EOS evaluation wrappers ────────────────────────
+# Static pins on the three jobs that measure the EOS model on the official test split: scripts/eval_report_eos_h100.sh (decode,
+# GPU), eval_report_eos_chexbert_h100.sh and eval_report_eos_compare_h100.sh (CPU), and on the scripts/report_eos_stats.py they
+# call. Their behaviour (guards, R7 output, what each writes) is rehearsed for real in tests/test_report_eos_eval.py.
+
+_EVAL_WRAPPERS = {"decode": "eval_report_eos_h100.sh", "chexbert": "eval_report_eos_chexbert_h100.sh",
+                  "compare": "eval_report_eos_compare_h100.sh"}
+
+
+def _eval_text(kind: str) -> str:
+    return (REPO_ROOT / "scripts" / _EVAL_WRAPPERS[kind]).read_text()
+
+
+def _sbatch_options(src: str):
+    """({--key: value}, [bare flags]) of the #SBATCH directives."""
+    options, flags = {}, []
+    for line in src.splitlines():
+        if line.startswith("#SBATCH"):
+            token = line.split()[1]
+            if "=" in token:
+                options[token.split("=", 1)[0]] = token.split("=", 1)[1]
+            else:
+                flags.append(token)
+    return options, flags
+
+
+def _logical_lines(src: str) -> List[str]:
+    """The wrapper's commands, one per entry: comments and blanks dropped, backslash continuations joined."""
+    found, current = [], ""
+    for raw in src.splitlines():
+        line = raw.rstrip()
+        if not current and (not line.strip() or line.lstrip().startswith("#")):
+            continue
+        if line.endswith("\\"):
+            current += line[:-1].strip() + " "
+        else:
+            found.append((current + line.strip()).strip())
+            current = ""
+    return found
+
+
+def _command(src: str, needle: str) -> str:
+    """The one logical line containing `needle`."""
+    found = [l for l in _logical_lines(src) if needle in l]
+    assert len(found) == 1, "{} command lines contain {!r}: the wrapper changed shape, update this pin".format(len(found), needle)
+    return found[0]
+
+
+def _plain_assignments(src: str) -> Dict[str, str]:
+    """NAME=value lines with a plain value: no ${...} default, so no environment lever."""
+    return dict(re.findall(r'(?m)^([A-Z][A-Z0-9_]*)=([^\s$"#]+)[ \t]*(?:#.*)?$', src))
+
+
+_EVAL_COMMON = {"--partition": "pot-hpi-aisc-batch", "--account": "aisc", "--exclude": "ga03,gx17v1,gx13v1",
+                "--output": "logs/%x_%j.log", "--error": "logs/%x_%j.log", "--open-mode": "append"}
+_EVAL_SLURM = {
+    "decode": dict(_EVAL_COMMON, **{"--gpus": "1", "--cpus-per-task": "4", "--mem": "32G", "--time": "02:00:00",
+                                    "--job-name": "chat_eos_eval"}),
+    "chexbert": dict(_EVAL_COMMON, **{"--qos": "aisc", "--cpus-per-task": "4", "--mem": "16G", "--time": "02:00:00",
+                                      "--job-name": "chat_eos_chexbert"}),
+    "compare": dict(_EVAL_COMMON, **{"--qos": "aisc", "--cpus-per-task": "4", "--mem": "16G", "--time": "02:00:00",
+                                     "--job-name": "chat_eos_compare"}),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_EVAL_WRAPPERS))
+def test_eval_report_eos_wrappers_follow_the_slurm_invariants(kind):
+    """P9-G4. The decode asks for one H100 through --gpus=1 and never a typed --gres; the two scoring jobs are the proven
+    CPU-only combination (--qos=aisc, no GPU). All three: the renamed partition, the three nodes that cannot run them
+    excluded, a requeue that appends to the SLURM log, logs where every other wrapper puts them, and the standard cd line."""
+    src = _eval_text(kind)
+    options, flags = _sbatch_options(src)
+    assert options == _EVAL_SLURM[kind], options
+    assert flags == ["--requeue"], flags
+    code = _eos_wrapper_code(src)
+    assert not [l for l in code if "--gres" in l], "an untyped --gpus and a typed --gres do not mix"
+    assert 'cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"' in src
+    assert "set -euo pipefail" in src and "mkdir -p logs" in src
+    assert ("--gpus" in options) == (kind == "decode") and ("--qos" in options) == (kind != "decode")
+
+
+def test_eval_report_eos_wrappers_have_the_offline_environment_the_job_needs():
+    """Decode and comparison: every other chat job's offline Hugging Face (the GPT-2 tokenizer is read from the cache under
+    SCRATCH_ROOT). The CheXbert scorer is the exception D24 records: its weights live in the DEFAULT cache, so HF_HOME is not
+    overridden, and HF_HUB_OFFLINE defaults to 0 as in score_chexbert_h100.sh."""
+    for kind in ("decode", "compare"):
+        src = _eval_text(kind)
+        for needle in ('SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"', 'export HF_HOME="${SCRATCH_ROOT}/.hf"',
+                       "export HF_HUB_OFFLINE=1", "export HF_DATASETS_OFFLINE=1", 'VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"',
+                       'source "${VENV_ACTIVATE}"'):
+            assert needle in src, (kind, needle)
+    chexbert = _eval_text("chexbert")
+    assert 'export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"' in chexbert
+    assert 'VENV_ACTIVATE="${VENV_ACTIVATE:-.venv_chexbert/bin/activate}"' in chexbert and 'source "${VENV_ACTIVATE}"' in chexbert
+    assert "HF_HOME" not in "\n".join(_eos_wrapper_code(chexbert)), "D24: the CheXbert weights are in the default cache"
+    thesis = (REPO_ROOT / "scripts" / "score_chexbert_h100.sh").read_text()
+    assert 'export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"' in thesis and "HF_HOME" not in "\n".join(_eos_wrapper_code(thesis))
+
+
+def test_eval_report_eos_decode_is_the_published_eval_command_plus_the_eos_flags():
+    """P9-G4. The command is the one submit_v3_chain.sh's eval stage gave inspect_report_generation_h100.sh for the published
+    Mamba-3 runs (the wrapper's own defaults under the chain's overrides), with exactly three differences: --cached-decode,
+    --stop-at-eos and --max-new-tokens 200. Both published sources are parsed here, so this fails when either moves. The
+    values are plain assignments, not environment levers: sbatch exports the submitting shell."""
+    inspect_src = (REPO_ROOT / "scripts" / "inspect_report_generation_h100.sh").read_text()
+    chain = (REPO_ROOT / "scripts" / "submit_v3_chain.sh").read_text()
+    mine_src = _eval_text("decode")
+
+    # what the published eval ran: the wrapper's defaults, then the chain's eval submission over them
+    defaults = dict(re.findall(r'(?m)^([A-Z][A-Z0-9_]*)="\$\{\1:-([^}]*)\}"', inspect_src))
+    anchor = 'ev=$(_v3_submit "eval s${seed}"'
+    assert anchor in chain, "submit_v3_chain.sh's eval submission moved: update this pin, which reads the published eval from it"
+    submission = chain.split(anchor, 1)[1].split("scripts/inspect_report_generation_h100.sh", 1)[0]
+    chain_values = dict(re.findall(r'"([A-Z][A-Z0-9_]*)=([^"]*)"', submission))
+    published = dict(defaults, **chain_values)
+    assert {k: published[k] for k in ("MODEL_CONFIG", "PREFIX_K", "DECODE", "BEAM_SIZE", "NUM_SAMPLES", "MAX_NEW_TOKENS")} == {
+        "MODEL_CONFIG": "hybrid_150m_m3_rrg", "PREFIX_K": "32", "DECODE": "beam", "BEAM_SIZE": "3", "NUM_SAMPLES": "999999",
+        "MAX_NEW_TOKENS": "100"}
+    assert defaults["CACHED_DECODE"] == "false", "the published eval is uncached: --cached-decode is the first difference"
+
+    inspect_flags = set(re.findall(r"--[a-z][a-z-]*", _command(inspect_src, "python scripts/evaluate_report_generation.py")))
+    inspect_flags |= set(re.findall(r"\+=\((--[a-z][a-z-]*)", inspect_src))        # --chexbert and --dump-dir ride in an array
+    variable_of = dict(re.findall(r'(--[a-z][a-z-]*) "\$\{([A-Z][A-Z0-9_]*)\}"', inspect_src))
+    assert variable_of["--model-config"] == "MODEL_CONFIG" and variable_of["--max-new-tokens"] == "MAX_NEW_TOKENS"
+
+    call = _command(mine_src, "python scripts/evaluate_report_generation.py")
+    mine_flags = re.findall(r"--[a-z][a-z-]*", call.split(">>")[0])
+    assert mine_flags == ["--checkpoint", "--model-config", "--prefix-k", "--cached-decode", "--stop-at-eos", "--parquet",
+                          "--num-samples", "--decode", "--beam-size", "--max-new-tokens", "--dump-dir"], mine_flags
+    assert set(mine_flags) - {"--stop-at-eos"} <= inspect_flags, "a flag the published wrapper cannot pass"
+    always = {"--checkpoint", "--model-config", "--parquet", "--num-samples", "--decode", "--beam-size", "--max-new-tokens"}
+    assert always <= set(mine_flags), "a flag the published eval always passes"
+    assert {"--prefix-k", "--dump-dir"} <= set(mine_flags), "the chain set PREFIX_K and DUMP_DIR"
+
+    mine = _plain_assignments(mine_src)
+    for flag in ("--model-config", "--prefix-k", "--num-samples", "--decode", "--beam-size"):
+        variable = variable_of[flag]
+        assert mine[variable] == published[variable], (flag, mine[variable], published[variable])
+        assert '{} "${{{}}}"'.format(flag, variable) in call, flag
+    assert mine["MAX_NEW_TOKENS"] == "200" != published["MAX_NEW_TOKENS"] and '--max-new-tokens "${MAX_NEW_TOKENS}"' in call
+    assert "--cached-decode --stop-at-eos " in call
+
+    # the three defaults the rulings name, and nothing else is a lever
+    for line in ('CKPT="${CKPT:-${CHAT_HOME:-/sc/home/$USER/chat_sessions}/models/report_gen_m3_eos_s42/checkpoints/last.ckpt}"',
+                 'PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/test.parquet}"',
+                 'DUMP_DIR="${DUMP_DIR:-results/chat_report_eos_test_split_s42}"'):
+        assert line in mine_src, line
+    levers = set(re.findall(r'(?m)^([A-Z][A-Z0-9_]*)="\$\{\1:-', mine_src))
+    assert levers == {"SCRATCH_ROOT", "VENV_ACTIVATE", "CKPT", "PARQUET", "DUMP_DIR"}, levers
+
+
+def test_eval_report_eos_decode_header_says_why_two_hours_are_enough():
+    header = "\n".join(l for l in _eval_text("decode").splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))
+    assert "--time=02:00:00" in header and "6.35 ms" in header and "TIMEOUT" in header and "--time=04:00:00" in header
+
+
+def test_eval_report_eos_decode_refuses_without_done_and_over_an_existing_dump_and_outside_results_chat():
+    src = _eval_text("decode")
+    assert 'RUN_DIR="$(dirname "$(dirname "${CKPT}")")"' in src and '[ -f "${RUN_DIR}/DONE" ] ||' in src
+    assert '[ -e "${DUMP_DIR}/hyps.txt" ]' in src and '[ -e "${DUMP_DIR}/refs.txt" ]' in src
+    assert "results/chat_?*)" in src and "*..*)" in src
+    code = "\n".join(_eos_wrapper_code(src))
+    first_write = code.index('mkdir -p "${DUMP_DIR}"')
+    for message in ("DUMP_DIR is not a new chat_ directory", "checkpoint not found", "the training run has no DONE marker",
+                    "test parquet not found", "the dump already holds hyps.txt or refs.txt", "venv not found", "GPU(s) visible"):
+        assert 0 <= code.index(message) < first_write, "no directory is created before the guard '{}' has passed".format(message)
+
+
+def test_eval_report_eos_wrappers_send_raw_output_to_files_in_the_dump_dir_and_print_only_wrapper_authored_lines():
+    """R7. The evaluator's stdout (GENERATED:, REFERENCE:, study ids), the scorer's and the bootstrap's go to files in the dump
+    directory and are never printed; the stats script's stderr goes to a file and its stdout is cut down to the three line
+    shapes `chat_remote.sh summary` shows. Every line a wrapper prints starts with ===, RESULT or ERROR and names no path."""
+    path_variables = ("DUMP_DIR", "CKPT", "PARQUET", "RUN_DIR", "PUBLISHED_DIR", "OUTPUT", "CHAT_HOME", "SCRATCH_ROOT", "VENV_ACTIVATE")
+    redirected = {"decode": ("python scripts/evaluate_report_generation.py", '>> "${DUMP_DIR}/eval.log" 2>&1'),
+                  "chexbert": ("python scripts/score_chexbert_standalone.py", '>> "${DUMP_DIR}/chexbert.log" 2>&1'),
+                  "compare": ("python scripts/bootstrap_compare.py", '>> "${DUMP_DIR}/bootstrap.log" 2>&1')}
+    for kind in sorted(_EVAL_WRAPPERS):
+        src = _eval_text(kind)
+        code = _eos_wrapper_code(src)
+        needle, redirect = redirected[kind]
+        assert redirect in _command(src, needle), (kind, "the tool's raw output is not sent to a file")
+        helpers = [l for l in _logical_lines(src) if "python scripts/report_eos_stats.py" in l]
+        assert helpers, kind
+        for line in helpers:
+            assert '2>> "${DUMP_DIR}/' in line, (kind, "the stats script's stderr is not sent to a file", line)
+        assert any("grep -aE '^(=== |RESULT |ERROR)'" in l for l in code), kind
+        redirects = []
+        for line in code:
+            if line.lstrip().startswith(("echo", "fail")):
+                continue                                              # a message may contain a '>'
+            redirects += re.findall(r'(?<![0-9&])>>?\s*("[^"]+"|\S+)', line)
+        assert redirects, kind
+        stray = [t for t in redirects if t != "/dev/null" and not t.startswith('"${DUMP_DIR}/')]
+        assert not stray, (kind, stray)
+        text = "\n".join(code)
+        echoed, failed = re.findall(r'echo "([^"]*)"', text), re.findall(r'\bfail "([^"]*)"', text)
+        failed += re.findall(r'(?m)^need "[^"]*" "([^"]*)"', text)                 # the comparison's input checks print through need()
+        assert len(echoed) + len(failed) >= 6, (kind, echoed, failed)
+        for line in echoed:
+            assert re.match(r"(=== |RESULT |ERROR)", line), (kind, line)               # fail() adds its own ERROR prefix
+        for line in echoed + failed:
+            assert "/" not in line, (kind, line)                                        # a repo-relative path is a path too
+            for var in path_variables:
+                assert "${" + var + "}" not in line, (kind, var, line)
+        assert 'fail() { echo "ERROR $*"; exit 1; }' in src
+        for line in code:
+            assert not re.match(r"\s*(date|hostname|nvidia-smi|env|printenv|cat|tail|head|less)\b", line), (kind, line)
+        assert "set -x" not in src and "set -o xtrace" not in src
+
+
+def test_eval_report_eos_wrappers_print_the_sync_stamp_first_and_with_the_p9_g3_snippet_verbatim():
+    """Provenance, as the training wrapper prints it: the commit and cleanliness `chat_remote.sh sync` last shipped, read from
+    .sync_stamp, as the very first line. The snippet is the training wrapper's, copied exactly."""
+    train = _eos_wrapper_text()
+    start = train.index('SYNC="unknown"')
+    snippet = train[start:train.index('echo "=== sync ${SYNC} ==="', start) + len('echo "=== sync ${SYNC} ==="')]
+    assert ".sync_stamp" in snippet and snippet.count("\n") >= 6
+    for kind in sorted(_EVAL_WRAPPERS):
+        src = _eval_text(kind)
+        assert snippet in src, kind
+        code = "\n".join(_eos_wrapper_code(src))
+        sync = code.index('echo "=== sync ${SYNC} ==="')
+        assert code.index('echo "') == sync, (kind, "something is printed before the sync line")
+        assert code.index("python ") > sync and ".sync_stamp" in code[:sync], kind
+
+
+def test_eval_report_eos_compare_runs_the_thesis_bootstrap_with_the_thesis_defaults_inside_the_dump_dir():
+    """P9-G4. scripts/bootstrap_compare.py, unchanged, with the flags bootstrap_compare_h100.sh gives it when it has label
+    matrices and PER_LABEL=true, the seed and resample count that wrapper defaults to, the EOS dump as A and the published
+    Mamba-3 s42 dump as B, and its report beside the EOS dump."""
+    thesis = (REPO_ROOT / "scripts" / "bootstrap_compare_h100.sh").read_text()
+    thesis_flags = set(re.findall(r"--[a-z][a-z-]*", _command(thesis, "python3 scripts/bootstrap_compare.py").split("${EXTRA_ARGS")[0]))
+    for line in thesis.splitlines():
+        if "EXTRA_ARGS+=(" in line:
+            thesis_flags |= set(re.findall(r"--[a-z][a-z-]*", line))
+    assert {"--hyps-a", "--hyps-b", "--refs", "--name-a", "--name-b", "--bootstrap-samples", "--seed", "--output", "--labels-a",
+            "--labels-b", "--per-label"} <= thesis_flags
+    thesis_defaults = dict(re.findall(r'(?m)^([A-Z][A-Z0-9_]*)="\$\{\1:-([^}]*)\}"', thesis))
+    src = _eval_text("compare")
+    mine = _plain_assignments(src)
+    assert (mine["SAMPLES"], mine["SEED"]) == (thesis_defaults["SAMPLES"], thesis_defaults["SEED"]) == ("1000", "0")
+    assert (mine["NAME_A"], mine["NAME_B"]) == ("eos_s42", "m3_s42")
+    assert 'OUTPUT="${DUMP_DIR}/bootstrap_${NAME_A}_vs_${NAME_B}.md"' in src
+    for line in ('DUMP_DIR="${DUMP_DIR:-results/chat_report_eos_test_split_s42}"',
+                 'PUBLISHED_DIR="${PUBLISHED_DIR:-results/report_gen_m3_test_split_s42}"'):
+        assert line in src, line
+    call = _command(src, "python scripts/bootstrap_compare.py")
+    assert set(re.findall(r"--[a-z][a-z-]*", call.split(">>")[0])) == thesis_flags
+    for needle in ('--hyps-a "${DUMP_DIR}/hyps.txt"', '--hyps-b "${PUBLISHED_DIR}/hyps.txt"', '--refs "${DUMP_DIR}/refs.txt"',
+                   '--name-a "${NAME_A}"', '--name-b "${NAME_B}"', '--bootstrap-samples "${SAMPLES}"', '--seed "${SEED}"',
+                   '--output "${OUTPUT}"', '--labels-a "${DUMP_DIR}/chexbert_labels.json"',
+                   '--labels-b "${PUBLISHED_DIR}/chexbert_labels.json"', "--per-label"):
+        assert needle in call, needle
+    code = "\n".join(_eos_wrapper_code(src))
+    assert code.index("python scripts/bootstrap_compare.py") < code.index("report_eos_stats.py hyps") < code.index("report_eos_stats.py gate")
+    assert 'cmp -s "${DUMP_DIR}/refs.txt" "${PUBLISHED_DIR}/refs.txt"' in code, "the two systems must have been scored on the same studies"
+    levers = set(re.findall(r'(?m)^([A-Z][A-Z0-9_]*)="\$\{\1:-', src))
+    assert levers == {"SCRATCH_ROOT", "VENV_ACTIVATE", "DUMP_DIR", "PUBLISHED_DIR"}, levers
+
+
+def test_eval_report_eos_compare_header_documents_the_three_chained_submit_lines():
+    """P9-G4 ruling 4: the controller submits the three jobs; the compare wrapper's header is where the exact lines are."""
+    header = "\n".join(l for l in _eval_text("compare").splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))
+    decode = "bash scripts/chat_remote.sh submit scripts/eval_report_eos_h100.sh"
+    chexbert = ("bash scripts/chat_remote.sh submit scripts/eval_report_eos_chexbert_h100.sh DUMP_DIR=results/chat_report_eos_test_split_s42 "
+                "-- --dependency=afterok:")
+    compare = ("bash scripts/chat_remote.sh submit scripts/eval_report_eos_compare_h100.sh DUMP_DIR=results/chat_report_eos_test_split_s42 "
+               "PUBLISHED_DIR=results/report_gen_m3_test_split_s42 -- --dependency=afterok:")
+    for line in (decode, chexbert, compare):
+        assert line in header, line
+    assert header.index(decode) < header.index(chexbert) < header.index(compare)
+    assert "chat_remote.sh sync" in header and "chat_remote.sh summary logs/chat_eos_eval_" in header
+
+
+def test_eval_report_eos_chexbert_replaces_the_thesis_scorer_wrapper_only_because_of_what_that_one_prints():
+    """P9-G4 ruling 2. score_chexbert_h100.sh would have been reused unchanged if every line `chat_remote.sh summary` shows
+    were free of text, ids and paths. It is not: its first line is a `===` line (shown) naming both file paths, its ERROR
+    lines name paths too, it prints no RESULT line, and it lets the scorer's raw output into the job log. The thin wrapper runs
+    the same script with the same three arguments and prints none of that. If the thesis wrapper is ever made R7-safe, this
+    test is the prompt to reconsider the thin one."""
+    thesis = (REPO_ROOT / "scripts" / "score_chexbert_h100.sh").read_text()
+    assert 'echo "=== Phase 11B standalone CheXbert scoring: ${HYP_FILE} / ${REF_FILE} ==="' in thesis
+    assert 'echo "ERROR: ${HYP_FILE} or ${REF_FILE} not found' in thesis and "RESULT" not in thesis
+    assert re.match(r"=== ", "=== Phase 11B standalone CheXbert scoring: x / y ===")           # SUMMARY_PATTERN shows it
+    src = _eval_text("chexbert")
+    thesis_call = _command(thesis, "python scripts/score_chexbert_standalone.py")
+    mine_call = _command(src, "python scripts/score_chexbert_standalone.py")
+    assert re.findall(r"--[a-z][a-z-]*", mine_call.split(">>")[0]) == re.findall(r"--[a-z][a-z-]*", thesis_call) == [
+        "--hyp-file", "--ref-file", "--output-dir"]
+    for needle in ('--hyp-file "${DUMP_DIR}/hyps.txt"', '--ref-file "${DUMP_DIR}/refs.txt"', '--output-dir "${DUMP_DIR}"'):
+        assert needle in mine_call, needle
+    assert 'DUMP_DIR="${DUMP_DIR:-results/chat_report_eos_test_split_s42}"' in src
+    # chexbert_metrics.json is written first and chexbert_labels.json last: only the second marks a finished scoring
+    assert '[ -e "${DUMP_DIR}/chexbert_labels.json" ]' in src
+
+
+def test_eval_report_eos_wrappers_pass_the_bash_syntax_check():
+    import shutil
+    import subprocess
+    shells = [s for s in ("/bin/bash", shutil.which("bash")) if s and os.path.exists(s)]
+    assert shells
+    for kind in sorted(_EVAL_WRAPPERS):
+        for shell in set(shells):
+            done = subprocess.run([shell, "-n", str(REPO_ROOT / "scripts" / _EVAL_WRAPPERS[kind])], capture_output=True, text=True)
+            assert done.returncode == 0, (kind, shell, done.stderr)
+
+
+def test_eval_report_eos_stats_script_is_stdlib_only_at_import_so_the_chexbert_venv_can_run_it():
+    """The CheXbert job runs `report_eos_stats.py chexbert` in .venv_chexbert (transformers<5, no torch, no hybrid_xmamba): its
+    module-level imports must be the standard library's, and the one sibling it needs (repair_generations) is itself stdlib-only."""
+    if not hasattr(sys, "stdlib_module_names"):
+        pytest.skip("sys.stdlib_module_names needs Python 3.10")
+    for name in ("report_eos_stats.py", "repair_generations.py"):
+        tree = ast.parse((REPO_ROOT / "scripts" / name).read_text())
+        imported = set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                imported |= {alias.name.split(".")[0] for alias in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                imported.add(node.module.split(".")[0])
+        assert imported <= set(sys.stdlib_module_names) | {"scripts"}, (name, sorted(imported - set(sys.stdlib_module_names)))
