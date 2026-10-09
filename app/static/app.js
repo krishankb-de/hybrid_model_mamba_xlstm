@@ -730,7 +730,9 @@ export function createApp(env) {
       }
     } catch (err) {
       if (!turn.id) { refuse(turn, err); return; }   // it never started: no id was ever given
-      if (!isAbort(err) && !turn.left) report(err);   // a network error mid-stream: the poll below carries on
+      // A network error mid-stream (a server that died, a tunnel that dropped) is no bug of the page's: the poll below carries the turn
+      // on, and only what is unexpected is logged (P4-H: a killed server logged "TypeError: network error" as one).
+      if (!expected(err) && !turn.left) report(err);
     } finally {
       turn.streaming = false;
     }

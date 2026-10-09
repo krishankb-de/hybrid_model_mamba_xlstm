@@ -954,6 +954,30 @@ test('a first turn the server refuses leaves no empty chat behind: the chat made
   assert.equal(h.fetch.to('DELETE', '/v1/sessions/').length, 1);                    // a chat with a turn is never deleted
 });
 
+test('a stream the network drops mid-turn is followed by the poll and logs nothing: a network failure is not a bug of the page (P4-H)', async (t) => {
+  const logged = captureErrors(t);
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(...events.slice(0, 9));   // up to the first snapshot of the report
+  await flush();
+  run.channel.fail(new TypeError('network error'));   // what Chrome's fetch throws when the server dies mid-stream
+  await flush();
+  assert.equal(h.api.polls.length, 1);   // the poll carries the turn on from its last seq
+  assert.equal(h.api.polls[0].opts.after, 9);
+  assert.deepEqual(logged, []);           // and nothing is logged as a bug
+  assert.equal($('notice').hidden, true);
+  h.api.polls[0].channel.push(...events.slice(9));
+  h.api.polls[0].channel.end();
+  await turn;
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.deepEqual(logged, []);
+});
+
 test('a refused turn in a chat that was there before deletes nothing, even when the chat has no turn yet', async () => {
   const h = await ready();   // s_a: an existing chat with no turns
   h.api.refuse = refusal(422, 'Use a PNG, JPEG or WEBP image.');
