@@ -214,6 +214,7 @@ class TinyServer:
                     return
             except OSError:
                 time.sleep(0.2)
+        self.stop()   # one that did not come up in time is not left running
         raise RuntimeError("the tiny server did not start:\n" + self.log_tail())
 
     def kill(self) -> None:
@@ -500,12 +501,12 @@ def browser():
         manager.stop()
 
 
-@pytest.hookimpl(wrapper=True)
+@pytest.hookimpl(hookwrapper=True)   # the old form, which every pytest this repo meets understands (collection imports this file)
 def pytest_runtest_makereport(item, call):
-    report = yield
+    outcome = yield
+    report = outcome.get_result()
     if report.when == "call":
         item.rep_call = report   # the ui fixture's teardown asks whether the test itself passed
-    return report
 
 
 @pytest.fixture
