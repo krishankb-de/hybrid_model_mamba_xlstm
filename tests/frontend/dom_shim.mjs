@@ -8,7 +8,8 @@
 // and child combinators; focus, blur and document.activeElement, with a browser's rules for what can be focused: a
 // button, an input, an enabled select or textarea, a link with an href, or anything with a tabindex, and only while
 // it is in the document (the body of the installed document) and neither it nor anything above it has the hidden
-// attribute: a card that was replaced has lost its focus, and so has a control that is hidden under a focus holder.
+// attribute: a card that was replaced has lost its focus, and so has a control that is hidden under a focus holder, or a
+// button, input, select or textarea that is disabled while it has the focus (Chrome's focus fixup rule).
 // Focus moving fires blur on the control that had it and then focus on the one that takes it (neither bubbles), and
 // select() selects the whole of an input's value (selectionStart, selectionEnd). A form submits as a browser's does
 // (P4-G): a click on a submit button (type="submit", or no type) fires a cancelable, bubbling submit on its form, and
@@ -312,7 +313,10 @@ export function createDocument() {
   focused = null;
   return {
     get activeElement() {
-      if (focused && (!body.contains(focused) || inHiddenSubtree(focused))) focused = null;   // a browser blurs what leaves the page or is hidden, for good
+      // A browser blurs what leaves the page or is hidden, for good, and (its focus fixup rule) a control that is disabled while it has
+      // the focus: Chrome hands that focus to the page itself (P4-H: Send and Stop disable themselves when they are pressed).
+      if (focused && (!body.contains(focused) || inHiddenSubtree(focused)
+                      || (FOCUSABLE_TAGS.has(focused.localName) && focused.hasAttribute('disabled')))) focused = null;
       return focused ?? body;
     },
     createElement: (tag) => new ShimElement(tag),

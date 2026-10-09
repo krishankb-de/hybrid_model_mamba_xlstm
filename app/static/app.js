@@ -526,8 +526,16 @@ export function createApp(env) {
     turn.userEl = next;
   }
 
+  // A control that is disabled while it has the focus loses it to the page itself (the focus fixup rule), and the keyboard would have to
+  // start again from the top: Send and Stop switch themselves off when they are pressed. The note field, where the next note is typed,
+  // takes the focus first (P4-H).
+  function keepFocusFrom(control) {
+    if (doc.activeElement === control) ui.prompt.focus();
+  }
+
   // The state of the controls that depend on whether a turn runs.
   function syncControls() {
+    if (state.busy || state.loading) keepFocusFrom(ui.send);
     ui.send.disabled = state.busy || state.loading;
     ui.stop.hidden = !state.busy;
     ui.exports.hidden = !state.session.id;
@@ -806,6 +814,7 @@ export function createApp(env) {
     const turn = state.turn;
     if (!turn || !turn.id || turn.stopping || turn.settled) return;
     turn.stopping = true;
+    keepFocusFrom(ui.stop);
     ui.stop.disabled = true;
     ui.stop.textContent = 'Stopping…';
     try {

@@ -884,6 +884,31 @@ test('the status region says a thing only when it changes', async () => {
   assert.deepEqual(spoken, ['Queued', 'encode running', 'Report ready']);
 });
 
+test('Send pressed while it has the focus hands the focus to the note field before it is switched off, so the keyboard keeps its place (P4-H)', async () => {
+  const h = await ready();
+  $('send').focus();
+  assert.equal(document.activeElement, $('send'));
+  const turn = h.app.send();   // what the composer's submit runs when Send is pressed with Enter, Space or a click
+  assert.equal($('send').disabled, true);
+  assert.equal(document.activeElement, $('prompt'));   // not the page: a disabled button loses the focus, and Chrome gives it to the body
+  h.api.streams[0].accept('m_a');
+  await flush();
+  assert.equal(document.activeElement, $('prompt'));
+  h.api.streams[0].channel.push(...fullTurn().slice(1));
+  h.api.streams[0].channel.end();
+  await turn;
+  assert.equal($('send').disabled, false);
+  assert.equal(document.activeElement, $('prompt'));   // where the next note is typed
+  $('prompt').focus();
+  const second = h.app.send();   // sent from the note field: the focus stays there and is not moved
+  assert.equal(document.activeElement, $('prompt'));
+  h.api.streams[1].accept('m_b');
+  await flush();
+  h.api.streams[1].channel.push(...fullTurn('m_b').slice(1));
+  h.api.streams[1].channel.end();
+  await second;
+});
+
 test('a turn that the server refuses before its stream opens: the notice says why, its user turn is taken back, and the composer is as it was', async (t) => {
   const logged = captureErrors(t);
   const h = await ready();
