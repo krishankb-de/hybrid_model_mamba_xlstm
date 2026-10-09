@@ -30,10 +30,12 @@ import pandas as pd
 import pytest
 
 from scripts import build_retrieval_gallery as bg
-from tests.test_chat_remote import STAMP_RE, Sandbox
+from tests import wrapper_rehearsal as wr
+from tests.test_chat_remote import STAMP_RE
+from tests.wrapper_rehearsal import STAMP, job_lines, real_stamp, results, snapshot
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BASH = "/bin/bash" if os.path.exists("/bin/bash") else "bash"     # the Mac's /bin/bash is 3.2: the oldest shell to support
+LINE_OK = wr.safe_line("gallery")     # the first words of every line the job may print
 
 
 @pytest.fixture(scope="module")
@@ -1172,7 +1174,7 @@ def test_the_wrappers_allowlist_passes_every_line_the_builder_prints_and_each_sh
 
 # ── the wrapper, rehearsed in a temp tree ─────────────────────────────────────
 
-PYTHON_STUB = r"""#!/bin/bash
+GALLERY_PYTHON_STUB = r"""#!/bin/bash
 # Stands in for the venv's python: records every call, plays the GPU probe, the build step and the reference step, and runs
 # everything else (the wrapper's path helper, the REAL --compare-rk) with the test interpreter.
 { echo "@@"; for a in "$@"; do printf '%s\n' "$a"; done; } >> "$STUB_DIR/python.calls"
@@ -1215,63 +1217,30 @@ cp "$STUB_DIR/reference.json" "$odir/phase6_mimic_20261009_101500.json"
 exit 0
 """
 
-CLUSTER_USER = "krishankumar.bhushan"
-STAMP = "2026-10-09T20:00:00Z 3f2a9c41d7e86b05a1c4e9d3b7f60285ac9e1d47 clean"
-LINE_OK = re.compile(r"^(=== |\[gallery\] |RESULT |ERROR)")
 CKPT_13D = "./outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt"
 CKPT_DECODER = "./outputs/h100_report_gen_m3_tower13d_s42/checkpoints/last.ckpt"
 
 
-def snapshot(root: Path) -> List[tuple]:
-    """Every path under `root` with size and mtime: what a job that only READS a tree leaves exactly as it was (R8)."""
-    found = []
-    for base, dirs, files in os.walk(str(root)):
-        for name in dirs + files:
-            full = os.path.join(base, name)
-            st = os.lstat(full)
-            found.append((os.path.relpath(full, str(root)), st.st_size, st.st_mtime_ns))
-    return sorted(found)
+class JobBox(wr.JobBox):
+    """The build wrapper run for real in the temp tree of tests/wrapper_rehearsal.py: CLUSTER_REPO holds a copy of the real builder
+    so that --compare-rk runs for real, and the stub python plays the GPU probe, the build step and the reference step."""
 
+    WRAPPER = "build_retrieval_gallery_h100.sh"
+    SCRIPTS = ("build_retrieval_gallery.py",)
+    PYTHON_STUB = GALLERY_PYTHON_STUB
+    RUN_DIRS = ("h100_kd_150m_v2_full_data_lr3e6", "h100_report_gen_m3_tower13d_s42")
+    DATA_FILES = ("train.parquet", "validate.parquet", "test.parquet")      # the reference loader reads all three
 
-class JobBox:
-    """The wrapper run for real in a temp tree standing in for the cluster: CLUSTER_REPO (repo/, with a copy of the real builder
-    so that --compare-rk runs for real), the thesis checkout (main/) behind repo/outputs, CHAT_HOME (chat/), the dataset
-    (data/) and a stub python for the GPU probe, the build step and the reference step."""
-
-    def __init__(self, root: Path, stamp: Optional[str] = STAMP):
-        self.root = root
-        self.repo, self.main, self.chat, self.data = root / "repo", root / "main", root / "chat", root / "data"
-        self.stubs, self.bin, self.scratch = root / "stubs", root / "bin", root / "scratch"
-        (self.repo / "scripts").mkdir(parents=True)
-        for name in ("build_retrieval_gallery_h100.sh", "build_retrieval_gallery.py"):
-            shutil.copy(str(REPO_ROOT / "scripts" / name), str(self.repo / "scripts" / name))
-        (self.repo / ".venv" / "bin").mkdir(parents=True)
-        (self.repo / ".venv" / "bin" / "activate").write_text("")
-        (self.repo / "logs").mkdir()
-        if stamp is not None:
-            (self.repo / ".sync_stamp").write_text(stamp + "\n")
-        for rel in ("h100_kd_150m_v2_full_data_lr3e6", "h100_report_gen_m3_tower13d_s42"):
-            ckpt = self.main / "outputs" / rel / "checkpoints" / "last.ckpt"
-            ckpt.parent.mkdir(parents=True)
-            ckpt.write_bytes(b"")
-        (self.repo / "outputs").symlink_to(self.main / "outputs", target_is_directory=True)
-        for directory in (self.chat, self.data, self.stubs, self.bin, self.scratch):
-            directory.mkdir()
-        for name in ("train.parquet", "validate.parquet", "test.parquet"):      # the reference loader reads all three
-            (self.data / name).write_bytes(b"")
-        python = self.bin / "python"
-        python.write_text(PYTHON_STUB)
-        python.chmod(0o755)
-        df = self.bin / "df"       # as the real one: it fails for a directory that does not exist; free space is FAKE_DF_KB (default 50 GB)
-        df.write_text('#!/bin/bash\nfor last; do :; done\necho "$last" >> "$STUB_DIR/df.calls"\n'
-                      '[ -d "$last" ] || { echo "df: $last: No such file or directory" >&2; exit 1; }\n'
-                      'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"\n'
-                      'echo "/dev/fake 100000000 1000 ${FAKE_DF_KB:-50000000} 1% /fake"\n')
-        df.chmod(0o755)
+    def populate(self) -> None:
         self.build_id = "20261009_1234567"
         self.set_build_mode("ok")
         self.set_ref_mode("ok")
         self.set_metrics(METRICS, METRICS)
+
+    def base_env(self) -> Dict[str, str]:
+        env = super().base_env()
+        env.update(DATA=str(self.data), BUILD_ID=self.build_id)
+        return env
 
     @property
     def out_dir(self) -> Path:
@@ -1293,23 +1262,6 @@ class JobBox:
         (self.stubs / "manifest.json").write_text(json.dumps({"build_id": self.build_id, "counts": {"images": 1}, "gate_rk": {"app": app}}))
         (self.stubs / "reference.json").write_text(json.dumps({"timestamp": "20261009_101500", "metrics": reference}))
 
-    def run(self, **extra_env: Optional[str]) -> subprocess.CompletedProcess:
-        env = {"PATH": "{}:/usr/bin:/bin".format(self.bin), "HOME": str(self.root / "home"), "USER": CLUSTER_USER,
-               "SLURM_SUBMIT_DIR": str(self.repo), "SLURM_JOB_ID": "1234567", "SLURM_CPUS_PER_TASK": "16",
-               "CHAT_HOME": str(self.chat), "SCRATCH_ROOT": str(self.scratch), "DATA": str(self.data), "BUILD_ID": self.build_id,
-               "STUB_DIR": str(self.stubs), "REAL_PYTHON": sys.executable, "PYTHONDONTWRITEBYTECODE": "1"}
-        env.update(extra_env)
-        env = {k: v for k, v in env.items() if v is not None}
-        # stdout and stderr share one pipe, like the single SLURM log: whatever bash itself complains about counts too.
-        return subprocess.run([BASH, str(self.repo / "scripts" / "build_retrieval_gallery_h100.sh")], cwd=str(self.root), env=env,
-                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=240)
-
-    def calls(self) -> List[List[str]]:
-        log = self.stubs / "python.calls"
-        if not log.exists():
-            return []
-        return [rec.splitlines() for rec in log.read_text().split("@@\n") if rec.strip()]
-
     def steps(self) -> Dict[str, List[List[str]]]:
         """The three job steps as the stub saw them: build, reference, compare."""
         calls = [c for c in self.calls() if c and c[0].startswith("scripts/")]
@@ -1319,14 +1271,6 @@ class JobBox:
 
     def ran_nothing(self) -> bool:
         return not any(self.steps().values())
-
-
-def job_lines(done: subprocess.CompletedProcess) -> List[str]:
-    return done.stdout.splitlines()
-
-
-def results(lines: List[str]) -> List[dict]:
-    return [json.loads(l[len("RESULT "):]) for l in lines if l.startswith("RESULT ")]
 
 
 def test_a_clean_run_builds_runs_the_reference_compares_and_prints_only_safe_lines(tmp_path):
@@ -1723,18 +1667,6 @@ def test_the_job_never_deletes_anything(tmp_path):
     src = (REPO_ROOT / "scripts" / "build_retrieval_gallery_h100.sh").read_text()
     code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
     assert not re.search(r"(^|[\s;&|(])rm(\s|$)", code, re.M) and "--delete" not in code and "ln -sf" not in code
-
-
-def real_stamp(root: Path, dirty: bool) -> str:
-    """The .sync_stamp that `scripts/chat_remote.sh sync` writes, from the real script in a throwaway git tree with ssh and rsync
-    stubbed (tests/test_chat_remote.py's Sandbox): the wrapper has to read what the producer writes."""
-    box = Sandbox(root)
-    if dirty:
-        script = box.repo / "scripts" / "chat_remote.sh"
-        script.write_text(script.read_text() + "\n# touched\n")
-    done = box.run("sync")
-    assert done.returncode == 0, done.stdout + done.stderr
-    return (box.repo / ".sync_stamp").read_text().strip()
 
 
 @pytest.mark.parametrize("dirty", [False, True])
