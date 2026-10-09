@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { ShimEvent, installDom, serialize } from './dom_shim.mjs';
 import {
   BOUNDS, CLIENT_KEY, DEFAULT_SETTINGS, HEALTH_MS, HEALTH_SLOW_MS, SETTINGS_KEY, STALL_MS, browserStorage,
-  checkImageFile, chosenCard, clientId, createApp, createWatchdog, errorMessage, exportFilename, healthText, loadSettings,
+  checkImageFile, chosenCard, clientId, createApp, createWatchdog, errorMessage, exportFilename, healthText, isCommand, loadSettings,
   nearBottom, nextHealthDelay, optionsFromSettings, parseRoute, saveSettings, serverHas, sessionDate, sessionMeta, sessionTitle,
   userTurnMessage,
 } from '../../app/static/app.js';
@@ -405,6 +405,19 @@ test('checkImageFile lets through PNG, JPEG, WEBP and a file with no type, and s
   assert.equal(checkImageFile(file('image/png', 20 * 1024 * 1024 + 1)), 'The image is over the 20 MB limit.');
   assert.equal(checkImageFile(null), 'Choose an image.');
   assert.equal(checkImageFile({ type: 'image/png' }), null);   // no size known: the server decides
+});
+
+test('isCommand tells a command from a note as the server does: the notes of fixtures/commands.json, which the server is held to too (P4-H)', () => {
+  const cases = JSON.parse(readFileSync(new URL('./fixtures/commands.json', import.meta.url)));
+  assert.ok(cases.length >= 20 && cases.some((c) => c.command) && cases.some((c) => !c.command));
+  for (const { note, command } of cases) assert.equal(isCommand(note), command, JSON.stringify(note));
+  for (const odd of [null, undefined, 5, {}, ['beam 5']]) assert.equal(isCommand(odd), false);
+});
+
+test('a stored question (a user message with no image) becomes a user turn with no chips: it ran no model, so it used no settings (P4-H)', () => {
+  const options = { beam_size: 3, max_new_tokens: 100 };
+  assert.deepEqual(userTurnMessage({ text: 'is it pneumonia?', image_filename: null }, { options }), { text: 'is it pneumonia?', image: null, options: null });
+  assert.deepEqual(userTurnMessage({ text: 'tokens 30', image_filename: 'chest.png' }, { options }).options, options);   // a re-run names its image
 });
 
 // ---- the page: a shim DOM shaped like index.html, a fake window, timers, fetch and api module ------------------------------
@@ -3823,6 +3836,27 @@ test('the drawer says that changes apply from the next Send, and while a turn ru
   assert.deepEqual([running.hidden, applies.hidden], [true, false]);
 });
 
+test('with no new image the hint follows the note as it is typed: a command or no note re-runs the last X-ray, any other note gets no report (P4-H)', async () => {
+  const h = harness({ sessions: [sess('s_a', 'A')], routes: doneSession('s_a', 'A', 'm_a') });
+  await h.app.start();
+  await flush();
+  const hint = $('rerun-hint');
+  const RERUN = 'No new image: Send re-runs s_a.png with these settings.';
+  const type = (note) => { $('prompt').value = note; $('prompt').dispatchEvent(new ShimEvent('input', { bubbles: true })); return hint.textContent; };
+  assert.equal(hint.textContent, RERUN);
+  assert.equal(type('Is there pneumonia?'), 'This note is not a command: with no new image, Send gets no report.');   // the server's rule
+  assert.equal(hint.hidden, false);
+  assert.equal($('send').getAttribute('aria-describedby'), 'rerun-hint');   // Send still says what it will do
+  assert.equal(type('tokens 30'), RERUN);
+  assert.equal(type('Reference: Heart size is normal.'), RERUN);
+  assert.equal(type('   '), RERUN);
+  type('what is this?');
+  attach(imageFile('new.png'));
+  assert.equal(hint.hidden, true);   // a note with a new image goes with it
+  buttonOf($('preview'), 'Remove').click();
+  assert.equal(hint.textContent, 'This note is not a command: with no new image, Send gets no report.');
+});
+
 test('with no new image and an earlier one in the chat, the composer says that Send re-runs it; not in an empty chat, with a new image, or while a turn runs', async () => {
   const empty = harness({ sessions: [] });
   await empty.app.start();
@@ -3886,6 +3920,57 @@ test('the re-run hint names the newest image of the chat, not the newest turn', 
   await flush();
   assert.equal($('rerun-hint').hidden, false);
   assert.equal($('rerun-hint').textContent, 'No new image: Send re-runs second.png with these settings.');   // the question after it had no image
+});
+
+test('a user turn shows the chips of what ran: no k where the server runs no retrieval, and none for a question, which runs no model (P4-H)', async () => {
+  const h = harness({ models: NO_STAGES, sessions: [sess('s_a', 'earlier', 0)], routes: EXISTING });
+  await h.app.start();
+  await flush();
+  const lastChips = () => texts(qa(qa($('conversation'), '.turn.user').at(-1), '.options .chip'));
+  attach(imageFile('chest.png'));
+  const turn = h.app.send();
+  await flush();
+  assert.deepEqual(lastChips(), ['beam 3', '100 tok', 'cached']);   // drawn from what is sent, at once: no k
+  h.api.streams[0].accept('m_a');
+  await flush();
+  h.api.streams[0].channel.push(...fullTurn());
+  h.api.streams[0].channel.end();
+  await turn;
+  assert.deepEqual(lastChips(), ['beam 5', '100 tok', 'cached']);   // what the server resolved: still no k, the stage was skipped
+  $('prompt').value = 'Is there pneumonia?';
+  const question = h.app.send();
+  await flush();
+  assert.deepEqual(lastChips(), []);   // a note that is no command, with no image: no model will run
+  h.api.streams[1].accept('m_q');
+  await flush();
+  resetEvents();
+  h.api.streams[1].channel.push(startEv({ message_id: 'm_q', image: null }), ev('warning', { code: 'not_a_command', message: 'Not a command.' }),
+                                stopEv('done', { message_id: 'm_q' }));
+  h.api.streams[1].channel.end();
+  await question;
+  assert.deepEqual(lastChips(), []);   // and message_start, with no image, says none ran
+  assert.equal(q(qa($('conversation'), '.turn.user').at(-1), '.user-text').textContent, 'Is there pneumonia?');
+});
+
+test('replayed, a question turn has no chips, and a turn shows no k where the server runs no retrieval (an older server is taken to)', async () => {
+  resetEvents();
+  const question = [startEv({ message_id: 'm_q', image: null }), ev('warning', { code: 'not_a_command', message: 'Not a command.' }),
+                    stopEv('done', { message_id: 'm_q' })];
+  const routes = {
+    'GET /v1/sessions/s_a': { ...sess('s_a', 'two', 2), messages: [userMsg('u_1', '', 'chest.png'), botMsg('m_1', 'done', START_DATA.options),
+                                                                  userMsg('u_q', 'what is this?'), botMsg('m_q', 'done', START_DATA.options)] },
+    'GET /v1/messages/m_1': () => ({ ...botMsg('m_1'), events: rows(fullTurn('m_1')) }),
+    'GET /v1/messages/m_q': { ...botMsg('m_q'), events: rows(question) },
+  };
+  for (const [models, chips] of [[NO_STAGES, ['beam 5', '100 tok', 'cached']], [MODELS, ['beam 5', '100 tok', 'cached', 'k 4/3']]]) {
+    const h = harness({ models, sessions: [sess('s_a', 'two', 2)], routes });
+    await h.app.start();
+    await flush();
+    const [first, , second] = $('conversation').children;
+    assert.deepEqual(texts(qa(first, '.options .chip')), chips);
+    assert.deepEqual(texts(qa(second, '.options .chip')), []);
+    assert.equal(q(second, '.user-text').textContent, 'what is this?');
+  }
 });
 
 test('a server with no retrieval gallery and no labeller: those controls are disabled and say why, and the chips leave out k', async () => {

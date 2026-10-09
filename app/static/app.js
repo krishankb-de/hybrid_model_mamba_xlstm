@@ -69,6 +69,7 @@ const NUMBER_KEYS = Object.keys(BOUNDS);
 const rangeLabel = (title, key) => `${title} (${BOUNDS[key][0]}–${BOUNDS[key][1]})`;           // "Token budget (16–200)": the range is in the label
 const rangeMessage = (key) => `Enter a whole number from ${BOUNDS[key][0]} to ${BOUNDS[key][1]}.`;   // what a field says when its text is not one
 const SAVED_TEXT = 'Settings saved. They apply from your next Send.';
+const QUESTION_TEXT = 'This note is not a command: with no new image, Send gets no report.';   // the re-run hint, for a note the server will not run
 const SAVED_MS = 4000;   // how long the page says so
 const STORAGE_TEXT = 'Browser storage is unavailable, so these settings last until the page closes.';
 // The published protocol, as every Options default has it, but for two switches that are on here and off in the server's Options (its
@@ -329,12 +330,14 @@ export function exportFilename(contentDisposition, sessionId, format) {
 
 // A user message and the assistant message that answers it, as the user turn draws them. The assistant row carries the
 // turn's resolved options. A replayed upload has no image URL until the image endpoint exists (P6-B): the file name only.
+// A user message with neither an image nor a test row is a question the server answered with no model: it shows no options (P4-H).
 export function userTurnMessage(user, assistant) {
   const filename = text(user?.image_filename);
+  const ran = !!filename || Number.isInteger(user?.test_row);
   return {
     text: typeof user?.text === 'string' ? user.text : '',
     image: filename ? { url: null, filename } : null,
-    options: isObject(assistant?.options) ? assistant.options : null,
+    options: ran && isObject(assistant?.options) ? assistant.options : null,
   };
 }
 
@@ -354,6 +357,19 @@ export function checkImageFile(file) {
   if (Number.isFinite(file.size) && file.size > MAX_IMAGE_BYTES) return 'The image is over the 20 MB limit.';
   return null;
 }
+
+// The server's text commands (app/commands.py), each the whole note once its whitespace is collapsed, case aside. The page reads them only
+// to say what Send will do: with no new image, a command or an empty note runs the chat's last X-ray again, and any other note gets the
+// server's fixed answer and no report (post_message). The server decides; tests/frontend/fixtures/commands.json holds the two to one list.
+const COMMANDS = [/^beam \d+$/i, /^greedy$/i, /^tokens \d+$/i, /^retrieve \d+$/i, /^reference:\s*.+$/i, /^repair (?:on|off)$/i];
+
+export function isCommand(note) {
+  const t = typeof note === 'string' ? note.split(/\s+/).filter(Boolean).join(' ') : '';
+  return COMMANDS.some((command) => command.test(t));
+}
+
+// Does a turn of this note and this file run the model? With a file it does; with none, only an empty note or a command does.
+const runsTheModel = (note, file) => !!file || !text(note) || isCommand(note);
 
 // ---- the page -----------------------------------------------------------------------------------------------------------------
 
@@ -468,6 +484,7 @@ export function createApp(env) {
     copy,
     showModels: () => openDrawer({ models: true }),
     labelNames: Array.isArray(state.models?.label_names) ? state.models.label_names : undefined,
+    retrieval: serverHas(state.models, 'retrieval'),   // false: a user turn shows no k, which this server never uses
     ui: state.session.ui,
     turn: n,
   });
@@ -551,12 +568,13 @@ export function createApp(env) {
   }
 
   // Under the image well, when Send with no new image would run the chat's last X-ray again: with a file attached, in an empty chat
-  // and while a turn runs (or a chat loads) it says nothing. Information, not an alert.
+  // and while a turn runs (or a chat loads) it says nothing. Information, not an alert. It follows the note as it is typed (P4-H): a note
+  // that is not a command gets the server's fixed answer and no report, and the hint says so instead of promising a re-run.
   function syncRerun() {
     const name = state.file || state.busy || state.loading ? '' : newestImage();
     ui.rerun.hidden = !name;
     if (name) {
-      ui.rerun.textContent = `No new image: Send re-runs ${name} with these settings.`;
+      ui.rerun.textContent = runsTheModel(ui.prompt.value ?? '', null) ? `No new image: Send re-runs ${name} with these settings.` : QUESTION_TEXT;
       ui.send.setAttribute('aria-describedby', 'rerun-hint');   // Send says what it will do, to whoever reaches it by tab
     } else {
       ui.send.removeAttribute('aria-describedby');   // a hidden note that is still named would still be read out
@@ -622,7 +640,8 @@ export function createApp(env) {
       if (!turn.card && typeof event.data?.message_id === 'string') accept(turn, event.data.message_id);   // a server that sent no X-Message-Id
       turn.view = applyEvent(turn.view, event);
       turn.dirty = true;
-      if (event.event === 'message_start') refreshUserBubble(turn, event.data.options);   // the options the server resolved, commands included
+      // The options the server resolved, commands included; a turn with no image is a question it answers with no model, so none were used.
+      if (event.event === 'message_start') refreshUserBubble(turn, event.data.image ? event.data.options : null);
       if (turn.view.status !== 'running') settle(turn);
       else scheduleRender(turn.draw);
     } catch (err) {   // a reducer or a builder that threw on this event: say so, log it, and carry on with the next one
@@ -685,7 +704,8 @@ export function createApp(env) {
         session.blobUrls.add(url);
         turn.image = { url, filename: file.name };
       }
-      turn.userEl = renderUserTurn({ text: note, image: turn.image, options }, cardCtx(turn.n));
+      // A note the server will not run (no file, no command) uses no settings, so its turn shows no chips (P4-H).
+      turn.userEl = renderUserTurn({ text: note, image: turn.image, options: runsTheModel(note, file) ? options : null }, cardCtx(turn.n));
       session.turns.push(turn);
       ui.conversation.append(turn.userEl);
       scroller.toEnd(turn.userEl);
@@ -1518,6 +1538,7 @@ export function createApp(env) {
 
   function wireComposer() {
     ui.composer.addEventListener('submit', (event) => { event.preventDefault(); detach(send()); });
+    ui.prompt.addEventListener('input', () => syncRerun());   // the re-run hint follows the note: a command, or a note the server will not run
     ui.prompt.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;   // Shift+Enter is a newline; an IME's Enter is not a send
       event.preventDefault();

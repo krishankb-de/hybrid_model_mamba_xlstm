@@ -1,5 +1,19 @@
 """CHAT_UI_PLAN.md P3-D: text commands (spec §4)."""
+import json
+from pathlib import Path
+
 from app.commands import COMMAND_HELP, NOT_A_QA_BOT, parse_command
+
+COMMANDS_FIXTURE = Path(__file__).resolve().parent / "frontend" / "fixtures" / "commands.json"
+
+
+def test_the_pages_list_of_commands_is_the_servers():
+    """P4-H: the page tells a command from a note (app/static/app.js isCommand) for the hint under the image well. Its node test reads
+    the same notes, so the two cannot drift apart without one of them failing."""
+    cases = json.loads(COMMANDS_FIXTURE.read_text(encoding="utf-8"))
+    assert len(cases) >= 20 and {c["command"] for c in cases} == {True, False}
+    for case in cases:
+        assert (parse_command(case["note"]) is not None) is case["command"], case
 
 
 def test_commands_map_to_options():

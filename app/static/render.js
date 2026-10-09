@@ -12,13 +12,15 @@
 // input) cannot become markup. The only URLs set on an element are blob: object URLs and data: images; an image comes
 // through ctx.loadImage because an <img src> cannot carry the bearer token.
 //
-// ctx = { loadImage, openViewer, copy, showModels, labelNames, ui, turn }. Every member is optional and a missing
+// ctx = { loadImage, openViewer, copy, showModels, labelNames, retrieval, ui, turn }. Every member is optional and a missing
 // callback hides its control.
 //   loadImage(path) -> Promise<object URL>   api.js loadImage with the page's auth: a user turn's thumbnail
 //   openViewer(image)                        a click on the thumbnail; image is what renderUserTurn was given
 //   copy(text)                               the report's Copy button; a throw or a rejected promise shows "Copy failed"
 //   showModels()                             the provenance link, which opens /v1/models in the drawer
 //   labelNames: [14 names]                   CHEXBERT_14 order, from /v1/models; else the order of view.labels
+//   retrieval: false                         the server runs no retrieval stage (/v1/models features): a user turn shows no k chip,
+//                                            since k was never used; left out, it is taken to run one
 //   ui: Map                                  keeps the open stage details and Show raw, per message id, across the
 //                                            whole-card replace; without it a re-rendered card starts closed
 //   turn: 3                                  the turn's number in the session: it names the card and tells the same
@@ -461,7 +463,7 @@ export function renderUserTurn(msg, ctx) {
   const m = isObject(msg) ? msg : {};
   const cx = ctx ?? {};
   const text = str(m.text).trim();
-  const chips = optionChips(m.options);
+  const chips = optionChips(cx.retrieval === false && isObject(m.options) ? { ...m.options, k_images: null, k_reports: null } : m.options);
   const picture = isObject(m.image) ? thumbnail(m.image, cx) : null;
   return el('article', { class: 'turn user', 'aria-label': named('Your message', cx), hidden: !picture && !text && !chips.length },
     el('div', { class: 'bubble' }, picture, text ? el('p', { class: 'user-text' }, text) : null,

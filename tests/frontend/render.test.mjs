@@ -1122,6 +1122,15 @@ test('the user turn shows the note, the thumbnail and the option chips', async (
   assert.equal(img.getAttribute('src'), 'blob:test/1');   // through ctx.loadImage: the token never rides an <img src>
 });
 
+test('with ctx.retrieval false the user turn shows no k chip: the server ran no retrieval, so k was not used (P4-H)', () => {
+  const options = tinyView().options;
+  const chips = (ctx) => texts(qa(renderUserTurn({ text: 'x', options }, ctx), '.options .chip'));
+  assert.deepEqual(chips({ retrieval: false }), ['beam 3', '16 tok', 'cached', 'raw text', 'full budget']);
+  assert.deepEqual(chips({ retrieval: true }), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text', 'full budget']);
+  assert.deepEqual(chips({}), chips({ retrieval: true }));   // not said: taken to run, as serverHas takes an older server
+  assert.equal(options.k_images, 4);   // the view is not written to
+});
+
 test('a preview URL is used as it is and a server path goes through ctx.loadImage; nothing else ever reaches src', async () => {
   const loaded = [];
   const ctx = { loadImage: async (p) => { loaded.push(p); return 'blob:test/1'; } };
