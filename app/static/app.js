@@ -214,7 +214,8 @@ const GENERIC_ERROR = 'Something went wrong — see the console';   // for what 
 const FETCH_FAILURE = /failed to fetch|fetch failed|load failed|networkerror|network error|network connection|internet connection|network request failed/i;
 
 // A TypeError is how fetch reports a network failure, and also how a bug of ours reports itself. Where only fetch can have
-// thrown (a request, the stream or the poll of api.js, a cancel) the error is marked, and errorMessage trusts the mark.
+// thrown (a request of the page's own, a cancel) the error is marked, and errorMessage trusts the mark. The stream and the poll
+// are marked at their source instead: api.js marks what the transport threw (transportFailure), and fromTransport reads that.
 function markNetwork(err) {
   if (err instanceof TypeError && !('network' in err)) err.network = true;
   return err;
@@ -248,13 +249,16 @@ export function errorMessage(err) {
   return clip(text(err?.message) || 'Something went wrong.');
 }
 
-// What comes out of an api.js generator's next() is the transport's: a stream that failed, a poll that was refused. (What the page
-// does with each event is its own, and is caught where it is done.) A TypeError out of it is a network failure, and is marked.
+// What comes out of an api.js generator's next(): a stream that failed, a poll that was refused. (What the page does with each event is
+// its own, and is caught where it is done.) api.js marks a failure of the transport where it happens (transportFailure): that one is the
+// network's, and is said as such. Any other error, a TypeError too, is a bug, and the page logs it (P4-H): a TypeError is not the network
+// just because it is a TypeError.
 async function* fromTransport(source) {
   try {
     yield* source;
   } catch (err) {
-    throw markNetwork(err);
+    if (err?.transport === true && !('network' in err)) err.network = true;
+    throw err;
   }
 }
 
@@ -358,10 +362,12 @@ export function checkImageFile(file) {
   return null;
 }
 
-// The server's text commands (app/commands.py), each the whole note once its whitespace is collapsed, case aside. The page reads them only
-// to say what Send will do: with no new image, a command or an empty note runs the chat's last X-ray again, and any other note gets the
-// server's fixed answer and no report (post_message). The server decides; tests/frontend/fixtures/commands.json holds the two to one list.
-const COMMANDS = [/^beam \d+$/i, /^greedy$/i, /^tokens \d+$/i, /^retrieve \d+$/i, /^reference:\s*.+$/i, /^repair (?:on|off)$/i];
+// The server's text commands (app/commands.py), each the whole note once its whitespace is collapsed, case aside, ASCII only on both sides.
+// The page reads them only to say what Send will do: with no new image, a command or an empty note runs the chat's last X-ray again, and
+// any other note gets the server's fixed answer and no report (post_message). The server decides; tests/frontend/fixtures/commands.json
+// holds the two to one list, and every rule on either side to an example in it (tests/test_app_commands.py, tests/frontend/app.test.mjs).
+export const COMMANDS = Object.freeze([/^beam \d+$/i, /^greedy$/i, /^tokens \d+$/i, /^retrieve \d+$/i, /^reference:\s*.+$/i,
+                                       /^repair (?:on|off)$/i]);
 
 export function isCommand(note) {
   const t = typeof note === 'string' ? note.split(/\s+/).filter(Boolean).join(' ') : '';
@@ -370,6 +376,12 @@ export function isCommand(note) {
 
 // Does a turn of this note and this file run the model? With a file it does; with none, only an empty note or a command does.
 const runsTheModel = (note, file) => !!file || !text(note) || isCommand(note);
+
+// Does the element show the keyboard's focus ring (:focus-visible), which a browser draws for a focus the keyboard brought and not for a
+// click or a tap? A browser that cannot tell is taken not to.
+function focusVisible(node) {
+  try { return node?.matches?.(':focus-visible') === true; } catch { return false; }
+}
 
 // ---- the page -----------------------------------------------------------------------------------------------------------------
 
@@ -544,10 +556,11 @@ export function createApp(env) {
   }
 
   // A control that is disabled while it has the focus loses it to the page itself (the focus fixup rule), and the keyboard would have to
-  // start again from the top: Send and Stop switch themselves off when they are pressed. The note field, where the next note is typed,
-  // takes the focus first (P4-H).
+  // start again from the top: Send and Stop switch themselves off when they are pressed. Pressed from the keyboard (the control shows its
+  // focus ring, :focus-visible), the note field, where the next note is typed, takes the focus first (P4-H). A click or a tap leaves the
+  // focus to the browser: in the note field, a tap would open a phone's keyboard over the card that is about to stream.
   function keepFocusFrom(control) {
-    if (doc.activeElement === control) ui.prompt.focus();
+    if (doc.activeElement === control && focusVisible(control)) ui.prompt.focus();
   }
 
   // The state of the controls that depend on whether a turn runs.
@@ -665,6 +678,7 @@ export function createApp(env) {
       // A poll that fails after the turn's own message_stop was read (the server stores that before it marks the message finished, so
       // the poll that read it asks once more) has nothing left to ask: a Retry for a finished turn would be a button that does nothing.
       if (turn.left || turn.settled || isAbort(err)) return;
+      if (!expected(err)) report(err);   // a bug, not the network or a refusal: the notice says "see the console", and the console has it
       watchdog.failed();
       if (state.turn === turn) {   // Stop works again, whatever it said: pressing it follows the turn from here
         turn.stopping = false;

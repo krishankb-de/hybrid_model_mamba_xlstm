@@ -358,6 +358,13 @@ class Store:
                 (message_id, client_id, client_id)).fetchone()
         return None if row is None else _message_dict(row)
 
+    def message_visible(self, message_id: str) -> bool:
+        """get_message(message_id, None) is not None, without reading the row: a running turn asks it at every step (P4-H)."""
+        with self._lock:
+            return self._con.execute(
+                "SELECT 1 FROM messages m JOIN sessions s ON s.id = m.session_id WHERE m.id = ? AND s.deleted_at IS NULL",
+                (message_id,)).fetchone() is not None
+
     def finish_turn(self, message_id: str, status: str, report: Optional[str] = None,
                     display_report: Optional[str] = None, provenance: Optional[Dict[str, Any]] = None,
                     total_ms: Optional[float] = None) -> None:

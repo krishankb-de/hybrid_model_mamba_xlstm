@@ -195,8 +195,9 @@ class Pipeline:
         self._require_session(turn.job.message_id)
 
     def _require_session(self, message_id: str) -> None:
-        """_Gone once the turn's session is deleted: a message is resolved through its session."""
-        if self.store.get_message(message_id, None) is None:
+        """_Gone once the turn's session is deleted: a message is resolved through its session. An existence query, since the generate
+        stage asks at every step."""
+        if not self.store.message_visible(message_id):
             raise _Gone()
 
     def _stage(self, turn: _Turn, name: str, run: Callable[[], Tuple[StageResult, Any]]) -> Any:

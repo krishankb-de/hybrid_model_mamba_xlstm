@@ -4,7 +4,8 @@
 //
 // Events come out as {event, data} with data.seq, from the stream and from polling alike, and state.js folds both.
 // A refused request throws an Error with `status` and `body`, the server's parsed error envelope
-// {"type": "error", "error": {"type", "message"}} (null when the body is not JSON). Every request carries authHeaders:
+// {"type": "error", "error": {"type", "message"}} (null when the body is not JSON); a failure of the transport itself (fetch
+// rejected, a body that could not be read) throws with `transport: true` (transportFailure). Every request carries authHeaders:
 // an <img src> cannot send them, which is why images are fetched and shown through object URLs (D23), and why those
 // take a path on this page's own origin only: the bearer token goes nowhere else.
 
@@ -35,6 +36,25 @@ export function parseSSE(buffer) {
   return { events, rest: buffer };
 }
 
+// A failure of the transport itself, marked where it happens (P4-H): fetch rejected (the network, a server that is down, a tunnel that
+// dropped, an abort) or reading a response's body failed. The page takes these, and only these, for the network's doing; a TypeError
+// that is a bug (of this file's parsing, or of a callback it was given) carries no mark, and the page logs it. -> the error, marked.
+export function transportFailure(err) {
+  if (err !== null && typeof err === 'object' && !('transport' in err)) {
+    try { err.transport = true; } catch { /* a frozen error stays as it is */ }
+  }
+  return err;
+}
+
+// fetch, with its rejection marked as the transport's.
+async function fetched(url, init) {
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    throw transportFailure(err);
+  }
+}
+
 export function authHeaders(token, clientId) {
   const h = {};
   if (token) h.Authorization = `Bearer ${token}`;
@@ -48,8 +68,8 @@ export function authHeaders(token, clientId) {
 // so the connection is not left open. An aborted signal ends it with the AbortError fetch throws. A stream that ends
 // without a message_stop just returns: the caller sees view.status still 'running' and falls back to pollMessage.
 export async function* streamTurn({ base = '', sessionId, form, token, clientId, signal, onMessageId }) {
-  const res = await fetch(`${base}/v1/sessions/${sessionId}/messages`,
-                          { method: 'POST', body: form, signal, headers: authHeaders(token, clientId) });
+  const res = await fetched(`${base}/v1/sessions/${sessionId}/messages`,
+                            { method: 'POST', body: form, signal, headers: authHeaders(token, clientId) });
   if (!res.ok) throw Object.assign(new Error('turn refused'), { status: res.status, body: await res.json().catch(() => null) });
   const reader = res.body.getReader();
   try {
@@ -58,7 +78,13 @@ export async function* streamTurn({ base = '', sessionId, form, token, clientId,
     const dec = new TextDecoder();
     let buf = '';
     for (;;) {
-      const { value, done } = await reader.read();
+      let chunk;
+      try {
+        chunk = await reader.read();
+      } catch (err) {
+        throw transportFailure(err);   // the connection broke mid-stream (or the read was aborted)
+      }
+      const { value, done } = chunk;
       if (done) return;
       const { events, rest } = parseSSE(buf + dec.decode(value, { stream: true }));
       buf = rest;
@@ -103,9 +129,9 @@ export async function* pollMessage({ base = '', messageId, after = 0, token, cli
     let message;
     try {
       const url = `${base}/v1/messages/${messageId}?after=${seen}`;
-      const res = await fetch(url, { signal, headers: authHeaders(token, clientId) });
+      const res = await fetched(url, { signal, headers: authHeaders(token, clientId) });
       if (!res.ok) throw await refused(res, 'poll refused');
-      message = await res.json();
+      message = await res.json().catch((err) => { throw err instanceof TypeError ? transportFailure(err) : err; });   // a body cut off
     } catch (err) {
       if (signal?.aborted) return;
       if (!(err instanceof TypeError || RETRY_STATUSES.has(err.status)) || ++failures >= MAX_POLL_FAILURES) throw err;
@@ -125,7 +151,7 @@ export async function* pollMessage({ base = '', messageId, after = 0, token, cli
 
 // Asks the server to stop a queued or running turn; -> {id, status, cancel_requested}. Idempotent on the server.
 export async function cancelMessage({ base = '', messageId, token, clientId }) {
-  const res = await fetch(`${base}/v1/messages/${messageId}/cancel`, { method: 'POST', headers: authHeaders(token, clientId) });
+  const res = await fetched(`${base}/v1/messages/${messageId}/cancel`, { method: 'POST', headers: authHeaders(token, clientId) });
   if (!res.ok) throw await refused(res, 'cancel refused');
   return res.json();
 }
@@ -150,7 +176,7 @@ export function loadImage(url, auth = {}) {
   }
   if (!images.has(url)) {
     const loading = (async () => {
-      const res = await fetch(url, { headers: authHeaders(auth.token, auth.clientId) });
+      const res = await fetched(url, { headers: authHeaders(auth.token, auth.clientId) });
       if (!res.ok) throw await refused(res, 'image refused');
       const objectUrl = URL.createObjectURL(await res.blob());
       objectUrls.add(objectUrl);

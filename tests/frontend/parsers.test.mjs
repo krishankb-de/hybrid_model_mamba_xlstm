@@ -686,6 +686,34 @@ test('streamTurn: a body whose cancel() rejects does not fail a consumer that st
   assert.deepEqual(cancelAttempts, ['cancel']);   // it did try to close the body: the rejection was swallowed, not skipped
 });
 
+test('streamTurn marks a failure of the transport where it happens, and nothing else: the page swallows only those (P4-H)', async (t) => {
+  const frame = new TextEncoder().encode(wire('message_start', { seq: 1, message_id: 'm1' }));
+  const broken = () => new ReadableStream({   // one frame, then the connection dies
+    start(c) { c.enqueue(frame); },
+    pull(c) { c.error(new TypeError('network error')); },
+  });
+  let respond = () => { throw new TypeError('fetch failed'); };   // the connection cannot be made
+  stubFetch(t, () => respond());
+  const marked = (err) => err instanceof TypeError && err.transport === true;
+  await assert.rejects(drain(streamTurn({ sessionId: 's1', form: new FormData() })), marked);
+  respond = () => new Response(broken(), { status: 200, headers: { 'X-Message-Id': 'm1' } });
+  await assert.rejects(drain(streamTurn({ sessionId: 's1', form: new FormData() })), marked);   // the body fails mid-stream
+  const bug = new TypeError("Cannot read properties of undefined (reading 'id')");   // the caller's own code fails: no mark
+  await assert.rejects(drain(streamTurn({ sessionId: 's1', form: new FormData(), onMessageId: () => { throw bug; } })),
+                       (err) => err === bug && !('transport' in err));
+  const invalid = envelope('validation_error', 'nope');   // a refusal is the server's answer, not the transport's
+  respond = () => json(invalid, 422);
+  await assert.rejects(drain(streamTurn({ sessionId: 's1', form: new FormData() })),
+                       (err) => err.status === 422 && !('transport' in err));
+});
+
+test('pollMessage and cancelMessage mark a failure of the transport too', async (t) => {
+  const calls = stubFetch(t, netDown);
+  await assert.rejects(drain(pollMessage({ messageId: 'm1', intervalMs: 1, maxBackoffMs: 2 })), (err) => err.transport === true);
+  assert.equal(calls.length, 20);
+  await assert.rejects(cancelMessage({ messageId: 'm1' }), (err) => err instanceof TypeError && err.transport === true);
+});
+
 test('streamTurn goes on after a frame that is not JSON', async (t) => {
   const body = wire('message_start', { seq: 1, message_id: 'm1' }) + 'event: x\ndata: {oops\n\n' + wire('message_stop', { seq: 3 });
   stubFetch(t, () => new Response(body, { status: 200 }));

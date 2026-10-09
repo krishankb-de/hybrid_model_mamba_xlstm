@@ -1387,8 +1387,8 @@ def test_markdown_export_has_a_heading_per_turn_and_exports_download(client):
 GIT_SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
-def _provenance(sha):
-    return lambda root: {"git_sha": sha, "git_dirty": None if sha is None else False, "git_source": None if sha is None else "git"}
+def _provenance(sha, dirty=False):
+    return lambda root: {"git_sha": sha, "git_dirty": None if sha is None else dirty, "git_source": None if sha is None else "git"}
 
 
 def test_health_reports_mode_and_load_without_a_token(tmp_path, monkeypatch):
@@ -1416,6 +1416,23 @@ def test_health_says_which_code_the_server_started_from_and_when(tmp_path, monke
     assert started.utcoffset() == datetime.timedelta(0) and before <= started <= after
     assert first["code_version"] == GIT_SHA[:7]
     assert first["code_version"] == c.app.state.engines["tiny"].card()["git_sha"][:7]
+
+
+@pytest.mark.parametrize("dirty,expected", [(True, "0123456-dirty"), (False, "0123456"), (None, "0123456")])
+def test_health_marks_code_that_had_changes_its_commit_does_not_hold(tmp_path, monkeypatch, dirty, expected):
+    """P4-H fix 1: a dirty tree runs code its sha does not name, so code_version says so; a tree that cannot tell is not called dirty."""
+    monkeypatch.setattr(engine_module, "git_provenance", _provenance(GIT_SHA, dirty))
+    with TestClient(create_app(engine="tiny", home=str(tmp_path))) as c:
+        assert c.get("/healthz").json()["code_version"] == expected
+
+
+def test_health_shows_no_code_version_in_public_mode(tmp_path, monkeypatch):
+    """P4-H fix 1: /healthz needs no token, so a public server does not tell anyone which commit it runs. It still says when it started."""
+    monkeypatch.setattr(engine_module, "git_provenance", _provenance(GIT_SHA))
+    with TestClient(create_app(engine="tiny", home=str(tmp_path), mode="public", token="t")) as c:
+        health = c.get("/healthz").json()
+    assert health["mode"] == "public" and health["code_version"] is None
+    datetime.datetime.fromisoformat(health["started_at"])
 
 
 def test_health_says_null_when_the_server_cannot_tell_its_code_version(tmp_path, monkeypatch):

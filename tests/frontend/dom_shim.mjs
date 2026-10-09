@@ -9,7 +9,9 @@
 // button, an input, an enabled select or textarea, a link with an href, or anything with a tabindex, and only while
 // it is in the document (the body of the installed document) and neither it nor anything above it has the hidden
 // attribute: a card that was replaced has lost its focus, and so has a control that is hidden under a focus holder, or a
-// button, input, select or textarea that is disabled while it has the focus (Chrome's focus fixup rule).
+// button, input, select or textarea that is disabled while it has the focus (Chrome's focus fixup rule). matches(':focus-visible')
+// is true for a focus that came by the keyboard: a keydown sets that, a pointerdown, mousedown or touchstart sets a pointer's, and a
+// page nobody has touched yet counts as the keyboard's.
 // Focus moving fires blur on the control that had it and then focus on the one that takes it (neither bubbles), and
 // select() selects the whole of an input's value (selectionStart, selectionEnd). A form submits as a browser's does
 // (P4-G): a click on a submit button (type="submit", or no type) fires a cancelable, bubbling submit on its form, and
@@ -30,9 +32,20 @@ const TEXT_LIKE = new Set(['text', 'search', 'url', 'tel', 'email', 'password', 
 const isSubmitButton = (node) => node.localName === 'button' && (node.getAttribute('type') ?? 'submit') === 'submit';
 let documentBody = null;   // the body of the document installed last: focus works inside it only
 let focused = null;        // the element that has focus, if it is still in that body
+let focusVisible = false;  // and whether that focus came by the keyboard, so that it matches :focus-visible (P4-H)
+let modality = 'keyboard'; // what moved the focus last: a key ('keyboard', also a page nobody has touched yet) or a pointer
+const POINTER_EVENTS = new Set(['pointerdown', 'mousedown', 'touchstart']);
 const tripwire = (name) => { throw new Error(`the DOM shim has no ${name}: a renderer must build nodes, not parse strings`); };
 // The element or an ancestor has the hidden attribute: nothing in it is rendered, so nothing in it can have focus.
 const inHiddenSubtree = (node) => { for (let n = node; n && n.nodeType === 1; n = n.parentNode) if (n.hasAttribute('hidden')) return true; return false; };
+
+// The element that has the focus now. A browser blurs what leaves the page or is hidden, for good, and (its focus fixup rule) a control
+// that is disabled while it has the focus: Chrome hands that focus to the page itself (P4-H: Send and Stop disable themselves when pressed).
+function currentFocus() {
+  if (focused && (!documentBody || !documentBody.contains(focused) || inHiddenSubtree(focused)
+                  || (FOCUSABLE_TAGS.has(focused.localName) && focused.hasAttribute('disabled')))) focused = null;
+  return focused;
+}
 
 export class ShimEvent {
   constructor(type, init = {}) {
@@ -212,6 +225,7 @@ class ShimElement extends ShimNode {
     if (!focusable || !documentBody || !documentBody.contains(this) || inHiddenSubtree(this) || focused === this) return;
     const had = focused;
     focused = this;
+    focusVisible = modality === 'keyboard';   // a focus that a key brought shows its ring; one a click or a tap brought does not
     if (had) had.dispatchEvent(new ShimEvent('blur'));   // the one that had focus first, then this one; neither bubbles
     this.dispatchEvent(new ShimEvent('focus'));
   }
@@ -258,6 +272,8 @@ class ShimElement extends ShimNode {
   }
   dispatchEvent(event) {
     if (!event.target) event.target = this;
+    if (event.type === 'keydown') modality = 'keyboard';
+    else if (POINTER_EVENTS.has(event.type)) modality = 'pointer';
     for (let node = this; node && node.nodeType === 1; node = node.parentNode) {
       event.currentTarget = node;
       for (const listener of [...(node.listeners.get(event.type) ?? [])]) listener.call(node, event);
@@ -280,7 +296,11 @@ class ShimElement extends ShimNode {
     if (button && !button.hasAttribute('disabled')) button.click();
   }
 
-  matches(selector) { return matchesAny(this, compile(selector)); }
+  matches(selector) {
+    if (selector === ':focus') return currentFocus() === this;
+    if (selector === ':focus-visible') return currentFocus() === this && focusVisible;   // the focus came by the keyboard
+    return matchesAny(this, compile(selector));
+  }
   closest(selector) {
     const complexes = compile(selector);
     for (let n = this; n && n.nodeType === 1; n = n.parentNode) if (matchesAny(n, complexes)) return n;
@@ -311,14 +331,10 @@ export function createDocument() {
   const body = new ShimElement('body');
   documentBody = body;
   focused = null;
+  focusVisible = false;
+  modality = 'keyboard';
   return {
-    get activeElement() {
-      // A browser blurs what leaves the page or is hidden, for good, and (its focus fixup rule) a control that is disabled while it has
-      // the focus: Chrome hands that focus to the page itself (P4-H: Send and Stop disable themselves when they are pressed).
-      if (focused && (!body.contains(focused) || inHiddenSubtree(focused)
-                      || (FOCUSABLE_TAGS.has(focused.localName) && focused.hasAttribute('disabled')))) focused = null;
-      return focused ?? body;
-    },
+    get activeElement() { return currentFocus() ?? body; },
     createElement: (tag) => new ShimElement(tag),
     createTextNode: (data) => new ShimText(data),
     body,

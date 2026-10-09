@@ -16,10 +16,12 @@ _RULES = [
 
 
 def parse_command(text: str) -> Optional[Dict[str, Any]]:
-    """Option overrides for a text-only turn, or None if the text is not a command."""
+    """Option overrides for a text-only turn, or None if the text is not a command. ASCII only (re.ASCII): Unicode's \\d would also
+    take other scripts' digits and its case folding the long s for an s, which the page's copy of these rules (app/static/app.js
+    isCommand, JavaScript) does not (P4-H)."""
     t = " ".join((text or "").split())
     for pattern, build in _RULES:
-        m = re.fullmatch(pattern, t, flags=re.IGNORECASE)
+        m = re.fullmatch(pattern, t, flags=re.IGNORECASE | re.ASCII)
         if m:
             return build(m)
     return None

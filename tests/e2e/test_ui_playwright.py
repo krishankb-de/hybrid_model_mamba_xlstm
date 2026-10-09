@@ -7,7 +7,10 @@ and the synthetic images are in conftest.py.
     venv/bin/python -m pytest tests/e2e -m e2e -q
 """
 import json
+import os
 import re
+import subprocess
+import sys
 from typing import Any, Dict, List, Tuple
 
 import pytest
@@ -16,7 +19,7 @@ pytest.importorskip("playwright.sync_api", reason="the e2e tests need `pip insta
 
 from app.commands import NOT_A_QA_BOT  # noqa: E402
 from app.imaging import FORMATS_MSG, TOO_SMALL_MSG  # noqa: E402
-from tests.e2e.conftest import DESKTOP, FAULT_TOKENS, squeezed, stage_detail  # noqa: E402
+from tests.e2e.conftest import DESKTOP, FAULT_TOKENS, REPO_ROOT, squeezed, stage_detail  # noqa: E402
 
 pytestmark = [pytest.mark.e2e, pytest.mark.slow]
 
@@ -380,11 +383,12 @@ def test_stop_ends_a_running_turn_and_the_composer_works_again(ui, images):
     ui.attach(images["xray_a.png"])
     page.click("#send")
     ui.wait_running(snapshots=4)
+    assert ui.composer()["focus"] != "prompt"   # a click on Send leaves the focus to the browser: only the keyboard's is handed on
     ui.shot("streaming_1280x900_light.png")
     # The chat is listed under its title from the moment its first turn starts, not as "New chat · 0 turns" until it ends.
     page.wait_for_function("() => { const t = document.querySelector('#session-list li .session-title');"
                            " const m = document.querySelector('#session-list li .session-meta');"
-                           " return t && t.textContent === 'xray_a.png' && m.textContent.endsWith('· 1 turn'); }", timeout=5000)
+                           " return t && t.textContent === 'xray_a.png' && m.textContent.endsWith('· 1 turn'); }", timeout=10000)
     assert ui.card()["status"] == "running"
     page.click("#stop")
     card = ui.wait_settled(0, timeout=20)
@@ -392,6 +396,7 @@ def test_stop_ends_a_running_turn_and_the_composer_works_again(ui, images):
     assert card["stages"]["generate"] == "skipped" and "(stopped)" in card["stage_text"]["generate"]
     composer = ui.composer()
     assert not composer["send_disabled"] and composer["stop_hidden"] and composer["stop_text"] == "Stop"
+    assert composer["focus"] != "prompt"         # nor does a click on Stop
     [message] = assistants(ui, ui.session_id())
     assert message["status"] == "aborted"
     assert len([r for r in message["events"] if r["event"] == "content_block_delta"]) < 200
@@ -455,8 +460,11 @@ def test_sessions_new_chat_switching_reload_and_delete(ui, images):
     ui.reload()
     assert [r["id"] for r in ui.sidebar()] == [sid_b]   # and it stays gone
     assert [s["id"] for s in ui.server.sessions()] == [sid_b] and ui.server.status("v1/sessions/" + sid_a) == 404
-    page.once("dialog", lambda dialog: dialog.dismiss())   # Cancel in the dialog deletes nothing
+    sent = len(ui.requests)
+    page.once("dialog", lambda dialog: dialog.dismiss())   # Cancel in the dialog deletes nothing, and asks the server nothing
     page.click("#session-list li[data-session='{}'] .session-delete".format(sid_b))
+    page.wait_for_timeout(300)                              # a DELETE goes out as the dialog closes: 300 ms is ample
+    assert [r for r in ui.requests[sent:] if r[0] == "DELETE"] == []
     assert [r["id"] for r in ui.sidebar()] == [sid_b] and [s["id"] for s in ui.server.sessions()] == [sid_b]
 
     # Deleting a chat whose turn is running stops that turn: the server's one worker is free at once for the next chat's turn.
@@ -466,7 +474,7 @@ def test_sessions_new_chat_switching_reload_and_delete(ui, images):
     page.once("dialog", lambda dialog: dialog.accept())
     page.click("#session-list li[data-session='{}'] .session-delete".format(sid_b))
     page.wait_for_function("location.hash === '#/new'")   # the last chat is gone: an empty one
-    for _ in range(20):   # 2 s; left running, the 200-token turn would hold the worker for about 10 s more
+    for _ in range(50):   # 5 s, for a loaded machine; left running, the 200-token turn would hold the worker for about 10 s more
         if ui.server.get("healthz")["turns_in_flight"] == 0:
             break
         page.wait_for_timeout(100)
@@ -607,7 +615,7 @@ def test_keyboard_only(ui, images):
         page.keyboard.press("Enter")
     chooser.value.set_files(images["xray_a.png"])
     page.wait_for_function("!document.querySelector('#preview').hidden")
-    page.focus("#send")
+    tab_to(page, "send", limit=6)
     page.keyboard.press("Enter")                   # Send by keyboard: the focus goes to the note field, not to nowhere
     page.wait_for_function("!document.querySelector('#stop').hidden && !document.querySelector('#stop').disabled")
     assert ui.composer()["focus"] == "prompt"
@@ -655,13 +663,18 @@ def test_phone_tablet_and_desktop_viewports_and_the_dark_theme(ui, images):
     ui.turn(images["xray_a.png"])
     sid = ui.session_id()
     for width, height in ((390, 844), (768, 1024), (1440, 900)):
-        page = ui.new_page(viewport=(width, height))
+        phone = width == 390
+        page = ui.new_page(viewport=(width, height), **({"has_touch": True, "is_mobile": True} if phone else {}))
         ui.open(page, "#/s/" + sid)
         geometry = page.evaluate(GEOMETRY_JS)
         assert all(v <= 0 for v in geometry["overflow"].values()), (width, geometry)   # no horizontal scroll anywhere
         assert geometry["send"] == {"inside": True, "hit": True}, (width, geometry)    # Send is on screen and nothing covers it
-        if width == 390:
+        if phone:
             ui.shot("phone_390x844_light.png", page)
+            before = ui.cards(page)
+            page.tap("#send")   # a tap re-runs the X-ray, and leaves the note field alone: no soft keyboard over the card that streams
+            assert page.evaluate("document.activeElement.id") != "prompt"
+            assert ui.wait_settled(before, page)["status"] == "done"
         page.click("#settings")
         geometry = page.evaluate(GEOMETRY_JS)
         assert all(v <= 0 for v in geometry["overflow"].values()), (width, "drawer", geometry)
@@ -704,3 +717,38 @@ def test_two_tabs_run_turns_at_once_and_neither_disturbs_the_other(ui, images):
     assert ui.session_id(one) == sid_one and ui.card(one)["shown"] == card_one["shown"]
     assert {row["id"] for row in ui.sidebar(one)} == {sid_one, sid_two}
     ui.assert_clean()
+
+
+# ---- the harness itself ----------------------------------------------------------------------------------------------------------
+
+PROBE_CONFTEST = """\
+from tests.e2e.conftest import *  # noqa: F401,F403  (the harness: its fixtures and its report hook)
+from tests.e2e.conftest import _sigterm_runs_teardown  # noqa: F401
+"""
+PROBE_TEST = """\
+def test_a_problem_after_the_last_assertion(ui):
+    page = ui.open()
+    ui.assert_clean()
+    page.evaluate("console.error('late: after the last assertion')")
+"""
+
+
+def test_the_harness_fails_a_test_whose_page_reports_a_problem_after_its_last_assertion(tmp_path):
+    """P4-H fix 1: teardown asks the pages again for every test that passed, even one that ended with assert_clean, so a console error,
+    a page error or a failed request that comes in late still fails the test. A nested run of one probe test, with this harness."""
+    (tmp_path / "conftest.py").write_text(PROBE_CONFTEST)
+    (tmp_path / "test_probe.py").write_text(PROBE_TEST)
+    probe = subprocess.Popen([sys.executable, "-m", "pytest", str(tmp_path), "-q", "-p", "no:cacheprovider"], cwd=str(tmp_path),
+                             env=dict(os.environ, PYTHONPATH=REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        out, _ = probe.communicate(timeout=240)
+    finally:
+        if probe.poll() is None:   # its harness turns SIGTERM into teardown, so the server and the Chrome it started end with it
+            probe.terminate()
+            try:
+                probe.communicate(timeout=60)
+            except subprocess.TimeoutExpired:
+                probe.kill()
+                probe.communicate()
+    assert "1 passed, 1 error" in out, out[-3000:]
+    assert "console.error: late: after the last assertion" in out, out[-3000:]

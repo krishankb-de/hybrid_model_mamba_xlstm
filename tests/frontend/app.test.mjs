@@ -7,13 +7,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ShimEvent, installDom, serialize } from './dom_shim.mjs';
 import {
-  BOUNDS, CLIENT_KEY, DEFAULT_SETTINGS, HEALTH_MS, HEALTH_SLOW_MS, SETTINGS_KEY, STALL_MS, browserStorage,
+  BOUNDS, CLIENT_KEY, COMMANDS, DEFAULT_SETTINGS, HEALTH_MS, HEALTH_SLOW_MS, SETTINGS_KEY, STALL_MS, browserStorage,
   checkImageFile, chosenCard, clientId, createApp, createWatchdog, errorMessage, exportFilename, healthText, isCommand, loadSettings,
   nearBottom, nextHealthDelay, optionsFromSettings, parseRoute, saveSettings, serverHas, sessionDate, sessionMeta, sessionTitle,
   userTurnMessage,
 } from '../../app/static/app.js';
 import { applyEvent, initialView } from '../../app/static/state.js';
 import { el, renderAssistantCard } from '../../app/static/render.js';
+import { transportFailure } from '../../app/static/api.js';
 
 installDom();   // after the import above: with no #composer on the page, importing app.js started nothing
 
@@ -412,6 +413,15 @@ test('isCommand tells a command from a note as the server does: the notes of fix
   assert.ok(cases.length >= 20 && cases.some((c) => c.command) && cases.some((c) => !c.command));
   for (const { note, command } of cases) assert.equal(isCommand(note), command, JSON.stringify(note));
   for (const odd of [null, undefined, 5, {}, ['beam 5']]) assert.equal(isCommand(odd), false);
+});
+
+test('every command rule of the page has an example in fixtures/commands.json, so a rule added without one fails (P4-H fix 1)', () => {
+  const cases = JSON.parse(readFileSync(new URL('./fixtures/commands.json', import.meta.url)));
+  const examples = cases.filter((c) => c.command).map((c) => c.note.split(/\s+/).filter(Boolean).join(' '));
+  const uncovered = (rules) => rules.filter((rule) => !examples.some((note) => rule.test(note)));
+  assert.ok(COMMANDS.length >= 6 && Object.isFrozen(COMMANDS));
+  assert.deepEqual(uncovered(COMMANDS), []);
+  assert.deepEqual(uncovered([...COMMANDS, /^stop (?:on|off)$/i]).map(String), ['/^stop (?:on|off)$/i']);   // the guard bites
 });
 
 test('a stored question (a user message with no image) becomes a user turn with no chips: it ran no model, so it used no settings (P4-H)', () => {
@@ -965,7 +975,7 @@ test('a stream the network drops mid-turn is followed by the poll and logs nothi
   await flush();
   run.channel.push(...events.slice(0, 9));   // up to the first snapshot of the report
   await flush();
-  run.channel.fail(new TypeError('network error'));   // what Chrome's fetch throws when the server dies mid-stream
+  run.channel.fail(transportFailure(new TypeError('network error')));   // what api.js throws when the server dies mid-stream
   await flush();
   assert.equal(h.api.polls.length, 1);   // the poll carries the turn on from its last seq
   assert.equal(h.api.polls[0].opts.after, 9);
@@ -976,6 +986,37 @@ test('a stream the network drops mid-turn is followed by the poll and logs nothi
   await turn;
   assert.equal(cardOf().getAttribute('data-status'), 'done');
   assert.deepEqual(logged, []);
+});
+
+test('a TypeError out of the stream or the poll that api.js did not mark as the transport\'s is a bug, and is logged (P4-H)', async (t) => {
+  const logged = captureErrors(t);
+  const h = await ready();
+  const events = fullTurn();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  run.channel.push(...events.slice(0, 9));
+  await flush();
+  const bug = new TypeError("Cannot read properties of undefined (reading 'delta')");   // the stream handling's own failure
+  run.channel.fail(bug);
+  await flush();
+  assert.deepEqual(logged.map((args) => args[0]), [bug]);   // logged, though it is a TypeError
+  assert.equal(h.api.polls.length, 1);                      // and the poll still carries the turn on
+  const broken = new TypeError('x is not iterable');        // the poll gives up on a failure that is no network's
+  h.api.polls[0].channel.fail(broken);
+  await flush();
+  assert.deepEqual(logged.map((args) => args[0]), [bug, broken]);
+  assert.equal(q($('notice'), 'p').textContent, 'Something went wrong — see the console');   // and the console has it
+  await turn;                                               // the send itself is over: the poll it ended on failed
+  buttonOf($('notice'), 'Retry').click();                   // Retry follows the turn again
+  await flush();
+  h.api.polls.at(-1).channel.push(...events.slice(9));
+  h.api.polls.at(-1).channel.end();
+  await flush();
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.deepEqual(logged.map((args) => args[0]), [bug, broken]);   // nothing more
 });
 
 test('a Send right after a refused first turn makes a new chat, and does not send its turn into the one being deleted (P4-H)', async () => {
@@ -1018,8 +1059,10 @@ test('a refused turn in a chat that was there before deletes nothing, even when 
 
 test('Send pressed while it has the focus hands the focus to the note field before it is switched off, so the keyboard keeps its place (P4-H)', async () => {
   const h = await ready();
+  press($('prompt'), 'Tab');   // the keyboard moves the focus: it shows its ring (:focus-visible)
   $('send').focus();
   assert.equal(document.activeElement, $('send'));
+  assert.equal($('send').matches(':focus-visible'), true);
   const turn = h.app.send();   // what the composer's submit runs when Send is pressed with Enter, Space or a click
   assert.equal($('send').disabled, true);
   assert.equal(document.activeElement, $('prompt'));   // not the page: a disabled button loses the focus, and Chrome gives it to the body
@@ -1041,6 +1084,28 @@ test('Send pressed while it has the focus hands the focus to the note field befo
   await second;
 });
 
+test('Send and Stop pressed with a pointer (a click, a tap) leave the focus alone: on a phone the note field would open the keyboard (P4-H)', async () => {
+  const h = await ready();
+  $('send').dispatchEvent(new ShimEvent('pointerdown', { bubbles: true }));
+  $('send').focus();   // the focus a click or a tap gives a button: no ring
+  assert.equal($('send').matches(':focus-visible'), false);
+  const turn = h.app.send();
+  assert.notEqual(document.activeElement, $('prompt'));   // no soft keyboard over the card that is about to stream
+  assert.equal(document.activeElement, document.body);    // the disabled Send gave it up to the page, as Chrome does
+  h.api.streams[0].accept('m_a');
+  await flush();
+  $('stop').dispatchEvent(new ShimEvent('pointerdown', { bubbles: true }));
+  $('stop').focus();
+  const stopping = h.app.stopTurn();
+  assert.notEqual(document.activeElement, $('prompt'));
+  await stopping;
+  await flush();   // the dropped stream hands the turn to a poll
+  h.api.polls[0].channel.push(stopEv('aborted'));
+  h.api.polls[0].channel.end();
+  await turn;
+  assert.notEqual(document.activeElement, $('prompt'));
+});
+
 test('a turn that the server refuses before its stream opens: the notice says why, its user turn is taken back, and the composer is as it was', async (t) => {
   const logged = captureErrors(t);
   const h = await ready();
@@ -1050,7 +1115,7 @@ test('a turn that the server refuses before its stream opens: the notice says wh
     [refusal(413, 'The image is over the 20 MB upload limit.'), 'The image is over the 20 MB upload limit.'],
     [refusal(401, 'Missing or wrong token'), 'Enter the access token in Settings'],
     [refusal(429, 'The server is busy with 4 turns; try again shortly.'), 'The server is busy; try again shortly'],
-    [new TypeError('Failed to fetch'), 'Cannot reach the server. Check the connection and try again.'],
+    [transportFailure(new TypeError('Failed to fetch')), 'Cannot reach the server. Check the connection and try again.'],   // as api.js throws it
   ];
   for (const [err, shown] of cases) {
     h.api.refuse = err;
@@ -3240,7 +3305,7 @@ test('a TypeError out of the stream or the poll is the network, and one out of t
   second.api.streams[0].channel.push(...fullTurn().slice(0, 4));
   second.api.streams[0].channel.end();
   await flush();
-  second.api.polls[0].channel.fail(new TypeError('whatever the browser says'));   // the poll itself failed: that is the network
+  second.api.polls[0].channel.fail(transportFailure(new TypeError('whatever the browser says')));   // the poll itself failed: the network
   await again;
   await flush();
   assert.equal(q($('notice'), 'p').textContent, 'Cannot reach the server. Check the connection and try again.');

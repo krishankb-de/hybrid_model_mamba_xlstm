@@ -9,8 +9,8 @@ Each test gets a tiny server of its own and pages of its own in one headless Goo
     runs for the whole session; each test has its own contexts (storage, downloads) and pages.
   * Every page is watched: console errors, uncaught page errors, HTTP 4xx and 5xx responses, and failed requests. A test that
     provokes a refusal says so first (UI.expect_refusal), and so does one that takes the server down (UI.server_down); anything else
-    is a failure, said in plain words by UI.assert_clean. Every test ends with it, and teardown asks again for a test that passed
-    without it.
+    is a failure, said in plain words by UI.assert_clean. Every test ends with it, and teardown asks again, after a short settle, for
+    every test that passed: a problem that arrives after the test's last assertion fails it too.
 The images are synthetic (noise, a renamed text file, a GIF, a 32 px PNG, a padded 21 MB file). CHAT_UI_E2E_EVIDENCE=<dir> also saves
 screenshots of the key states there (UI.shot), each under 400 KB. Without the playwright package or without Google Chrome every test
 here is skipped; `pip install -r requirements-e2e.txt` provides the first.
@@ -275,22 +275,24 @@ class UI:
         self.problems = []  # type: List[str]
         self.provoked = []  # type: List[Tuple[int, str, str]]
         self.refusals = []  # type: List[str]
+        self.requests = []  # type: List[Tuple[str, str]]   # (method, path) of every request any page made, in order
         self.down = False
-        self.checked = False
         self.contexts = []  # type: List[Any]
         self.page = self.new_page()
 
     # -- contexts, pages and the watch
-    def new_context(self, viewport: Tuple[int, int] = DESKTOP, scheme: str = "light") -> Any:
+    def new_context(self, viewport: Tuple[int, int] = DESKTOP, scheme: str = "light", **options: Any) -> Any:
+        """A browser context of its own (storage, downloads); options go to Playwright (has_touch=True, is_mobile=True for a phone)."""
         context = self.browser.new_context(viewport={"width": viewport[0], "height": viewport[1]}, color_scheme=scheme,
-                                           accept_downloads=True)
+                                           accept_downloads=True, **options)
         self.contexts.append(context)
         return context
 
-    def new_page(self, context: Any = None, viewport: Tuple[int, int] = DESKTOP, scheme: str = "light") -> Any:
-        page = (context or self.new_context(viewport, scheme)).new_page()
+    def new_page(self, context: Any = None, viewport: Tuple[int, int] = DESKTOP, scheme: str = "light", **options: Any) -> Any:
+        page = (context or self.new_context(viewport, scheme, **options)).new_page()
         page.on("console", self._console)
         page.on("pageerror", lambda error: self.problems.append("uncaught page error: {}".format(error)))
+        page.on("request", lambda request: self.requests.append((request.method, urlparse(request.url).path)))
         page.on("response", self._response)
         page.on("requestfailed", self._failed)
         return page
@@ -328,8 +330,16 @@ class UI:
         self.down = down
 
     def assert_clean(self) -> None:
-        self.checked = True
         assert not self.problems, "the page reported {} problem(s):\n  {}".format(len(self.problems), "\n  ".join(self.problems))
+
+    def settle(self, ms: int = 250) -> None:
+        """Give the pages a moment to report what is still on its way (a console error from a timer, a request that fails late). One
+        wait is enough: Playwright delivers every page's events while any call waits."""
+        for context in self.contexts:
+            for page in context.pages:
+                if not page.is_closed():
+                    page.wait_for_timeout(ms)
+                    return
 
     def close(self) -> None:
         for context in self.contexts:
@@ -520,7 +530,8 @@ def ui(request, browser, tmp_path):
         harness = UI(browser, server, os.environ.get(EVIDENCE_ENV) or None)
         yield harness
         report = getattr(request.node, "rep_call", None)
-        if report is not None and report.passed and not harness.checked:
+        if report is not None and report.passed:   # asked again even after the test's own assert_clean: a problem that came later fails it too
+            harness.settle()
             harness.assert_clean()
     finally:
         if harness is not None:

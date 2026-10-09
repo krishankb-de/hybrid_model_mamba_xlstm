@@ -1,19 +1,44 @@
 """CHAT_UI_PLAN.md P3-D: text commands (spec §4)."""
 import json
+import re
 from pathlib import Path
 
-from app.commands import COMMAND_HELP, NOT_A_QA_BOT, parse_command
+from app.commands import _RULES, COMMAND_HELP, NOT_A_QA_BOT, parse_command
 
 COMMANDS_FIXTURE = Path(__file__).resolve().parent / "frontend" / "fixtures" / "commands.json"
+
+
+def _cases():
+    return json.loads(COMMANDS_FIXTURE.read_text(encoding="utf-8"))
+
+
+def _uncovered(patterns, cases):
+    """The patterns that no command of the fixture is an example of: a rule added without a case."""
+    commands = [" ".join(c["note"].split()) for c in cases if c["command"]]
+    return [p for p in patterns if not any(re.fullmatch(p, note, flags=re.IGNORECASE | re.ASCII) for note in commands)]
 
 
 def test_the_pages_list_of_commands_is_the_servers():
     """P4-H: the page tells a command from a note (app/static/app.js isCommand) for the hint under the image well. Its node test reads
     the same notes, so the two cannot drift apart without one of them failing."""
-    cases = json.loads(COMMANDS_FIXTURE.read_text(encoding="utf-8"))
+    cases = _cases()
     assert len(cases) >= 20 and {c["command"] for c in cases} == {True, False}
     for case in cases:
         assert (parse_command(case["note"]) is not None) is case["command"], case
+
+
+def test_every_server_command_has_an_example_in_the_shared_fixture():
+    """P4-H fix 1: a rule added to _RULES without a case in commands.json fails here, so the page's copy cannot fall behind unseen."""
+    assert _uncovered([pattern for pattern, _ in _RULES], _cases()) == []
+    assert _uncovered([pattern for pattern, _ in _RULES] + [r"stop (on|off)"], _cases()) == [r"stop (on|off)"]   # the guard bites
+
+
+def test_commands_read_ascii_digits_and_letters_only_as_the_page_does():
+    """P4-H fix 1: Python's \\d also takes other scripts' digits and its case folding takes the long s for an s; JavaScript's does
+    neither. The server reads ASCII only, so the page and the server tell a command the same way."""
+    assert parse_command("beam ５") is None and parse_command("tokens ٣٠") is None
+    assert parse_command("tokenſ 30") is None
+    assert parse_command("BEAM 5") == {"decode": "beam", "beam_size": 5}
 
 
 def test_commands_map_to_options():

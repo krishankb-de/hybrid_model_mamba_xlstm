@@ -419,10 +419,15 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     default_model = next(iter(engines))
     worker = Worker(Pipeline(engines, default_model, store, mode, drift_note=drift_note), queue_cap)
     static_dir = STATIC_DIR
-    # Read once, here: the code this process runs is what it imported at the start, whatever the checkout says later (P4-H A2).
+    # Read once, here: the code this process runs is what it imported at the start, whatever the checkout says later (P4-H A2). The card's
+    # provenance: the checkout's HEAD, else the .sync_stamp; "-dirty" when that tree had changes its commit does not hold. /healthz needs
+    # no token, so a public server names no commit to whoever asks.
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    git_sha = engines[default_model].card().get("git_sha")   # the card's provenance: the checkout's HEAD, else the .sync_stamp
-    code_version = git_sha[:7] if isinstance(git_sha, str) and git_sha else None
+    provenance = engines[default_model].card()
+    git_sha = provenance.get("git_sha")
+    code_version = None
+    if mode == "private" and isinstance(git_sha, str) and git_sha:
+        code_version = git_sha[:7] + ("-dirty" if provenance.get("git_dirty") is True else "")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -484,8 +489,8 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
              responses={200: {"description": "The server is up.", "content": {"application/json": {"example": HEALTHZ_EXAMPLE}}},
                         **_refusals({}, token=False, client_id=False)},
              description="The server's mode, default model, turns in flight and queue cap, with `code_version` (the short git sha "
-                         "of the code it started from, which it runs until it restarts; null when it cannot tell) and `started_at` "
-                         "(ISO 8601, UTC). It needs no token.")
+                         "of the code it started from, which it runs until it restarts, with `-dirty` when that tree had changes; "
+                         "null when it cannot tell, and in public mode) and `started_at` (ISO 8601, UTC). It needs no token.")
     def healthz():
         return {"status": "ok", "mode": mode, "default_model": default_model, "turns_in_flight": worker.in_flight,
                 "queue_cap": queue_cap, "code_version": code_version, "started_at": started_at}

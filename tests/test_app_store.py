@@ -262,6 +262,17 @@ def test_concurrent_appends_keep_seq_contiguous(tmp_path):
     assert [e["seq"] for e in s.events_after(mid)] == list(range(1, 201))
 
 
+def test_message_visible_answers_what_get_message_does_for_any_client_without_reading_the_row(tmp_path):
+    """P4-H fix 1: the per-step check of a running turn asks only whether its message is still there (a session deleted mid-turn hides
+    it), with get_message's rule and no client scope."""
+    s = Store(tmp_path)
+    sess, user_id, mid = _turn(s, "public", "client-a")
+    assert s.message_visible(mid) is True and s.message_visible(user_id) is True
+    assert s.message_visible("m_" + "0" * 22) is False and s.get_message("m_" + "0" * 22, None) is None
+    assert s.delete_session(sess["id"], "client-a") is True
+    assert s.message_visible(mid) is False and s.get_message(mid, None) is None
+
+
 def test_messages_follow_their_sessions_scope_and_deletion(tmp_path):
     s = Store(tmp_path)
     sess, user_id, mid = _turn(s, "public", "client-a")
