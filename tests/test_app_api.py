@@ -124,6 +124,29 @@ def test_cancel_endpoint_aborts_the_turn(live):
     assert httpx.get(live + "/v1/messages/{}".format(mid)).json()["status"] == "aborted"
 
 
+def test_deleting_a_session_stops_its_running_turn_at_the_next_step(live, caplog):
+    """P4-H: a chat deleted while its turn ran stopped nothing. The store still takes events for a deleted session, so the turn decoded
+    on to its budget on the server's one worker, and the next turn of any chat waited behind it. The generate stage now looks at every
+    step, as the stages before it look at their start, and the turn ends quietly (aborted) at the next step."""
+    sid = httpx.post(live + "/v1/sessions", json={}).json()["id"]
+    frames, deleted = [], []
+    with httpx.stream("POST", live + "/v1/sessions/{}/messages".format(sid),
+                      files={"image": ("x.png", png_bytes(), "image/png")},
+                      data={"text": "", "options": json.dumps({"max_new_tokens": 150})}, timeout=30) as r:
+        for frame in iter_sse(r.iter_text()):
+            frames.append(frame)
+            if frame["event"] == "content_block_delta" and not deleted:
+                deleted.append(httpx.delete(live + "/v1/sessions/{}".format(sid)).status_code)
+    assert deleted == [204]
+    assert frames[-1]["event"] == "message_stop" and frames[-1]["data"]["status"] == "aborted"
+    assert [f for f in frames if f["event"] == "error"] == []                          # quietly
+    assert len([f for f in frames if f["event"] == "content_block_delta"]) < 20        # within a step or two, not 150
+    assert any("deleted" in r.getMessage() for r in caplog.records if r.name == "app.pipeline")
+    assert httpx.get(live + "/healthz").json()["turns_in_flight"] == 0
+    other = httpx.post(live + "/v1/sessions", json={}).json()["id"]                   # the worker is free for the next chat
+    assert _turn(httpx.Client(base_url=live, timeout=30), other)[-1]["data"]["status"] == "done"
+
+
 def test_overload_is_refused_before_the_stream_opens(live):   # the live fixture has queue_cap=2
     sid = httpx.post(live + "/v1/sessions", json={}).json()["id"]
     url = live + "/v1/sessions/{}/messages".format(sid)

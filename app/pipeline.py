@@ -177,6 +177,9 @@ class Pipeline:
         self._send(turn, "content_block_start", {"index": 0, "content_block": {"type": "report", "text": ""}})
 
         def snapshot(step: int, text: str) -> None:
+            # A session deleted mid-generate ends its turn here, at this step, as _check ends one before a stage (P4-H): the store still
+            # takes a deleted session's events, so without this the turn decoded on to its budget, and every turn queued behind it waited.
+            self._require_session(turn.job.message_id)
             self._send(turn, "content_block_delta",
                        {"index": 0, "delta": {"type": "beam_snapshot", "step": step, "text": text}})
 
