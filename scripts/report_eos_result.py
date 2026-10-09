@@ -4,11 +4,13 @@
 
     RESULT {"train":"done","steps":N,"wall_s":S,"val_loss":x,"published_val_loss":y,"ckpt_exists":true}
 
-steps is the largest step any scalar of the run's newest TensorBoard version reached; val_loss is the last val/lm_loss
-that version logged, and published_val_loss the same for the published run (read from the event files under its logs/
-directory, the sibling of its run_metadata.json). TensorBoardLogger starts a new version_N for every attempt, so a
-requeued run is read from its last attempt. Both runs validate on the same split, but the EOS run's loss counts one more
-token per report, so the two are close, not equal.
+steps is the number of optimizer steps the run's newest TensorBoard version covers: its largest step stamp plus one. Lightning
+stamps a step with the number completed BEFORE it (validation runs before the step is counted), so a finished 12000-step run
+ends at stamp 11999; tests/test_report_eos_job.py measures that against the installed Lightning. The wrapper compares steps
+with MAX_STEPS before it writes DONE. val_loss is the last val/lm_loss that version logged, and published_val_loss the same for
+the published run (read from the event files under its logs/ directory, the sibling of its run_metadata.json).
+TensorBoardLogger starts a new version_N for every attempt, so a requeued run is read from its last attempt. Both runs
+validate on the same split, but the EOS run's loss counts one more token per report, so the two are close, not equal.
 
 The reader is tensorboard's (requirements.txt lists it), or tbparse's when that is the one installed. With neither
 importable the losses and steps are null, the checkpoint basename is added, and a === line says so. A run with no events
@@ -67,14 +69,15 @@ def read_scalars(version_dir: Path) -> Scalars:
 
 
 def run_summary(log_dir: Path, read: Callable[[Path], Scalars] = read_scalars) -> Optional[Dict[str, Any]]:
-    """{"steps", "val_loss"} from the newest version directory under log_dir that logged any scalar, or None."""
+    """{"steps", "val_loss"} from the newest version directory under log_dir that logged any scalar, or None. steps counts
+    optimizer steps: the largest step stamp plus one, stamps being zero-based (see the module docstring)."""
     for version_dir in event_dirs(log_dir):
         scalars = read(version_dir)
         steps = [step for points in scalars.values() for step, _ in points]
         if not steps:
             continue
         val = sorted(scalars.get(VAL_TAG, []), key=lambda point: point[0])
-        return {"steps": max(steps), "val_loss": val[-1][1] if val else None}
+        return {"steps": max(steps) + 1, "val_loss": val[-1][1] if val else None}
     return None
 
 

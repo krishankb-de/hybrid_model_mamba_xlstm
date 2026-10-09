@@ -327,14 +327,34 @@ def test_cli_code_check_imports_the_real_dataset_the_way_the_trainer_does():
     assert done.stdout.splitlines() == [CODE_OK]
 
 
-def test_the_trainers_own_import_route_is_the_one_the_preflight_follows():
-    """The check is only about the trainer's dataset if it imports the way the trainer does."""
-    trainer = (REPO_ROOT / "scripts" / "train_report_generation.py").read_text()
-    preflight = SCRIPT.read_text()
-    assert "from scripts.train_contrastive import load_mimic_cxr" in trainer
-    assert "from scripts.train_contrastive import load_mimic_cxr" in preflight
-    prelude = "project_root = Path(__file__).parent.parent\nsys.path.insert(0, str(project_root))"
-    assert prelude in trainer and prelude in preflight, "the same sys.path prelude: the tree this file lives in comes first"
+def test_the_preflight_reaches_the_dataset_through_load_mimic_cxr_the_way_the_trainer_does():
+    """Pinned on the syntax trees, not on text: a docstring that quotes the import line, or a comment, satisfies nothing. The
+    trainer imports load_mimic_cxr from scripts.train_contrastive; the preflight's loader makes that same import, and nothing
+    else, and takes ImageTextDataset from the globals of that function (the class it instantiates), so a direct import of
+    ImageTextDataset, or of the module another way, fails here."""
+    trainer, preflight = ast.parse((REPO_ROOT / "scripts" / "train_report_generation.py").read_text()), ast.parse(SCRIPT.read_text())
+    route = ("scripts.train_contrastive", ["load_mimic_cxr"])
+
+    def import_froms(tree):
+        return [(n.module, [a.name for a in n.names]) for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
+
+    assert route in import_froms(trainer)
+    loader = next(n for n in ast.walk(preflight) if isinstance(n, ast.FunctionDef) and n.name == "load_trainer_dataset_class")
+    assert import_froms(loader) == [route]
+    mentions = [ast.unparse(n) for n in ast.walk(preflight)
+                if isinstance(n, (ast.Import, ast.ImportFrom)) and "train_contrastive" in ast.unparse(n)]
+    assert mentions == ["from scripts.train_contrastive import load_mimic_cxr"], mentions
+    assert "load_mimic_cxr.__globals__['ImageTextDataset']" in ast.unparse(loader)
+
+
+def test_the_preflight_starts_with_the_trainers_own_sys_path_prelude():
+    """The tree the file lives in comes first on sys.path, in the same two statements the trainer opens with."""
+    def prelude(path):
+        tree = ast.parse(path.read_text())
+        assign = next(n for n in tree.body if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == "project_root")
+        insert = next(n for n in tree.body if isinstance(n, ast.Expr) and ast.unparse(n).startswith("sys.path.insert"))
+        return ast.dump(assign), ast.dump(insert)
+    assert prelude(SCRIPT) == prelude(REPO_ROOT / "scripts" / "train_report_generation.py")
 
 
 # ── the recipe check ──────────────────────────────────────────────────────────
@@ -513,6 +533,19 @@ def test_cli_recipe_check_refuses_a_run_that_would_overwrite_the_published_one(t
     assert body == {"preflight": "recipe", "changed": [], "added": [FLAG], "removed": [], "ok": False}
     assert [l for l in lines[1:] if "unchanged" in l and "output_dir" in l]
     assert [l for l in lines[1:] if "unchanged" in l and "experiment_name" in l]
+
+
+def test_compose_accepts_hydra_run_dir_and_leaves_the_job_config_unchanged_so_the_split_is_defensive():
+    """hydra.* overrides are not part of the job config, and the preflight drops them before compose. That is a precaution, not a
+    workaround: Hydra 1.3.2's compose API takes `hydra.run.dir=...` and `hydra/job_logging=...` and ignores them for the job
+    config (it rejects only `+hydra.*` and `~hydra.*`). Skipped if a later Hydra stops accepting them, where the split turns
+    from defensive into required."""
+    base = job_overrides(new_overrides())
+    try:
+        with_hydra = pre.compose_job_config(base + ["hydra.run.dir=/x/hydra", "hydra/job_logging=disabled"], CONFIGS)
+    except Exception as exc:
+        pytest.skip("this Hydra's compose rejects hydra.* overrides ({}): the split is required here".format(type(exc).__name__))
+    assert with_hydra == pre.compose_job_config(base, CONFIGS)
 
 
 def test_cli_recipe_check_drops_hydra_overrides_before_it_composes(tmp_path):

@@ -6875,9 +6875,26 @@ def test_train_report_eos_wrapper_redirects_the_trainer_and_prints_only_wrapper_
                     "SCRATCH_ROOT", "START_MARK", "MAIN_REPO", "OUT_REAL", "MAIN_REAL"):
             assert "${" + var + "}" not in line, (var, line)
     assert 'fail() { echo "ERROR $*"; exit 1; }' in src
+    # No slash anywhere in what is printed: a repo-relative script path is a path too (fix 1, minor 6).
+    assert not [line for line in echoed + failed if "/" in line], [line for line in echoed + failed if "/" in line]
+    # Every refusal to write DONE reads `ERROR done refused: <reason>`, with literals and numbers only.
+    for reason in ("interrupt.ckpt", "last.ckpt is missing", "last.ckpt was not written during this attempt",
+                   "steps=${STEPS} expected=${MAX_STEPS}"):
+        assert any(f.startswith("done refused:") and reason in f for f in failed), reason
     for line in code:
         assert not re.match(r"\s*(date|hostname|nvidia-smi|env|printenv|cat|tail|head|less)\b", line), line
     assert "set -x" not in src and "set -o xtrace" not in src
+
+
+def test_train_report_eos_wrapper_prints_its_sync_stamp_before_anything_else():
+    """Provenance (fix 1, minor 4). `scripts/chat_remote.sh sync` leaves .sync_stamp in the tree it ships; the job prints the
+    commit and cleanliness it reads there as its very first line, before any other output and before any command runs
+    (behaviour, against the real producer's output: tests/test_report_eos_job.py)."""
+    code = "\n".join(_eos_wrapper_code(_eos_wrapper_text()))
+    sync = code.index('echo "=== sync ${SYNC} ==="')
+    assert code.index('echo "') == sync, "something is printed before the sync line"
+    assert code.index("python ") > sync and code.index("source ") > sync
+    assert ".sync_stamp" in code[:sync]
 
 
 def test_train_report_eos_wrapper_runs_the_preflight_first_on_the_one_override_list():

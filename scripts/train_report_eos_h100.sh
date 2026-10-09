@@ -19,7 +19,9 @@
 # R8: the run's output, its logs and Hydra's own run directory all go under ${CHAT_HOME}/models/report_gen_m3_eos_s42.
 # ./outputs is a symlink into the thesis checkout: Hydra's default run directory would be created there, so hydra.run.dir
 # is set, and the wrapper refuses an OUT_DIR inside an outputs directory or under that checkout. A finished run (the DONE
-# marker) is never overwritten; a requeued, unfinished one restarts from scratch.
+# marker) is never overwritten; a requeued, unfinished one restarts from scratch. DONE itself is written only for a run that
+# finished: exit 0, no interrupt.ckpt written during this attempt, a last.ckpt written during it and, when the TensorBoard
+# events can be read, exactly MAX_STEPS steps. Otherwise: `ERROR done refused: <reason>`, with numbers and literals only.
 # R7: the job log carries only === / RESULT / ERROR lines written by this script. The trainer's stdout and stderr, which can
 # show report text and study paths, go to ${OUT_DIR}/train.log and are never printed. Read the job with
 # `bash scripts/chat_remote.sh summary logs/chat_report_eos_<jobid>.log`.
@@ -42,6 +44,18 @@
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"
 mkdir -p logs
+
+# Provenance, before anything else: the commit and cleanliness `scripts/chat_remote.sh sync` last shipped to this tree. It writes
+# .sync_stamp as "<UTC time> <40-hex commit> <clean|dirty>" and sends it last, so the stamp names a complete transfer. Only the
+# commit and the flag are printed, and only for a line of exactly that shape: anything else reads as unknown.
+SYNC="unknown"
+if [ -f .sync_stamp ]; then
+  { read -r _ sync_sha sync_flag sync_extra < .sync_stamp; } 2>/dev/null || true
+  if [[ "${sync_sha:-}" =~ ^[0-9a-f]{40}$ && ( "${sync_flag:-}" == "clean" || "${sync_flag:-}" == "dirty" ) && -z "${sync_extra:-}" ]]; then
+    SYNC="${sync_sha} ${sync_flag}"
+  fi
+fi
+echo "=== sync ${SYNC} ==="
 
 # Every line printed below starts with ===, RESULT or ERROR (the shapes `chat_remote.sh summary` shows) and names no path.
 fail() { echo "ERROR $*"; exit 1; }
@@ -146,7 +160,7 @@ case "${OUT_REAL}/" in
   "${MAIN_REAL}"/*) fail "OUT_DIR is under the thesis checkout (R8)" ;;
 esac
 # OUT_DIR is CHAT_HOME/models/<run>: CHAT_HOME is made by scripts/chat_cluster_setup_h100.sh, owner-only, and not here.
-[ -d "$(dirname "$(dirname "${OUT_DIR}")")" ] || fail "CHAT_HOME does not exist: run scripts/chat_cluster_setup_h100.sh first"
+[ -d "$(dirname "$(dirname "${OUT_DIR}")")" ] || fail "CHAT_HOME does not exist: run chat_cluster_setup_h100.sh first"
 if [ -e "${OUT_DIR}/DONE" ]; then
   fail "${EXPERIMENT} is already DONE: a finished run is never overwritten"
 fi
@@ -183,17 +197,29 @@ if [ "${rc}" -ne 0 ]; then
   echo "ERROR train exit=${rc}"
   exit "${rc}"
 fi
-# SignalCheckpointCallback saves interrupt.ckpt on SIGTERM / SIGUSR1 and then raises SystemExit(0): a preempted trainer exits 0.
-# Marking that run DONE would block the requeue that has to finish it, so an interrupt.ckpt newer than this attempt's start
-# means "not finished". (One from an earlier attempt is older than START_MARK and does not count.)
-if [ "${OUT_DIR}/checkpoints/interrupt.ckpt" -nt "${START_MARK}" ]; then
-  fail "train was cut short by a signal (interrupt.ckpt written during this attempt): not marking the run DONE"
-fi
 
-# --- result, then the DONE marker (this wrapper's last act) ----------------------------------------------------------
+# --- result: reported whatever the verdict, so that a refusal below comes with the numbers it rests on -----------------
+# R7: its stdout is cut down to the three line shapes before it reaches the log, and its stderr goes to a file. Its failure is
+# a report, not a gate: the DONE checks read steps from its RESULT line when there is one, and skip that check when there is not.
 rc=0
-python scripts/report_eos_result.py --out-dir "${OUT_DIR}" --published "${PUBLISHED_META}" --wall-s "${WALL_S}" 2>> "${OUT_DIR}/result.err" || rc=$?
+RESULT_OUT="$(python scripts/report_eos_result.py --out-dir "${OUT_DIR}" --published "${PUBLISHED_META}" --wall-s "${WALL_S}" 2>> "${OUT_DIR}/result.err")" || rc=$?
+printf '%s\n' "${RESULT_OUT}" | grep -aE '^(=== |RESULT |ERROR)' || true
 [ "${rc}" -eq 0 ] || echo "ERROR result exit=${rc}"
-[ -f "${OUT_DIR}/checkpoints/last.ckpt" ] || fail "training finished but last.ckpt is missing: not marking the run DONE"
+STEPS="$(printf '%s\n' "${RESULT_OUT}" | sed -n '/^RESULT /{s/.*"steps":\([0-9][0-9]*\).*/\1/p;q;}')" || STEPS=""
+
+# --- the DONE marker, this wrapper's last act: only for a run that really finished -----------------------------------
+# Exit 0 is not enough. SignalCheckpointCallback saves interrupt.ckpt on SIGTERM / SIGUSR1 and then raises SystemExit(0), so a
+# preempted trainer exits 0; and a restarted attempt can leave an earlier attempt's last.ckpt in place. DONE would block the
+# requeue that has to finish such a run, so it needs: no interrupt.ckpt written during THIS attempt (newer than START_MARK; an
+# earlier attempt's is older and does not count), a last.ckpt written during it, and, when the events could be read, exactly
+# MAX_STEPS steps (steps counts optimizer steps, see report_eos_result.py).
+if [ "${OUT_DIR}/checkpoints/interrupt.ckpt" -nt "${START_MARK}" ]; then
+  fail "done refused: interrupt.ckpt was written during this attempt: a signal cut the run short"
+fi
+[ -f "${OUT_DIR}/checkpoints/last.ckpt" ] || fail "done refused: last.ckpt is missing"
+[ "${OUT_DIR}/checkpoints/last.ckpt" -nt "${START_MARK}" ] || fail "done refused: last.ckpt was not written during this attempt"
+if [ -n "${STEPS}" ] && [ "${STEPS}" -ne "${MAX_STEPS}" ]; then
+  fail "done refused: steps=${STEPS} expected=${MAX_STEPS}"
+fi
 printf '%s job=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${SLURM_JOB_ID:-local}" > "${OUT_DIR}/DONE"
 echo "=== END ${EXPERIMENT}: DONE marker written ==="

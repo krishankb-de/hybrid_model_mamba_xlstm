@@ -61,8 +61,11 @@ def flatten(node: Any, prefix: str = "") -> Dict[str, Any]:
 
 
 def is_hydra_override(override: str) -> bool:
-    """`hydra.run.dir=...`, `+hydra.verbose=true`, `~hydra.run.dir`, `hydra/job_logging=disabled`: it configures Hydra's own
-    node, which the trainer's @hydra.main removes before main() sees the config, and the compose API would reject."""
+    """`hydra.run.dir=...`, `+hydra.verbose=true`, `~hydra.run.dir`, `hydra/job_logging=disabled`: these configure Hydra
+    itself and are not part of the job config (the trainer's @hydra.main removes the `hydra` node before main() sees it),
+    so they are dropped before compose. The split is defensive, not a workaround: Hydra 1.3.2's compose API accepts
+    `hydra.run.dir=...` and `hydra/job_logging=...` and leaves the job config unchanged by them (a test shows it); it
+    rejects only `+hydra.*` and `~hydra.*`."""
     key = override.lstrip("+~").split("=", 1)[0]
     return key.split(".", 1)[0] == "hydra" or key.startswith("hydra/")
 
