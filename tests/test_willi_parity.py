@@ -6758,3 +6758,152 @@ def test_no_yaml_turns_the_report_eos_target_on():
           for where, value in occurrences(yaml.safe_load(p.read_text()), "")
           if value is not False and value is not None]
     assert not on, "yaml sets report_eos_target: {}".format(on)
+
+
+# ── CHAT_UI_PLAN.md P9-G3: the EOS training wrapper ───────────────────────────
+# Static pins on scripts/train_report_eos_h100.sh. Its behaviour (guards, preflight gate, R7 output, DONE marker) is
+# rehearsed for real in tests/test_report_eos_job.py; the preflight it runs is tests/test_report_eos_preflight.py.
+
+def _eos_wrapper_text() -> str:
+    return (REPO_ROOT / "scripts" / "train_report_eos_h100.sh").read_text()
+
+
+def _eos_wrapper_code(src: str) -> List[str]:
+    """The wrapper's lines minus comments and blanks (the #SBATCH directives are comments to bash)."""
+    return [line for line in src.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+
+
+def test_train_report_eos_wrapper_follows_the_slurm_invariants():
+    """P9-G3. H100 through --gpus=N and never a typed --gres (sbatch rejects the mix), the renamed partition, the three
+    nodes that cannot run it excluded, a requeue that appends to the SLURM log instead of overwriting it, logs where
+    every other wrapper puts them, and offline Hugging Face on a compute node."""
+    src = _eos_wrapper_text()
+    options, flags = {}, []
+    for line in src.splitlines():
+        if line.startswith("#SBATCH"):
+            token = line.split()[1]
+            if "=" in token:
+                options[token.split("=", 1)[0]] = token.split("=", 1)[1]
+            else:
+                flags.append(token)
+    assert options == {
+        "--partition": "pot-hpi-aisc-batch", "--account": "aisc", "--gpus": "4", "--exclude": "ga03,gx17v1,gx13v1",
+        "--cpus-per-task": "8", "--mem": "96G", "--time": "04:00:00", "--job-name": "chat_report_eos",
+        "--output": "logs/%x_%j.log", "--error": "logs/%x_%j.log", "--open-mode": "append"}, options
+    assert flags == ["--requeue"], flags
+    assert not [l for l in _eos_wrapper_code(src) if "--gres" in l], "an untyped --gpus and a typed --gres do not mix"
+    assert 'cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"' in src
+    for needle in ("set -euo pipefail", 'SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"',
+                   'export HF_HOME="${SCRATCH_ROOT}/.hf"', "export HF_HUB_OFFLINE=1", "export HF_DATASETS_OFFLINE=1",
+                   'VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"', 'source "${VENV_ACTIVATE}"'):
+        assert needle in src, needle
+
+
+def test_train_report_eos_wrapper_trains_the_published_decoder_recipe_and_fixes_it():
+    """P9-G3. Every value the published wrapper's override list reads equals what the published s42 decoder run used:
+    submit_v3_chain.sh's decoder submission over train_report_generation_h100.sh's own defaults, both parsed here
+    (tests/report_eos_recipe.py). The values are plain assignments, not environment levers, because sbatch exports the
+    submitting shell: a stray SEED or MAX_STEPS must not be able to change a 5 H100-hour run."""
+    from tests import report_eos_recipe as R
+    published, mine = R.published_recipe(), R.new_wrapper_assignments()
+    names = sorted(set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)\}", " ".join(R.published_wrapper_tokens()))) - {"EXPERIMENT"})
+    assert len(names) > 20, names
+    for name in names:
+        assert name in mine, "the EOS wrapper does not set {}".format(name)
+        assert R.expand(mine[name], dict(mine, USER=R.CLUSTER_USER)) == published[name], name
+        assert ":-" not in mine[name], "{} is an environment lever: the recipe is fixed".format(name)
+    assert mine["EXPERIMENT"] == R.NEW_EXPERIMENT and published["EXPERIMENT"] == R.PUBLISHED_EXPERIMENT
+    assert ":-" not in mine["EXPERIMENT"]
+    # the headline values, written out
+    assert [published[k] for k in ("MODEL_CONFIG", "NUM_GPUS", "TRAINER_CFG", "MAX_STEPS", "SEED", "SAVE_TOP_K",
+                                   "AUX_LAMBDA", "PREFIX_K")] == [
+        "hybrid_150m_m3_rrg", "4", "h100_multi_ddp", "12000", "42", "0", "0.0", "32"]
+    assert published["DECODER_CKPT"] == "./outputs/h100_stage0_150m_m3/checkpoints/last.ckpt"
+    assert published["IMAGE_ENCODER_CKPT"] == "./outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt"
+    assert mine["PUBLISHED_EXPERIMENT"] == R.PUBLISHED_EXPERIMENT == "h100_report_gen_m3_tower13d_s42"
+
+
+def test_train_report_eos_wrapper_override_list_is_the_published_wrappers_apart_from_the_allowed_differences():
+    """P9-G3. Same keys, same order, same value expressions as the published wrapper's python call. The differences are
+    exactly: output_dir (the new directory), and two additions at the end, the flag and Hydra's own run directory, which
+    would otherwise be created under ./outputs, a symlink into the thesis checkout."""
+    from tests import report_eos_recipe as R
+    published = [R.unquote(t) for t in R.published_wrapper_tokens()]
+    swapped = ["output_dir=${OUT_DIR}" if t == "output_dir=./outputs/${EXPERIMENT}" else t for t in published]
+    assert swapped != published, "the published wrapper's output_dir override moved"
+    assert [R.unquote(t) for t in R.new_wrapper_tokens()] == swapped + [
+        "+dataset.report_eos_target=true", "hydra.run.dir=${OUT_DIR}/hydra"]
+
+
+def test_train_report_eos_wrapper_writes_nothing_under_outputs():
+    """P9-G3, R8. ./outputs is a symlink into the thesis checkout. The run's own output, its logs and Hydra's directory go
+    under OUT_DIR; the only mentions of outputs are the three paths it READS and the guard that refuses an OUT_DIR there."""
+    src = _eos_wrapper_text()
+    code = _eos_wrapper_code(src)
+    reads = re.compile(r'^(DECODER_CKPT|IMAGE_ENCODER_CKPT)=\./outputs/[\w./-]+$'
+                       r'|^PUBLISHED_META="\./outputs/\$\{PUBLISHED_EXPERIMENT\}/run_metadata\.json"$')
+    other = [l for l in code if "outputs" in l and not reads.match(l.strip())]
+    assert other and all(("case " in l or "fail " in l or "realpath_py outputs" in l) for l in other), other
+    redirects = []
+    for line in code:
+        if line.lstrip().startswith(("echo", "fail")):
+            continue                                              # a message may contain a '>'
+        redirects += re.findall(r'(?<![0-9&])>>?\s*("[^"]+"|\S+)', line)
+    assert redirects, "the wrapper redirects the trainer, the preflight and the DONE marker"
+    stray = [t for t in redirects if t != "/dev/null" and not t.startswith(('"${OUT_DIR}/', '"${START_MARK}"'))]
+    assert not stray, stray
+    assert 'OUT_DIR="${CHAT_HOME:-/sc/home/$USER/chat_sessions}/models/report_gen_m3_eos_s42"' in src
+    assert '"${OUT_DIR}/DONE"' in src and "*/outputs/*" in src, "the DONE and outputs guards"
+
+
+def test_train_report_eos_wrapper_redirects_the_trainer_and_prints_only_wrapper_authored_lines():
+    """P9-G3, R7. The trainer's stdout and stderr (report text, study paths) go to OUT_DIR/train.log and are never
+    printed; every line the wrapper prints starts with ===, RESULT or ERROR (the shapes `chat_remote.sh summary`
+    shows) and names no path."""
+    src = _eos_wrapper_text()
+    code = _eos_wrapper_code(src)
+    train = [l for l in code if "python scripts/train_report_generation.py" in l]
+    assert len(train) == 1 and '>> "${OUT_DIR}/train.log" 2>&1' in train[0], train
+    assert '"ERROR train exit=${rc}"' in src
+    text = "\n".join(code)
+    echoed, failed = re.findall(r'echo "([^"]*)"', text), re.findall(r'\bfail "([^"]*)"', text)
+    assert len(echoed) + len(failed) > 10, (echoed, failed)
+    for line in echoed:
+        assert re.match(r"(=== |RESULT |ERROR)", line), line          # fail() adds its own ERROR prefix
+    for line in echoed + failed:
+        for var in ("OUT_DIR", "CHAT_HOME", "DECODER_CKPT", "IMAGE_ENCODER_CKPT", "PUBLISHED_META", "MIMIC_CACHE_DIR",
+                    "SCRATCH_ROOT", "START_MARK", "MAIN_REPO", "OUT_REAL", "MAIN_REAL"):
+            assert "${" + var + "}" not in line, (var, line)
+    assert 'fail() { echo "ERROR $*"; exit 1; }' in src
+    for line in code:
+        assert not re.match(r"\s*(date|hostname|nvidia-smi|env|printenv|cat|tail|head|less)\b", line), line
+    assert "set -x" not in src and "set -o xtrace" not in src
+
+
+def test_train_report_eos_wrapper_runs_the_preflight_first_on_the_one_override_list():
+    """P9-G3. One source for the overrides: the same OVERRIDES array goes to the preflight, which composes it, and to
+    the trainer, which runs it. The preflight runs first and its failure ends the job."""
+    src = _eos_wrapper_text()
+    code = "\n".join(_eos_wrapper_code(src))
+    assert code.count("OVERRIDES=(") == 1
+    pre = code.index("python scripts/report_eos_preflight.py")
+    train = code.index("python scripts/train_report_generation.py")
+    result = code.index("python scripts/report_eos_result.py")
+    assert pre < train < result
+    assert 'python scripts/report_eos_preflight.py --published "${PUBLISHED_META}" -- "${OVERRIDES[@]}"' in code
+    assert 'python scripts/train_report_generation.py --config-name config "${OVERRIDES[@]}"' in code
+    assert 'fail "preflight exit=${rc}, nothing was trained"' in code
+    assert code.index('fail "preflight exit=') < train, "the gate sits between the preflight and the trainer"
+    for name in ("report_eos_preflight.py", "report_eos_result.py"):
+        assert (REPO_ROOT / "scripts" / name).is_file(), name
+
+
+def test_train_report_eos_wrapper_passes_the_bash_syntax_check():
+    import shutil
+    import subprocess
+    shells = [s for s in ("/bin/bash", shutil.which("bash")) if s and os.path.exists(s)]
+    assert shells
+    for shell in set(shells):
+        done = subprocess.run([shell, "-n", str(REPO_ROOT / "scripts" / "train_report_eos_h100.sh")],
+                              capture_output=True, text=True)
+        assert done.returncode == 0, (shell, done.stderr)
