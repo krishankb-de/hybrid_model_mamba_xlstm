@@ -7045,12 +7045,16 @@ def test_eval_report_eos_decode_is_the_published_eval_command_plus_the_eos_flags
         "MODEL_CONFIG": "hybrid_150m_m3_rrg", "PREFIX_K": "32", "DECODE": "beam", "BEAM_SIZE": "3", "NUM_SAMPLES": "999999",
         "MAX_NEW_TOKENS": "100"}
     assert defaults["CACHED_DECODE"] == "false", "the published eval is uncached: --cached-decode is the first difference"
-    # Nothing else the inspect wrapper can switch on is on in the published eval, and the chain sets none of it. If it ever does,
-    # the published run is no longer "this command minus three flags" and this decode would silently compare against another one.
+    # Nothing else the inspect wrapper can switch on is on in the published eval, and the chain never mentions any of it. If it
+    # ever does, the published run is no longer "this command minus three flags" and this decode would silently compare against
+    # another one. The chain is searched whole, not just its eval submission: an `export` or a lever threaded through would reach the
+    # eval job without appearing among that submission's VAR=value pairs.
     for name in ("SCAN_IMPL", "TFLA_IMPL", "CHUNK_SIZE"):
-        assert defaults[name] == "" and name not in chain_values, "the published eval pins {}: this decode must too".format(name)
+        assert defaults[name] == "", "the published eval pins {}: this decode must too".format(name)
     for name in ("COMPILE", "CHEXBERT", "CACHED_DECODE"):
-        assert defaults[name] == "false" and name not in chain_values, "the published eval turns {} on".format(name)
+        assert defaults[name] == "false", "the published eval turns {} on".format(name)
+    for name in ("SCAN_IMPL", "TFLA_IMPL", "CHUNK_SIZE", "COMPILE", "CHEXBERT", "CACHED_DECODE"):
+        assert name not in chain, "submit_v3_chain.sh mentions {}: the published eval may no longer be the default one".format(name)
 
     inspect_flags = set(re.findall(r"--[a-z][a-z-]*", _command(inspect_src, "python scripts/evaluate_report_generation.py")))
     inspect_flags |= set(re.findall(r"\+=\((--[a-z][a-z-]*)", inspect_src))        # --chexbert and --dump-dir ride in an array

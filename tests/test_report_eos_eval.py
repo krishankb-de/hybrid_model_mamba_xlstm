@@ -88,8 +88,8 @@ def test_the_metric_allowlist_is_what_bootstrap_compare_emits():
 
 @pytest.mark.parametrize("bad", [
     "No acute cardiopulmonary process.",                     # report text: what a free-name rule let through
-    "s50414267",                                             # a study id
-    "p10000032",                                             # a subject id
+    "s87654321",                                             # a study id
+    "p12345678",                                             # a subject id
     "results/chat_report_eos_test_split_s42/hyps.txt",       # a path
     "/sc/home/someone",
     "Findings: no acute disease.",
@@ -98,13 +98,23 @@ def test_the_metric_allowlist_is_what_bootstrap_compare_emits():
     "eos_s42\n", "eos_s42 ", " eos_s42", "Eos_s42", "EOS_S42", "rouge_l2", "lung lesion", "No Finding\n",   # near misses: exact only
     {"nested": 1},
     float("nan"), float("inf"),
-    50414267, -50414267, 10000032.0, 10 ** 7,                # a number of 8 digits or more could be an id
+    87654321, -87654321, 12345678.0, 10 ** 7,                # a number of 8 digits or more could be an id
 ])
 def test_result_line_refuses_anything_not_on_the_allowlist_and_any_number_an_id_could_hide_in(bad):
     with pytest.raises(ValueError):
         stats.result_line({"x": bad})
     with pytest.raises(ValueError):
         stats.result_line({"x": [bad]})
+
+
+def test_the_module_docstring_describes_each_kind_of_line_the_module_prints():
+    """R7's claims, in the module's own words, are the ones the code keeps: a RESULT line holds allowlisted names and bounded
+    numbers; an ERROR line holds literals and numbers parsed as digits or computed (the EOS line's counts, a dump's line counts),
+    never text; and the literal === notes are printed as well, so "and nothing else" would be false."""
+    doc = " ".join(stats.__doc__.split())
+    assert "numbers it parsed as digits or computed, never text" in doc
+    assert "never a value read out of a log or a file" not in doc, "the ERROR lines that print the EOS line's counts do"
+    assert "and nothing else" not in doc and "`=== ...` notes" in doc
 
 
 def test_result_line_keeps_the_numbers_a_job_prints():
@@ -343,8 +353,8 @@ def test_decode_result_refuses_a_dump_it_cannot_tie_to_the_log(tmp_path, what):
     assert "/" not in str(raised.value) and len(str(raised.value)) < 200, "the message is printed: literals and numbers only"
 
 
-@pytest.mark.parametrize("poison", ['"Findings: no acute cardiopulmonary process. s50414267"', "50414267.5", "true", "[50414267]",
-                                    '{"id": 50414267}', "null", "41", "40.0"])        # 40.0 == 40: only the type check refuses it
+@pytest.mark.parametrize("poison", ['"Findings: no acute cardiopulmonary process. s87654321"', "87654321.5", "true", "[87654321]",
+                                    '{"id": 87654321}', "null", "41", "40.0"])        # 40.0 == 40: only the type check refuses it
 def test_an_aggregate_count_that_is_not_the_integer_n_is_refused_with_a_message_that_holds_none_of_it(tmp_path, poison):
     """ERROR lines carry literals and numbers the script validated, never a value read out of the log. The count in the aggregate
     block is whatever JSON the log holds: it must be an int (not a bool, float or text) before it is compared, and it is not echoed."""
@@ -355,11 +365,11 @@ def test_an_aggregate_count_that_is_not_the_integer_n_is_refused_with_a_message_
     with pytest.raises(stats.ResultError) as raised:
         stats.decode_result(poisoned, tmp_path, budget=200, wall_s=1)
     message = str(raised.value)
-    assert not any(bit in message for bit in ("50414267", "Findings", "acute", "41", "id")), message
+    assert not any(bit in message for bit in ("87654321", "Findings", "acute", "41", "id")), message
     (tmp_path / "eval.log").write_text(poisoned)
     done = run_stats("decode", "--log", str(tmp_path / "eval.log"), "--dump-dir", str(tmp_path), "--budget", "200", "--wall-s", "1")
     assert done.returncode == 2 and done.stdout.startswith("ERROR ") and "RESULT" not in done.stdout
-    assert not any(bit in done.stdout + done.stderr for bit in ("50414267", "Findings", "acute")), done.stdout
+    assert not any(bit in done.stdout + done.stderr for bit in ("87654321", "Findings", "acute")), done.stdout
 
 
 # ── the CheXbert scorer's files ───────────────────────────────────────────────
@@ -374,7 +384,7 @@ def write_chexbert_files(directory: Path, n: int, labels_n: Optional[int] = None
     (directory / "chexbert_labels.json").write_text(json.dumps({"y_true": rows, "y_pred": rows, "label_names": LABEL_NAMES}))
 
 
-@pytest.mark.parametrize("poison", ['"50414267"', "50414267.0", '"Findings: no acute cardiopulmonary process."', "true", "[50414267]"])
+@pytest.mark.parametrize("poison", ['"87654321"', "87654321.0", '"Findings: no acute cardiopulmonary process."', "true", "[87654321]"])
 def test_a_chexbert_example_count_that_is_not_an_int_is_refused_with_a_message_that_holds_none_of_it(tmp_path, poison):
     write_dump(tmp_path, 7)
     write_chexbert_files(tmp_path, 7)
@@ -383,7 +393,7 @@ def test_a_chexbert_example_count_that_is_not_an_int_is_refused_with_a_message_t
     assert (tmp_path / "chexbert_metrics.json").read_text() != metrics
     with pytest.raises(stats.ResultError) as raised:
         stats.chexbert_result(tmp_path, 1)
-    assert not any(bit in str(raised.value) for bit in ("50414267", "Findings", "acute")), str(raised.value)
+    assert not any(bit in str(raised.value) for bit in ("87654321", "Findings", "acute")), str(raised.value)
 
 
 def test_chexbert_result_has_the_four_f1_headlines_and_the_example_count(tmp_path):
@@ -586,13 +596,13 @@ def test_parse_bootstrap_refuses_a_report_without_the_label_metrics_the_gate_is_
 def test_parse_bootstrap_refuses_a_row_name_the_job_does_not_print_and_does_not_echo_it():
     """A name read out of the report is printed only if it is on the allowlist, and each table has its own: metrics in the first,
     CheXbert labels in the second."""
-    poisoned_label = rendered(FLAT, labels={"s50414267": (0.1, 0.3, -0.2, -0.3, -0.1)})
+    poisoned_label = rendered(FLAT, labels={"s87654321": (0.1, 0.3, -0.2, -0.3, -0.1)})
     label_in_metrics = rendered(dict(FLAT, **{"Lung Lesion": (0.1, 0.3, -0.2, -0.3, -0.1)}))
     metric_in_labels = rendered(FLAT, labels={"rouge_l": (0.1, 0.3, -0.2, -0.3, -0.1)})
     for text in (poisoned_label, label_in_metrics, metric_in_labels):
         with pytest.raises(stats.ResultError) as raised:
             stats.parse_bootstrap(text, "eos_s42", "m3_s42")
-        assert not any(bit in str(raised.value) for bit in ("s50414267", "Lung Lesion", "rouge_l")), str(raised.value)
+        assert not any(bit in str(raised.value) for bit in ("s87654321", "Lung Lesion", "rouge_l")), str(raised.value)
 
 
 @pytest.mark.parametrize("text", ["", "# nothing\n", "| metric | eos_s42 | m3_s42 | diff | 95% CI | verdict |\n|---|---|---|---|---|---|\n| rouge_l | nan |\n"])
@@ -668,7 +678,7 @@ def test_cli_hyps_says_so_when_the_tokenizer_is_not_cached_and_still_reports_eve
     assert json.loads(result[len("RESULT "):])["mean_tokens"] is None
 
 
-@pytest.mark.parametrize("name", ["results/chat_x", "my_system", "s50414267", "No acute cardiopulmonary process.", ""])
+@pytest.mark.parametrize("name", ["results/chat_x", "my_system", "s87654321", "No acute cardiopulmonary process.", ""])
 def test_cli_hyps_refuses_a_system_name_that_is_not_on_the_allowlist(tmp_path, name):
     write_dump(tmp_path, 2)
     done = run_stats("hyps", name + "=" + str(tmp_path / "hyps.txt"), "--tokenizer", "none")
@@ -681,10 +691,10 @@ def test_cli_gate_refuses_a_system_name_that_is_not_on_the_allowlist_before_it_c
     """The report is rendered with the poisoned name as system A, so its header matches what is asked and the allowlist check is
     the only thing in the way: a clean refusal (2), not a crash (1) when the name reaches the first RESULT line."""
     md = tmp_path / "bootstrap.md"
-    md.write_text(rendered(FLAT, names=("s50414267", "m3_s42")))
-    done = run_stats("gate", "--bootstrap", str(md), "--name-a", "s50414267", "--name-b", "m3_s42")
+    md.write_text(rendered(FLAT, names=("s87654321", "m3_s42")))
+    done = run_stats("gate", "--bootstrap", str(md), "--name-a", "s87654321", "--name-b", "m3_s42")
     assert done.returncode == 2 and done.stdout.startswith("ERROR ") and "RESULT" not in done.stdout
-    assert "s50414267" not in done.stdout + done.stderr
+    assert "s87654321" not in done.stdout + done.stderr
 
 
 def test_cli_gate_prints_the_comparison_and_exits_0_even_when_the_gate_fails(tmp_path):

@@ -1,9 +1,10 @@
 """P9-G4 (CHAT_UI_PLAN.md): the numbers the three EOS evaluation jobs print. One module, four subcommands. Each prints
-`RESULT {json}` lines and `ERROR ...` lines, and nothing else (R7: anything an agent reads has left the cluster, which the DUA
-forbids for MIMIC text, study ids and paths). A RESULT line holds numbers under 10 million, flags, null, and strings only from an
-explicit allowlist (ALLOWED_NAMES: the wrapper's own constants, the metric names bootstrap_compare emits, the 14 CheXbert labels),
-so nothing read from a log or a file can reach one as text. An ERROR line holds literals and numbers this script has validated,
-never a value read out of a log or a file.
+`RESULT {json}` lines, `ERROR ...` lines and the literal `=== ...` notes that say what a missing value means, and no other line
+(R7: anything an agent reads has left the cluster, which the DUA forbids for MIMIC text, study ids and paths). A RESULT line holds
+numbers under 10 million, flags, null, and strings only from an explicit allowlist (ALLOWED_NAMES: the wrapper's own constants, the
+metric names bootstrap_compare emits, the 14 CheXbert labels), so nothing read from a log or a file can reach one as text. An ERROR
+line holds literals and numbers it parsed as digits or computed, never text; the counts in the evaluator's EOS stop line and the
+line counts of a dump are such numbers.
 
     decode   --log eval.log --dump-dir DIR --budget 200 --wall-s S                         job 1, scripts/eval_report_eos_h100.sh
     chexbert --dump-dir DIR --wall-s S                                                      job 2, eval_report_eos_chexbert_h100.sh
