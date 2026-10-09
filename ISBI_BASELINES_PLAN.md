@@ -14,11 +14,14 @@ Current paper file: **`Method and Evaluation V9.tex`** (the user's; earlier: v6,
 |---|---|
 | this worktree `../isbi_baselines_wt`, branch `isbi_baselines` (off `h100_efficiency` 5c45527) | all code + plan + state |
 | cluster `hpi-hpc:~/hybrid_isbi` (git worktree of `~/hybrid_mamba_xlstm`, branch `isbi_baselines`) | jobs are submitted FROM here; `.venv`, `.venv_chexbert`, `outputs`, `results` are symlinks to the main checkout |
-| cluster `~/hybrid_mamba_xlstm/results/`, `analysis/` | all job outputs (MIMIC-derived files stay there, rule R6) |
+| cluster `~/hybrid_mamba_xlstm/results/` (= `~/hybrid_isbi/results`, symlink) | decoded reports, CheXbert labels, floors (MIMIC-derived, stay there, rule R6) |
+| cluster `~/hybrid_mamba_xlstm/analysis/` | bootstrap tables (`bootstrap_m3_vs_floor*`, `bootstrap_transformer_vs_floor*`), `efficiency_isbi_short/` |
+| cluster `~/hybrid_isbi/analysis/isbi_reviewer/` (NOT symlinked) | B7/B9 outputs: `context_stats.json`, `error_analysis.json`, `decode/`, `prefill_b1/`, `prefill_b16/`, `decode_cudnn_bug/` (invalid, kept for the record) |
 
-Code reached the cluster by `rsync` (not git). After this branch is pushed, sync the cluster with
-`git -C ~/hybrid_isbi fetch && git -C ~/hybrid_isbi reset --hard origin/isbi_baselines` (files are
-identical, so nothing is lost). Login node runs no project Python: everything goes through `sbatch`.
+Branch `isbi_baselines` is pushed to origin (since 2026-10-09) and the cluster worktree tracks it.
+Workflow: edit + test + commit + push here, then on the cluster
+`git -C ~/hybrid_isbi pull --ff-only`, then `sbatch` from `~/hybrid_isbi`.
+Login node runs no project Python: everything goes through `sbatch`.
 
 **Done (all verified, see phases below and `analysis/isbi_reviewer/FINDINGS.md`).**
 - B0-B6: five retrieval floors (BiomedCLIP, CLIP, PubMedCLIP, XrayCLIP, MedSigLIP), scored + bootstrapped

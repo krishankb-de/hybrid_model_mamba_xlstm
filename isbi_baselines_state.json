@@ -44,7 +44,8 @@
     "2026-10-08: 2026-10-08 jobs: B8 train/eval/chexbert m3_xrayclip s42 2624239/40/41, s43 2624242/43/44, s44 2624245/46/47; transformer_xrayclip s42 2624248/49/50, s43 2624251/52/53, s44 2624254/55/56. B7/B9: cpu 2624264, decode 2624265, prefill b1 2624266, b16 2624267.",
     "B7-A: test report median 113 tokens (p95 214, 1.8% >256); 89.9% of test studies have priors (median 6); history tokens median 738, p95 3858, max 8037; context with history >1024 for 44.5%, >4096 4.6%, >8192 0%. 89% of reports match comparison words (broad regex, upper bound). B9: decoders omit, rarely hallucinate: overall halluc ~0.10 vs floors ~0.15, omission ~0.60 vs xrayclip floor 0.49; findings/report 2.1-2.4 vs ref 3.13. Pneumothorax halluc 1.0% / omit 95.6% (mLMamba), floors 4-6% / 79-81%. Transformer identical pattern -> not SSM-specific. Halluc concentrated in cardiomegaly 0.42, support devices 0.32.",
     "2026-10-08: 2026-10-08: decode bench 2624265: mLMamba step 6.5-7.4 ms flat over L=132..16384 (cache 0.022 GB/report). Transformer numbers INVALID (~240 ms/step): SDPA picked cuDNN backend, which rebuilds its plan on CPU each step as key length changes (profile 2624647). Fixed by pinning flash/efficient/math in AttentionBlock.step (forward untouched); old json moved to decode_cudnn_bug/; rerun prof 2624904 + decode 2624905. Prefill jobs 2624266/67 failed (shared inductor cache dir between concurrent jobs) -> rerun 2624648/2624649 with separate SCRATCH_ROOT, sequential.",
-    "B7-C done: report (prefill+100 tok, beam 3): at 132 ctx Transformer 1.2-1.3x faster; at 1024 mLMamba 1.6-1.8x, 4096 2.2-2.8x, 16384 5.0-6.0x faster; decode cache 8x/27x/103x smaller. Fix verified: Transformer step 4.57 ms (prof 2624904)."
+    "B7-C done: report (prefill+100 tok, beam 3): at 132 ctx Transformer 1.2-1.3x faster; at 1024 mLMamba 1.6-1.8x, 4096 2.2-2.8x, 16384 5.0-6.0x faster; decode cache 8x/27x/103x smaller. Fix verified: Transformer step 4.57 ms (prof 2624904).",
+    "2026-10-09: 2026-10-09: branch isbi_baselines pushed to origin (d430171); cluster ~/hybrid_isbi reset to origin/isbi_baselines (only CLAUDE.md differed; code identical). From now on sync the cluster with git pull, not rsync."
   ],
   "phases": {
     "B0": {
@@ -277,7 +278,7 @@
     "B8",
     "B9"
   ],
-  "last_updated": "2026-10-09T18:30:01+02:00",
+  "last_updated": "2026-10-09T18:45:21+02:00",
   "paper": {
     "location": "main checkout: ISBI Paper /Method and Evaluation V9.tex (untracked; figs/ is DUA data)",
     "v9_errors_to_fix": [
@@ -287,8 +288,9 @@
     ]
   },
   "cluster": {
-    "worktree": "hpi-hpc:~/hybrid_isbi (branch isbi_baselines, synced by rsync; symlinks .venv .venv_chexbert outputs results -> ~/hybrid_mamba_xlstm)",
+    "worktree": "hpi-hpc:~/hybrid_isbi (branch isbi_baselines, tracks origin; sync with `git -C ~/hybrid_isbi pull --ff-only`; symlinks .venv .venv_chexbert outputs results -> ~/hybrid_mamba_xlstm)",
     "outputs": "~/hybrid_mamba_xlstm/{results,analysis,outputs}",
-    "hf_token": "~/.hf_token (mode 600)"
+    "hf_token": "~/.hf_token (mode 600)",
+    "reviewer_outputs": "~/hybrid_isbi/analysis/isbi_reviewer/ (not symlinked)"
   }
 }
