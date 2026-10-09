@@ -5,8 +5,8 @@
   "base": "h100_efficiency @ 5c45527 (2026-09-30, 'SLURM: partition aisc-batch renamed to pot-hpi-aisc-batch')",
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P5",
-  "status": "P0-P4 complete 2026-10-09. P9-G (learned stop condition, approved 2026-10-09): G1 (EOS target flag) and G2 (EOS-stop decoders: top-hypothesis stop, soft stop, no EOS first; engine eos_trained) done and reviewed; G3 wrapper + preflight reviewed (22fa8c2, 0bb201d), prediction recorded, submission next; G4 rulings written.",
-  "next_action": "1) Submit P9-G3 from a clean committed tree: bash scripts/chat_remote.sh sync && bash scripts/chat_remote.sh submit scripts/train_report_eos_h100.sh; record the job id (note); read results only with chat_remote.sh state <id> / summary logs/chat_report_eos_<id>.log (R7). 2) While it trains: P9-G4 laptop part (implementer + review; rulings under P9-G4; brief: brief.sh P9-G4 --contracts), then P5-A onward. 3) When G3 prints DONE + RESULT: tick P9-G3 with the job id and metrics, submit the G4 chain (decode -> CheXbert -> compare), record its prediction first (R4). The agent cannot push (permission classifier): the user pushes chat_ui.",
+  "status": "P0-P3 complete; P4 7/8 (P4-H Playwright e2e added 2026-10-09). P9-G1/G2 done; P9-G3 job 2632173 submitted (EOS training). Parallel worktrees off a8e7efe: P9-G4 laptop part, P5-A, P5-B, P4-H.",
+  "next_action": "Parallel (user, 2026-10-09), worktrees off a8e7efe: P9-G4 laptop part, P5-A, P5-B, P4-H (Playwright e2e + fixes) -> review each, merge into chat_ui, restart the dev server. P9-G3 job 2632173 (check: bash scripts/chat_remote.sh state 2632173; summary logs/chat_report_eos_2632173.log). When G3 prints DONE + RESULT: tick P9-G3, record the G4 prediction (R4), submit the G4 chain. After P5-B review: submit the gallery job. Then P5-C (needs A+B), P5-D, P5-E, P5-F. The agent cannot push (permission classifier): the user pushes chat_ui.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -340,7 +340,7 @@
     },
     "P4": {
       "title": "Frontend shell (laptop, tiny engine)",
-      "status": "complete",
+      "status": "in_progress",
       "checkboxes": {
         "P4-A": {
           "done": true,
@@ -369,6 +369,10 @@
         "P4-G": {
           "done": true,
           "desc": "Stop condition: stop decoding once the report starts repeating; a Settings drawer with Save. Added 2026-10-09 after the user's second test."
+        },
+        "P4-H": {
+          "done": false,
+          "desc": "An end-to-end Playwright test of the UI, driven like a real user, with fixes for what it finds."
         }
       },
       "evidence": {
@@ -615,9 +619,11 @@
     "2026-10-09: P4-G stop condition (stop_on_repeat: UI default on, server off = published protocol; 200 tok/17.9 s -> 21 tok/2.3 s on tiny) + Settings drawer with Save, ranges, select-on-focus, revert-on-invalid; review clean after 1 fix round",
     "2026-10-09: P9-G1 EOS target flag (default off) reviewed clean, no fix round",
     "2026-10-09: P9-G2 EOS-stop decoders (top-hypothesis stop, soft stop, no EOS first, published-first candidates) + engine eos_trained; review clean after fix rounds 0-1",
-    "2026-10-09: 2026-10-09: P9-G1/G2 ticked (reviewed clean); P9-G2 rulings amended in the plan (top-hypothesis stop, soft stop, no EOS first, published-first candidates); P9-G3 as-built + R4 prediction recorded before submission; P9-G4 rulings added; P9-G5 carried items"
+    "2026-10-09: 2026-10-09: P9-G1/G2 ticked (reviewed clean); P9-G2 rulings amended in the plan (top-hypothesis stop, soft stop, no EOS first, published-first candidates); P9-G3 as-built + R4 prediction recorded before submission; P9-G4 rulings added; P9-G5 carried items",
+    "2026-10-09: 2026-10-09: P9-G3 submitted as job 2632173 (chat_report_eos, 4 H100, sync a8e7efe clean); log logs/chat_report_eos_2632173.log; read via chat_remote.sh state/summary only (R7)",
+    "2026-10-09: 2026-10-09: P4-H added (user: Playwright e2e UI testing + fixes; stale-server ImportError hardening); P5-A/P5-B rulings added; four tasks dispatched in parallel worktrees (P9-G4, P5-A, P5-B, P4-H)"
   ],
-  "last_updated": "2026-10-09T22:11:39+02:00",
+  "last_updated": "2026-10-09T22:32:45+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",

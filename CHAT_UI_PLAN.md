@@ -2947,6 +2947,38 @@ Commits:
   - The settled screenshots are a default (stop-on) turn.
   - Layout: 138 cases (the Save button in every drawer viewport). Node: 299.
 
+- [ ] **P4-H** (laptop) An end-to-end Playwright test of the UI, driven like a real user, with fixes for what it finds. The user's request, 2026-10-09: "do a complete testing through the playwright through the ui testing by opening the complete steps in the ui and checking and also perfomring the operation and users behaviour and checking how its processing and fixing any issues that are arriving".
+  - **The trigger.** The user also hit "Error: Internal error (ImportError)" with no output on localhost.
+    - Root cause, reproduced: a stale dev server. It started at 14:24, before the P9-G2 decoder commits. `Engine.generate` imported the new `scripts/evaluate_report_generation.py` lazily on the first turn, and that file imports `StopDecoding` from the old, already-loaded `hybrid_lm`.
+    - Fixed operationally by restarting the server on a8e7efe. A real turn then succeeded.
+  - **Requirements** (the brief is `.superpowers/sdd/CHAT_UI_PLAN/task-P4-H-brief.md`):
+    - **A1.** Bind the decoders when the engine starts, so a running server never mixes old and new code.
+    - **A2.** `/healthz` gains `code_version` and `started_at`.
+    - **A3.** An internal error tells the user to restart the server after a code update. It shows the class name only, never the exception text (R1/R7).
+    - **B.** The suite is `tests/e2e/test_ui_playwright.py`, using Python Playwright and the installed Chrome via `channel="chrome"`. Its tests are marked `e2e` and `slow`, so `validate.sh` skips them, and the dependency lives in `requirements-e2e.txt`. It has 14 user journeys:
+      - first load;
+      - upload by file chooser and by drag-and-drop;
+      - send with and without a note;
+      - re-run;
+      - the settings drawer;
+      - stop;
+      - Show raw;
+      - sessions and replay;
+      - export;
+      - refusals and a server kill;
+      - keyboard only;
+      - viewports and dark mode;
+      - two tabs.
+
+      Every test fails on a console error or an unexpected 4xx/5xx.
+    - **C.** Explore first, then fix every defect a user would notice, each with a failing test first. Report the findings as a table.
+    - **D.** At most 8 PNGs in `docs/chat_ui/evidence/p4h/`.
+  - **Gates:**
+    - `validate.sh` prints "All gates passed.";
+    - the e2e suite passes;
+    - the browser check passes 10/10;
+    - the layout check stays green.
+
 ### P5 — Labels and retrieval backend
 
 Gate: laptop — `pytest tests/test_app_labels.py tests/test_app_gallery.py tests/test_app_retrieval_stages.py` green on the tiny gallery. Cluster — gallery built; towers hash-checked; test-split R@1/5/10 equal to `evaluate_cxr_retrieval.py` in the same job; labels cross-check 0 mismatches; 50/50 self-retrieval.
@@ -3123,6 +3155,21 @@ def test_labeler_service_normalises_whitespace_and_reports_names(monkeypatch):
 
 Commit `"P5-A: labels client, rule labeller, agreement, CheXbert service"`.
 
+*Rulings (controller, 2026-10-09; the task runs in parallel, in its own worktree):*
+- **Code and scope.** Transcribe the code above, keeping `CHEXBERT_14` exactly. Do not touch `app/pipeline.py`, `app/server.py` or `app/static/`; P5-E wires these modules in.
+- **`LabelerClient`.**
+  - It validates the response shape: one row of 14 values in {0, 1} per text. Anything else raises `LabelerUnavailable`, with messages that carry counts only and never text (R7). That includes the order mismatch.
+  - An empty input returns `[]` without making a request.
+  - `healthy()` also catches `ValueError` and `HTTPException`.
+- **`label_agreement`** raises `ValueError` unless both inputs have length 14.
+- **The service.**
+  - It accepts at most 64 texts, each at most 20,000 characters; more gives 422.
+  - `/healthz` returns 503 with a fixed message when f1chexbert fails to load.
+- **Tests.**
+  - The client runs against a local fake HTTP server, covering good, mismatch, wrong-shape, non-JSON and refused responses.
+  - The service limits are covered, plus the 503.
+  - A parity test checks that `app/labeler.py` imports nothing from `hybrid_xmamba`.
+
 - [ ] **P5-B** `scripts/build_retrieval_gallery.py` (with `--tiny`) and `_h100.sh`: the §6.5 files through `evaluate_cxr_retrieval`'s own loaders; tower hash; R@k gate inside the job.
 
 **Files:** create `scripts/build_retrieval_gallery.py`, `scripts/build_retrieval_gallery_h100.sh`, `tests/test_build_retrieval_gallery.py`; modify `tests/test_willi_parity.py`.
@@ -3228,6 +3275,22 @@ python scripts/build_retrieval_gallery.py --compare-rk "${OUT}"
 Tests (laptop): `--tiny` writes every §6.5 file with consistent shapes; `group_starts` partitions `group_order`; `--compare-rk` returns 1 on a doctored reference file and 0 on an equal one; the parity test checks the wrapper's directives, `HF_HUB_OFFLINE`, `--mimic-split test` and `--compare-rk`.
 
 Commit `"P5-B: gallery builder (+tiny) reusing the retrieval chapter's loaders"`. Then on lx01: `sbatch scripts/build_retrieval_gallery_h100.sh`; tick with job id, `towers_identical`, `gate_rk.equal`, counts and wall time.
+
+*Rulings (controller, 2026-10-09; the task runs in parallel, in its own worktree):* mirror P9-G3's wrapper hygiene.
+- **The job log (R7).** It carries only `===`, `[gallery]`, `RESULT` and `ERROR` lines. The raw output of both Python steps goes to `OUT/build.log` and `OUT/reference_rk.log`. A failure prints `ERROR <step> exit=<code>`.
+- **Provenance.** The first line is the `.sync_stamp` sync line, and the manifest records the sha and the clean/dirty flag.
+- **Requeue and R8.**
+  - `--requeue` and `--open-mode=append`.
+  - The job refuses when `OUT/manifest.json` exists, since a finished build is never overwritten.
+  - `OUT` sits under `CHAT_HOME/gallery/<build_id>`, never under `/outputs/` or the thesis checkout.
+  - `BUILD_ID` defaults to `<date>_<job id>`, so a requeue resumes in the same directory.
+- **Reference and compare.**
+  - `evaluate_cxr_retrieval.py` runs unchanged (R3); follow its real CLI.
+  - `--compare-rk` prints `RESULT {"gate_rk_equal": …}`.
+- **The `tiny_gallery` test fixture** is shared, for reuse by P5-C, P5-D and P5-E.
+- **Tests.**
+  - A sandbox rehearsal of the wrapper.
+  - Unit tests of the pure pieces: grouping, report text, manifest and provenance.
 
 - [ ] **P5-C** `scripts/label_gallery_reports.py` and `_h100.sh` (`.venv_chexbert`): `labels.npy` via group representatives; canary and projection; a 0-mismatch cross-check on the 2,663 test references.
 
