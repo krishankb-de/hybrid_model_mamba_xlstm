@@ -2898,6 +2898,55 @@ Commit `"P4-F: clean report display (dedup + stream view)"` and `"P4-F: settings
   - A header glued to a sentence ("Findings: X.") does not dedup a later "X.".
   - A browser that stored `display_repair: false` keeps it.
 
+- [x] **P4-G** Stop condition: stop decoding once the report starts repeating; a Settings drawer with Save. Added 2026-10-09 after the user's second test.
+
+**Why.** After P4-F the card was clean, but every turn still decoded the whole budget: 200 tokens took 16 s for a 23-word report, and the card still said it stopped at the budget. The published decoder has no stop condition, and the model never learned an end-of-report token (V5-D). So the app adds a stop condition at decode time.
+
+**The stop condition.**
+- **The check.** `Options.stop_on_repeat`. After every step the engine looks at the best beam's text. When its last *completed* sentence repeats an earlier one (the same key as `stream_view`), decoding stops at that step and keeps that beam.
+- **Thesis code untouched.** The stop leaves the decoder through the step callback, as Stop does, so the thesis decoders stay untouched (R3).
+- **Defaults.**
+  - The server default is `False`, so API clients and every parity test keep the published protocol (R2).
+  - The UI default is `True`, behind a Settings switch: "Stop when the report starts repeating".
+  - Switched off, the turn decodes the whole budget. Its chip then reads `full budget`.
+- **What the card shows.**
+  - `generate.detail.stopped` is `"repeat"` or `"budget"`.
+  - `truncated_mid_sentence` is true only for a budget stop.
+  - A repeat stop says "Stopped when the model began repeating itself.".
+  - A budget stop with repair on says "Reached the N-token budget; the unfinished last sentence is hidden (Show raw shows it).".
+- **Measured on the tiny engine** (200 tokens, uncached): before, 200 tokens and 17.9 s; after, 21 tokens, 2.3 s, `stopped: "repeat"`.
+- **Real decoders** (cached Mamba-3 and uncached 13D): they share the same callback, but are first run on the cluster at P7-D.
+
+**The Settings drawer.**
+- A Save button, primary; Enter in any field also saves. It confirms with "Settings saved. They apply from your next Send.".
+- Each number field shows its range in the label, e.g. "Token budget (16–200)". The 16–200 bound is the spec's (`docs/chat_ui/CHAT_UI_SPEC.md:115`).
+- Focusing a field selects its whole value, so typing replaces it.
+- A value outside the range shows an error under the field and keeps the previous value. It never snaps to the bound silently: before, typing after "200" gave "200150", and Enter turned that into 200.
+
+Commits:
+- `"P4-G: stop decoding when the report repeats"`;
+- `"P4-G: settings drawer with Save, ranges, no silent clamp"`;
+- the review fix.
+
+*As built (P4-G, commits c0b51ce, d839a35 and 60e9217; the code is authoritative):*
+- **The stop.**
+  - `repeat_started` sits beside `stream_view` in `app/engine.py`.
+  - A private `_RepeatStop` leaves the decoder from the step callback. `Cancelled` is checked first.
+  - The stopped result equals the published decoder cut at the stop step, on cached, uncached, beam and greedy decoding (pinned by tests).
+  - `truncated_mid_sentence = stopped == "budget" and …`: with beam > 1, the best beam at the first repeat can already be into the next sentence, and that fragment is not a budget cut.
+  - `OPTIONS_DOC` documents all of this.
+- **Typing a number.**
+  - A valid value applies live, as in P4-F.
+  - When the text turns invalid, the setting goes back to the value it had when the field was focused, e.g. "300" over 120: 120 → 30 → 120.
+  - Enter or Save on invalid text keeps that value and re-selects the bad text.
+  - The select-on-focus guard is armed only by a pointer press, so a click after Tab places the caret.
+- **Save.** It closes the drawer and confirms in `#saved` (cleared when the drawer reopens). If browser storage refuses, it says so instead of "Settings saved".
+- **Card note.** With repair on, a budget stop that hides nothing (no complete sentence) uses the plain note.
+- **Checks.**
+  - The browser check's `settings` case types real keys: replace-not-append, Tab-then-click, "300" over 120 ends at 120, and the Save path.
+  - The settled screenshots are a default (stop-on) turn.
+  - Layout: 138 cases (the Save button in every drawer viewport). Node: 299.
+
 ### P5 — Labels and retrieval backend
 
 Gate: laptop — `pytest tests/test_app_labels.py tests/test_app_gallery.py tests/test_app_retrieval_stages.py` green on the tiny gallery. Cluster — gallery built; towers hash-checked; test-split R@1/5/10 equal to `evaluate_cxr_retrieval.py` in the same job; labels cross-check 0 mismatches; 50/50 self-retrieval.
@@ -3635,6 +3684,15 @@ done
 
 1. On lx01: `sbatch scripts/serve_chat_h100.sh`. 2. Laptop: `bash app/tunnel/tunnel.sh` (`VIA` from P1-B). 3. Open `http://localhost:8000`; pick test rows 0–4 with the picker. 4. For each, the live report must equal line *i* of the P2-E CPU golden `hyps.txt` (same node type) — record it; the card's published-vs-live line must match the P1-C result for that row. 5. Repeat the P6-F checklist on real data. 6. Record per-stage ms, first-byte time and total turn time against the targets (first byte ≤ 300 ms; total within the P1-D decision). Tick with job id, screenshots, timings.
 
+*Added at P4-G (2026-10-09):* the UI now stops at the first repeated sentence by default.
+- **The step 4 equality check** runs with "Stop when the report starts repeating" switched off, which is the published protocol. The same rule holds for every published-vs-live comparison (P5-E `live_equals_published`).
+- **Measuring the stop condition.** A second pass over the same rows, with the switch on, measures it on the real decoders:
+  - how often it fires at the 100-token default and at 200 tokens;
+  - the tokens and time it saves;
+  - that it never cuts a report before its first complete sentence.
+
+  Record these beside the timings.
+
 - [ ] **P7-E** Requeue drill: `scontrol requeue <job>` mid-turn → the turn is stored `error` with `server_restart`; the job comes back; the tunnel re-attaches unattended.
 
 Record: the requeue time, the new node, the time until `tunnel.sh` re-attached, the stored status of the interrupted turn, and that the SQLite file opened cleanly on the new node (D22). If the database is reported locked after the move, record it and switch the DB to `journal_mode=DELETE` (rollback journal) as the documented fallback.
@@ -3821,6 +3879,63 @@ Measure first-byte and frame gaps through the quick tunnel with `probe_client.py
 - [ ] **P9-F** (optional, U5 "a mix between the two") Compare mode: one image decoded by both the Mamba-3 and the 13D decoders, the two reports and label sets side by side in one card.
 
 Only after P9-E's other boxes, and only if the user still wants it. It reuses `Pipeline` with two engines in one turn (`options.compare: true`, private and public alike), two `content_block`s (index 0 and 1), and one `label` stage that labels both. Tests on the tiny stack with two tiny engines.
+
+### P9-G: a learned stop condition. Approved 2026-10-09; scheduled right after P4-G.
+
+**The user's approval** (2026-10-09, verbatim): "yes approve this but make sure that the response is stopped in correct manner and not at any point the result that i want to get is the similar images sluster and also the report generation . so it needs these two things and then it should stop ."
+
+What it means for the plan:
+- A turn must deliver two things, then end cleanly:
+  - the similar X-rays from the gallery (P5-B/D/E, P6-C);
+  - a generated report that ends at a natural end of its own, not at an arbitrary point.
+- P9-G is no longer optional, and it runs before P5. Its single H100 training job (about 1.3 h, the same as the published Mamba-3 run, per `analysis/ARCHIVE_MANIFEST.md`) then trains while P5's laptop work goes on.
+
+**Why P4-G is not enough.**
+- P4-G's decode-time stop only notices a loop after it has begun.
+- The trainer sets `pad_token = eos_token` (`scripts/train_report_generation.py:223`).
+- The training step then masks every `attention_mask == 0` position (`hybrid_xmamba/training/lightning_module.py:1634-1640`, on `ImageTextDataset`'s right-padded tokens in `scripts/train_contrastive.py`).
+- So no end-of-report token is ever a target, and the model cannot learn to stop (V5-D).
+
+- [ ] **P9-G1** (laptop) An EOS target behind a new flag. The flag is `dataset.report_eos_target`, default `false`.
+  - When it is on, each report that fits in `max_length` ends with exactly one EOS whose `attention_mask` is 1, so it is supervised. The padding after it stays masked.
+  - A report cut by `max_length` gets no EOS, because the budget, not the report, ended it.
+  - Off is byte-identical to today: the same `input_ids` and `attention_mask` for every row.
+  - Tests:
+    - a unit test on the dataset and collate output, for both settings;
+    - a parity test that the flag-off batch is unchanged;
+    - one `test_willi_parity.py` assertion that every published `_rrg` yaml leaves the flag off.
+- [ ] **P9-G2** (laptop) EOS-stop decoders and the engine.
+  - `beam_search_decode_eos` and a cached twin live beside the published decoders, which stay byte-identical (R3).
+  - A beam that emits EOS is finished and set aside. Decoding ends when the best `beam_size` candidates are all finished, or at the budget.
+  - The finished score uses the same length penalty as the published decoders.
+  - Parity tests:
+    - with EOS never emitted, the output equals the published decoders token for token, cached and uncached;
+    - a scripted model that emits EOS stops there.
+  - The engine:
+    - uses them when the model card says `eos_trained: true`;
+    - sets `generate.detail.stopped` to `"eos"`;
+    - P4-G's repeat stop stays as a backstop.
+  - The card shows no budget note on an EOS stop.
+- [ ] **P9-G3** (cluster) The training job.
+  - The recipe is the published `h100_report_gen_m3_tower13d_s42` (`hybrid_150m_m3_rrg`, the same tower, Mamba-3 backbone, data and seed 42), with only `dataset.report_eos_target=true`.
+  - It writes to a new directory outside `MAIN_REPO` (R8): `CHAT_HOME/models/report_gen_m3_eos_s42/`. Checkpoints are MIMIC-derived (Class R), so they stay on the cluster.
+  - Before submitting, record a prediction (R4): wall time ≈ the published 1.3 h, and a final val loss close to the published run's, because the target gains one token per report.
+  - Read the job's results only through `scripts/chat_remote.sh summary` (R7).
+- [ ] **P9-G4** (cluster) The evaluation job, on the official test split (n = 2,663).
+  - The EOS model is decoded with the EOS-stop beam search (beam 3, budget 200, so the model, not the budget, ends the report).
+  - The baseline is the published Mamba-3 run, decoded with the published protocol.
+  - Report:
+    - ROUGE-L, BLEU-1/4, CheXbert-14 micro/macro and exact match, with paired-bootstrap 95% CIs (`bootstrap_compare`);
+    - mean length;
+    - the share of reports that end by EOS, against those cut at the budget;
+    - repeated sentences per report.
+  - **Gate:** no metric significantly worse than the published run.
+  - Prediction: the cut-at-budget share falls from 301/400 (V5-D) to under 10%.
+- [ ] **P9-G5** (laptop, then cluster) The EOS model in the UI.
+  - The model appears in `MODEL_CHECKPOINTS` as a selectable model. Its card names the EOS training and links the G4 numbers.
+  - The published checkpoints and numbers are unchanged.
+  - Making it the *default* model is the user's decision, once they have seen the G4 numbers.
+  - Verify a real turn on the cluster: it shows similar X-rays (once P5-E and P6-C are done) and a report that ends with `stopped: "eos"`.
 
 ---
 
