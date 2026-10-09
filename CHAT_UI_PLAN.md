@@ -2985,7 +2985,7 @@ Gate: laptop — `pytest tests/test_app_labels.py tests/test_app_gallery.py test
 
 Predictions (R4): P5-B towers identical and no `img_proj` (85%); R@k equal to every digit (90%); 45–90 min on one H100. P5-C 0 mismatches against `y_true` (85%, the group-broadcast argument); f1chexbert stays on CPU (55%), so 8 CPU shards of about 1 h, else 15–45 min on one H100. P5-F 50/50 self-retrieval at rank 1; the live CPU own-rank equals the build's GPU rank on ≥ 48/50 test studies; the labeller service equals the published labels on 50 + 50.
 
-- [ ] **P5-A** `app/labels.py` (names, client, rule labeller, agreement) and the `app/labeler.py` service.
+- [x] **P5-A** `app/labels.py` (names, client, rule labeller, agreement) and the `app/labeler.py` service.
 
 **Files:** create `app/labels.py`, `app/labeler.py`, `tests/test_app_labels.py`.
 
@@ -3170,6 +3170,20 @@ Commit `"P5-A: labels client, rule labeller, agreement, CheXbert service"`.
   - The service limits are covered, plus the 503.
   - A parity test checks that `app/labeler.py` imports nothing from `hybrid_xmamba`.
 
+*As built (761def2, cherry-picked to 6bac709; reviewed clean, no fix round):*
+- **`app/labels.py`** (standard library only).
+  - The client validates the response shape. Its errors carry an HTTP status or an exception class name, raised `from None`.
+- **`app/labeler.py`.**
+  - It returns 422 without echoing the input, because FastAPI's default 422 body echoes it (R7).
+  - It returns a fixed 503 on `/healthz` and `/label` when the model fails to load.
+  - A double-checked lock guards the lazy load, and a failed load is logged server-side.
+- **Tests.** `tests/test_app_labels.py` has 67 tests, including the client against the real service served by uvicorn. `CHEXBERT_14` is checked against `CHEXPERT_14_LABELS`.
+- **Carried forward:**
+  - The client does not split large requests. More than 64 texts, or more than 20,000 characters in one text, gives `LabelerUnavailable` (HTTP 422); P5-F's 50 per call fit.
+  - The serving wrapper (P5-E/P7) must run `python -m uvicorn app.labeler:app`, since web deps live in a `PYTHONPATH` overlay.
+  - A persistent load failure has no back-off, so pollers must poll more slowly than the load takes.
+  - Polish for the final review: a reorder-only mismatch message, overlapping client tests.
+
 - [ ] **P5-B** `scripts/build_retrieval_gallery.py` (with `--tiny`) and `_h100.sh`: the §6.5 files through `evaluate_cxr_retrieval`'s own loaders; tower hash; R@k gate inside the job.
 
 **Files:** create `scripts/build_retrieval_gallery.py`, `scripts/build_retrieval_gallery_h100.sh`, `tests/test_build_retrieval_gallery.py`; modify `tests/test_willi_parity.py`.
@@ -3338,6 +3352,10 @@ Laptop tests use a fake `f1chexbert` module and a tiny gallery: representatives 
 Commit `"P5-C: CheXbert labels for the gallery, cross-checked"`. Then `sbatch scripts/label_gallery_reports_h100.sh`; tick with job id, mismatches (expected 0), groups labelled, wall time.
 
 - [ ] **P5-D** `app/gallery.py`: load with the tower check, image→image, image→report over groups, own rank (chapter protocol), identical-image lookup, test studies.
+
+*Carried (controller, 2026-10-10):*
+- **From the P5-B review.** `Gallery.open` refuses a gallery whose `manifest.json` lacks `gate_rk.equal == true` (a build whose gate failed or never ran), as well as one whose tower hash differs.
+- **Tiny sizes.** P5-B's tiny gallery has 200 images, 40 test rows and 240 report rows. Read every size from `manifest["counts"]`, never from this plan's numbers.
 
 **Files:** create `app/gallery.py`, `tests/test_app_gallery.py`.
 
@@ -4123,6 +4141,29 @@ What it means for the plan:
     - It also runs a new `scripts/report_eos_stats.py` on both dumps' hyps. That reports mean length, empty reports, repeated sentences per report (`repair_generations`, `dedup="all"`) and the share with an unterminated last sentence.
     - It prints RESULT lines, numbers only, ending with `RESULT {"gate":"pass"|"fail","worse":[…]}`. "worse" lists every metric whose 95% CI of (EOS − published) lies entirely below 0.
   - **Tests.** Parity tests, unit tests and a sandbox rehearsal, as in P9-G3.
+
+  *As built, laptop part (070390d, d8857d7, 8618316; review approved, fix rounds 1 and 2 clean):*
+  - **Job 1 (decode).** `scripts/eval_report_eos_h100.sh`.
+  - **Job 2 (CheXbert).** `scripts/eval_report_eos_chexbert_h100.sh`, a thin wrapper.
+    - Why: the thesis `score_chexbert_h100.sh` prints a `===` line with both file paths and no RESULT, so it fails R7.
+    - It runs the same scorer, with the same arguments, venv and D24 environment.
+  - **Job 3 (compare).** `scripts/eval_report_eos_compare_h100.sh`. It runs `bootstrap_compare.py` unchanged, with the thesis wrapper's 1000 resamples, seed 0 and per-label rows.
+  - **`scripts/report_eos_stats.py`** has four subcommands: `decode`, `chexbert`, `hyps` and `gate`.
+    - Its RESULT lines carry only allowlisted names (wrapper constants, `bootstrap_compare`'s 9 metrics, the 14 CheXbert labels) and numbers with |x| < 10^7.
+    - Its ERROR lines are literals plus parsed digit counts.
+  - **Fail-early guards:**
+    - job 1 refuses without the training's DONE, an existing dump, a `results/chat_*` path, or a visible GPU;
+    - an up-front check that the published `refs.txt` exists;
+    - a byte compare of the two `refs.txt` after the decode, which stops the chain before CheXbert.
+  - **The gate RESULT** lists `worse`, the main-table metrics whose CI upper bound is below 0. An informational `label_worse` lists the per-label rows that are worse, but does not gate.
+  - **Tests:** `tests/test_report_eos_eval.py` (212) and 14 parity pins. The gate parser round-trips the real `bootstrap_compare.render`; the reviewer fuzzed 6,000 reports with 0 disagreements.
+  - **Submit lines** (header of the compare wrapper), chained with `afterok`. Job 1 runs with `-- --time=04:00:00`.
+
+  **Prediction (R4), recorded before submission:**
+  - **Decode.** `ended_by_eos` is at least 90% of 2,663, so `share_cut` < 0.10, against 301/400 cut mid-sentence at 100 tokens for the published run (V5-D).
+  - **Length.** EOS reports average 40–80 words. Repeated sentences per report fall to near 0.
+  - **Gate.** Pass, meaning no main metric significantly worse: 65%. ROUGE-L may even rise, because the published reports are cut at 100 tokens. The most likely "worse" is BLEU-4 or exact match, if the EOS model writes shorter reports.
+  - **Wall time.** Decode 0.8–1.5 h (cached, beam 3), CheXbert about 30 min, compare under 30 min.
 - [ ] **P9-G5** (laptop, then cluster) The EOS model in the UI.
   - The model appears in `MODEL_CHECKPOINTS` as a selectable model. Its card names the EOS training and links the G4 numbers.
   - The published checkpoints and numbers are unchanged.

@@ -372,7 +372,7 @@
         },
         "P4-H": {
           "done": false,
-          "desc": "An end-to-end Playwright test of the UI, driven like a real user, with fixes for what it finds."
+          "desc": "(laptop) An end-to-end Playwright test of the UI, driven like a real user, with fixes for what it finds. The user's request, 2026-10-09: \"do a complete testi..."
         }
       },
       "evidence": {
@@ -395,10 +395,10 @@
     },
     "P5": {
       "title": "Labels and retrieval backend",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "P5-A": {
-          "done": false,
+          "done": true,
           "desc": "app/labels.py (names, client, rule labeller, agreement) and the app/labeler.py service."
         },
         "P5-B": {
@@ -422,7 +422,11 @@
           "desc": "Live-path gates job scripts/chat_retrieval_gates.py with _h100.sh (CPU): self-retrieval, live own-rank vs the build's rank, labeller service vs the published..."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "p5a_commit": "6bac709 (cherry-pick of 761def2)",
+        "p5a_tests": "tests/test_app_labels.py (67) + tests/test_willi_parity.py::test_chexbert_service_imports_nothing_from_hybrid_xmamba",
+        "p5a_review": "approved, no fix round; reviewer 13 hostile requests 0 leaks, 19/19 mutants"
+      },
       "verdict": null
     },
     "P6": {
@@ -621,16 +625,20 @@
     "2026-10-09: P9-G2 EOS-stop decoders (top-hypothesis stop, soft stop, no EOS first, published-first candidates) + engine eos_trained; review clean after fix rounds 0-1",
     "2026-10-09: 2026-10-09: P9-G1/G2 ticked (reviewed clean); P9-G2 rulings amended in the plan (top-hypothesis stop, soft stop, no EOS first, published-first candidates); P9-G3 as-built + R4 prediction recorded before submission; P9-G4 rulings added; P9-G5 carried items",
     "2026-10-09: 2026-10-09: P9-G3 submitted as job 2632173 (chat_report_eos, 4 H100, sync a8e7efe clean); log logs/chat_report_eos_2632173.log; read via chat_remote.sh state/summary only (R7)",
-    "2026-10-09: 2026-10-09: P4-H added (user: Playwright e2e UI testing + fixes; stale-server ImportError hardening); P5-A/P5-B rulings added; four tasks dispatched in parallel worktrees (P9-G4, P5-A, P5-B, P4-H)"
+    "2026-10-09: 2026-10-09: P4-H added (user: Playwright e2e UI testing + fixes; stale-server ImportError hardening); P5-A/P5-B rulings added; four tasks dispatched in parallel worktrees (P9-G4, P5-A, P5-B, P4-H)",
+    "2026-10-09: P5-A labels client/rule labeller/agreement + CheXbert service; merged into chat_ui (validate All gates passed)",
+    "2026-10-10: 2026-10-10: P5-A merged (6bac709) and ticked; P9-G4 laptop part done (070390d, d8857d7, 8618316) with as-built + R4 prediction in the plan; P5-D/P5-C/P5-E carries recorded"
   ],
-  "last_updated": "2026-10-09T22:32:45+02:00",
+  "last_updated": "2026-10-10T00:47:53+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
       "_previous_image walks only image_sha256 (no test rows): extend it for test-row turns (also P6-D)",
       "browser check 8 switches from the seeded synthetic labelled turn to a live labelled turn",
       "set /v1/models features.retrieval / features.labels true when the gallery / labeller are wired",
-      "published comparisons (live_equals_published) must decode with stop_on_repeat false"
+      "published comparisons (live_equals_published) must decode with stop_on_repeat false",
+      "labeller serving: python -m uvicorn app.labeler:app (web deps in a PYTHONPATH overlay)",
+      "LabelerClient does not chunk: >64 texts or >20k chars per text -> LabelerUnavailable (HTTP 422)"
     ],
     "P6-A": [
       "composer layout: inject the re-run hint and #preview into the layout check (801/820/834x568 drawer open, 320x568 long name); Send sits below the composer fold at 801-820 x 568-650 with the drawer open - fix (one-line ellipsis hint under max-height 640px) or accept explicitly",
@@ -667,12 +675,23 @@
       "announce(msg, true) re-read by assistive tech is unverified",
       "a header glued to a sentence ('Findings: X.') does not dedup a later 'X.' (repair_report key)",
       "P9-G1: class docstring \"fits in max_length\" -> \"fits with room for one more token\"; the + override test matches Hydra error text",
-      "P9-G2: no test pairs a non-empty prompt with a step-0 EOS; argmax-frame test [1] variant cannot discriminate; inert [:2*beam] cap; wording nits (cached docstring \"as the published pair do\", parser message with no mode, dangling docstring line erg:538-540)"
+      "P9-G2: no test pairs a non-empty prompt with a step-0 EOS; argmax-frame test [1] variant cannot discriminate; inert [:2*beam] cap; wording nits (cached docstring \"as the published pair do\", parser message with no mode, dangling docstring line erg:538-540)",
+      "PhysioNet doc example ids 10000032/50414267 in older chat tests (test_app_redact, test_chat_cpu_probe, test_chat_engine_golden) and CHAT_UI_PLAN.md: replace in a polish pass (thesis files untouched)",
+      "pytest.ini uses a [tool:pytest] header, so pytest ignores it (markers live in tests/conftest.py)",
+      "P5-A polish: reorder-only mismatch message, _count wording, overlapping client tests, no load back-off",
+      "P9-G3: summary mask() blanks 8+ digit runs inside the sync sha (cosmetic)"
     ],
     "P9-G5": [
       "UI copy for eos_trained models: render.js \"full budget\" chip and app.js:1360 stop-switch hint (\"always decodes the whole token budget\") are wrong for an EOS model",
       "golden driver card line prints eos_trained",
       "optional final engine snapshot: the last stream frame is not the report after a soft stop that returns a finished report while the answer was live, or after a late win (message_stop.display_report settles the card)"
+    ],
+    "P5-D": [
+      "Gallery.open refuses a manifest without gate_rk.equal == true (P5-B review minor 4)",
+      "read gallery sizes from manifest[\"counts\"] (tiny gallery is 200/40/240)"
+    ],
+    "P5-C": [
+      "extract the JobBox wrapper-rehearsal harness from tests/test_build_retrieval_gallery.py into a shared helper when P5-C needs it"
     ]
   }
 }
