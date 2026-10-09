@@ -23,12 +23,15 @@ Files, in --out (section 6.5; labels.npy and label_names.json come from P5-C):
   report_texts.txt                                      one `Findings: ... Impression: ...` per report row, as refs.txt prints it
   gate_rk.json, manifest.json                           the R@k gate, then provenance and counts (written last: the marker of a
                                                         finished build)
---compare-rk writes `reference` and `equal` into gate_rk.json and the manifest, and exits 1 when unequal. --tiny writes the same
-layout from synthetic data, with no model and no MIMIC, for the laptop tests (the `tiny_gallery` fixture in tests/conftest.py).
+--compare-rk writes `reference` and `equal` into the manifest and then into gate_rk.json, whose `equal` is the verdict marker and so
+comes last, and exits 1 when unequal; unequal, it also prints the reference's values of what differs and by how many studies. --tiny
+writes the same layout from synthetic data, with no model and no MIMIC, for the laptop tests (the `tiny_gallery` fixture in
+tests/conftest.py). A directory that holds a manifest.json is never written again, by either (R8): AlreadyBuilt.
 
 Output is MIMIC-derived (Class R, analysis/ARCHIVE_MANIFEST.md): it stays on the cluster and is never committed. R7: stdout carries
-`[gallery]` lines of counts, booleans and hashes (never a path, an id or report text) and, in --compare-rk mode, one `RESULT {json}`
-or `ERROR ...` line of numbers and key names. Everything else the loaders print is for the wrapper to keep in a file.
+`[gallery]` lines of known shapes (counts, booleans, hashes and norms: never a path, an id or report text, and the wrapper lets only
+those shapes through) and, in --compare-rk mode, a few `RESULT {json}` or `ERROR ...` lines of numbers and key names. Everything else
+the loaders print is for the wrapper to keep in a file.
 """
 import argparse
 import hashlib
@@ -47,6 +50,7 @@ sys.path.insert(0, str(PROJECT_ROOT))      # app, scripts and hybrid_xmamba come
 
 BATCH_SIZE = 32          # evaluate_cxr_retrieval.py's --batch-size default: the same batches as the published R@k
 MAX_LENGTH = 256         # ... and its --max-length default
+NORM_TOLERANCE = 1e-3    # every vector is unit length to this much: app/gallery.py reads a dot product as a cosine
 DEFAULT_DECODER_CONFIG = "hybrid_150m_m3_rrg"
 RK_KEYS = ("i2t_R@1", "i2t_R@5", "i2t_R@10", "t2i_R@1", "t2i_R@5", "t2i_R@10")
 TOKENIZER = {"name": "gpt2", "max_length": MAX_LENGTH, "padding": "max_length", "truncation": True, "padding_side": "right",
@@ -64,8 +68,18 @@ TINY_POOL = 120          # distinct reports the rows are drawn from, with a temp
 
 
 def say(message: str) -> None:
-    """One [gallery] line: counts, booleans and hashes, never a path, an id or report text (R7)."""
+    """One [gallery] line: counts, booleans, hashes and norms, never a path, an id or report text (R7). The wrapper passes a line to
+    the job log only if it has one of the shapes in its GALLERY_SHAPES, so a new line needs a new shape there and in the tests."""
     print("[gallery] " + message, flush=True)
+
+
+class AlreadyBuilt(RuntimeError):
+    """The output directory holds a manifest.json: the marker of a finished build, which is never written again (R8)."""
+
+
+def refuse_if_built(out: Path) -> None:
+    if (Path(out) / "manifest.json").exists():
+        raise AlreadyBuilt("manifest.json exists in the output directory: a finished build is never overwritten")
 
 
 # ── pure pieces ───────────────────────────────────────────────────────────────
@@ -194,14 +208,38 @@ def check_columns(frames: Dict[str, Any]) -> None:
             raise RuntimeError("{}.parquet lacks the columns {}".format(split, ", ".join(missing)))
 
 
-def check_rows(frames: Dict[str, Any], rows: Dict[str, int], emb: Dict[str, Tuple[np.ndarray, np.ndarray]]) -> None:
+def check_rows(frames: Dict[str, Any], rows: Dict[str, int], emb: Dict[str, Tuple[np.ndarray, np.ndarray]],
+               splits: Sequence[str] = ("train", "test")) -> None:
     """The parquet, the loader and the vectors must describe the same rows, or the texts and metadata would be misaligned with the
-    vectors without a sound."""
-    for split in ("train", "test"):
+    vectors without a sound. build() asks about the test split the moment it is encoded, before the train pass of about an hour."""
+    for split in splits:
         counts = (len(frames[split]), int(rows[split]), int(emb[split][0].shape[0]), int(emb[split][1].shape[0]))
         if len(set(counts)) != 1:
             raise RuntimeError("{}: the parquet, the loader, the image vectors and the text vectors disagree about the rows: {}"
                                .format(split, counts))
+
+
+def norm_stats(vectors: Tuple[np.ndarray, np.ndarray]) -> Dict[str, Tuple[float, float, float]]:
+    """(least, greatest, mean) norm of the image vectors and of the text vectors of one split."""
+    found = {}
+    for kind, array in zip(("img", "txt"), vectors):
+        norms = np.linalg.norm(array, axis=1)
+        found[kind] = (float(norms.min()), float(norms.max()), float(norms.mean(dtype=np.float64)))
+    return found
+
+
+def norms_line(split: str, stats: Dict[str, Tuple[float, float, float]]) -> str:
+    return "norms: {} img min={:.6f} max={:.6f} mean={:.6f} txt min={:.6f} max={:.6f} mean={:.6f}".format(
+        split, *(stats["img"] + stats["txt"]))
+
+
+def check_unit_norms(split: str, stats: Dict[str, Tuple[float, float, float]], tolerance: float = NORM_TOLERANCE) -> None:
+    """Every vector is unit length, to a thousandth: app/gallery.py ranks by dot product and calls it cosine, so a vector of another
+    length would be ranked by its length as well. A NaN fails too, because only a number inside the bounds passes."""
+    for kind, (least, greatest, _) in stats.items():
+        if not (1.0 - tolerance <= least and greatest <= 1.0 + tolerance):
+            raise RuntimeError("{} {} vectors are not unit length: least norm {:.6f}, greatest norm {:.6f}, bound 1 +- {}".format(
+                split, kind, least, greatest, tolerance))
 
 
 def isbi_cross_check(img_emb: np.ndarray, path: Optional[Path]) -> Dict[str, Any]:
@@ -264,11 +302,13 @@ def compare_rk(out: Path, wall_s: Optional[int] = None) -> int:
     if "N" in app and "N" in reference and app["N"] != reference["N"]:
         differs.append("N")
     gate.update(reference=reference, equal=not differs, reference_file=found[-1].name)
-    write_json_atomic(out / "gate_rk.json", gate)
+    # The verdict is gate_rk.json's `equal`, and the wrapper reads it to tell a decided gate from one still to be decided, so it is
+    # written last: a crash between the two files leaves the gate undecided, and the next attempt decides it again.
     if (out / "manifest.json").is_file():
         manifest = json.loads((out / "manifest.json").read_text())
         manifest["gate_rk"] = gate
         write_json_atomic(out / "manifest.json", manifest)
+    write_json_atomic(out / "gate_rk.json", gate)
     payload = {"gate_rk_equal": not differs, "n": app.get("N")}
     payload.update({k: round(float(app[k]), 4) for k in RK_KEYS})
     if differs:
@@ -276,15 +316,40 @@ def compare_rk(out: Path, wall_s: Optional[int] = None) -> int:
     if wall_s is not None:
         payload["wall_s"] = int(wall_s)
     print("RESULT " + json.dumps(payload))
+    if differs:
+        try:
+            lines = reference_diagnosis(app, reference, differs)
+        except (TypeError, ValueError, KeyError):     # a diagnosis that cannot be made changes nothing about the verdict
+            lines = []
+        for line in lines:
+            print("RESULT " + json.dumps(line))
     return 0 if not differs else 1
+
+
+def reference_diagnosis(app: Dict[str, Any], reference: Dict[str, Any], differs: List[str]) -> List[Dict[str, Any]]:
+    """What an unequal gate leaves to read through `summary`, which shows lines of a job log and cuts them at 300 characters: the
+    reference's own values of the recalls that differ (and its study count, if that differs), then the gap in studies. A flip of
+    one study across a cut is a gap of 1, and a real mismatch is a gap of many. Numbers and key names only; a line of its own for each,
+    so that none comes near the cut however much differs."""
+    keys = [k for k in differs if k in RK_KEYS]
+    shown = {"gate_rk_reference": {k: round(float(reference[k]), 4) for k in keys}}
+    if "N" in differs:
+        shown["reference_n"] = int(reference["N"])
+    lines = [shown]
+    n = app.get("N")
+    if keys and n:
+        lines.append({"delta_studies": {k: int(round((float(reference[k]) - float(app[k])) * n)) for k in keys}})
+    return lines
 
 
 # ── the real build ────────────────────────────────────────────────────────────
 
 def real_deps() -> SimpleNamespace:
     """build()'s heavy collaborators: the retrieval chapter's own loaders (R3: imported, never edited), the thesis's checkpoint
-    loader for the report model, and the engine's hashes. Imported here, not at the top, so that --tiny and --compare-rk never
-    pay for torch, datasets and transformers; a test passes fakes behind the same signatures instead."""
+    loader for the report model, and the engine's hashes. Imported here, not at the top, so that --compare-rk, which needs none of
+    it, imports neither torch nor datasets nor transformers, and --tiny, which needs torch only for the vocabulary list in
+    app/tiny.py and builds no model, imports none of datasets, transformers, the reference script and the engine (both are tested
+    in a fresh interpreter). A test passes fakes behind the same signatures instead."""
     import torch
     from transformers import AutoTokenizer
     from app.engine import file_sha256, tensor_sha256
@@ -308,12 +373,15 @@ def real_deps() -> SimpleNamespace:
 
 
 def build(args: Any, deps: Optional[SimpleNamespace] = None) -> Dict[str, Any]:
-    """The test split first (2,663 rows: the gate), then the train split (191,462), through the reference loaders; then the report
-    texts, their groups, the metadata and the manifest, which is written last. Returns the manifest."""
+    """The test split first (2,663 rows: the gate), then the train split (191,462), through the reference loaders, each checked the
+    moment it is encoded (its rows against the parquet's, its vectors for unit length) so that a wrong test split is found before
+    the pass of about an hour over the train split; then the report texts, their groups, the metadata and the manifest, which is
+    written last. Refuses a directory that already holds a manifest.json (AlreadyBuilt). Returns the manifest."""
     import gc
     import pandas as pd
-    deps = real_deps() if deps is None else deps
     out = Path(args.out)
+    refuse_if_built(out)                                  # first of all: before the imports of real_deps(), and before any file
+    deps = real_deps() if deps is None else deps
     out.mkdir(parents=True, exist_ok=True)
     frames = {s: pd.read_parquet(Path(args.data) / "{}.parquet".format(s)) for s in ("train", "test")}
     check_columns(frames)
@@ -336,15 +404,16 @@ def build(args: Any, deps: Optional[SimpleNamespace] = None) -> Dict[str, Any]:
         emb[split] = deps.encode_dataset(loader, text_enc, img_proj, tower13d, device)        # (img, txt), float32, unit length
         rows[split] = n
         say("{}: {} rows".format(split, n))
+        check_rows(frames, rows, emb, (split,))
+        stats = norm_stats(emb[split])
+        say(norms_line(split, stats))                       # printed before the check, so that a failure leaves its numbers in the log
+        check_unit_norms(split, stats)
         if split == "test":
             gate = {"app": deps.compute_retrieval_metrics(emb["test"][0], emb["test"][1])}
             say(gate_line(gate["app"]))
 
-    check_rows(frames, rows, emb)
     n_train, n_test = len(frames["train"]), len(frames["test"])
     write_embeddings(out, emb["test"][0], emb["test"][1], emb["train"][0], emb["train"][1])
-    say("norms: img_mean={:.6f} txt_mean={:.6f}".format(float(np.linalg.norm(emb["train"][0], axis=1).mean()),
-                                                         float(np.linalg.norm(emb["train"][1], axis=1).mean())))
 
     texts = report_texts(frames["train"]) + report_texts(frames["test"])
     _, starts = write_layout(out, texts, n_train, n_test, deps.group_ids_from_texts)
@@ -488,9 +557,11 @@ def build_tiny(out: Path, seed: int = 0, n_images: int = TINY_IMAGES, n_test: in
     """A synthetic gallery in the layout of section 6.5, written by the same writers as the real build: n_images random unit
     dim-d image vectors (and as many train reports), n_test test studies, duplicate report groups, gray JPEGs under out/images/.
     With_labels adds random per-group labels and label_names.json (P5-C's files) and sets labels_status to done. Returns the
-    manifest. No model, no MIMIC, and none of the heavy imports."""
+    manifest. No model and no MIMIC; of the heavy imports only torch, which app/tiny.py brings in for its vocabulary list (not
+    datasets, transformers, the reference script or the engine). Refuses a directory that already holds a manifest.json."""
     from app.imaging import CLIP_MEAN, CLIP_STD
     out = Path(out)
+    refuse_if_built(out)
     out.mkdir(parents=True, exist_ok=True)
     frames, pick = tiny_frames(out / "images", seed, n_images, n_test)
     img, test_img, txt, labels = tiny_vectors(pick, seed, n_images, n_test, dim)
@@ -545,13 +616,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
-    if args.tiny:
-        counts = build_tiny(Path(args.tiny))["counts"]
-        say("tiny: {images} images, {report_rows} report rows, {report_groups} groups, {test} test".format(**counts))
-        return 0
     if args.compare_rk:
         return compare_rk(Path(args.compare_rk), args.wall_s)
-    build(args)
+    try:
+        if args.tiny:
+            counts = build_tiny(Path(args.tiny))["counts"]
+            say("tiny: {images} images, {report_rows} report rows, {report_groups} groups, {test} test".format(**counts))
+        else:
+            build(args)
+    except AlreadyBuilt as err:      # a plain line instead of a traceback: the directory is a finished build, and stays one
+        print("ERROR " + str(err))
+        return 1
     return 0
 
 

@@ -261,6 +261,108 @@ def test_compare_rk_returns_1_on_a_doctored_reference_and_names_what_differs(tmp
     assert payload["gate_rk_equal"] is False and payload["differs"] == ["i2t_R@10"]
 
 
+def result_payloads(text: str) -> List[dict]:
+    return [json.loads(l[len("RESULT "):]) for l in text.splitlines() if l.startswith("RESULT ")]
+
+
+def test_an_unequal_gate_also_prints_the_references_values_and_the_gap_in_studies(tmp_path, capsys):
+    """A flip of one study across a cut moves a recall by 1/2663, a real mismatch moves it by many. Through `summary`, which shows
+    the job log's lines and nothing else, the two have to be told apart: the reference's own values of what differs, and by how
+    many studies."""
+    out = tmp_path / "g"
+    reference = dict(METRICS, **{"i2t_R@10": METRICS["i2t_R@10"] + 1 / 2663, "t2i_R@5": METRICS["t2i_R@5"] - 120 / 2663})
+    write_gate(out, METRICS)
+    write_reference(out, reference)
+    assert bg.main(["--compare-rk", str(out), "--wall-s", "7"]) == 1
+    text = capsys.readouterr().out
+    verdict, shown, gap = result_payloads(text)
+    assert verdict["gate_rk_equal"] is False and verdict["differs"] == ["i2t_R@10", "t2i_R@5"] and verdict["wall_s"] == 7
+    assert verdict["i2t_R@10"] == 0.1714, "the build's own values stay on the verdict line"
+    assert shown == {"gate_rk_reference": {"i2t_R@10": round(reference["i2t_R@10"], 4), "t2i_R@5": round(reference["t2i_R@5"], 4)}}
+    assert gap == {"delta_studies": {"i2t_R@10": 1, "t2i_R@5": -120}}, "one study against a hundred and twenty"
+    assert all(len(l) < 300 and "/" not in l for l in text.splitlines()), "numbers only, and what `summary` keeps whole"
+
+
+def test_the_diagnosis_lines_stay_whole_when_everything_differs(tmp_path, capsys):
+    out = tmp_path / "g"
+    write_gate(out, dict(METRICS, **{k: 0.0 for k in bg.RK_KEYS}))
+    write_reference(out, dict(METRICS, **{k: 1.0 for k in bg.RK_KEYS}, N=2662))
+    assert bg.main(["--compare-rk", str(out), "--wall-s", "123456"]) == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 3 and all(l.startswith("RESULT {") and len(l) < 300 for l in lines), [len(l) for l in lines]
+    verdict, shown, gap = result_payloads("\n".join(lines))
+    assert verdict["differs"] == list(bg.RK_KEYS) + ["N"]
+    assert shown["reference_n"] == 2662 and set(shown["gate_rk_reference"]) == set(bg.RK_KEYS)
+    assert set(gap["delta_studies"].values()) == {2663}
+
+
+def test_a_different_number_of_studies_alone_prints_the_reference_count_and_no_gap(tmp_path, capsys):
+    out = tmp_path / "g"
+    write_gate(out, METRICS)
+    write_reference(out, dict(METRICS, N=2662))
+    assert bg.main(["--compare-rk", str(out)]) == 1
+    verdict, shown = result_payloads(capsys.readouterr().out)
+    assert verdict["differs"] == ["N"] and shown == {"gate_rk_reference": {}, "reference_n": 2662}
+
+
+def test_a_diagnosis_that_cannot_be_made_does_not_change_the_verdict(tmp_path, capsys):
+    out = tmp_path / "g"
+    write_gate(out, METRICS)
+    write_reference(out, dict(METRICS, N="n/a"))                      # unequal, and a study count the diagnosis cannot read
+    assert bg.main(["--compare-rk", str(out)]) == 1
+    payloads = result_payloads(capsys.readouterr().out)
+    assert len(payloads) == 1 and payloads[0]["gate_rk_equal"] is False and payloads[0]["differs"] == ["N"]
+    assert json.loads((out / "gate_rk.json").read_text())["equal"] is False, "the verdict was still recorded"
+
+
+def test_a_crash_between_the_two_verdict_files_leaves_the_gate_undecided(tmp_path, monkeypatch):
+    """The wrapper reads gate_rk.json's `equal` to tell a decided gate from one that is still to be decided, so that file is written
+    last: when the second write fails, the gate must still read as undecided, and the next attempt decides it again."""
+    out = tmp_path / "g"
+    write_gate(out, METRICS)
+    write_reference(out, dict(METRICS))
+    (out / "manifest.json").write_text(json.dumps({"build_id": "x", "gate_rk": {"app": METRICS}}))
+    real_write, calls = bg.write_json_atomic, []
+
+    def crash_on_the_second(path, obj):
+        calls.append(Path(path).name)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        real_write(path, obj)
+
+    monkeypatch.setattr(bg, "write_json_atomic", crash_on_the_second)
+    with pytest.raises(OSError):
+        bg.compare_rk(out)
+    assert calls == ["manifest.json", "gate_rk.json"], "the verdict file is the last one written"
+    assert "equal" not in json.loads((out / "gate_rk.json").read_text()), "undecided: a requeue decides it again"
+    monkeypatch.setattr(bg, "write_json_atomic", real_write)
+    assert bg.compare_rk(out) == 0 and json.loads((out / "gate_rk.json").read_text())["equal"] is True
+
+
+def test_an_equal_gate_prints_no_diagnosis(tmp_path, capsys):
+    out = tmp_path / "g"
+    write_gate(out, METRICS)
+    write_reference(out, dict(METRICS))
+    assert bg.main(["--compare-rk", str(out)]) == 0
+    assert len(result_payloads(capsys.readouterr().out)) == 1
+
+
+def test_compare_rk_from_the_command_line_imports_nothing_heavy(tmp_path):
+    """The comparison is numbers and JSON. It needs no torch, no pandas and none of the loaders, and the wrapper's third step must
+    not pay for them (--tiny imports torch, through app/tiny.py's vocabulary, and nothing else of these: its own test)."""
+    out = tmp_path / "g"
+    write_gate(out, METRICS)
+    write_reference(out, dict(METRICS))
+    probe = ("import sys; sys.path.insert(0, {root!r}); from scripts import build_retrieval_gallery as bg; "
+             "code = bg.main(['--compare-rk', {out!r}]); "
+             "print('HEAVY', sorted(m for m in ('torch', 'pandas', 'PIL', 'datasets', 'transformers', 'open_clip', 'app.engine', 'app.tiny', "
+             "'scripts.evaluate_cxr_retrieval') if m in sys.modules)); sys.exit(code)").format(root=str(REPO_ROOT), out=str(out))
+    done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, cwd=str(tmp_path), timeout=60,
+                          env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "HEAVY []" in done.stdout, done.stdout
+
+
 @pytest.mark.parametrize("key", ["i2t_R@1", "i2t_R@5", "i2t_R@10", "t2i_R@1", "t2i_R@5", "t2i_R@10"])
 def test_each_of_the_six_recalls_decides_the_gate(tmp_path, key):
     out = tmp_path / "g"
@@ -565,19 +667,24 @@ def test_tiny_from_the_command_line_is_fast_and_pulls_in_none_of_the_heavy_modul
 
 # ── build(), end to end, with fakes behind the reference script's real signatures ──
 
-GALLERY_SHAPES = re.compile(
-    r"^\[gallery\] ("
-    r"device=(cuda|cpu)"
-    r"|towers_identical=(True|False) img_proj=(True|False)"
-    r"|tower_sha256=[0-9a-f]{64} decoder_tower_sha256=[0-9a-f]{64}"
-    r"|(test|train): \d+ rows"
-    r"|gate_rk app:( (i2t|t2i)_R@(1|5|10)=[0-9.]+){6} n=\d+"
-    r"|norms: img_mean=[0-9.]+ txt_mean=[0-9.]+"
-    r"|texts: \d+ rows, \d+ groups"
-    r"|hashed \d+ image files"
-    r"|isbi cross-check: status=(absent|mismatch|unreadable|compared rows=\d+ max_abs_diff=[0-9.e+-]+)"
-    r"|manifest written, labels_status=pending"
-    r")$")
+# The one place the shapes of a [gallery] line are written down in the tests. The wrapper's allowlist (GALLERY_SHAPES in
+# scripts/build_retrieval_gallery_h100.sh, one anchored pattern per line) has to accept exactly these, and what the builder prints
+# has to fit them: digits are bounded (a count has at most 7), a hash is 64 hex, and nothing is free text, so an id or a piece of a
+# report cannot ride on a line of this log.
+NUM6 = r"(nan|inf|[0-9]{1,3}\.[0-9]{6})"
+GALLERY_SHAPE_LIST = [
+    r"device=(cuda|cpu)",
+    r"towers_identical=(True|False) img_proj=(True|False)",
+    r"tower_sha256=[0-9a-f]{64} decoder_tower_sha256=[0-9a-f]{64}",
+    r"(test|train): [0-9]{1,7} rows",
+    r"gate_rk app:( (i2t|t2i)_R@(1|5|10)=[0-9]\.[0-9]{4}){6} n=[0-9]{1,7}",
+    r"norms: (test|train) img min={n} max={n} mean={n} txt min={n} max={n} mean={n}".format(n=NUM6),
+    r"texts: [0-9]{1,7} rows, [0-9]{1,7} groups",
+    r"hashed [0-9]{1,7} image files",
+    r"isbi cross-check: status=(absent|mismatch|unreadable|compared rows=[0-9]{1,7} max_abs_diff=[0-9]\.[0-9]{3}e[+-][0-9]{2})",
+    r"manifest written, labels_status=pending",
+]
+GALLERY_SHAPES = re.compile(r"^\[gallery\] (" + "|".join(GALLERY_SHAPE_LIST) + r")$")
 
 
 def checked(real, fake, calls: list, name: str):
@@ -597,7 +704,9 @@ class World:
     'checkpoints' (only hashed), and fakes behind the reference loaders' real signatures."""
     N_TRAIN, N_TEST, WIDTH = 30, 10, 8
 
-    def __init__(self, root: Path, ref, decoder_differs: bool = False, img_proj=None, train_rows_in_loader: Optional[int] = None):
+    def __init__(self, root: Path, ref, decoder_differs: bool = False, img_proj=None, train_rows_in_loader: Optional[int] = None,
+                 test_rows_in_loader: Optional[int] = None, scale: Optional[dict] = None):
+        """scale = {(split, 0 for the image vectors or 1 for the text vectors): factor} stretches that set's vectors."""
         import torch
         from app.engine import file_sha256, tensor_sha256
         from scripts.evaluate_report_generation import load_report_generation_module
@@ -611,6 +720,10 @@ class World:
         self.emb = {split: (unit(rng.standard_normal((n, self.WIDTH))).astype(np.float32),
                             unit(rng.standard_normal((n, self.WIDTH))).astype(np.float32))
                     for split, n in (("train", self.N_TRAIN), ("test", self.N_TEST))}
+        for (split, which), factor in (scale or {}).items():
+            pair = list(self.emb[split])
+            pair[which] = pair[which] * np.float32(factor)
+            self.emb[split] = tuple(pair)
         self.args = make_args(root, data=str(self.data), out=str(root / "gallery" / "20261009_77"), workers=3)
         self.text_enc, self.img_proj = object(), img_proj
         with torch.random.fork_rng(devices=[]):                 # the global random state belongs to the other tests
@@ -619,7 +732,8 @@ class World:
             self.decoder_tower = torch.nn.Linear(4, 4)
         if not decoder_differs:
             self.decoder_tower.load_state_dict(self.tower.state_dict())
-        rows = {"train": train_rows_in_loader if train_rows_in_loader is not None else self.N_TRAIN, "test": self.N_TEST}
+        rows = {"train": train_rows_in_loader if train_rows_in_loader is not None else self.N_TRAIN,
+                "test": test_rows_in_loader if test_rows_in_loader is not None else self.N_TEST}
 
         def fake_dataloader(dataset_name, cache_dir, tokenizer, max_length=256, batch_size=32, num_workers=4, local_parquet_dir=None,
                             mimic_split="test"):
@@ -789,11 +903,102 @@ def test_build_prints_only_gallery_lines_of_counts_booleans_and_hashes(tmp_path,
     assert not [l for l in lines if "/" in l or str(tmp_path) in l], "R7: no path in a [gallery] line"
     text = "\n".join(lines)
     for needle in ("towers_identical=True img_proj=False", "test: 10 rows", "train: 30 rows", "texts: 40 rows,",
-                   "hashed 40 image files", "isbi cross-check: status=absent", "manifest written, labels_status=pending"):
+                   "hashed 40 image files", "isbi cross-check: status=absent", "manifest written, labels_status=pending",
+                   "norms: test img min=", "norms: train img min="):
         assert needle in text, needle
-    order = [text.index(n) for n in ("towers_identical", "test: 10 rows", "gate_rk app", "train: 30 rows", "texts: 40 rows", "hashed 40",
-                                     "manifest written")]
-    assert order == sorted(order), "the tower verdict first, the test gate before the long train pass, the manifest last"
+    order = [text.index(n) for n in ("towers_identical", "test: 10 rows", "norms: test", "gate_rk app", "train: 30 rows", "norms: train",
+                                     "texts: 40 rows", "hashed 40", "manifest written")]
+    assert order == sorted(order), "the tower verdict first, the test split checked and gated before the long train pass, the manifest last"
+
+
+NORMS_LINE = re.compile(r"^\[gallery\] norms: (test|train) img min=(\S+) max=(\S+) mean=(\S+) txt min=(\S+) max=(\S+) mean=(\S+)$")
+
+
+def norms_of(output: str, split: str) -> dict:
+    (line,) = [l for l in output.splitlines() if l.startswith("[gallery] norms: {} ".format(split))]
+    found = NORMS_LINE.match(line)
+    assert found, line
+    values = [float(v) for v in found.groups()[1:]]
+    return {"img": dict(zip(("min", "max", "mean"), values[:3])), "txt": dict(zip(("min", "max", "mean"), values[3:]))}
+
+
+def test_build_logs_the_least_and_the_greatest_norm_of_the_images_and_of_the_texts_of_each_split(tmp_path, ref, capsys):
+    World(tmp_path, ref, scale={("test", 0): 1.0004, ("train", 1): 0.9996}).build()
+    out = capsys.readouterr().out
+    test, train = norms_of(out, "test"), norms_of(out, "train")
+    assert test["img"]["min"] == pytest.approx(1.0004, abs=2e-6) and test["img"]["max"] == pytest.approx(1.0004, abs=2e-6)
+    assert test["img"]["mean"] == pytest.approx(1.0004, abs=2e-6) and test["txt"]["max"] == pytest.approx(1.0, abs=2e-6)
+    assert train["txt"]["min"] == pytest.approx(0.9996, abs=2e-6) and train["txt"]["mean"] == pytest.approx(0.9996, abs=2e-6)
+    assert train["img"]["min"] == pytest.approx(1.0, abs=2e-6) and train["img"]["max"] == pytest.approx(1.0, abs=2e-6)
+
+
+@pytest.mark.parametrize("split, which, factor", [("test", 0, 1.0009), ("test", 1, 0.9991), ("train", 0, 1.0009), ("train", 1, 0.9991)])
+def test_vectors_within_a_thousandth_of_unit_length_pass(tmp_path, ref, split, which, factor):
+    manifest = World(tmp_path, ref, scale={(split, which): factor}).build()
+    assert manifest["labels_status"] == "pending"
+
+
+@pytest.mark.parametrize("split, which, factor", [("test", 0, 1.0011), ("test", 1, 0.9989), ("test", 0, float("nan")),
+                                                  ("train", 0, 1.002), ("train", 1, 0.998), ("train", 1, 0.0)])
+def test_a_vector_set_outside_one_plus_or_minus_a_thousandth_stops_the_build_and_its_numbers_are_in_the_log(
+        tmp_path, ref, capsys, split, which, factor):
+    """Downstream (app/gallery.py) ranks by dot product and calls it cosine: a vector that is not unit length would be ranked by its
+    length as well. The numbers are printed before the raise, because the job log is all that anyone may read."""
+    w = World(tmp_path, ref, scale={(split, which): factor})
+    with pytest.raises(RuntimeError) as err:
+        w.build()
+    assert split in str(err.value) and "norm" in str(err.value) and str(tmp_path) not in str(err.value)
+    out = capsys.readouterr().out
+    assert "[gallery] norms: {} img min=".format(split) in out and all(GALLERY_SHAPES.match(l) for l in out.splitlines()), out
+    assert not (w.out / "manifest.json").exists() and not (w.out / "img_emb.npy").exists()
+    if split == "test":
+        assert [c[2]["mimic_split"] for c in w.calls if c[0] == "build_dataloader"] == ["test"], "the train pass never started"
+
+
+def test_the_test_split_is_checked_right_after_its_encode_before_the_long_train_pass(tmp_path, ref, capsys):
+    w = World(tmp_path, ref, test_rows_in_loader=9)
+    with pytest.raises(RuntimeError) as err:
+        w.build()
+    assert "test" in str(err.value) and "9" in str(err.value) and str(tmp_path) not in str(err.value)
+    kinds = [c[0] for c in w.calls]
+    assert kinds.count("build_dataloader") == 1 and kinds.count("encode_dataset") == 1, "the train pass never started"
+    assert [c[2]["mimic_split"] for c in w.calls if c[0] == "build_dataloader"] == ["test"]
+    assert "[gallery] test: 9 rows" in capsys.readouterr().out, "the count the loader gave is in the log"
+    assert not (w.out / "manifest.json").exists()
+
+
+def test_a_direct_build_refuses_to_rewrite_a_finished_build_whatever_called_it(tmp_path, ref, capsys):
+    """R8, in the builder itself and not only in the wrapper: manifest.json is the marker of a finished build."""
+    w = World(tmp_path, ref)
+    w.out.mkdir(parents=True)
+    (w.out / "manifest.json").write_text('{"first": "build"}\n')
+    (w.out / "img_emb.npy").write_bytes(b"kept")
+    with pytest.raises(bg.AlreadyBuilt) as err:
+        w.build()
+    assert isinstance(err.value, RuntimeError) and str(tmp_path) not in str(err.value)
+    assert w.calls == [], "refused before any model was loaded"
+    assert (w.out / "manifest.json").read_text() == '{"first": "build"}\n' and (w.out / "img_emb.npy").read_bytes() == b"kept"
+    # --tiny too, as a function and from the command line
+    tiny = tmp_path / "tiny"
+    bg.build_tiny(tiny)
+    before = {p.name: p.read_bytes() for p in tiny.iterdir() if p.is_file()}
+    with pytest.raises(bg.AlreadyBuilt):
+        bg.build_tiny(tiny)
+    capsys.readouterr()
+    assert bg.main(["--tiny", str(tiny)]) == 1
+    printed = capsys.readouterr().out.splitlines()
+    assert len(printed) == 1 and printed[0].startswith("ERROR ") and str(tmp_path) not in printed[0] and "/" not in printed[0]
+    assert {p.name: p.read_bytes() for p in tiny.iterdir() if p.is_file()} == before, "nothing was rewritten"
+
+
+def test_a_refused_build_does_not_even_import_the_loaders(tmp_path, monkeypatch):
+    """The guard comes before real_deps(): a direct invocation on a finished build is refused at once, not after the imports."""
+    out = tmp_path / "done"
+    out.mkdir()
+    (out / "manifest.json").write_text("{}")
+    monkeypatch.setattr(bg, "real_deps", lambda: pytest.fail("real_deps() ran before the guard"))
+    with pytest.raises(bg.AlreadyBuilt):
+        bg.build(make_args(tmp_path, out=str(out)))
 
 
 def test_a_different_decoder_tower_is_recorded_not_hidden(tmp_path, ref, capsys):
@@ -871,6 +1076,100 @@ def test_the_manifests_transform_facts_are_the_same_numbers_whichever_path_write
     assert bg.transform_facts(CLIP_MEAN, CLIP_STD, 224) == bg.transform_facts(ref.IMAGE_MEAN, ref.IMAGE_STD, ref.IMAGE_SIZE)
 
 
+# ── the wrapper's allowlist of [gallery] lines (R7) ───────────────────────────
+
+def wrapper_patterns() -> List[str]:
+    """GALLERY_SHAPES as scripts/build_retrieval_gallery_h100.sh holds it: one anchored pattern per line of one single-quoted
+    assignment (grep -E reads a newline as 'or')."""
+    found = re.search(r"^GALLERY_SHAPES='(.*?)'$", (REPO_ROOT / "scripts" / "build_retrieval_gallery_h100.sh").read_text(), re.M | re.S)
+    assert found, "the wrapper has no GALLERY_SHAPES assignment"
+    return found.group(1).split("\n")
+
+
+def grep_passes(lines: List[str]) -> List[str]:
+    """The lines the wrapper's filter lets through: those very patterns, through the very grep, as the job runs them."""
+    done = subprocess.run(["grep", "-aE", "\n".join(wrapper_patterns())], input="\n".join(lines) + "\n", capture_output=True, text=True)
+    assert done.returncode in (0, 1), done.stderr
+    return done.stdout.splitlines()
+
+
+GALLERY_PASS = [
+    "[gallery] device=cuda", "[gallery] device=cpu",
+    "[gallery] towers_identical=True img_proj=False", "[gallery] towers_identical=False img_proj=True",
+    "[gallery] tower_sha256=" + "0a1b2c3d" * 8 + " decoder_tower_sha256=" + "f" * 64,
+    "[gallery] test: 2663 rows", "[gallery] train: 191462 rows", "[gallery] train: 1234567 rows",
+    "[gallery] gate_rk app: i2t_R@1=0.0415 i2t_R@5=0.1042 i2t_R@10=0.1714 t2i_R@1=0.0388 t2i_R@5=0.0991 t2i_R@10=0.1626 n=2663",
+    "[gallery] norms: test img min=0.999999 max=1.000001 mean=1.000000 txt min=0.999998 max=1.000002 mean=1.000000",
+    "[gallery] norms: train img min=nan max=nan mean=nan txt min=0.000000 max=37.512345 mean=inf",
+    "[gallery] texts: 194125 rows, 163021 groups", "[gallery] hashed 194125 image files",
+    "[gallery] isbi cross-check: status=absent", "[gallery] isbi cross-check: status=mismatch",
+    "[gallery] isbi cross-check: status=unreadable",
+    "[gallery] isbi cross-check: status=compared rows=191462 max_abs_diff=1.953e-05",
+    "[gallery] manifest written, labels_status=pending",
+]
+GALLERY_WITHHELD = [
+    "[gallery] study_id=12345678",                                                      # an id with no slash in it
+    "[gallery] The heart is mildly enlarged and there is a small pleural effusion.",    # report text
+    "[gallery] test: 40 rows study_id=12345678",                                        # a good line with an id behind it
+    "[gallery] /sc/home/someone/images/p10/leak.jpg",
+    "[gallery] test: 12345678 rows",                                                    # eight digits: an id, not a count
+    "[gallery] hashed 50000001 image files",
+    "[gallery]  test: 40 rows", " [gallery] test: 40 rows", "[gallery] test: 40 rows ", "[gallery] test: 40 rows\t",
+    "[gallery] tower_sha256=" + "A" * 64 + " decoder_tower_sha256=" + "a" * 64,                 # upper-case hex
+    "[gallery] tower_sha256=" + "a" * 63 + " decoder_tower_sha256=" + "a" * 64,                 # a hash a digit short
+    "[gallery] tower_sha256=" + "a" * 64 + " decoder_tower_sha256=" + "a" * 64 + "0",
+    "[gallery] device=cuda:0", "[gallery] device=cuda extra",
+    "[gallery] isbi cross-check: status=compared rows=12 max_abs_diff=1.2e-05",         # not the {:.3e} the builder writes
+    "[gallery] norms: test img min=1 max=1 mean=1 txt min=1 max=1 mean=1",
+    "[gallery] norms: validate img min=1.000000 max=1.000000 mean=1.000000 txt min=1.000000 max=1.000000 mean=1.000000",
+    "[gallery] gate_rk app: i2t_R@1=0.0415 n=2663",
+    "[gallery] manifest written, labels_status=pending, study 50000001",
+    "gallery] test: 40 rows", "[gallery]test: 40 rows", "[Gallery] test: 40 rows", "[gallery] tiny: 200 images, 240 report rows, 78 groups, 40 test",
+    "",
+]
+
+
+def test_the_wrappers_allowlist_passes_the_known_lines_and_withholds_everything_else():
+    assert grep_passes(GALLERY_PASS) == GALLERY_PASS
+    assert grep_passes(GALLERY_WITHHELD) == []
+    for line in GALLERY_PASS + GALLERY_WITHHELD:      # the shapes written in the tests and the patterns in the wrapper say the same
+        assert bool(GALLERY_SHAPES.match(line)) == (grep_passes([line]) == [line]), line
+    assert [bool(GALLERY_SHAPES.match(line)) for line in GALLERY_PASS] == [True] * len(GALLERY_PASS)
+
+
+def test_the_wrappers_allowlist_is_one_anchored_pattern_per_shape_with_nothing_free_in_it():
+    patterns = wrapper_patterns()
+    assert len(patterns) == len(GALLERY_SHAPE_LIST)
+    assert "" not in patterns, "an empty pattern matches every line"
+    for pattern in patterns:
+        assert pattern.startswith("^\\[gallery\\] ") and pattern.endswith("$"), pattern
+        bare = re.sub(r"\[[^\]]*\]", "", re.sub(r"\\.", "", pattern))      # without escaped characters, then bracket expressions
+        assert not re.search(r"[.*+?]", bare), "a wildcard, an unbounded repeat or an optional part in " + pattern
+        assert not re.search(r"\\[sSwWdD]", pattern), pattern
+    assert not (REPO_ROOT / "scripts" / "build_retrieval_gallery_h100.sh").read_text().count("grep -av '/'"), "the blacklist is gone"
+
+
+def test_the_wrappers_allowlist_passes_every_line_the_builder_prints_and_each_shape_is_exercised(tmp_path, ref, capsys):
+    pytest.importorskip("torch")
+    printed = []
+    for i, variant in enumerate(("plain", "other tower with a projection", "isbi cross-check")):
+        root = tmp_path / str(i)
+        root.mkdir()
+        w = World(root, ref, decoder_differs=(i == 1), img_proj=(object() if i == 1 else None))
+        if variant == "isbi cross-check":
+            w.args.isbi_cache = str(_save_isbi(root / "isbi.pt", w.emb["train"][0].astype(np.float16)))
+        w.build()
+        printed += capsys.readouterr().out.splitlines()
+    assert printed and all(l.startswith("[gallery] ") for l in printed)
+    assert grep_passes(printed) == printed, [l for l in printed if l not in grep_passes(printed)]
+    assert all(GALLERY_SHAPES.match(l) for l in printed)
+    for shape in GALLERY_SHAPE_LIST:
+        assert any(re.match(r"^\[gallery\] " + shape + "$", l) for l in printed), "the builder never printed a line of the shape " + shape
+    # and no byte of any of them could be an id or a report: each is cut by the allowlist at the first thing it does not know
+    for line in printed:
+        assert grep_passes([line + " study_id=12345678"]) == [] and grep_passes([line + "x"]) == [], line
+
+
 # ── the wrapper, rehearsed in a temp tree ─────────────────────────────────────
 
 PYTHON_STUB = r"""#!/bin/bash
@@ -892,7 +1191,12 @@ done
 if [ "$1" = scripts/build_retrieval_gallery.py ]; then
   printf 'Encoding:  50%%|#####     | 1/2\r'
   echo "[gallery] towers_identical=True img_proj=False"
-  echo "[gallery] /sc/home/someone/images/p10/leak.jpg a path that a gallery line must never carry"
+  if [ "$(cat "$STUB_DIR/build.junk" 2>/dev/null)" != no ]; then
+    echo "[gallery] /sc/home/someone/images/p10/leak.jpg a path that a gallery line must never carry"
+    echo "[gallery] study_id=12345678"
+    echo "[gallery] The heart is mildly enlarged and there is a small pleural effusion."
+    echo "[gallery] test: 40 rows study_id=12345678"
+  fi
   echo "[gallery] test: 40 rows"
   echo "Findings: FAKE REPORT TEXT study_id=12345678 /sc/home/someone/images/p10/img.jpg"
   echo "Traceback (most recent call last): FAKE MIMIC TEXT in a message" >&2
@@ -953,11 +1257,17 @@ class JobBox:
         (self.repo / "outputs").symlink_to(self.main / "outputs", target_is_directory=True)
         for directory in (self.chat, self.data, self.stubs, self.bin, self.scratch):
             directory.mkdir()
-        for name in ("train.parquet", "test.parquet"):
+        for name in ("train.parquet", "validate.parquet", "test.parquet"):      # the reference loader reads all three
             (self.data / name).write_bytes(b"")
         python = self.bin / "python"
         python.write_text(PYTHON_STUB)
         python.chmod(0o755)
+        df = self.bin / "df"       # as the real one: it fails for a directory that does not exist; free space is FAKE_DF_KB (default 50 GB)
+        df.write_text('#!/bin/bash\nfor last; do :; done\necho "$last" >> "$STUB_DIR/df.calls"\n'
+                      '[ -d "$last" ] || { echo "df: $last: No such file or directory" >&2; exit 1; }\n'
+                      'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"\n'
+                      'echo "/dev/fake 100000000 1000 ${FAKE_DF_KB:-50000000} 1% /fake"\n')
+        df.chmod(0o755)
         self.build_id = "20261009_1234567"
         self.set_build_mode("ok")
         self.set_ref_mode("ok")
@@ -972,6 +1282,10 @@ class JobBox:
 
     def set_ref_mode(self, mode: str) -> None:
         (self.stubs / "ref.mode").write_text(mode + "\n")
+
+    def set_junk(self, on: bool) -> None:
+        """Whether the stub build step prints [gallery] lines of no known shape (an id, report text, a path) among its good ones."""
+        (self.stubs / "build.junk").write_text(("yes" if on else "no") + "\n")
 
     def set_metrics(self, app: dict, reference: dict) -> None:
         """What the stub build step leaves as gate_rk.json (the app side) and the stub reference step as its result file."""
@@ -1023,11 +1337,13 @@ def test_a_clean_run_builds_runs_the_reference_compares_and_prints_only_safe_lin
     assert done.returncode == 0, done.stdout
     # R7: only wrapper- and builder-authored lines, and nothing the python steps printed besides [gallery] lines
     assert [l for l in lines if not LINE_OK.match(l)] == [], "a line that is not ===, [gallery], RESULT or ERROR"
-    assert not [l for l in lines if "FAKE" in l or "12345678" in l or "/sc/home" in l or "Traceback" in l or "Encoding" in l]
+    assert not [l for l in lines if "FAKE" in l or "12345678" in l or "/sc/home" in l or "Traceback" in l or "Encoding" in l
+                or "heart" in l or "effusion" in l or "study_id" in l]
     assert lines[0] == "=== sync 3f2a9c41d7e86b05a1c4e9d3b7f60285ac9e1d47 clean ===", "the provenance comes first"
     gallery = [l for l in lines if l.startswith("[gallery]")]
     assert gallery == ["[gallery] towers_identical=True img_proj=False", "[gallery] test: 40 rows"], \
-        "the builder's lines pass, the one that carries a path and the progress bar's fragment do not"
+        "only a line of a known shape passes: not the path, not the slash-free id, not report text, not a valid line with an id behind it"
+    assert lines.index("=== gallery lines withheld: 4 ===") == lines.index("[gallery] test: 40 rows") + 1, "four withheld, counted, no more"
     (final,) = results(lines)
     assert final["gate_rk_equal"] is True and final["n"] == 2663 and final["i2t_R@10"] == 0.1714
     assert isinstance(final["wall_s"], int) and 0 <= final["wall_s"] < 600
@@ -1045,6 +1361,29 @@ def test_a_clean_run_builds_runs_the_reference_compares_and_prints_only_safe_lin
     for name, snap in before.items():
         assert snapshot(getattr(box, name)) == snap, name
     assert [p.name for p in box.chat.iterdir()] == ["gallery"] and [p.name for p in (box.chat / "gallery").iterdir()] == [box.build_id]
+
+
+def test_a_build_that_printed_nothing_unexpected_says_zero_withheld(tmp_path):
+    """A 0 is evidence that the filter ran and found nothing to withhold; silence would not tell it from a filter that never ran."""
+    box = JobBox(tmp_path)
+    box.set_junk(False)
+    done = box.run()
+    lines = job_lines(done)
+    assert done.returncode == 0, done.stdout
+    assert [l for l in lines if l.startswith("[gallery]")] == ["[gallery] towers_identical=True img_proj=False", "[gallery] test: 40 rows"]
+    assert lines.index("=== gallery lines withheld: 0 ===") == lines.index("[gallery] test: 40 rows") + 1
+
+
+def test_a_filter_that_cannot_count_says_unknown_and_not_zero(tmp_path):
+    box = JobBox(tmp_path)
+    grep = box.bin / "grep"           # fails only for the counting call: every other grep is the real one
+    grep.write_text('#!/bin/bash\ncase " $* " in *" -avcE "*) exit 2;; esac\n'
+                    'for g in /usr/bin/grep /bin/grep; do [ -x "$g" ] && exec "$g" "$@"; done\nexit 127\n')
+    grep.chmod(0o755)
+    done = box.run()
+    lines = job_lines(done)
+    assert done.returncode == 0, done.stdout
+    assert "=== gallery lines withheld: unknown ===" in lines and "=== gallery lines withheld: 0 ===" not in lines
 
 
 def test_the_three_steps_run_in_order_with_the_published_commands(tmp_path):
@@ -1115,8 +1454,10 @@ def test_an_unequal_gate_fails_the_job_with_the_verdict_in_the_log(tmp_path):
     done = box.run()
     lines = job_lines(done)
     assert done.returncode == 1, done.stdout
-    (final,) = results(lines)
-    assert final["gate_rk_equal"] is False and final["differs"] == ["t2i_R@10"]
+    verdict, shown, gap = results(lines)
+    assert verdict["gate_rk_equal"] is False and verdict["differs"] == ["t2i_R@10"]
+    assert shown == {"gate_rk_reference": {"t2i_R@10": 0.2}}, "the reference's own value is in the job log"
+    assert gap == {"delta_studies": {"t2i_R@10": round((0.2 - METRICS["t2i_R@10"]) * 2663)}}
     assert "ERROR compare exit=1" in lines and not [l for l in lines if l.startswith("=== END")]
     assert [l for l in lines if not LINE_OK.match(l)] == []
     assert json.loads((box.out_dir / "gate_rk.json").read_text())["equal"] is False
@@ -1164,17 +1505,113 @@ def test_a_comparison_that_cannot_run_is_an_error_line_not_a_traceback_in_the_jo
     assert "FAKE REPORT TEXT" in (box.out_dir / "compare.err").read_text()
 
 
-def test_a_finished_build_is_never_overwritten(tmp_path):
+def decided_build(box: JobBox, equal: bool) -> None:
+    """A build as the job leaves it once the gate is decided: manifest.json (the marker) and a gate_rk.json with the verdict."""
+    box.out_dir.mkdir(parents=True)
+    (box.out_dir / "manifest.json").write_text('{"first": "build"}\n')
+    (box.out_dir / "gate_rk.json").write_text(json.dumps({"app": METRICS, "reference": METRICS, "equal": equal}, indent=2))
+
+
+@pytest.mark.parametrize("equal", [True, False])
+def test_a_build_whose_gate_is_already_decided_is_never_overwritten_and_not_resumed(tmp_path, equal):
+    box = JobBox(tmp_path)
+    decided_build(box, equal)
+    before = snapshot(box.chat)
+    done = box.run()
+    lines = job_lines(done)
+    assert done.returncode == 1, done.stdout
+    assert any(l.startswith("ERROR") and "gate already decided" in l and box.build_id in l for l in lines), lines
+    assert box.ran_nothing() and "=== resume: gate only (build kept) ===" not in lines
+    assert (box.out_dir / "manifest.json").read_text() == '{"first": "build"}\n' and snapshot(box.chat) == before
+
+
+def test_a_manifest_without_a_gate_file_cannot_be_gated_and_is_refused(tmp_path):
     box = JobBox(tmp_path)
     box.out_dir.mkdir(parents=True)
     (box.out_dir / "manifest.json").write_text('{"first": "build"}\n')
     before = snapshot(box.chat)
     done = box.run()
-    lines = job_lines(done)
     assert done.returncode == 1, done.stdout
-    assert [l for l in lines if l.startswith("ERROR")] and box.build_id in "\n".join(lines)
-    assert box.ran_nothing()
-    assert (box.out_dir / "manifest.json").read_text() == '{"first": "build"}\n' and snapshot(box.chat) == before
+    assert any(l.startswith("ERROR") and "gate_rk.json" in l for l in job_lines(done)), job_lines(done)
+    assert box.ran_nothing() and snapshot(box.chat) == before
+
+
+def test_a_requeue_after_a_failed_reference_step_resumes_at_the_gate_and_decides_it(tmp_path):
+    """Step 1 finished (manifest.json is there) and step 2 failed. The next attempt, a requeue or a resubmission under the same
+    BUILD_ID, keeps the hour of encoding and runs steps 2 and 3 only."""
+    box = JobBox(tmp_path)
+    box.set_ref_mode("fail")
+    first = box.run()
+    assert first.returncode == 4 and "ERROR reference exit=4" in job_lines(first)
+    assert (box.out_dir / "manifest.json").is_file() and '"equal"' not in (box.out_dir / "gate_rk.json").read_text()
+    (box.out_dir / "img_emb.npy").write_bytes(b"the build")                                # stands for the build's own files
+    kept = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in box.out_dir.iterdir() if p.is_file()}
+    box.set_ref_mode("ok")
+    second = box.run(SLURM_RESTART_COUNT="1")
+    lines = job_lines(second)
+    assert second.returncode == 0, second.stdout
+    assert "=== resume: gate only (build kept) ===" in lines and not [l for l in lines if l.startswith("[gallery]")]
+    assert not any("earlier attempt" in l for l in lines), "that is the message of a build that starts again"
+    assert any("restart=1" in l and l.startswith("=== job=") for l in lines)
+    assert [l for l in lines if not LINE_OK.match(l)] == []
+    (final,) = results(lines)
+    assert final["gate_rk_equal"] is True and lines[-1].startswith("=== END ")
+    assert len(box.steps()["build"]) == 1, "the build was not run again"
+    assert len(box.steps()["reference"]) == 2 and len(box.steps()["compare"]) == 1
+    assert json.loads((box.out_dir / "gate_rk.json").read_text())["equal"] is True
+    assert json.loads((box.out_dir / "manifest.json").read_text())["gate_rk"]["equal"] is True
+    for name in ("img_emb.npy", "build.log"):
+        assert (box.out_dir / name).read_bytes() == kept[name][0] and (box.out_dir / name).stat().st_mtime_ns == kept[name][1], name
+    assert "FAKE REPORT TEXT" in (box.out_dir / "reference_rk.log").read_text(), "the reference step ran again"
+
+
+def test_a_resumed_gate_that_comes_out_unequal_is_decided_once_and_then_refused(tmp_path):
+    box = JobBox(tmp_path)
+    box.set_ref_mode("fail")
+    assert box.run().returncode == 4
+    box.set_ref_mode("ok")
+    box.set_metrics(METRICS, dict(METRICS, **{"i2t_R@1": 0.5}))
+    second = box.run()
+    assert second.returncode == 1 and "=== resume: gate only (build kept) ===" in job_lines(second)
+    assert "ERROR compare exit=1" in job_lines(second) and json.loads((box.out_dir / "gate_rk.json").read_text())["equal"] is False
+    third = box.run()
+    assert third.returncode == 1 and any("gate already decided" in l for l in job_lines(third)), job_lines(third)
+    assert len(box.steps()["reference"]) == 2, "no third attempt at the reference"
+
+
+def test_a_missing_validate_parquet_is_named_and_stops_the_job_before_anything_runs(tmp_path):
+    """The reference script's build_dataloader reads train, validate and test together, so the job needs all three files."""
+    source = (REPO_ROOT / "scripts" / "evaluate_cxr_retrieval.py").read_text()
+    assert re.search(r'"validation":\s*f"\{local_parquet_dir\}/validate\.parquet"', source), "the reason for this check moved: update it"
+    box = JobBox(tmp_path)
+    (box.data / "validate.parquet").unlink()
+    done = box.run()
+    assert done.returncode == 1 and any(l.startswith("ERROR") and "validate.parquet" in l for l in job_lines(done)), job_lines(done)
+    assert box.ran_nothing() and not box.out_dir.exists() and not (box.chat / "gallery").exists()
+
+
+def test_free_space_is_measured_on_the_nearest_directory_that_exists(tmp_path):
+    """The first build has no gallery/ yet, and the real df fails for a path that is not there (the stub does too)."""
+    box = JobBox(tmp_path)
+    assert box.run().returncode == 0
+    assert (box.stubs / "df.calls").read_text().splitlines() == [str(box.chat)], "no gallery/ existed: CHAT_HOME is measured"
+    (box.stubs / "df.calls").unlink()
+    again = box.run(BUILD_ID="a_second_build")
+    assert again.returncode == 0, again.stdout
+    assert (box.stubs / "df.calls").read_text().splitlines() == [str(box.chat / "gallery")], "gallery/ exists now: it is measured"
+
+
+@pytest.mark.parametrize("free_kb, enough", [("2097151", False), ("2097152", True), ("1000", False), ("50000000", True), ("-", False)])
+def test_the_job_wants_two_gigabytes_free_where_the_gallery_goes(tmp_path, free_kb, enough):
+    box = JobBox(tmp_path)
+    done = box.run(FAKE_DF_KB=free_kb)
+    lines = job_lines(done)
+    if enough:
+        assert done.returncode == 0, done.stdout
+    else:
+        assert done.returncode == 1 and any(l.startswith("ERROR") and "free space" in l for l in lines), lines
+        assert [l for l in lines if not LINE_OK.match(l)] == [], "no bash complaint about a number it could not read"
+        assert box.ran_nothing() and not box.out_dir.exists() and not (box.chat / "gallery").exists(), "nothing was created"
 
 
 @pytest.mark.parametrize("where", ["inside_outputs", "under_main", "outputs_elsewhere", "symlink_into_main", "symlink_named_outputs",
@@ -1251,7 +1688,7 @@ def test_a_missing_chat_home_or_input_stops_the_job_before_anything_runs(tmp_pat
     box.chat.mkdir()
     things = [box.main / "outputs" / "h100_kd_150m_v2_full_data_lr3e6" / "checkpoints" / "last.ckpt",
               box.main / "outputs" / "h100_report_gen_m3_tower13d_s42" / "checkpoints" / "last.ckpt",
-              box.data / "train.parquet", box.data / "test.parquet"]
+              box.data / "train.parquet", box.data / "validate.parquet", box.data / "test.parquet"]
     for path in things:
         path.rename(str(path) + ".away")
         done = box.run()

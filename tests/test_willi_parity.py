@@ -6823,8 +6823,14 @@ def test_build_retrieval_gallery_wrapper_keeps_every_python_steps_raw_output_out
     assert compare.startswith('CMP_OUT="$(python scripts/build_retrieval_gallery.py') and compare.endswith(
         '2>> "${OUT}/compare.err")" || rc=$?'), compare
     text = "\n".join(code)
-    # the only things that leave a log file: [gallery] lines without a slash, and RESULT / ERROR lines
-    assert "tr '\\r' '\\n' < \"${OUT}/build.log\" | grep -aE '^\\[gallery\\] ' | grep -av '/' | tail -n 60 || true" in text
+    # the only things that leave a log file: [gallery] lines of a known shape (an allowlist, not a blacklist of characters), the
+    # number of those withheld, and RESULT / ERROR lines
+    assert "tr '\\r' '\\n' < \"${OUT}/build.log\" | grep -aE \"${GALLERY_SHAPES}\" | tail -n 60 || true" in text
+    assert ("WITHHELD=\"$(tr '\\r' '\\n' < \"${OUT}/build.log\" | grep -a '^\\[gallery\\] ' | grep -avcE \"${GALLERY_SHAPES}\" || true)\""
+            in text)
+    assert "case \"${WITHHELD}\" in ''|*[!0-9]*) WITHHELD=unknown ;; esac" in text, "a count that could not be made is not a zero"
+    assert 'echo "=== gallery lines withheld: ${WITHHELD} ==="' in text
+    assert "grep -av '/'" not in text, "a slash is not what makes a line unsafe"
     assert "printf '%s\\n' \"${CMP_OUT}\" | grep -aE '^(RESULT |ERROR)' || true" in text
     for step in ("build", "reference", "compare"):
         assert 'echo "ERROR {} exit=${{rc}}"'.format(step) in text, step
@@ -6858,14 +6864,36 @@ def test_build_retrieval_gallery_wrapper_checks_every_path_before_it_creates_or_
     first_step = code.index("python scripts/build_retrieval_gallery.py --checkpoint-13d")
     for guard in ('fail "OUT is inside an outputs directory"', 'fail "OUT resolves into an outputs directory"',
                   'fail "OUT is under the thesis checkout (R8)"', 'fail "CHAT_HOME does not exist: run chat_cluster_setup_h100.sh first"',
-                  '[ -e "${OUT}/manifest.json" ]', 'fail "13D checkpoint (the retrieval tower and text encoder) not found"',
+                  '[ -e "${OUT}/manifest.json" ]',
+                  'fail "${BUILD_ID} has a manifest.json but no gate_rk.json: it cannot be gated, use a new BUILD_ID"',
+                  'fail "${BUILD_ID} is already built and its gate already decided: a finished build is never overwritten"',
+                  'fail "13D checkpoint (the retrieval tower and text encoder) not found"',
                   'fail "decoder checkpoint not found"', 'fail "train.parquet not found in DATA"', 'fail "test.parquet not found in DATA"',
+                  'fail "validate.parquet not found in DATA: the reference loader reads train, validate and test together"',
+                  'MIN_FREE_KB=2097152', '"${FREE_KB}" -ge "${MIN_FREE_KB}"',
+                  'fail "${FREE_KB} KB free space where the gallery goes: at least 2 GB are needed"',
                   '"${GPUS}" -ge 1'):
         assert guard in code, guard
         assert code.index(guard) < mkdir < first_step, guard
     plain_name = '"${BUILD_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$'
     assert plain_name in code and code.index(plain_name) < code.index('OUT="${CHAT_HOME}/gallery/')
     assert not re.search(r"(^|[\s;&|(])rm(\s|$)", code, re.M), "additive only: no deletion"
+
+
+def test_build_retrieval_gallery_wrapper_resumes_at_the_gate_only_for_a_finished_build_with_no_verdict_yet():
+    """A manifest.json (step 1 finished) with a gate_rk.json that has no verdict resumes at steps 2 and 3, with the build kept; one
+    whose verdict is in is refused, and so is a manifest with no gate file (behaviour: tests/test_build_retrieval_gallery.py)."""
+    code = "\n".join(_gallery_wrapper_code(_gallery_wrapper_text()))
+    assert code.count("RESUME=0") == 1 and code.count("RESUME=1") == 1
+    assert "grep -q '\"equal\":' \"${OUT}/gate_rk.json\"" in code
+    assert 'echo "=== resume: gate only (build kept) ==="' in code
+    guard = code.index('if [ -e "${OUT}/manifest.json" ]; then')
+    assert code.index("RESUME=0") < guard < code.index("RESUME=1") < code.index('echo "=== resume: gate only (build kept) ==="')
+    build = code.index("python scripts/build_retrieval_gallery.py --checkpoint-13d")
+    reference = code.index("python scripts/evaluate_cxr_retrieval.py")
+    opening = code.rindex('if [ "${RESUME}" -eq 0 ]; then', 0, build)
+    assert opening < build < code.index("\nfi\n", build) < reference, "step 1 is skipped on a resume, steps 2 and 3 never are"
+    assert code.index('echo "=== resume: gate only (build kept) ==="') < build
 
 
 def test_build_retrieval_gallery_wrapper_passes_the_bash_syntax_check():

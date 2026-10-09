@@ -10,19 +10,26 @@
 #   1. scripts/build_retrieval_gallery.py encodes the official train (191,462) and test (2,663) splits through
 #      scripts/evaluate_cxr_retrieval.py's own load_models, build_dataloader and encode_dataset at batch 32, hashes the 13D tower
 #      and the report model's tower (towers_identical), and writes the gallery files and gate_rk.app, that script's own
-#      compute_retrieval_metrics on the test split.
+#      compute_retrieval_metrics on the test split. It checks the test split the moment it is encoded (rows, unit length), before
+#      the pass over the train split.
 #   2. scripts/evaluate_cxr_retrieval.py runs UNCHANGED (R3), on the same 13D checkpoint and the test split: the published protocol.
 #   3. scripts/build_retrieval_gallery.py --compare-rk: every i2t and t2i R@k of step 1 must equal step 2's, to every digit. When
-#      they do not, the job ends with the verdict in its log and exit 1, and the gallery must not be used.
+#      they do not, the job ends with the verdict in its log (and, for what differs, the reference's values and the gap in studies)
+#      and exit 1, and the gallery must not be used.
 #
 # R8: the gallery goes to ${CHAT_HOME}/gallery/<build id>, nowhere else. OUT is derived, never an environment lever (sbatch exports
 # the submitting shell, and OUT is a common name); the build id must be one plain name. ./outputs is a symlink into the thesis
-# checkout, so the wrapper refuses an OUT inside an outputs directory or under that checkout. A finished build (its manifest.json,
-# which the builder writes last) is never overwritten; a requeued, unfinished one starts again in the same directory (the build id
-# defaults to the date and the job id, which a requeue keeps) and replaces its own partial files and raw logs.
-# R7: the job log carries only === lines that name no path, [gallery] lines (the builder's counts, booleans and hashes, filtered
-# here so that none can carry a path), the one RESULT line of the comparison, and ERROR lines with a step and an exit code. The raw
-# stdout and stderr of the builder and of the thesis script, which show paths and can show report text, go to ${OUT}/build.log and
+# checkout, so the wrapper refuses an OUT inside an outputs directory or under that checkout. A build whose manifest.json is there
+# (the builder writes it last) is never built again. With no verdict in its gate_rk.json yet, which is what a failure or a requeue
+# in step 2 or 3 leaves, the next attempt under the same BUILD_ID RESUMES: it prints `=== resume: gate only (build kept) ===` and runs
+# steps 2 and 3 on the build it finds. With the verdict in (equal or not) it is refused, "gate already decided", and so is a
+# manifest.json with no gate_rk.json. A requeue before the manifest starts step 1 again in the same directory (the build id
+# defaults to the date and the job id, which a requeue keeps) and replaces its own partial files and raw logs. The job also wants
+# validate.parquet beside the other two (the reference loader reads all three) and 2 GB free where the gallery goes.
+# R7: the job log carries only === lines that name no path, [gallery] lines of the shapes in GALLERY_SHAPES below (an allowlist: an
+# id or a piece of a report on a [gallery] line is no known shape, whatever the builder prints, and `=== gallery lines withheld: N ===`
+# counts what was not shown), the RESULT lines of the comparison, and ERROR lines with a step and an exit code. The raw stdout and
+# stderr of the builder and of the thesis script, which show paths and can show report text, go to ${OUT}/build.log and
 # ${OUT}/reference_rk.log and are never printed. Read the job with
 # `bash scripts/chat_remote.sh summary logs/chat_gallery_<jobid>.log`. Its mask blanks every run of 8 or more digits, so the date
 # in the default build id, and now and then a stretch of a hash, shows as <num>: towers_identical is the evidence, the hashes are
@@ -76,6 +83,22 @@ BUILD_ID="${BUILD_ID:-$(date +%Y%m%d)_${SLURM_JOB_ID:-local}}"
 [[ "${BUILD_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "BUILD_ID must be one plain name: letters, digits, dot, dash, underscore"
 OUT="${CHAT_HOME}/gallery/${BUILD_ID}"
 
+# The [gallery] lines that may reach this log, as one anchored pattern per line (grep -E reads a newline as "or"): digits are
+# bounded (a count has at most 7), a hash is 64 hex, and nothing in a shape is free text, so an id or a piece of a report on a
+# [gallery] line matches none of them, whatever the builder prints. tests/test_build_retrieval_gallery.py runs these very patterns,
+# through grep, over everything the builder prints and over ids, report text and paths. No line may be empty: an empty pattern
+# matches every line.
+GALLERY_SHAPES='^\[gallery\] device=(cuda|cpu)$
+^\[gallery\] towers_identical=(True|False) img_proj=(True|False)$
+^\[gallery\] tower_sha256=[0-9a-f]{64} decoder_tower_sha256=[0-9a-f]{64}$
+^\[gallery\] (test|train): [0-9]{1,7} rows$
+^\[gallery\] gate_rk app:( (i2t|t2i)_R@(1|5|10)=[0-9]\.[0-9]{4}){6} n=[0-9]{1,7}$
+^\[gallery\] norms: (test|train) img min=(nan|inf|[0-9]{1,3}\.[0-9]{6}) max=(nan|inf|[0-9]{1,3}\.[0-9]{6}) mean=(nan|inf|[0-9]{1,3}\.[0-9]{6}) txt min=(nan|inf|[0-9]{1,3}\.[0-9]{6}) max=(nan|inf|[0-9]{1,3}\.[0-9]{6}) mean=(nan|inf|[0-9]{1,3}\.[0-9]{6})$
+^\[gallery\] texts: [0-9]{1,7} rows, [0-9]{1,7} groups$
+^\[gallery\] hashed [0-9]{1,7} image files$
+^\[gallery\] isbi cross-check: status=(absent|mismatch|unreadable|compared rows=[0-9]{1,7} max_abs_diff=[0-9]\.[0-9]{3}e[+-][0-9]{2})$
+^\[gallery\] manifest written, labels_status=pending$'
+
 echo "=== P5-B gallery ${BUILD_ID}: 13D tower and text encoder, report model ${MODEL_CONFIG}, official train and test splits, batch 32, 1 GPU ==="
 echo "=== job=${SLURM_JOB_ID:-local} restart=${SLURM_RESTART_COUNT:-0} node=$(hostname) ==="
 
@@ -96,8 +119,14 @@ case "${OUT_REAL}/" in
 esac
 # CHAT_HOME is made by scripts/chat_cluster_setup_h100.sh, owner-only, and not here.
 [ -d "${CHAT_HOME}" ] || fail "CHAT_HOME does not exist: run chat_cluster_setup_h100.sh first"
+# A manifest.json is the marker of a build that finished step 1; its gate_rk.json holds the verdict once step 3 has decided it.
+RESUME=0
 if [ -e "${OUT}/manifest.json" ]; then
-  fail "${BUILD_ID} is already built (manifest.json exists): a finished build is never overwritten"
+  [ -f "${OUT}/gate_rk.json" ] || fail "${BUILD_ID} has a manifest.json but no gate_rk.json: it cannot be gated, use a new BUILD_ID"
+  if grep -q '"equal":' "${OUT}/gate_rk.json"; then
+    fail "${BUILD_ID} is already built and its gate already decided: a finished build is never overwritten"
+  fi
+  RESUME=1
 fi
 
 GPU_INFO="$(python -c 'import torch; n = torch.cuda.device_count(); print(n, torch.cuda.get_device_name(0) if n else "none")' 2>/dev/null)" || GPU_INFO="0 none"
@@ -108,24 +137,42 @@ echo "=== gpus=${GPUS} (${GPU_INFO#* }) ==="
 [ -f "${CHECKPOINT}" ] || fail "decoder checkpoint not found"
 [ -f "${DATA}/train.parquet" ] || fail "train.parquet not found in DATA"
 [ -f "${DATA}/test.parquet" ] || fail "test.parquet not found in DATA"
+[ -f "${DATA}/validate.parquet" ] || fail "validate.parquet not found in DATA: the reference loader reads train, validate and test together"
+# The gallery is about 0.6 GB and the logs a little more. Measured where it will go: the nearest directory that exists (the first
+# build has no gallery/ yet), and a number that cannot be read counts as none.
+MIN_FREE_KB=2097152
+FREE_DIR="$(dirname "${OUT}")"
+while [ ! -d "${FREE_DIR}" ]; do FREE_DIR="$(dirname "${FREE_DIR}")"; done
+FREE_KB="$(df -Pk "${FREE_DIR}" 2>/dev/null | awk 'NR==2 {print $4}')" || FREE_KB=0
+case "${FREE_KB}" in ''|*[!0-9]*) FREE_KB=0 ;; esac
+[ "${FREE_KB}" -ge "${MIN_FREE_KB}" ] || fail "${FREE_KB} KB free space where the gallery goes: at least 2 GB are needed"
 
-if [ -d "${OUT}" ]; then
-  echo "=== ${BUILD_ID}: an earlier attempt left files here and did not finish: its partial files are overwritten ==="
+if [ "${RESUME}" -eq 1 ]; then
+  echo "=== resume: gate only (build kept) ==="
+else
+  if [ -d "${OUT}" ]; then
+    echo "=== ${BUILD_ID}: an earlier attempt left files here and did not finish: its partial files are overwritten ==="
+  fi
+  mkdir -p "${OUT}"
 fi
-mkdir -p "${OUT}"
 
 # --- step 1: the gallery -----------------------------------------------------------------------------------------
-# Only the builder's [gallery] lines leave build.log (a progress bar can sit in front of one on the same physical line, hence
-# the tr), and only those without a slash: a path in one is dropped here, whatever the builder does.
-echo "=== step 1/3: the gallery; raw output goes to build.log and is never printed ==="
+# Only the builder's [gallery] lines of a known shape leave build.log (a progress bar can sit in front of one on the same physical
+# line, hence the tr), and the others are counted, not shown.
 SECONDS=0
-rc=0
-python scripts/build_retrieval_gallery.py \
-  --checkpoint-13d "${CKPT_13D}" --decoder-checkpoint "${CHECKPOINT}" --decoder-config "${MODEL_CONFIG}" \
-  --data "${DATA}" --out "${OUT}" --build-id "${BUILD_ID}" --workers "${SLURM_CPUS_PER_TASK:-8}" \
-  --isbi-cache "${SCRATCH_ROOT}/isbi_gallery_adapted.pt" > "${OUT}/build.log" 2>&1 || rc=$?
-tr '\r' '\n' < "${OUT}/build.log" | grep -aE '^\[gallery\] ' | grep -av '/' | tail -n 60 || true
-if [ "${rc}" -ne 0 ]; then echo "ERROR build exit=${rc}"; exit "${rc}"; fi
+if [ "${RESUME}" -eq 0 ]; then
+  echo "=== step 1/3: the gallery; raw output goes to build.log and is never printed ==="
+  rc=0
+  python scripts/build_retrieval_gallery.py \
+    --checkpoint-13d "${CKPT_13D}" --decoder-checkpoint "${CHECKPOINT}" --decoder-config "${MODEL_CONFIG}" \
+    --data "${DATA}" --out "${OUT}" --build-id "${BUILD_ID}" --workers "${SLURM_CPUS_PER_TASK:-8}" \
+    --isbi-cache "${SCRATCH_ROOT}/isbi_gallery_adapted.pt" > "${OUT}/build.log" 2>&1 || rc=$?
+  tr '\r' '\n' < "${OUT}/build.log" | grep -aE "${GALLERY_SHAPES}" | tail -n 60 || true
+  WITHHELD="$(tr '\r' '\n' < "${OUT}/build.log" | grep -a '^\[gallery\] ' | grep -avcE "${GALLERY_SHAPES}" || true)"
+  case "${WITHHELD}" in ''|*[!0-9]*) WITHHELD=unknown ;; esac
+  echo "=== gallery lines withheld: ${WITHHELD} ==="
+  if [ "${rc}" -ne 0 ]; then echo "ERROR build exit=${rc}"; exit "${rc}"; fi
+fi
 
 # --- step 2: the reference R@k: the thesis script, unchanged, on the same checkpoint and the official test split --------
 echo "=== step 2/3: the reference R@k (scripts/evaluate_cxr_retrieval.py, unchanged, test split); raw output goes to reference_rk.log ==="
