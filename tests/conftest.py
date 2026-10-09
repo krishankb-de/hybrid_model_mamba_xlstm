@@ -21,6 +21,11 @@ def pytest_configure(config):
         "markers",
         "slow: marks tests as slow (deselect with '-m \"not slow\"')"
     )
+    # Here and not in pytest.ini: its [tool:pytest] header is a setup.cfg one, so pytest reads nothing from that file.
+    config.addinivalue_line(
+        "markers",
+        "e2e: the chat page in a real Chrome (tests/e2e; needs requirements-e2e.txt); run with -m e2e"
+    )
     config.addinivalue_line(
         "markers",
         "cuda: marks tests that require CUDA"

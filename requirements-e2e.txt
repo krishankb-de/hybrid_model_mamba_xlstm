@@ -1,0 +1,4 @@
+# requirements-e2e.txt — the end-to-end tests of the chat page (tests/e2e, CHAT_UI_PLAN.md P4-H). A laptop tool: not in
+# app/requirements.txt, which is the cluster's web overlay. Playwright drives the installed Google Chrome (channel="chrome"),
+# so `playwright install` is not needed. Run: venv/bin/python -m pytest tests/e2e -m e2e -q
+playwright>=1.45
