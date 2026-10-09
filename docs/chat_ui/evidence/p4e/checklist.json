@@ -4,14 +4,14 @@
     "failures": []
   },
   "environment": {
-    "date": "2026-10-08",
+    "date": "2026-10-09",
     "engine": "tiny (random weights, toy vocabulary; no checkpoint, no data)",
     "tiny_step_delay_s": 0.02,
     "image": "synthetic PNG (tests/app_helpers.png_bytes)",
     "browser": "Chrome/146.0.7680.178 (headless)",
     "python": "3.14.3",
     "os": "Darwin",
-    "warm_up_turn_s": 0.81,
+    "warm_up_turn_s": 1.04,
     "viewports": {
       "desktop": [
         1280,
@@ -24,8 +24,9 @@
     },
     "notes": [
       "The tiny pipeline skips retrieve, label and score until P5-E, so the a11y check reads its label chips from a second tiny app whose home was seeded with one SYNTHETIC labelled turn (labelled_chips_*.png); the other checks run the live pipeline.",
-      "The settings drawer clamps the token budget to the server's 16-200, so the 422 of the error check is reached through the note's command ('tokens 500'), which the server applies on top of the drawer's options.",
-      "Display repair is on by default in the page (the server's own default stays off), so the reports in every picture are the repaired display copy; the settings check runs 200 tokens to show that none of its sentences repeats on the card or in any frame of the stream, while Show raw keeps the decoder's whole text (the tiny model repeats one sentence about a dozen times).",
+      "The settings drawer refuses a token budget outside the server's 16-200 with a line under the field, so the 422 of the error check is reached through the note's command ('tokens 500'), which the server applies on top of the drawer's options.",
+      "Display repair and Stop when the report starts repeating are on by default in the page (the server's own defaults stay off). The tiny model never writes an end-of-report token and loops after about 20 tokens, so a default turn ends by itself near 21 tokens (the settings check measures it); the checks that need a long turn (stream, reload, sessions, stop) store the switch off before the page loads, and every check starts from the page's defaults.",
+      "Display repair on means the reports in every picture are the repaired display copy; the settings check runs 200 tokens, with the stop switch off, to show that none of its sentences repeats on the card or in any frame of the stream, while Show raw keeps the decoder's whole text (the tiny model repeats one sentence about a dozen times).",
       "The tiny server runs no retrieval gallery and no labeller, so its /v1/models says features retrieval and labels are false: the drawer disables k_images, k_reports and CheXbert labels with a note, and the composer chips leave out k (settings_*.png).",
       "Every screenshot was confirmed by the page itself (a DOM rule per picture, true before and after the capture)."
     ]
@@ -34,8 +35,8 @@
     {
       "name": "stream",
       "status": "PASS",
-      "detail": "6 stages settled (3 done, 3 skipped); 30 snapshots, report 3 -> 205 chars; status ended on 'Report ready'; done in 1.1 s",
-      "seconds": 1.3,
+      "detail": "6 stages settled (3 done, 3 skipped); 30 snapshots, report 3 -> 205 chars; status ended on 'Report ready'; done in 1.3 s",
+      "seconds": 1.5,
       "data": {
         "stages": {
           "preprocess": "done",
@@ -62,27 +63,27 @@
         "aria_busy": [
           [
             true,
-            34
+            32
           ],
           [
             false,
-            1133
+            1296
           ]
         ],
-        "card_done_ms": 1130,
+        "card_done_ms": 1289,
         "token_budget": 40,
-        "seconds": 1.14
+        "seconds": 1.33
       },
       "console_errors": []
     },
     {
       "name": "reload",
       "status": "PASS",
-      "detail": "the card after Page.reload equals the live one (3934 characters of markup, the same six stage states); a reload mid-turn followed the running turn to the card another reload shows",
-      "seconds": 5.7,
+      "detail": "the card after Page.reload equals the live one (3976 characters of markup, the same six stage states); a reload mid-turn followed the running turn to the card another reload shows",
+      "seconds": 6.3,
       "data": {
-        "markup_chars": 3934,
-        "text_chars": 855,
+        "markup_chars": 3976,
+        "text_chars": 897,
         "stages": {
           "preprocess": "done",
           "encode": "done",
@@ -102,7 +103,7 @@
             "stop": true
           },
           "followed_equals_replayed": true,
-          "markup_chars": 4084
+          "markup_chars": 4126
         }
       },
       "console_errors": []
@@ -110,19 +111,19 @@
     {
       "name": "sessions",
       "status": "PASS",
-      "detail": "2 chats switched 4 times, each with its own card and user turn; leaving a running turn cancelled its stream (request aborted), nothing asked for it (45 samples), and it replays done",
-      "seconds": 7.0,
+      "detail": "2 chats switched 4 times, each with its own card and user turn; leaving a running turn cancelled its stream (request aborted), nothing asked for it (48 samples), and it replays done",
+      "seconds": 7.7,
       "data": {
         "sessions": [
-          "s_01a11d2044f10000628a8d",
-          "s_01a11d20480100005cd356"
+          "s_01a11f766dbd0000276713",
+          "s_01a11f7671300000d41fa0"
         ],
         "messages": {
-          "a": "m_01a11d2045150001aeaa4e",
-          "b": "m_01a11d2048250001071970",
-          "b2": "m_01a11d204d900001d85c68"
+          "a": "m_01a11f766de10001377eca",
+          "b": "m_01a11f7671530001ed349c",
+          "b2": "m_01a11f767735000148cc46"
         },
-        "samples_while_away": 45,
+        "samples_while_away": 48,
         "stream_request_cancelled": true,
         "report_chars_of_turn_finished_while_away": 171
       },
@@ -131,24 +132,24 @@
     {
       "name": "exports",
       "status": "PASS",
-      "detail": "JSON parses (37283 bytes, 4 messages, logs end in message_stop done); Markdown (1561 bytes) has '## Turn 1' and '## Turn 2'",
-      "seconds": 2.2,
+      "detail": "JSON parses (34840 bytes, 4 messages, logs end in message_stop done); Markdown (1529 bytes) has '## Turn 1' and '## Turn 2'",
+      "seconds": 2.3,
       "data": {
         "json": {
-          "file": "session-s_01a11d20604a0000359069.json",
-          "bytes": 37283,
+          "file": "session-s_01a11f768bd00000e04fc1.json",
+          "bytes": 34840,
           "messages": 4,
           "events_per_turn": [
-            37,
-            37
+            34,
+            34
           ]
         },
         "markdown": {
-          "file": "session-s_01a11d20604a0000359069.md",
-          "bytes": 1561,
+          "file": "session-s_01a11f768bd00000e04fc1.md",
+          "bytes": 1529,
           "headings": [
-            "## Turn 1 — 2026-10-08 20:07:03 UTC",
-            "## Turn 2 — 2026-10-08 20:07:04 UTC"
+            "## Turn 1 — 2026-10-09 07:00:25 UTC",
+            "## Turn 2 — 2026-10-09 07:00:25 UTC"
           ]
         }
       },
@@ -157,13 +158,13 @@
     {
       "name": "stop",
       "status": "PASS",
-      "detail": "stopped after 3 of 150 snapshots (1 more by the time the card said aborted, 0.05 s after the press); no more afterwards; note 'Turn stopped'",
-      "seconds": 0.8,
+      "detail": "stopped after 3 of 150 snapshots (1 more by the time the card said aborted, 0.07 s after the press); no more afterwards; note 'Turn stopped'",
+      "seconds": 0.9,
       "data": {
         "budget": 150,
         "snapshots_when_pressed": 2,
         "snapshots_total": 3,
-        "seconds_to_aborted": 0.05,
+        "seconds_to_aborted": 0.07,
         "note": "Turn stopped",
         "server_status": "aborted",
         "stages": {
@@ -187,7 +188,7 @@
       "name": "keyboard",
       "status": "PASS",
       "detail": "Tab visits 27 controls in DOM order, each with a focus ring; Enter sends; Enter and Space toggle a stage; Enter opens the drawer and Esc closes it to Settings",
-      "seconds": 0.9,
+      "seconds": 1.1,
       "data": {
         "tab_stops": [
           "#new-session",
@@ -358,7 +359,7 @@
       "name": "a11y",
       "status": "PASS",
       "detail": "stage buttons: their text, then state, with expanded, no glyph first; status region live=polite reads 'Report ready'; 14 chips read '<name>: positive|negative'; every control named; no text under AA contrast in 4 states",
-      "seconds": 2.7,
+      "seconds": 2.6,
       "data": {
         "contrast_issues_under_aa": {
           "settled card, light": [],
@@ -383,8 +384,8 @@
           },
           {
             "stage": "generate",
-            "visible": "generate · 651 ms",
-            "name": "generate · 651 ms, done, turn 1",
+            "visible": "generate · 665 ms",
+            "name": "generate · 665 ms, done, turn 1",
             "expanded": false
           }
         ],
@@ -397,7 +398,7 @@
           "preprocess": "preprocess · 2 ms",
           "encode": "encode · 0 mspatch_grid197, 32pooled_dim16prefix_tokens4devicecpuone_passtrue",
           "retrieve": "retrieve · skipped: gallery_unavailable",
-          "generate": "generate · 651 ms",
+          "generate": "generate · 665 ms",
           "label": "label · skipped: labeler_unavailable",
           "score": "score · skipped: no_reference"
         },
@@ -433,7 +434,7 @@
       "name": "error",
       "status": "PASS",
       "detail": "a server 422 showed the alert 'Invalid options: max_new_tokens: Input should be less than …', kept the note and the image, dismissed to the note field; the same composer then sent",
-      "seconds": 3.0,
+      "seconds": 0.9,
       "data": {
         "http_status": 422,
         "notice": "Invalid options: max_new_tokens: Input should be less than or equal to 200",
@@ -450,8 +451,8 @@
     {
       "name": "settings",
       "status": "PASS",
-      "detail": "typed 150 (1, 15 not clamped; chips and stored setting at 150 before any blur) and the turn ran it; re-run hint named xray_a.png, hidden with an image attached; typed 200 and the re-run of the same X-ray used it; at 200 tokens the card has 23 words and 0 repeated sentences (raw: 184 words, 13 repeated), none in 33 frames of the stream; Show raw is the decoder's text",
-      "seconds": 9.8,
+      "detail": "a click into the budget selected it and 1-2-0 typed over it read 120 (not 100120); Enter saved it, closed the drawer to Settings and the page said 'Settings saved.' for 4.0 s; 300 and 8 were refused with the line under the field (300 on its way applied 30, 8 changed nothing; Enter changed nothing); the Save button saved 150; a default turn stopped on a repeat after 21 of its 150 tokens with the q…",
+      "seconds": 11.7,
       "data": {
         "drawer_before": {
           "server_features": {
@@ -474,98 +475,411 @@
             "100 tok",
             "cached"
           ],
-          "display_repair_checked": true
-        },
-        "first_send": {
-          "typed_states": [
-            {
-              "value": "1",
-              "focused": true,
-              "stored": null,
-              "chips": [
-                "beam 3",
-                "100 tok",
-                "cached"
-              ]
-            },
-            {
-              "value": "15",
-              "focused": true,
-              "stored": null,
-              "chips": [
-                "beam 3",
-                "100 tok",
-                "cached"
-              ]
-            },
-            {
-              "value": "150",
-              "focused": true,
-              "stored": 150,
-              "chips": [
-                "beam 3",
-                "150 tok",
-                "cached"
-              ]
-            }
+          "display_repair_checked": true,
+          "number_field_labels": [
+            "Beam size (1–8)",
+            "Token budget (16–200)",
+            "Similar images (0–12)",
+            "Matching reports (0–10)"
           ],
+          "stop_switch": {
+            "checked": true,
+            "hint": "Off: the published protocol, which always decodes the whole token budget."
+          },
+          "save_button": {
+            "text": "Save",
+            "type": "submit",
+            "last": true,
+            "closeFirst": true
+          }
+        },
+        "enter_saves": {
+          "typed": {
+            "replaces": "100",
+            "selected_by_the_click": "100",
+            "states": [
+              {
+                "value": "1",
+                "focused": true,
+                "selected": "",
+                "stored": null,
+                "chips": [
+                  "beam 3",
+                  "100 tok",
+                  "cached"
+                ],
+                "error": {
+                  "hidden": false,
+                  "text": "Enter a whole number from 16 to 200."
+                },
+                "invalid": "true",
+                "describedby": "max_new_tokens-error",
+                "drawerOpen": true,
+                "saved": "",
+                "active": "max_new_tokens"
+              },
+              {
+                "value": "12",
+                "focused": true,
+                "selected": "",
+                "stored": null,
+                "chips": [
+                  "beam 3",
+                  "100 tok",
+                  "cached"
+                ],
+                "error": {
+                  "hidden": false,
+                  "text": "Enter a whole number from 16 to 200."
+                },
+                "invalid": "true",
+                "describedby": "max_new_tokens-error",
+                "drawerOpen": true,
+                "saved": "",
+                "active": "max_new_tokens"
+              },
+              {
+                "value": "120",
+                "focused": true,
+                "selected": "",
+                "stored": 120,
+                "chips": [
+                  "beam 3",
+                  "120 tok",
+                  "cached"
+                ],
+                "error": {
+                  "hidden": true,
+                  "text": "Enter a whole number from 16 to 200."
+                },
+                "invalid": null,
+                "describedby": null,
+                "drawerOpen": true,
+                "saved": "",
+                "active": "max_new_tokens"
+              }
+            ]
+          },
+          "after_enter": {
+            "drawer_open": false,
+            "focus": "settings",
+            "message": "Settings saved. They apply from your next Send.",
+            "stored": 120,
+            "chips": [
+              "beam 3",
+              "120 tok",
+              "cached"
+            ],
+            "region": {
+              "role": "status",
+              "live": "polite",
+              "visible": true,
+              "near": true
+            },
+            "seconds_on_page": 4.0
+          }
+        },
+        "refused_300": {
+          "typed": {
+            "replaces": "120",
+            "selected_by_the_click": "120",
+            "states": [
+              {
+                "value": "3",
+                "focused": true,
+                "selected": "",
+                "stored": 120,
+                "chips": [
+                  "beam 3",
+                  "120 tok",
+                  "cached"
+                ],
+                "error": {
+                  "hidden": false,
+                  "text": "Enter a whole number from 16 to 200."
+                },
+                "invalid": "true",
+                "describedby": "max_new_tokens-error",
+                "drawerOpen": true,
+                "saved": "",
+                "active": "max_new_tokens"
+              },
+              {
+                "value": "30",
+                "focused": true,
+                "selected": "",
+                "stored": 30,
+                "chips": [
+                  "beam 3",
+                  "30 tok",
+                  "cached"
+                ],
+                "error": {
+                  "hidden": true,
+                  "text": "Enter a whole number from 16 to 200."
+                },
+                "invalid": null,
+                "describedby": null,
+                "drawerOpen": true,
+                "saved": "",
+                "active": "max_new_tokens"
+              },
+              {
+                "value": "300",
+                "focused": true,
+                "selected": "",
+                "stored": 30,
+                "chips": [
+                  "beam 3",
+                  "30 tok",
+                  "cached"
+                ],
+                "error": {
+                  "hidden": false,
+                  "text": "Enter a whole number from 16 to 200."
+                },
+                "invalid": "true",
+                "describedby": "max_new_tokens-error",
+                "drawerOpen": true,
+                "saved": "",
+                "active": "max_new_tokens"
+              }
+            ]
+          },
+          "after_enter": {
+            "typed": "300",
+            "drawer_open": true,
+            "field_kept_as_typed": true,
+            "error": "Enter a whole number from 16 to 200.",
+            "chips": [
+              "beam 3",
+              "30 tok",
+              "cached"
+            ],
+            "stored": 30,
+            "saved_message": ""
+          }
+        },
+        "refused_8": {
+          "typed": {
+            "replaces": "300",
+            "selected_by_the_click": "300",
+            "states": [
+              {
+                "value": "8",
+                "focused": true,
+                "selected": "",
+                "stored": 30,
+                "chips": [
+                  "beam 3",
+                  "30 tok",
+                  "cached"
+                ],
+                "error": {
+                  "hidden": false,
+                  "text": "Enter a whole number from 16 to 200."
+                },
+                "invalid": "true",
+                "describedby": "max_new_tokens-error",
+                "drawerOpen": true,
+                "saved": "",
+                "active": "max_new_tokens"
+              }
+            ]
+          },
+          "after_enter": {
+            "typed": "8",
+            "drawer_open": true,
+            "field_kept_as_typed": true,
+            "error": "Enter a whole number from 16 to 200.",
+            "chips": [
+              "beam 3",
+              "30 tok",
+              "cached"
+            ],
+            "stored": 30,
+            "saved_message": ""
+          }
+        },
+        "save_button": {
+          "typed": {
+            "replaces": "8",
+            "selected_by_the_click": "8",
+            "states": [
+              {
+                "value": "1",
+                "focused": true,
+                "selected": "",
+                "stored": 30,
+                "chips": [
+                  "beam 3",
+                  "30 tok",
+                  "cached"
+                ],
+                "error": {
+                  "hidden": false,
+                  "text": "Enter a whole number from 16 to 200."
+                },
+                "invalid": "true",
+                "describedby": "max_new_tokens-error",
+                "drawerOpen": true,
+                "saved": "",
+                "active": "max_new_tokens"
+              },
+              {
+                "value": "15",
+                "focused": true,
+                "selected": "",
+                "stored": 30,
+                "chips": [
+                  "beam 3",
+                  "30 tok",
+                  "cached"
+                ],
+                "error": {
+                  "hidden": false,
+                  "text": "Enter a whole number from 16 to 200."
+                },
+                "invalid": "true",
+                "describedby": "max_new_tokens-error",
+                "drawerOpen": true,
+                "saved": "",
+                "active": "max_new_tokens"
+              },
+              {
+                "value": "150",
+                "focused": true,
+                "selected": "",
+                "stored": 150,
+                "chips": [
+                  "beam 3",
+                  "150 tok",
+                  "cached"
+                ],
+                "error": {
+                  "hidden": true,
+                  "text": "Enter a whole number from 16 to 200."
+                },
+                "invalid": null,
+                "describedby": null,
+                "drawerOpen": true,
+                "saved": "",
+                "active": "max_new_tokens"
+              }
+            ]
+          },
+          "after_click": {
+            "saved": "Settings saved. They apply from your next Send.",
+            "active": "settings",
+            "stored": 150,
+            "drawerOpen": false
+          }
+        },
+        "first_send_stop_switch_on": {
           "chips_of_turn": [
             "beam 3",
             "150 tok",
             "cached",
             "k 4/3"
           ],
-          "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 150 tok · 4016 ms · cpu · model detailstiny random-init model",
-          "rerun_hint": "No new image: Send re-runs xray_a.png with these settings."
+          "rerun_hint": "No new image: Send re-runs xray_a.png with these settings.",
+          "repeat_stop": {
+            "budget": 150,
+            "tokens": 21,
+            "stopped": "repeat",
+            "snapshots": 21,
+            "card_notes": [
+              "Stopped when the model began repeating itself."
+            ],
+            "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 21 tok · 648 ms · cpu · model detailstiny random-init model",
+            "truncated_mid_sentence": false,
+            "raw_report_repeats": 1,
+            "card_repeats": 0
+          }
         },
-        "rerun": {
-          "typed_states": [
-            {
-              "value": "2",
-              "focused": true,
-              "stored": 150,
-              "chips": [
-                "beam 3",
-                "150 tok",
-                "cached"
-              ]
-            },
-            {
-              "value": "20",
-              "focused": true,
-              "stored": 20,
-              "chips": [
-                "beam 3",
-                "20 tok",
-                "cached"
-              ]
-            },
-            {
-              "value": "200",
-              "focused": true,
-              "stored": 200,
-              "chips": [
-                "beam 3",
-                "200 tok",
-                "cached"
-              ]
-            }
-          ],
+        "rerun_stop_switch_off": {
+          "typed": {
+            "replaces": "150",
+            "selected_by_the_click": "150",
+            "states": [
+              {
+                "value": "2",
+                "focused": true,
+                "selected": "",
+                "stored": 150,
+                "chips": [
+                  "beam 3",
+                  "150 tok",
+                  "cached"
+                ],
+                "error": {
+                  "hidden": false,
+                  "text": "Enter a whole number from 16 to 200."
+                },
+                "invalid": "true",
+                "describedby": "max_new_tokens-error",
+                "drawerOpen": true,
+                "saved": "Settings saved. They apply from your next Send.",
+                "active": "max_new_tokens"
+              },
+              {
+                "value": "20",
+                "focused": true,
+                "selected": "",
+                "stored": 20,
+                "chips": [
+                  "beam 3",
+                  "20 tok",
+                  "cached"
+                ],
+                "error": {
+                  "hidden": true,
+                  "text": "Enter a whole number from 16 to 200."
+                },
+                "invalid": null,
+                "describedby": null,
+                "drawerOpen": true,
+                "saved": "Settings saved. They apply from your next Send.",
+                "active": "max_new_tokens"
+              },
+              {
+                "value": "200",
+                "focused": true,
+                "selected": "",
+                "stored": 200,
+                "chips": [
+                  "beam 3",
+                  "200 tok",
+                  "cached"
+                ],
+                "error": {
+                  "hidden": true,
+                  "text": "Enter a whole number from 16 to 200."
+                },
+                "invalid": null,
+                "describedby": null,
+                "drawerOpen": true,
+                "saved": "Settings saved. They apply from your next Send.",
+                "active": "max_new_tokens"
+              }
+            ]
+          },
           "chips_of_turn": [
             "beam 3",
             "200 tok",
             "cached",
-            "k 4/3"
+            "k 4/3",
+            "full budget"
           ],
-          "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 200 tok · 5350 ms · cpu · model detailstiny random-init model",
+          "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 200 tok · 6333 ms · cpu · model detailstiny random-init model",
           "image": {
             "sha256": "6984124968a6154a82ee0a32057c2e8029e176ee959abd3784e63351d8f5fa24",
             "filename": "xray_a.png",
             "source": "previous",
             "urls": {
-              "original": "/v1/messages/m_01a11d209a9100003a3dc1/image?variant=original",
-              "thumb": "/v1/messages/m_01a11d209a9100003a3dc1/image?variant=thumb",
-              "model_input": "/v1/messages/m_01a11d209a9100003a3dc1/image?variant=model_input"
+              "original": "/v1/messages/m_01a11f76c271000019b000/image?variant=original",
+              "thumb": "/v1/messages/m_01a11f76c271000019b000/image?variant=thumb",
+              "model_input": "/v1/messages/m_01a11f76c271000019b000/image?variant=model_input"
             }
           },
           "options": {
@@ -580,6 +894,7 @@
             "label": true,
             "reference": null,
             "display_repair": true,
+            "stop_on_repeat": false,
             "test_row": null
           },
           "skipped_stages": {
@@ -605,6 +920,11 @@
           },
           "stream_frames_seen": 33,
           "stored_snapshots": 200,
+          "stopped": "budget",
+          "tokens": 200,
+          "card_notes": [
+            "Reached the 200-token budget; the unfinished last sentence is hidden (Show raw shows it)."
+          ],
           "truncated_mid_sentence": true,
           "show_raw_equals_decoder_report": true
         }
@@ -621,7 +941,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 106385,
+      "bytes": 108017,
       "page_confirmed": true
     },
     {
@@ -632,7 +952,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 125161,
+      "bytes": 130194,
       "page_confirmed": true
     },
     {
@@ -643,7 +963,7 @@
         900
       ],
       "scheme": "dark",
-      "bytes": 126968,
+      "bytes": 132139,
       "page_confirmed": true
     },
     {
@@ -654,7 +974,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 131848,
+      "bytes": 133578,
       "page_confirmed": true
     },
     {
@@ -665,7 +985,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 168270,
+      "bytes": 175185,
       "page_confirmed": true
     },
     {
@@ -676,7 +996,7 @@
         812
       ],
       "scheme": "light",
-      "bytes": 80542,
+      "bytes": 80573,
       "page_confirmed": true
     },
     {
@@ -687,7 +1007,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 133024,
+      "bytes": 133015,
       "page_confirmed": true
     },
     {
@@ -698,18 +1018,29 @@
         900
       ],
       "scheme": "light",
-      "bytes": 97419,
+      "bytes": 97688,
       "page_confirmed": true
     },
     {
-      "file": "settings_1280x900_light.png",
-      "shows": "the drawer with its notes, the re-run hint under the image well, and the chips at the typed budget",
+      "file": "drawer_error_1280x900_light.png",
+      "shows": "the drawer with 300 typed in the token budget: the line under the field, the red border, the chips unchanged, Save in sight",
       "viewport": [
         1280,
         900
       ],
       "scheme": "light",
-      "bytes": 204817,
+      "bytes": 143714,
+      "page_confirmed": true
+    },
+    {
+      "file": "settings_1280x900_light.png",
+      "shows": "the drawer with its ranges, notes and Save, the re-run hint under the image well, and the chips at the typed budget",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 205441,
       "page_confirmed": true
     }
   ]

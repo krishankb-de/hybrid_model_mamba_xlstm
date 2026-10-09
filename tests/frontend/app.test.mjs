@@ -48,8 +48,9 @@ test('loadSettings gives the defaults for no storage, an empty one, a broken one
   }
   assert.deepEqual(DEFAULT_SETTINGS, {
     model: '', decode: 'beam', beam_size: 3, max_new_tokens: 100, cached_decode: true, compile: false, k_images: 4, k_reports: 3,
-    label: true, display_repair: true, token: '',
-  });   // the published protocol, but for Display repair: it only changes what is shown, so the page has it on (the server's default stays off)
+    label: true, display_repair: true, stop_on_repeat: true, token: '',
+  });   // the published protocol, but for two switches that the page has on and the server's Options has off: Display repair only changes what
+        // is shown, and Stop when the report starts repeating ends a decoder that has no stop condition of its own (P4-G)
   assert.notEqual(loadSettings(undefined), DEFAULT_SETTINGS);   // a fresh object each time: the caller may change it
 });
 
@@ -67,7 +68,7 @@ test('loadSettings reads what saveSettings wrote, and nothing it cannot trust', 
   for (const [name, raw] of cases) assert.deepEqual(loadSettings(memoryStorage({ [SETTINGS_FILE]: raw })), DEFAULT_SETTINGS, name);
   const junk = memoryStorage({ [SETTINGS_FILE]: JSON.stringify({
     model: 5, decode: 'sampling', beam_size: 'many', max_new_tokens: null, cached_decode: 'yes', compile: 1, k_images: {}, k_reports: [],
-    label: 'no', display_repair: 0, token: 7, evil: '<img src=x onerror=alert(1)>', __proto__: { polluted: true },
+    label: 'no', display_repair: 0, stop_on_repeat: 'yes', token: 7, evil: '<img src=x onerror=alert(1)>', __proto__: { polluted: true },
   }) });
   assert.deepEqual(loadSettings(junk), DEFAULT_SETTINGS);   // each wrong type falls back to its own default
   assert.equal(Object.hasOwn(loadSettings(junk), 'evil'), false);   // and a key that is no setting is not carried
@@ -105,12 +106,12 @@ test('browserStorage returns the page storage, or null where reading the propert
 const CARD_CACHED = { name: 'hybrid_150m_m3_rrg', cached_decode_available: true };
 const CARD_PLAIN = { name: 'hybrid_150m_v2_rrg', cached_decode_available: false };
 const MODELS = { default_model: 'hybrid_150m_m3_rrg', mode: 'private', allow_compile: false, models: [CARD_CACHED, CARD_PLAIN] };
-const OPTION_KEYS = ['beam_size', 'cached_decode', 'compile', 'decode', 'display_repair', 'k_images', 'k_reports', 'label', 'max_new_tokens'];
+const OPTION_KEYS = ['beam_size', 'cached_decode', 'compile', 'decode', 'display_repair', 'k_images', 'k_reports', 'label', 'max_new_tokens', 'stop_on_repeat'];
 
 test('optionsFromSettings sends exactly the keys of the server Options that the drawer sets, at the published defaults (Display repair on)', () => {
   const options = optionsFromSettings(DEFAULT_SETTINGS, MODELS);
   assert.deepEqual(options, { decode: 'beam', beam_size: 3, max_new_tokens: 100, cached_decode: true, compile: false, k_images: 4, k_reports: 3,
-                              label: true, display_repair: true });   // no model: the server's default runs
+                              label: true, display_repair: true, stop_on_repeat: true });   // no model: the server's default runs
   assert.deepEqual(Object.keys(optionsFromSettings({ ...DEFAULT_SETTINGS, model: CARD_PLAIN.name }, MODELS)).sort(), [...OPTION_KEYS, 'model'].sort());
   for (const key of ['reference', 'test_row', 'retrieval_k', 'token']) assert.equal(key in options, false, key);   // extra="forbid" would refuse them
   assert.doesNotThrow(() => JSON.stringify(options));
@@ -139,7 +140,7 @@ test('optionsFromSettings holds for any input: every key present, every number i
   const pick = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return pool[seed % pool.length]; };
   for (let i = 0; i < 2000; i++) {
     const messy = { beam_size: pick(), max_new_tokens: pick(), k_images: pick(), k_reports: pick(), decode: pick(), cached_decode: pick(), compile: pick(),
-                    label: pick(), display_repair: pick(), model: pick(), token: pick(), extra: pick() };
+                    label: pick(), display_repair: pick(), stop_on_repeat: pick(), model: pick(), token: pick(), extra: pick() };
     const o = optionsFromSettings(messy, [MODELS, null, undefined, {}, [], [CARD_PLAIN], { models: 'no' }][i % 7]);
     assert.deepEqual(Object.keys(o).filter((k) => k !== 'model').sort(), OPTION_KEYS);
     assert.ok(Number.isInteger(o.beam_size) && o.beam_size >= 1 && o.beam_size <= 8);
@@ -147,7 +148,7 @@ test('optionsFromSettings holds for any input: every key present, every number i
     assert.ok(Number.isInteger(o.k_images) && o.k_images >= 0 && o.k_images <= 12);
     assert.ok(Number.isInteger(o.k_reports) && o.k_reports >= 0 && o.k_reports <= 10);
     assert.ok(['beam', 'greedy'].includes(o.decode));
-    for (const flag of ['cached_decode', 'compile', 'label', 'display_repair']) assert.equal(typeof o[flag], 'boolean', flag);
+    for (const flag of ['cached_decode', 'compile', 'label', 'display_repair', 'stop_on_repeat']) assert.equal(typeof o[flag], 'boolean', flag);
     assert.ok(!('model' in o) || typeof o.model === 'string');
   }
 });
@@ -590,7 +591,7 @@ const SHA = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
 const START_DATA = {
   message_id: 'm_a', user_message_id: 'u_a', session_id: 's_a', mode: 'private', model: TINY_CARD,
   options: { model: 'tiny', decode: 'beam', beam_size: 5, max_new_tokens: 100, cached_decode: true, compile: false, k_images: 4, k_reports: 3,
-             label: true, reference: null, display_repair: true, test_row: null },
+             label: true, reference: null, display_repair: true, stop_on_repeat: true, test_row: null },
   image: { sha256: SHA, filename: 'chest.png', source: 'upload', urls: {} },
 };
 const ev = (event, data = {}) => ({ event, data: { ...data, seq: ++eventCount } });
@@ -665,7 +666,8 @@ test('the ids the script adds to the page are unique, and an existing status reg
   const ids = qa(document.body, '[id]').map((n) => n.getAttribute('id'));
   assert.equal(new Set(ids).size, ids.length, 'no id twice');
   for (const added of ['drawer-close', 'models-section', 'exports', 'session-more', 'notice', 'cached-note', 'status', 'apply-note', 'running-note',
-                       'retrieval-note', 'labels-note', 'rerun-hint']) assert.ok(ids.includes(added), added);
+                       'retrieval-note', 'labels-note', 'rerun-hint', 'settings-form', 'drawer-save', 'stop-hint', 'saved',
+                       'beam_size-error', 'max_new_tokens-error', 'k_images-error', 'k_reports-error']) assert.ok(ids.includes(added), added);
   assert.equal($('status').getAttribute('class'), 'existing');   // the one that was there
   assert.equal($('status').parentNode, document.body);
   const fresh = harness();   // none there: the page makes a visually hidden, polite one
@@ -707,7 +709,7 @@ test('start with no hash opens the newest session and replays it: its user turn,
   assert.equal(q(user, '.user-text').textContent, 'beam 5\nplease');
   assert.equal(q(user, '.chip').textContent, 'chest.png');                                // a replayed upload: its file name, until P6-B
   assert.equal(qa(user, 'img').length, 0);
-  assert.deepEqual(texts(qa(user, '.options .chip')), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text']);   // the options the assistant row carries (this turn ran with Display repair off)
+  assert.deepEqual(texts(qa(user, '.options .chip')), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text', 'full budget']);   // the options the assistant row carries (this turn ran with Display repair and the stop switch off)
   assert.equal(user.getAttribute('aria-label'), 'Your message, turn 1');
   const replayed = fixture.reduce(applyEvent, initialView(botId));
   const fresh = renderAssistantCard(replayed, { copy() {}, showModels() {}, turn: 1, ui: new Map() });
@@ -810,7 +812,7 @@ test('Send streams a turn: Send is off and Stop is on while it runs, the card fi
   assert.equal(run.opts.form.get('text'), 'beam 5');
   assert.equal(run.opts.form.get('image').name, 'chest.png');
   assert.deepEqual(JSON.parse(run.opts.form.get('options')), { decode: 'beam', beam_size: 3, max_new_tokens: 100, cached_decode: true, compile: false,
-                                                                 k_images: 4, k_reports: 3, label: true, display_repair: true });
+                                                                 k_images: 4, k_reports: 3, label: true, display_repair: true, stop_on_repeat: true });
   assert.equal(typeof run.opts.clientId, 'string');
   assert.equal(run.opts.token, '');
   assert.equal($('send').disabled, true);
@@ -1506,6 +1508,11 @@ const change = (node) => node.dispatchEvent(new ShimEvent('change', { bubbles: t
 const ownText = (node) => node.childNodes.filter((n) => n.nodeType === 3).map((n) => n.data).join('');   // a label's words, not its select's options
 const labelled = (text) => qa($('drawer'), 'label').find((l) => (text instanceof RegExp ? text.test(ownText(l)) : ownText(l) === text));
 const control = (text) => q(labelled(text), 'input, select');
+// The number fields as the drawer labels them (P4-G): the range is in the label, built from BOUNDS.
+const BEAM = 'Beam size (1–8)';
+const BUDGET = 'Token budget (16–200)';
+const SIMILAR = 'Similar images (0–12)';
+const MATCHING = 'Matching reports (0–10)';
 
 test('Settings opens and closes the drawer with the hidden attribute and aria-expanded; the close button and Esc close it and give focus back', async () => {
   const h = harness();
@@ -1606,29 +1613,24 @@ test('compile is offered only when the server allows it', async () => {
   assert.equal(chipsText().includes('compiled'), true);
 });
 
-test('the number fields clamp what is typed to the server bounds, write the clamped value back, and keep the old one for text', async () => {
+test('each number field shows its range in its label and as min and max, and nothing typed out of range is changed into something else', async () => {
   const h = harness({ models: MODELS });
   await h.app.start();
   await flush();
   $('settings').click();
-  const field = (text) => control(text);
-  const type = (input, value) => { input.value = value; change(input); };
-  type(field('Beam size'), '99');
-  assert.deepEqual([field('Beam size').value, saved(h).beam_size], ['8', 8]);
-  type(field('Beam size'), '0');
-  assert.deepEqual([field('Beam size').value, saved(h).beam_size], ['1', 1]);
-  type(field('Beam size'), 'many');
-  assert.deepEqual([field('Beam size').value, saved(h).beam_size], ['1', 1]);   // text: the value it had
-  type(field('Token budget'), '5');
-  assert.deepEqual([field('Token budget').value, saved(h).max_new_tokens], ['16', 16]);
-  type(field('Token budget'), '250');
-  assert.deepEqual([field('Token budget').value, saved(h).max_new_tokens], ['200', 200]);
-  type(field(/k_images/), '13');
-  assert.deepEqual([field(/k_images/).value, saved(h).k_images], ['12', 12]);
-  type(field(/k_reports/), '-3');
-  assert.deepEqual([field(/k_reports/).value, saved(h).k_reports], ['0', 0]);
-  assert.deepEqual(['min', 'max'].map((a) => field('Beam size').getAttribute(a)), ['1', '8']);
-  assert.deepEqual(chipsText(), ['beam 1', '200 tok', 'cached', 'k 12/0']);   // the chips follow what will be sent
+  for (const [label, key] of [[BEAM, 'beam_size'], [BUDGET, 'max_new_tokens'], [SIMILAR, 'k_images'], [MATCHING, 'k_reports']]) {
+    const field = control(label);
+    const [low, high] = BOUNDS[key];
+    assert.deepEqual([field.getAttribute('data-setting'), field.getAttribute('min'), field.getAttribute('max')], [key, String(low), String(high)], label);
+    assert.equal(ownText(labelled(label)), `${label.split(' (')[0]} (${low}–${high})`, label);   // the label says what the field takes (an en dash)
+    typeInto(field, String(high + 1));                   // out of range: the field keeps what was typed, it is not snapped to the bound
+    assert.equal(field.value, String(high + 1), label);
+  }
+  assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3']);   // the chips are what will be sent, and that has not changed
+  assert.equal(h.storage.data.has(SETTINGS_KEY), false);                     // and nothing was stored
+  for (const field of [control(BEAM), control(BUDGET), control(SIMILAR), control(MATCHING)]) change(field);   // leaving the field does not clamp it either
+  assert.deepEqual([control(BEAM).value, control(BUDGET).value, control(SIMILAR).value, control(MATCHING).value], ['9', '201', '13', '11']);
+  assert.equal(h.storage.data.has(SETTINGS_KEY), false);
 });
 
 test('decode, labels and display repair are settings too; greedy has no beam to size; the mode is shown and cannot be edited', async () => {
@@ -1639,11 +1641,11 @@ test('decode, labels and display repair are settings too; greedy has no beam to 
   decode.value = 'greedy';
   change(decode);
   assert.equal(saved(h).decode, 'greedy');
-  assert.equal(control('Beam size').disabled, true);
+  assert.equal(control(BEAM).disabled, true);
   assert.equal(chipsText()[0], 'greedy');
   decode.value = 'beam';
   change(decode);
-  assert.equal(control('Beam size').disabled, false);
+  assert.equal(control(BEAM).disabled, false);
   const labels = control('CheXbert labels');
   labels.checked = false;
   change(labels);
@@ -1664,7 +1666,7 @@ test('settings are kept in storage, read at the next load, and applied when stor
   const first = harness({ models: MODELS });
   await first.app.start();
   await flush();
-  const beam = control('Beam size');
+  const beam = control(BEAM);
   beam.value = '6';
   change(beam);
   assert.equal(saved(first).beam_size, 6);
@@ -1675,7 +1677,7 @@ test('settings are kept in storage, read at the next load, and applied when stor
   const second = harness({ models: MODELS, storage: first.storage });   // the next page load
   await second.app.start();
   await flush();
-  assert.equal(control('Beam size').value, '6');
+  assert.equal(control(BEAM).value, '6');
   assert.equal(chipsText()[0], 'beam 6');
 
   const blocked = harness({ models: MODELS, storage: brokenStorage() });
@@ -1684,7 +1686,7 @@ test('settings are kept in storage, read at the next load, and applied when stor
   assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3']);   // the defaults
   const note = qa($('drawer'), '.hint').find((n) => n.textContent.startsWith('Browser storage'));
   assert.equal(note.hidden, true);
-  const input = control('Beam size');
+  const input = control(BEAM);
   input.value = '5';
   change(input);
   assert.equal(chipsText()[0], 'beam 5');   // still applied for this page
@@ -3738,40 +3740,40 @@ test('the composer chips say nothing of Display repair while it is on, and "raw 
   assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3']);
 });
 
-test('a number field applies a whole number inside its bounds as it is typed, and leaves a half-typed value for change to clamp', async () => {
+test('a number field applies a whole number inside its bounds as it is typed, and says so when what is typed is not one', async () => {
   const h = harness({ models: MODELS });
   await h.app.start();
   await flush();
   $('settings').click();   // the drawer is open, as it is for whoever types in it
-  const tokens = control('Token budget');
+  const tokens = control(BUDGET);
   assert.equal(tokens.getAttribute('data-setting'), 'max_new_tokens');   // a stable hook for the browser check
   tokens.focus();
   typeInto(tokens, '1');    // on the way to 150, and below the bound of 16
   typeInto(tokens, '15');
-  assert.equal(tokens.value, '15');   // not clamped to 16 under the hand that is typing
+  assert.equal(tokens.value, '15');   // never changed under the hand that is typing
   assert.equal(chipsText()[1], '100 tok');
   assert.equal(h.storage.data.has(SETTINGS_KEY), false);   // nothing was applied, so nothing was stored
   typeInto(tokens, '150');
   assert.equal(chipsText()[1], '150 tok');   // at once: no blur and no Enter
   assert.equal(saved(h).max_new_tokens, 150);
   assert.deepEqual([tokens.value, document.activeElement === tokens], ['150', true]);
-  for (const half of ['', '1e', '16.5', '-20', 'x']) {
-    typeInto(tokens, half);
-    assert.deepEqual([chipsText()[1], saved(h).max_new_tokens], ['150 tok', 150], half);   // not a whole number inside the bounds: waits
+  for (const bad of ['', '1e', '16.5', '-20', 'x', '250', '15']) {
+    typeInto(tokens, bad);
+    assert.deepEqual([chipsText()[1], saved(h).max_new_tokens, tokens.value], ['150 tok', 150, bad], bad);   // not a whole number inside the bounds: waits
+    assert.equal($('max_new_tokens-error').hidden, false, bad);                                               // and says so
   }
-  typeInto(tokens, '250');   // a whole number, above the bound
-  assert.deepEqual([tokens.value, chipsText()[1]], ['250', '150 tok']);
-  change(tokens);
-  assert.deepEqual([tokens.value, chipsText()[1], saved(h).max_new_tokens], ['200', '200 tok', 200]);   // change still clamps, as before
+  change(tokens);   // leaving the field does not clamp it: 15 stays 15 and the setting stays 150
+  assert.deepEqual([tokens.value, chipsText()[1], saved(h).max_new_tokens], ['15', '150 tok', 150]);
   typeInto(tokens, '0120');   // applied, and the field is not rewritten while it is being typed in ...
   assert.deepEqual([tokens.value, chipsText()[1]], ['0120', '120 tok']);
+  assert.equal($('max_new_tokens-error').hidden, true);
   change(tokens);
   assert.equal(tokens.value, '120');   // ... until change writes the setting back
-  typeInto(control('Beam size'), '5');
-  typeInto(control(/k_images/), '0');
-  typeInto(control(/k_reports/), '10');
+  typeInto(control(BEAM), '5');
+  typeInto(control(SIMILAR), '0');
+  typeInto(control(MATCHING), '10');
   assert.deepEqual(chipsText(), ['beam 5', '120 tok', 'cached', 'k 0/10']);   // every number field, not only the budget
-  typeInto(control(/k_reports/), '11');   // above the bound of 10
+  typeInto(control(MATCHING), '11');   // above the bound of 10
   assert.equal(chipsText().at(-1), 'k 0/10');
 });
 
@@ -3787,7 +3789,7 @@ test('the drawer says that changes apply from the next Send, and while a turn ru
   assert.equal(running.hidden, false);   // from Send, before the server has answered
   h.api.streams[0].accept('m_a');
   await flush();
-  typeInto(control('Token budget'), '64');   // the settings keep changing while it runs
+  typeInto(control(BUDGET), '64');   // the settings keep changing while it runs
   assert.equal(chipsText()[1], '64 tok');   // for the next Send
   assert.deepEqual(texts(qa(q($('conversation'), '.turn.user'), '.options .chip')).slice(0, 2), ['beam 3', '100 tok']);   // and the running turn is not touched
   h.api.streams[0].channel.push(...fullTurn());
@@ -3870,7 +3872,7 @@ test('a server with no retrieval gallery and no labeller: those controls are dis
   assert.equal(retrieval.textContent, 'This server has no retrieval gallery, so similar X-rays and matching reports are skipped.');
   assert.equal(labels.textContent, 'This server has no CheXbert labeller, so labels are skipped.');
   assert.deepEqual([retrieval.hidden, labels.hidden], [false, false]);
-  for (const [field, note] of [[/k_images/, 'retrieval-note'], [/k_reports/, 'retrieval-note'], ['CheXbert labels', 'labels-note']]) {
+  for (const [field, note] of [[SIMILAR, 'retrieval-note'], [MATCHING, 'retrieval-note'], ['CheXbert labels', 'labels-note']]) {
     const input = control(field);
     assert.deepEqual([input.disabled, input.getAttribute('aria-describedby')], [true, note], String(field));
   }
@@ -3879,10 +3881,10 @@ test('a server with no retrieval gallery and no labeller: those controls are dis
   // What is sent is what the user chose: the server skips the stages, and says so in the turn.
   const sent = optionsFromSettings(loadSettings(h.storage), NO_STAGES);
   assert.deepEqual([sent.k_images, sent.k_reports, sent.label], [4, 3, true]);
-  // The notes' places: after the field they explain.
-  const drawer = $('drawer').children;
-  assert.equal(drawer[drawer.indexOf(labelled(/k_reports/)) + 1], retrieval);
-  assert.equal(drawer[drawer.indexOf(labelled('CheXbert labels')) + 1], labels);
+  // The notes' places: after the field they explain (and the field's own, hidden, error line).
+  const form = $('settings-form').children;
+  assert.deepEqual(form.slice(form.indexOf(labelled(MATCHING)), form.indexOf(labelled(MATCHING)) + 3), [labelled(MATCHING), $('k_reports-error'), retrieval]);
+  assert.equal(form[form.indexOf(labelled('CheXbert labels')) + 1], labels);
 });
 
 test('a server that runs the stages, and an older one that does not say, leave those controls available', async () => {
@@ -3893,7 +3895,7 @@ test('a server that runs the stages, and an older one that does not say, leave t
     const h = harness({ models });
     await h.app.start();
     await flush();
-    for (const field of [/k_images/, /k_reports/, 'CheXbert labels']) {
+    for (const field of [SIMILAR, MATCHING, 'CheXbert labels']) {
       assert.deepEqual([control(field).disabled, control(field).hasAttribute('aria-describedby')], [false, false], `${name}: ${field}`);
     }
     assert.deepEqual([$('retrieval-note').hidden, $('labels-note').hidden], [true, true], name);
@@ -3903,12 +3905,12 @@ test('a server that runs the stages, and an older one that does not say, leave t
   const half = harness({ models: { ...MODELS, features: { retrieval: true, labels: false } } });   // each stage on its own
   await half.app.start();
   await flush();
-  assert.deepEqual([control(/k_images/).disabled, control('CheXbert labels').disabled], [false, true]);
+  assert.deepEqual([control(SIMILAR).disabled, control('CheXbert labels').disabled], [false, true]);
   assert.deepEqual([$('retrieval-note').hidden, $('labels-note').hidden], [true, false]);
   const other = harness({ models: { ...MODELS, features: { retrieval: false, labels: true } } });
   await other.app.start();
   await flush();
-  assert.deepEqual([control(/k_reports/).disabled, control('CheXbert labels').disabled], [true, false]);
+  assert.deepEqual([control(MATCHING).disabled, control('CheXbert labels').disabled], [true, false]);
   assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached']);
 });
 
@@ -3920,4 +3922,301 @@ test('serverHas is false only where the server says that a stage is not there', 
                         { features: { retrieval: true } }, { features: { retrieval: 0 } }, { features: { retrieval: 'false' } }]) {
     assert.equal(serverHas(models, 'retrieval'), true, JSON.stringify(models));   // not told: available, as an older server is
   }
+});
+
+// ---- P4-G: a drawer that saves visibly -------------------------------------------------------------------------------------------
+
+const FIELD_ERROR = (low, high) => `Enter a whole number from ${low} to ${high}.`;
+const SAVED = 'Settings saved. They apply from your next Send.';
+const STORAGE_NOTE = 'Browser storage is unavailable, so these settings last until the page closes.';
+const save = () => buttonOf($('drawer'), 'Save');
+const mouse = (target, type) => {   // the events of a click on a field: mousedown, then focus, then mouseup
+  const event = new ShimEvent(type, { bubbles: true, cancelable: true });
+  target.dispatchEvent(event);
+  return event;
+};
+const withDrawerOpen = async (options = {}) => {
+  const h = harness({ models: MODELS, ...options });
+  await h.app.start();
+  await flush();
+  $('settings').click();
+  return h;
+};
+
+test('Stop when the report starts repeating is on by default in the page (the server keeps it off), and a stored setting that lacks it gets the default', () => {
+  assert.equal(DEFAULT_SETTINGS.stop_on_repeat, true);
+  assert.equal(optionsFromSettings(DEFAULT_SETTINGS, MODELS).stop_on_repeat, true);
+  const older = loadSettings(memoryStorage({ [SETTINGS_FILE]: JSON.stringify({ beam_size: 6, display_repair: false }) }));   // saved before the switch existed
+  assert.deepEqual([older.stop_on_repeat, older.beam_size, older.display_repair], [true, 6, false]);
+  const off = loadSettings(memoryStorage({ [SETTINGS_FILE]: JSON.stringify({ stop_on_repeat: false }) }));
+  assert.equal(off.stop_on_repeat, false);
+  assert.equal(optionsFromSettings(off, MODELS).stop_on_repeat, false);
+  for (const wrong of ['no', 0, 1, null, [], {}]) {
+    assert.equal(loadSettings(memoryStorage({ [SETTINGS_FILE]: JSON.stringify({ stop_on_repeat: wrong }) })).stop_on_repeat, true, JSON.stringify(wrong));
+  }
+  const storage = memoryStorage();
+  assert.equal(saveSettings(storage, { ...DEFAULT_SETTINGS, stop_on_repeat: false }), true);
+  assert.equal(JSON.parse(storage.data.get(SETTINGS_KEY)).stop_on_repeat, false);
+});
+
+test('the drawer has the stop switch, on, with its hint; its chip reads "full budget" when it is off and nothing when it is on', async () => {
+  const h = await withDrawerOpen();
+  const stop = control('Stop when the report starts repeating');
+  assert.deepEqual([stop.getAttribute('type'), stop.getAttribute('data-setting'), stop.checked], ['checkbox', 'stop_on_repeat', true]);
+  assert.equal($('stop-hint').textContent, 'Off: the published protocol, which always decodes the whole token budget.');
+  assert.equal(stop.getAttribute('aria-describedby'), 'stop-hint');   // the words that say what off means are read with the switch
+  const form = $('settings-form').children;
+  assert.equal(form[form.indexOf(labelled('Stop when the report starts repeating')) + 1], $('stop-hint'));   // the hint is right under the switch
+  assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3']);   // on is what the page does: nothing to say
+  stop.checked = false;
+  change(stop);
+  assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3', 'full budget']);
+  assert.equal(saved(h).stop_on_repeat, false);
+  const repair = control('Display repair');
+  repair.checked = false;
+  change(repair);
+  assert.deepEqual(chipsText().slice(-2), ['raw text', 'full budget']);
+  stop.checked = true;
+  change(stop);
+  assert.equal(chipsText().includes('full budget'), false);
+  assert.equal(saved(h).stop_on_repeat, true);
+});
+
+test('a Send carries the stop switch as the drawer has it', async () => {
+  const h = await ready({ options: { models: MODELS } });
+  $('settings').click();
+  const stop = control('Stop when the report starts repeating');
+  stop.checked = false;
+  change(stop);
+  const turn = h.app.send();
+  await flush();
+  assert.equal(JSON.parse(h.api.streams[0].opts.form.get('options')).stop_on_repeat, false);
+  h.api.streams[0].accept('m_a');
+  await flush();
+  h.api.streams[0].channel.push(...fullTurn());
+  h.api.streams[0].channel.end();
+  await turn;
+});
+
+test('a number field selects its whole value when it gets focus, by Tab or by a click, and the first mouseup after the focus does not undo it', async () => {
+  await withDrawerOpen();
+  const tokens = control(BUDGET);
+  assert.equal(tokens.value, '100');
+  assert.equal(mouse(tokens, 'mouseup').defaultPrevented, false);   // no focus yet: nothing to guard
+  tokens.focus();   // Tab, or the focus that a click gives
+  assert.deepEqual([tokens.selectionStart, tokens.selectionEnd], [0, 3]);
+  tokens.selectionStart = tokens.selectionEnd = 3;   // the caret at the end of "100", where a click leaves it
+  assert.equal(mouse(tokens, 'mouseup').defaultPrevented, true);    // else the browser puts the caret back, and "150" is typed after "100"
+  assert.equal(mouse(tokens, 'mouseup').defaultPrevented, false);   // once: a click in a field that has focus places the caret as it always does
+  tokens.blur();
+  mouse(tokens, 'mousedown');   // a whole click on a field that has no focus: mousedown, then focus, then mouseup
+  tokens.focus();
+  assert.deepEqual([tokens.selectionStart, tokens.selectionEnd], [0, 3]);
+  assert.equal(mouse(tokens, 'mouseup').defaultPrevented, true);
+  tokens.blur();
+  tokens.focus();   // focus that nothing clicked, and the field is given up before any mouse button comes up: nothing stays armed
+  tokens.blur();
+  assert.equal(mouse(tokens, 'mouseup').defaultPrevented, false);
+  for (const [label, value] of [[BEAM, '3'], [SIMILAR, '4'], [MATCHING, '3']]) {   // every number field, not only the budget
+    const field = control(label);
+    field.focus();
+    assert.deepEqual([field.selectionStart, field.selectionEnd], [0, value.length], label);
+    assert.equal(mouse(field, 'mouseup').defaultPrevented, true, label);
+  }
+  control('Decode').focus();   // the other controls are left alone
+  assert.equal(control('Decode').selectionStart, undefined);
+  assert.equal(mouse(control('Decode'), 'mouseup').defaultPrevented, false);
+});
+
+test('a value that is not a whole number inside the range is not applied: the field says why, the chips and the stored setting stay, and a valid value clears it', async () => {
+  const h = await withDrawerOpen();
+  const tokens = control(BUDGET);
+  tokens.focus();
+  for (const bad of ['200150', '300', '8', '', '16.5', '-1', 'x']) {   // "200150" is the caret after the 200 with "150" typed; "300" is a user's guess
+    typeInto(tokens, bad);
+    const error = $('max_new_tokens-error');
+    assert.deepEqual([error.hidden, error.textContent], [false, 'Enter a whole number from 16 to 200.'], bad);
+    assert.deepEqual([tokens.getAttribute('aria-invalid'), tokens.getAttribute('aria-describedby')], ['true', 'max_new_tokens-error'], bad);
+    assert.equal(tokens.value, bad, bad);   // not rewritten
+    assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3'], bad);
+    assert.equal(h.storage.data.has(SETTINGS_KEY), false, bad);   // and not stored
+  }
+  typeInto(tokens, '150');
+  assert.deepEqual([$('max_new_tokens-error').hidden, tokens.hasAttribute('aria-invalid'), tokens.hasAttribute('aria-describedby')], [true, false, false]);
+  assert.deepEqual([chipsText()[1], saved(h).max_new_tokens], ['150 tok', 150]);
+  for (const [label, key, text, bounds] of [[BEAM, 'beam_size', '9', [1, 8]], [SIMILAR, 'k_images', '13', [0, 12]], [MATCHING, 'k_reports', '11', [0, 10]]]) {
+    typeInto(control(label), text);
+    assert.equal($(`${key}-error`).textContent, FIELD_ERROR(...bounds), label);   // each field names its own bounds
+    assert.equal($(`${key}-error`).hidden, false, label);
+  }
+  assert.deepEqual([saved(h).beam_size, saved(h).k_images, saved(h).k_reports], [3, 4, 3]);
+  assert.equal($('max_new_tokens-error').parentNode, $('settings-form'));   // under its own field, in the form
+  const form = $('settings-form').children;
+  assert.equal(form[form.indexOf(labelled(BUDGET)) + 1], $('max_new_tokens-error'));
+});
+
+test('Enter in a field submits the form, which is Save: it keeps the value, closes the drawer to Settings and says "Settings saved." for about 4 seconds', async () => {
+  const h = await withDrawerOpen();
+  const tokens = control(BUDGET);
+  tokens.focus();
+  typeInto(tokens, '150');
+  assert.equal($('saved').textContent, '');
+  const enter = press(tokens, 'Enter');   // the form submits as a browser's does
+  assert.equal($('drawer').hidden, true);
+  assert.equal(document.activeElement, $('settings'));
+  assert.equal($('settings').getAttribute('aria-expanded'), 'false');
+  assert.equal(saved(h).max_new_tokens, 150);
+  assert.equal(enter.defaultPrevented, false);   // the page leaves the key to the browser
+  const message = $('saved');
+  assert.deepEqual([message.textContent, message.hasAttribute('hidden')], [SAVED, false]);
+  assert.deepEqual(['role', 'aria-live'].map((a) => message.getAttribute(a)), ['status', 'polite']);
+  h.timers.advance(3900);
+  assert.equal(message.textContent, SAVED);   // still there
+  h.timers.advance(200);
+  assert.equal(message.textContent, '');      // gone after about 4 s
+});
+
+test('Enter in a field that holds a value outside the range does not close the drawer: the error stays, the focus stays, and nothing is saved or confirmed', async () => {
+  const h = await withDrawerOpen();
+  const tokens = control(BUDGET);
+  tokens.focus();
+  typeInto(tokens, '300');
+  press(tokens, 'Enter');
+  assert.equal($('drawer').hidden, false);
+  assert.equal(document.activeElement, tokens);
+  assert.deepEqual([$('max_new_tokens-error').hidden, $('max_new_tokens-error').textContent], [false, 'Enter a whole number from 16 to 200.']);
+  assert.equal(tokens.value, '300');   // not changed to 200
+  assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3']);
+  assert.equal(h.storage.data.has(SETTINGS_KEY), false);
+  assert.equal($('saved').textContent, '');
+  typeInto(tokens, '150');   // fixed: the same key now saves
+  press(tokens, 'Enter');
+  assert.equal($('drawer').hidden, true);
+  assert.deepEqual([saved(h).max_new_tokens, $('saved').textContent], [150, SAVED]);
+});
+
+test('the drawer ends in a primary Save button that persists, closes to Settings and confirms; the close button stays at the top', async () => {
+  const h = await withDrawerOpen();
+  const form = $('settings-form');
+  assert.equal(form.localName, 'form');
+  assert.equal(form.hasAttribute('novalidate'), true);   // our messages, not the browser's bubbles, which would also stop the submit
+  const button = save();
+  assert.deepEqual([button.localName, button.getAttribute('type'), button.id, button.disabled], ['button', 'submit', 'drawer-save', false]);
+  assert.equal(form.children.at(-1).contains(button), true);   // it ends the form
+  assert.equal(qa($('drawer'), 'button')[0], $('drawer-close'));   // ✕ stays at the top
+  assert.equal(qa($('drawer'), 'h2')[0].textContent, 'Settings');
+  assert.equal(form.contains($('drawer-close')), false);
+  typeInto(control(BEAM), '5');   // applies as it is typed ...
+  assert.equal(saved(h).beam_size, 5);
+  h.storage.data.delete(SETTINGS_KEY);   // ... and Save writes the settings again, whole, whether or not anything changed since the last write
+  button.click();
+  assert.deepEqual([saved(h).beam_size, saved(h).decode, saved(h).max_new_tokens, saved(h).stop_on_repeat], [5, 'beam', 100, true]);
+  assert.equal($('drawer').hidden, true);
+  assert.equal(document.activeElement, $('settings'));
+  assert.equal($('saved').textContent, SAVED);
+});
+
+test('Save with an invalid field stays open: it focuses the first invalid field, shows every error, and saves and confirms nothing', async () => {
+  const h = await withDrawerOpen();
+  typeInto(control(MATCHING), '11');
+  typeInto(control(BEAM), '9');
+  typeInto(control(BUDGET), '15');   // in the form's order: beam size, the budget, then the retrieval counts
+  control(MATCHING).focus();   // focus is elsewhere when Save is pressed
+  save().click();
+  assert.equal($('drawer').hidden, false);
+  assert.equal(document.activeElement, control(BEAM));
+  assert.deepEqual(['beam_size', 'max_new_tokens', 'k_images', 'k_reports'].map((key) => $(`${key}-error`).hidden), [false, false, true, false]);
+  assert.equal(h.storage.data.has(SETTINGS_KEY), false);
+  assert.equal($('saved').textContent, '');
+  assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3']);
+  assert.equal($('status').textContent, FIELD_ERROR(1, 8));   // a screen reader hears the first
+  typeInto(control(BEAM), '4');   // fix it: the next Save goes to the next
+  save().click();
+  assert.equal(document.activeElement, control(BUDGET));
+  assert.equal($('drawer').hidden, false);
+  assert.equal($('saved').textContent, '');
+});
+
+test('closing the drawer with an invalid field (the close button, Esc or Settings) puts the saved value back and clears the error; a valid value typed before stays', async () => {
+  const closers = [['the close button', () => $('drawer-close').click()], ['Esc', () => press(document.activeElement, 'Escape')],
+                   ['Settings', () => $('settings').click()]];
+  for (const [name, close] of closers) {
+    const h = await withDrawerOpen();
+    const tokens = control(BUDGET);
+    tokens.focus();
+    typeInto(tokens, '150');
+    typeInto(control(BEAM), '5');
+    typeInto(tokens, '300');
+    assert.equal($('max_new_tokens-error').hidden, false, name);
+    close();
+    assert.equal($('drawer').hidden, true, name);
+    assert.equal(tokens.value, '150', name);   // the saved value: not the 100 it started with, not the 300
+    assert.deepEqual([$('max_new_tokens-error').hidden, tokens.hasAttribute('aria-invalid'), tokens.hasAttribute('aria-describedby')], [true, false, false], name);
+    assert.deepEqual([saved(h).max_new_tokens, saved(h).beam_size, chipsText().slice(0, 2)], [150, 5, ['beam 5', '150 tok']], name);
+    assert.equal($('saved').textContent, '', name);   // closed, not saved
+    $('settings').click();   // reopened: the saved value, and no error
+    assert.deepEqual([control(BUDGET).value, $('max_new_tokens-error').hidden], ['150', true], name);
+  }
+});
+
+test('Save when the browser will not store the settings shows the storage note and does not say "saved"; the settings still apply in this tab', async () => {
+  await withDrawerOpen({ storage: brokenStorage() });
+  const note = qa($('drawer'), '.hint').find((n) => n.textContent.startsWith('Browser storage'));
+  assert.deepEqual([note.textContent, note.hidden], [STORAGE_NOTE, true]);   // nothing has been tried yet
+  save().click();
+  assert.equal(note.hidden, false);          // the existing note, shown
+  assert.equal($('saved').textContent, '');  // and no claim that anything was saved
+  assert.equal($('drawer').hidden, false);   // the note is in the drawer, so the drawer stays open
+  assert.equal($('status').textContent, STORAGE_NOTE);   // and a screen reader is told
+  typeInto(control(BUDGET), '150');
+  assert.equal(chipsText()[1], '150 tok');   // the settings still apply for this page
+  save().click();
+  assert.deepEqual([note.hidden, $('saved').textContent, $('drawer').hidden], [false, '', false]);
+});
+
+test('a second Save restarts the 4 seconds, and an earlier timer does not take the new message down', async () => {
+  const h = await withDrawerOpen();
+  save().click();
+  assert.equal($('saved').textContent, SAVED);
+  h.timers.advance(3000);
+  $('settings').click();
+  save().click();   // saved again, 3 s into the first
+  h.timers.advance(2000);   // 5 s in all: the first timer would have gone
+  assert.equal($('saved').textContent, SAVED);
+  h.timers.advance(2100);
+  assert.equal($('saved').textContent, '');
+});
+
+test('a field that holds an invalid draft keeps it, and its error, while another control changes; a field that becomes disabled loses its error', async () => {
+  const h = await withDrawerOpen();
+  typeInto(control(BUDGET), '300');
+  const decode = control('Decode');
+  decode.value = 'greedy';
+  change(decode);   // syncs the drawer from the settings
+  assert.deepEqual([control(BUDGET).value, $('max_new_tokens-error').hidden], ['300', false]);   // not rewritten under the user
+  decode.value = 'beam';
+  change(decode);
+  typeInto(control(BEAM), '9');
+  assert.equal($('beam_size-error').hidden, false);
+  decode.value = 'greedy';
+  change(decode);   // an invalid draft in a field that becomes disabled is dropped: it has nothing to say, and Save does not look at it
+  assert.deepEqual([control(BEAM).disabled, control(BEAM).value, $('beam_size-error').hidden, control(BEAM).hasAttribute('aria-invalid')], [true, '3', true, false]);
+  save().click();
+  assert.equal($('drawer').hidden, false);   // the budget is still invalid
+  assert.equal(document.activeElement, control(BUDGET));
+  assert.equal(saved(h).decode, 'greedy');
+});
+
+test('the confirmation is a polite status region right after the composer chips, empty until a Save and not the page\'s hidden status line', async () => {
+  const h = harness();
+  await h.app.start();
+  const region = $('saved');
+  const rowsOfComposer = $('composer').children;
+  assert.equal(rowsOfComposer[rowsOfComposer.indexOf($('chips')) + 1], region);
+  assert.deepEqual(['role', 'aria-live'].map((a) => region.getAttribute(a)), ['status', 'polite']);
+  assert.equal(region.textContent, '');
+  assert.equal(region.hasAttribute('hidden'), false);   // present from the start, so that a screen reader has it before its first message
+  assert.equal(region.classList.contains('visually-hidden'), false);   // it is for the eye too
+  assert.equal($('status').getAttribute('class'), 'visually-hidden');   // the page's own status line stays what it was
+  assert.notEqual($('status'), region);
 });

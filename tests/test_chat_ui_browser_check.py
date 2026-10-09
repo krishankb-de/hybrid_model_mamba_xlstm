@@ -128,6 +128,39 @@ def test_the_settings_check_types_the_budgets_the_brief_names_and_reads_the_note
     assert check.BUDGET_FIELD == '#drawer input[data-setting="max_new_tokens"]' and 'data-setting' in source
 
 
+def test_the_words_the_drawer_check_looks_for_are_the_words_of_the_page():   # P4-G
+    app = (Path(__file__).resolve().parents[1] / "app" / "static" / "app.js").read_text()
+    render = (Path(__file__).resolve().parents[1] / "app" / "static" / "render.js").read_text()
+    for words in (check.SAVED_TEXT, check.STOP_LABEL, check.STOP_HINT, check.STORAGE_TEXT):
+        assert words in app, words
+    head, tail = "Reached the ", "; the unfinished last sentence is hidden (Show raw shows it)."
+    assert check.REPEAT_NOTE in render and check.budget_note(123) == head + "123-token budget" + tail   # the card builds it from its pieces
+    assert head in render and tail in render and "-token budget" in render
+    assert check.BUDGET_ERROR == "Enter a whole number from 16 to 200."   # the server's bounds, in the page's words: from {low} to {high}
+    assert "Enter a whole number from ${BOUNDS[key][0]} to ${BOUNDS[key][1]}." in app
+    assert check.FIELD_LABELS == ["Beam size (1–8)", "Token budget (16–200)", "Similar images (0–12)", "Matching reports (0–10)"]
+    assert check.STOP_SWITCH == '#drawer input[data-setting="stop_on_repeat"]' and check.SAVE_BUTTON == "#drawer-save"
+    assert "id: 'drawer-save'" in app and "'stop_on_repeat'" in app
+
+
+def test_budget_note_is_the_card_note_of_a_budget_stop_with_repair_on():
+    assert check.budget_note(200) == "Reached the 200-token budget; the unfinished last sentence is hidden (Show raw shows it)."
+
+
+def test_the_drawer_check_reads_a_typed_field_as_the_page_should_have_it():
+    states = [{"value": v, "focused": True, "stored": s, "chips": ["beam 3", c], "error": {"hidden": h, "text": check.BUDGET_ERROR}, "invalid": i}
+              for v, s, c, h, i in (("3", 120, "120 tok", False, "true"), ("30", 30, "30 tok", True, None), ("300", 30, "30 tok", False, "true"))]
+    assert [check.budget_chip(t["chips"]) for t in states] == ["120 tok", "30 tok", "30 tok"]
+    assert check.errors_shown(states) == [True, False, True]   # the line is shown while the text is not a whole number inside the bounds
+    assert check.errors_shown([{"error": {"hidden": True}}]) == [False]
+
+
+def test_the_stop_off_script_writes_the_one_setting_and_nothing_else():
+    assert "stop_on_repeat" in check.STOP_OFF_JS and "cxrchat.settings" in check.STOP_OFF_JS
+    assert "try" in check.STOP_OFF_JS and "catch" in check.STOP_OFF_JS   # a browser that blocks storage must not break the page
+    assert "http" not in check.STOP_OFF_JS
+
+
 def test_every_screenshot_the_script_takes_has_a_rule_and_a_file_it_declares():
     source = SCRIPT.read_text()
     calls = re.findall(r'ctx\.shot\("(\w+)", "(\w+)", [^\n]*?(DESKTOP|PHONE)(?:, "(\w+)")?\)', source)
@@ -139,7 +172,7 @@ def test_every_screenshot_the_script_takes_has_a_rule_and_a_file_it_declares():
         files.add("{}_{}x{}_{}.png".format(name, width, height, scheme or "light"))
     assert files == set(check.EVIDENCE_FILES) - {"checklist.json"}, sorted(files ^ set(check.EVIDENCE_FILES))
     assert set(check.SHOT_RULES) == {key for key, *_ in calls}, "a rule that no screenshot uses"
-    assert len(check.EVIDENCE_FILES) <= 10   # the brief's limit on the committed evidence
+    assert len([f for f in check.EVIDENCE_FILES if f.endswith(".png")]) <= 10   # the brief's limit on the committed pictures (P4-G: at most 10)
 
 
 def test_each_page_rule_is_a_function_body_that_returns_and_reads_the_page_only():
@@ -171,4 +204,4 @@ def test_evidence_file_names_are_the_ones_the_plan_asks_for():
     json.dumps(check.EVIDENCE_FILES)
     assert any(f.startswith("streaming_") for f in check.EVIDENCE_FILES)
     assert {"settled_1280x900_light.png", "settled_1280x900_dark.png", "drawer_1280x900_light.png", "settled_375x812_light.png",
-            "stopped_1280x900_light.png", "error_notice_1280x900_light.png", "checklist.json"} <= set(check.EVIDENCE_FILES)
+            "stopped_1280x900_light.png", "error_notice_1280x900_light.png", "drawer_error_1280x900_light.png", "checklist.json"} <= set(check.EVIDENCE_FILES)

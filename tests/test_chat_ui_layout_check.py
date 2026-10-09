@@ -559,6 +559,47 @@ def test_an_open_drawer_that_runs_past_the_viewport_fails():
     assert any("#drawer leaves the viewport" in f for f in failures), failures
 
 
+def _save(width: int = 1280, height: int = 900, drawer: bool = True, in_view: bool = True, covered: bool = False, tall: float = 40.0,
+          left: Optional[float] = None) -> Dict[str, Any]:
+    """What MEASURE_SAVE_JS reports for a drawer whose Save button is in order: rendered and in sight when the drawer is open, not rendered
+    when it is closed, inside the drawer's width, a touch target tall, and nothing over its centre once it is scrolled to."""
+    if not drawer:
+        return {"present": True, "rendered": False, "drawer": None, "box": None, "in_view": False, "hit": None}
+    x = width - 320.0 + 16.0 if left is None else left
+    box = [x, height - 80.0, x + 288.0, height - 80.0 + tall]
+    return {"present": True, "rendered": True, "drawer": [width - 320.0, 40.0, float(width), float(height)], "box": box, "in_view": in_view,
+            "hit": {"ok": not covered, "at": [round(x + 144), round(height - 60.0)], "got": "#send" if covered else "#drawer-save"}}
+
+
+def test_a_save_button_that_is_rendered_in_sight_and_reachable_in_an_open_drawer_has_no_failures():
+    for scroll in (False, True):
+        assert layout.check_save(_save(), 1280, 900, scroll, True) == []
+        assert layout.check_save(_save(drawer=False), 1280, 900, scroll, False) == []
+
+
+def test_a_save_button_that_is_not_rendered_in_an_open_drawer_or_is_rendered_in_a_closed_one_fails():
+    gone = _save()
+    gone["rendered"], gone["box"], gone["hit"] = False, None, None   # what a display: none mutant of the button measures
+    assert any("#drawer-save is not rendered" in f for f in layout.check_save(gone, 1280, 900, False, True))
+    shown = _save()
+    assert any("#drawer-save is rendered, but the case hides the drawer" in f for f in layout.check_save(shown, 1280, 900, False, False))
+    missing = {"present": False}   # no Save at all: the drawer is not a form that ends in one
+    assert any("no #drawer-save" in f for f in layout.check_save(missing, 1280, 900, False, True))
+
+
+def test_a_save_button_that_leaves_the_drawer_or_the_viewport_or_is_covered_or_too_small_fails():
+    assert any("leaves the drawer" in f for f in layout.check_save(_save(left=1100.0), 1280, 900, False, True))   # runs past its right edge
+    assert any("leaves the drawer" in f for f in layout.check_save(_save(left=900.0), 1280, 900, False, True))    # starts left of it
+    assert any("is covered" in f for f in layout.check_save(_save(covered=True), 1280, 900, False, True))
+    assert any("is 30 px tall" in f for f in layout.check_save(_save(tall=30.0), 1280, 900, False, True))
+    assert any("is not in sight" in f for f in layout.check_save(_save(in_view=False), 1280, 900, False, True))   # the sticky bar went static
+
+
+def test_where_the_page_scrolls_save_need_not_be_in_sight_until_it_is_scrolled_to():
+    assert layout.check_save(_save(width=667, height=375, in_view=False), 667, 375, True, True) == []   # it is scrolled to, and hit-tested there
+    assert any("is covered" in f for f in layout.check_save(_save(width=667, height=375, covered=True), 667, 375, True, True))
+
+
 def _tall(height: int = 568, report: int = 120, composer_bottom: Optional[float] = None, scrolls: bool = True, reachable: bool = True) -> Dict[str, Any]:
     return {"doc": [375, 375], "conversation": {"ch": report},
             "composer": {"box": [16.0, 200.0, 359.0, composer_bottom if composer_bottom is not None else float(height) - 16.0],
@@ -588,8 +629,8 @@ class FakePage:
     """Stands in for Browser in run_checks: it follows the hidden attribute of #drawer and #stop that the harness writes, and answers
     each measurement from _measure, so that the loop's own wiring (which case claims what) is what is under test."""
 
-    def __init__(self, stop_renders: bool = True, floor: bool = True) -> None:
-        self.stop_renders, self.floor = stop_renders, floor
+    def __init__(self, stop_renders: bool = True, floor: bool = True, save_renders: bool = True) -> None:
+        self.stop_renders, self.floor, self.save_renders = stop_renders, floor, save_renders
         self.width, self.height = 0, 0
         self.drawer, self.stop = False, False
         self.opened = 0
@@ -618,15 +659,22 @@ class FakePage:
             return m
         if function == layout.MEASURE_TALL_JS:
             return _tall(self.height, report=120 if self.floor else 40)
+        if function == layout.MEASURE_SAVE_JS:
+            m = _save(self.width, self.height, self.drawer)
+            if self.drawer and not self.save_renders:
+                m["rendered"], m["box"], m["hit"] = False, None, None
+            return m
         return True
 
 
 def test_the_loop_runs_every_case_and_passes_on_a_page_in_order():
     page = FakePage()
     cases, failures = layout.run_checks(page, "http://x/")
+    viewports = len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)
     expected = (len(layout.WIDTHS) * len(layout.HEIGHTS) * len(layout.SCHEMES) * 2
-                + len(layout.SHORT_VIEWPORTS) * len(layout.SCHEMES) * 2 + len(layout.TALL_WIDTHS) * len(layout.SCHEMES))
-    assert cases == expected == 94
+                + len(layout.SHORT_VIEWPORTS) * len(layout.SCHEMES) * 2 + len(layout.TALL_WIDTHS) * len(layout.SCHEMES)
+                + viewports * len(layout.SCHEMES))   # P4-G: one more case for each viewport in each scheme, for the Save button
+    assert cases == expected == 138
     assert failures == []
     assert page.opened == ((len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)) * len(layout.SCHEMES)
                            + len(layout.TALL_WIDTHS) * len(layout.SCHEMES))   # one load per viewport and scheme, the drawer and Stop are toggled in it
@@ -635,7 +683,13 @@ def test_the_loop_runs_every_case_and_passes_on_a_page_in_order():
 def test_the_loop_reports_a_stop_button_that_never_renders_in_the_cases_that_show_it():
     cases, failures = layout.run_checks(FakePage(stop_renders=False), "http://x/")
     assert failures and all("#stop is not rendered, but the case shows it" in f and "stop=shown" in f for f in failures)
-    assert cases == 94
+    assert cases == 138
+
+
+def test_the_loop_reports_a_save_button_that_never_renders_in_the_save_cases_only():
+    cases, failures = layout.run_checks(FakePage(save_renders=False), "http://x/")
+    assert cases == 138 and len(failures) == len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)   # once per viewport: both schemes fail alike
+    assert all("light+dark" in f and "save" in f and "#drawer-save is not rendered" in f for f in failures), failures
 
 
 def test_the_loop_reports_a_deleted_floor_only_in_the_tall_cases():

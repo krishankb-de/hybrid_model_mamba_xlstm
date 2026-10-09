@@ -11,7 +11,8 @@
  * Hooks the scripts use: the hidden attribute (drawer, preview, stop, viewer), body.sidebar-open (the off-canvas
  * sidebar; a click on its scrim lands on the body), #image-well.dragging, ol.timeline li[data-state] and li.open,
  * .provisional, and the .card and .chip helpers (render.js). app.js builds the rows of #session-list, #exports,
- * #session-more, #notice, #rerun-hint (under the image well), the contents of #drawer and #health[data-state="down"], styled below.
+ * #session-more, #notice, #rerun-hint (under the image well), #saved (under the chips), the contents of #drawer (a form that ends in Save)
+ * and #health[data-state="down"], styled below.
  *
  * System fonts only and no url(): the page makes no request but to its own /static/ files.
  */
@@ -35,6 +36,7 @@
 
   --sidebar-w: 260px;
   --drawer-w: 320px;
+  --drawer-pad: 16px;     /* the drawer's padding; its Save bar is pulled out over it by the same amount */
   --column-w: 760px;
   --gutter: 24px;
   --radius: 12px;
@@ -407,6 +409,28 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 #chips:empty { display: none; }
 #chips > * { padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; line-height: 1.6; }
 
+#saved {   /* "Settings saved. They apply from your next Send.": a live region beside the chips, for the few seconds that app.js leaves it there */
+  flex: 1 0 100%;
+  min-width: 0;
+  margin: 0;
+  color: var(--ok);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+#saved:empty {   /* a live region has to be there before its first message, so it is not display: none; it takes no room and shows nothing */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 #notice {   /* what went wrong before a turn could start: the first row of the composer, until dismissed */
   flex: 1 0 100%;
   display: flex;
@@ -431,9 +455,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   grid-area: drawer;
   width: var(--drawer-w);
   min-height: 0;
-  padding: 16px;
+  padding: var(--drawer-pad);
   overflow-y: auto;
   overflow-wrap: anywhere;
+  scroll-padding-bottom: 80px;   /* the Save bar sticks to the bottom: the field that Tab, or a Save that found it wrong, focuses stays above it */
   border-left: 1px solid var(--border);
   background: var(--card);
 }
@@ -452,6 +477,18 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 #drawer input:disabled, #drawer select:disabled { border-style: dashed; background: var(--soft); color: var(--muted); cursor: not-allowed; }
 #drawer .check:has(:disabled) { color: var(--muted); }
 #drawer .note, #drawer .hint { margin: 4px 0 0; color: var(--muted); font-size: 0.8125rem; }
+#drawer .field-error { margin: 4px 0 0; color: var(--bad); font-size: 0.8125rem; }   /* "Enter a whole number from 16 to 200.", under its field */
+#drawer input[aria-invalid="true"] { border-color: var(--bad); }
+.drawer-actions {   /* Save sticks to the bottom of the drawer, so it is in sight however far the fields above it have scrolled */
+  position: sticky;
+  bottom: calc(-1 * var(--drawer-pad));   /* a sticky box keeps to the content edge: out over the padding, it is flush with the drawer's bottom */
+  margin: 16px calc(-1 * var(--drawer-pad)) 0;   /* and with both its sides */
+  padding: 12px var(--drawer-pad);
+  border-top: 1px solid var(--border);
+  background: var(--card);
+}
+#drawer-save { width: 100%; border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; }
+#drawer-save:hover:not(:disabled) { background: var(--accent); filter: brightness(1.1); }
 #drawer h3 { margin: 20px 0 4px; }
 #drawer h4 { margin: 12px 0 4px; color: var(--muted); font-size: 0.875rem; }
 #models-section table { table-layout: fixed; }   /* a long checkpoint path wraps in its cell instead of widening the drawer */
@@ -528,6 +565,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   }
   #conversation, #sidebar, #drawer { min-height: auto; overflow: visible; }
   #composer { overflow: visible; }
+  .drawer-actions { position: static; margin: 16px 0 0; padding: 0; border-top: 0; }   /* the page scrolls, and Save is at the end of the form */
 }
 
 /* ---- motion: none for a reader who asked for less ------------------------------------------------------------- */

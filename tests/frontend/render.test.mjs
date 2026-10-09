@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { installDom, serialize } from './dom_shim.mjs';
+import { ShimEvent, installDom, serialize } from './dom_shim.mjs';
 import { initialView, replay } from '../../app/static/state.js';
 import * as render from '../../app/static/render.js';
 import {
@@ -84,14 +84,14 @@ const viewOf = (steps) => replay(steps.map((s, i) => ({ event: s.event, data: { 
 
 // A finished turn. labels and score are what P5 will send; with neither the label and score stages end skipped.
 function finished({ report = 'Findings: The lungs are clear. Impression: No acute disease.', labels = null, score = null,
-                    truncated = false, display = report } = {}) {
+                    truncated = false, display = report, options = {}, generate = {} } = {}) {
   return viewOf([
-    START,
+    step('message_start', { ...START.data, options: { ...START.data.options, ...options } }),
     stageStart('preprocess', 0), stageEnd('preprocess', 1.6, { format: 'PNG', input_px: [320, 320] }),
     stageStart('encode', 1), stageEnd('encode', 611.6, { patch_grid: [197, 768], pooled_dim: 512, device: 'cpu' }),
     skipped('retrieve', 'gallery_unavailable'),
     stageStart('generate', 3), step('content_block_start', { index: 0, content_block: { type: 'report', text: '' } }),
-    snapshot(report), step('content_block_stop', { index: 0 }), stageEnd('generate', 5234.2, GENERATE),
+    snapshot(report), step('content_block_stop', { index: 0 }), stageEnd('generate', 5234.2, { ...GENERATE, ...generate }),
     labels ? stageEnd('label', 40, { chexbert_14: labels }) : skipped('label', 'labeler_unavailable'),
     score ? stageEnd('score', 12, score) : skipped('score', 'no_reference'),
     stopOf('done', { report, display_report: display, truncated_mid_sentence: truncated }),
@@ -463,6 +463,43 @@ test('the truncated note appears when the report stopped mid-sentence, and only 
   assert.equal(note(finished({ truncated: true })).textContent, 'Report stopped at the token budget mid-sentence');
   assert.equal(note(finished({ truncated: false })), null);
   assert.equal(note(tinyView()).textContent, 'Report stopped at the token budget mid-sentence');   // the recorded turn hit its budget
+});
+
+test('the card says why the report ended: a repeat stop gets a quiet note and no budget note; the budget with repair on says what is hidden; repair off keeps its note (P4-G)', () => {
+  const notes = (view) => texts(qa(renderReport(view), '.note'));
+  const REPEAT = 'Stopped when the model began repeating itself.';
+  const repeat = finished({ options: { display_repair: true, stop_on_repeat: true }, generate: { stopped: 'repeat', tokens: 21 } });
+  assert.deepEqual(notes(repeat), [REPEAT]);
+  assert.equal(q(renderReport(repeat), '.note.truncated'), null);   // it is not the budget's note
+  const note = q(renderReport(repeat), '.note');
+  assert.equal(note.getAttribute('data-stopped'), 'repeat');
+  assert.equal(note.classList.contains('error') || note.classList.contains('truncated'), false);   // quiet: the plain muted note
+  // a server that still flags the cut-off ending of a repeat stop: it was not the budget that ended it
+  assert.deepEqual(notes(finished({ truncated: true, options: { display_repair: true }, generate: { stopped: 'repeat', tokens: 21 } })), [REPEAT]);
+  assert.deepEqual(notes(finished({ truncated: true, options: { display_repair: false }, generate: { stopped: 'repeat', tokens: 21 } })), [REPEAT]);
+
+  const budget = finished({ truncated: true, options: { display_repair: true }, generate: { stopped: 'budget', tokens: 200 } });
+  assert.deepEqual(notes(budget), ['Reached the 200-token budget; the unfinished last sentence is hidden (Show raw shows it).']);
+  assert.ok(q(renderReport(budget), '.note.truncated'));
+  assert.deepEqual(notes(finished({ truncated: true, options: { display_repair: true }, generate: { stopped: 'budget', tokens: 100 } })),
+                   ['Reached the 100-token budget; the unfinished last sentence is hidden (Show raw shows it).']);   // the number is the tokens decoded
+  assert.deepEqual(notes(finished({ truncated: true, options: { display_repair: false }, generate: { stopped: 'budget', tokens: 100 } })),
+                   ['Report stopped at the token budget mid-sentence']);   // repair off: the unfinished sentence is on the card, as the existing note says
+  assert.deepEqual(notes(finished({ truncated: true, generate: { stopped: 'budget', tokens: 100 } })), ['Report stopped at the token budget mid-sentence']);   // a turn that does not say
+  assert.deepEqual(notes(finished({ truncated: false, options: { display_repair: true }, generate: { stopped: 'budget', tokens: 100 } })), []);   // nothing was hidden: nothing to say
+  assert.deepEqual(notes(finished({ truncated: true, options: { display_repair: true }, generate: { stopped: undefined, tokens: 64 } })),
+                   ['Reached the 64-token budget; the unfinished last sentence is hidden (Show raw shows it).']);   // a log from before the stop reason: it was the budget
+  assert.deepEqual(notes(finished({ truncated: true, options: { display_repair: true }, generate: { stopped: 'budget', tokens: undefined } })),
+                   ['Reached the token budget; the unfinished last sentence is hidden (Show raw shows it).']);   // no number to give
+  assert.deepEqual(notes(finished({ truncated: true, options: { display_repair: true }, generate: { stopped: 'eos', tokens: 87 } })),
+                   ['Report stopped at the token budget mid-sentence']);   // any other reason keeps the plain note
+});
+
+test('the recorded turn keeps its budget note, and a card that has not reached generate has no reason to give yet', () => {
+  const notesOf = (view) => texts(qa(renderReport(view), '.note'));
+  assert.deepEqual(notesOf(tinyView()), ['Report stopped at the token budget mid-sentence']);   // the recorded turn stopped at its budget, repair off
+  const early = viewOf([START, stageStart('generate', 3), snapshot('Findings: so far.')]);
+  assert.deepEqual(notesOf(early), []);   // the best beam so far
 });
 
 test('Show raw swaps the display copy for the raw report and back; the button says which it is on', () => {
@@ -978,7 +1015,7 @@ test('no builder writes to the view, the labels list or the ctx object it is giv
 test('the options read as small chips: beam, tokens, cached, k images/reports', () => {
   assert.deepEqual(optionChips({ decode: 'beam', beam_size: 3, max_new_tokens: 100, cached_decode: true, k_images: 4, k_reports: 3 }),
                    ['beam 3', '100 tok', 'cached', 'k 4/3']);   // the brief's example
-  assert.deepEqual(optionChips(tinyView().options), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text']);   // this recorded turn ran with Display repair off
+  assert.deepEqual(optionChips(tinyView().options), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text', 'full budget']);   // this recorded turn ran with Display repair and the stop switch off
   assert.deepEqual(optionChips({ decode: 'greedy', beam_size: 3, max_new_tokens: 150, cached_decode: false, k_images: 0, k_reports: 10,
                                  label: false, display_repair: true, compile: true, reference: 'a note', test_row: 17 }),
                    ['greedy', '150 tok', 'uncached', 'k 0/10', 'labels off', 'compiled', 'reference', 'test row 17']);   // repair on is the default: no chip
@@ -998,6 +1035,18 @@ test('Display repair has a chip only when it is off, and only a real false is a 
   assert.equal(optionChips({ ...base, display_repair: false }).includes('repair on'), false);   // the old chip is gone
 });
 
+test('Stop when the report starts repeating has a chip only when it is off, and only a real false is a choice: "full budget"', () => {
+  const base = { decode: 'beam', beam_size: 3 };
+  assert.deepEqual(optionChips({ ...base, stop_on_repeat: true }), ['beam 3']);   // the page's default says nothing
+  assert.deepEqual(optionChips({ ...base, stop_on_repeat: false }), ['beam 3', 'full budget']);   // the published protocol: the whole budget is decoded
+  for (const unsaid of [undefined, null, 0, '', 'false']) {
+    assert.deepEqual(optionChips({ ...base, stop_on_repeat: unsaid }), ['beam 3'], String(unsaid));   // an older turn does not say: no claim
+  }
+  assert.deepEqual(optionChips({ ...base, display_repair: false, stop_on_repeat: false }), ['beam 3', 'raw text', 'full budget']);
+  assert.deepEqual(optionChips({ ...base, stop_on_repeat: false, compile: true, reference: 'a note', test_row: 17 }),
+                   ['beam 3', 'full budget', 'compiled', 'reference', 'test row 17']);
+});
+
 test('the user turn shows the note, the thumbnail and the option chips', async () => {
   const loaded = [];
   const ctx = { loadImage: async (path) => { loaded.push(path); return 'blob:test/1'; } };
@@ -1006,7 +1055,7 @@ test('the user turn shows the note, the thumbnail and the option chips', async (
   assert.equal(turn.localName, 'article');
   assert.ok(turn.classList.contains('turn') && turn.classList.contains('user'));
   assert.equal(q(turn, '.user-text').textContent, 'beam 5\nplease');
-  assert.deepEqual(texts(qa(turn, '.options .chip')), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text']);
+  assert.deepEqual(texts(qa(turn, '.options .chip')), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text', 'full budget']);
   const img = q(turn, 'img');
   assert.equal(img.getAttribute('alt'), 'Uploaded X-ray: chest.png');
   await tick();
@@ -1292,6 +1341,56 @@ test('the shim gives focus to nothing inside a hidden subtree, and takes it away
   inner.removeAttribute('hidden');
   inner.focus();
   assert.equal(document.activeElement, inner);   // and takes it once nothing above it is hidden
+  document.body.replaceChildren();
+});
+
+test('the shim fires focus and blur as focus moves, selects a field\'s whole value, and submits a form as a browser does (P4-G)', () => {
+  const form = el('form', {}, el('input', { type: 'number', id: 'n' }), el('input', { type: 'text', id: 't' }), el('textarea', { id: 'a' }),
+                  el('button', { type: 'button', id: 'plain' }, 'plain'), el('button', { type: 'submit', id: 'go' }, 'Go'),
+                  el('button', { id: 'bare' }, 'no type'));
+  document.body.replaceChildren(form);
+  const [n, t, area, plain, go, bare] = ['n', 't', 'a', 'plain', 'go', 'bare'].map((id) => document.getElementById(id));
+  const seen = [];
+  for (const node of [n, t]) {
+    for (const type of ['focus', 'blur']) node.addEventListener(type, (event) => seen.push(`${type} ${node.id} bubbles=${event.bubbles}`));
+  }
+  n.focus();
+  t.focus();   // the field that had focus is blurred first
+  t.blur();
+  n.focus();
+  n.focus();   // already there: nothing fires again
+  assert.deepEqual(seen, ['focus n bubbles=false', 'blur n bubbles=false', 'focus t bubbles=false', 'blur t bubbles=false', 'focus n bubbles=false']);
+
+  n.value = '150';
+  n.select();   // the whole value, as a click or a Tab into the field leaves it
+  assert.deepEqual([n.selectionStart, n.selectionEnd], [0, 3]);
+  n.value = '';
+  n.select();
+  assert.deepEqual([n.selectionStart, n.selectionEnd], [0, 0]);   // nothing typed yet is nothing selected
+
+  const submits = [];
+  form.addEventListener('submit', (event) => { submits.push(event.target.localName); event.preventDefault(); });
+  plain.click();
+  assert.deepEqual(submits, []);               // a button of type button submits nothing
+  go.click();
+  bare.click();                                // a button with no type is a submit button
+  assert.deepEqual(submits, ['form', 'form']);
+  go.setAttribute('disabled', '');
+  go.click();
+  assert.equal(submits.length, 2);             // a disabled one does not
+  go.removeAttribute('disabled');
+
+  const enter = (target, init = {}) => { const e = new ShimEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init }); target.dispatchEvent(e); return e; };
+  enter(n);
+  enter(t);
+  assert.equal(submits.length, 4);             // Enter in a text-like field presses the form's default button, which submits
+  enter(area);
+  enter(plain);
+  assert.equal(submits.length, 4);             // in a textarea it is a newline, and on a button it is that button's own press
+  const seenKey = [];
+  form.addEventListener('keydown', (event) => { seenKey.push(event.key); event.preventDefault(); });
+  enter(n);
+  assert.deepEqual([submits.length, seenKey], [4, ['Enter']]);   // a handler that took the key leaves the form alone
   document.body.replaceChildren();
 });
 

@@ -400,3 +400,37 @@ def test_the_stage_glyphs_have_empty_alt_text_after_a_fallback_so_that_no_screen
         assert len(contents) == 2, (selector, declarations)
         (plain, plain_alt), (shape, alt) = contents
         assert plain_alt == "" and alt == '""' and plain == shape and plain != '""', (selector, contents)   # a fallback, then the same shape with empty alt text
+
+
+# ---- P4-G: the settings drawer ends in Save, and says what it saved ----------------------------------------------------------------
+
+def _rule(selector):
+    return " ".join(b for _, h, b in _walk(_stylesheet()) if h == selector)
+
+
+def test_the_drawers_save_bar_sticks_to_the_bottom_and_covers_what_scrolls_under_it():
+    bar = _rule(".drawer-actions")
+    assert re.search(r"position:\s*sticky", bar)
+    # A sticky box sticks to the scroll container's content edge, not its padding edge, so the bar is pulled out over the padding by the
+    # padding's own width (--drawer-pad is the drawer's padding): flush with the bottom, and with both sides, of the drawer.
+    assert re.search(r"(?<![\w-])bottom:\s*calc\(-1\s*\*\s*var\(--drawer-pad\)\)", bar)
+    assert re.search(r"(?<![\w-])margin:\s*\d+px\s+calc\(-1\s*\*\s*var\(--drawer-pad\)\)\s+0", bar)
+    assert re.search(r"(?<![\w-])padding:\s*var\(--drawer-pad\)", _rule("#drawer")) and _declared(_stylesheet())["--drawer-pad"] == "16px"
+    assert re.search(r"background:\s*var\(--card\)", bar)   # opaque: the fields scroll under it
+    assert re.search(r"scroll-padding-bottom:\s*\d+px", _rule("#drawer"))   # and a focused field is scrolled to above it
+    save = _rule("#drawer-save")
+    assert "var(--accent)" in save and "var(--on-accent)" in save   # a primary button, as Send is
+    short = " ".join(b for h, b in _media(r"@media\s*\(\s*max-height:\s*480px\s*\)") if h == ".drawer-actions")
+    assert re.search(r"position:\s*static", short)   # where the page scrolls instead nothing sticks (WCAG 1.4.10)
+
+
+def test_a_field_that_is_wrong_shows_its_line_and_its_border_in_the_error_colour():
+    assert re.search(r"color:\s*var\(--bad\)", _rule("#drawer .field-error"))
+    assert re.search(r"border-color:\s*var\(--bad\)", _rule('#drawer input[aria-invalid="true"]'))
+
+
+def test_the_saved_line_is_a_row_of_the_composer_that_takes_no_room_while_it_is_empty():
+    shown, empty = _rule("#saved"), _rule("#saved:empty")
+    assert re.search(r"flex:\s*1\s+0\s+100%", shown) and re.search(r"color:\s*var\(--ok\)", shown)   # a row of its own, in the confirming colour
+    assert re.search(r"position:\s*absolute", empty)   # out of the flex row, so that it leaves no gap ...
+    assert not re.search(r"display:\s*none|visibility:\s*hidden", empty)   # ... and still in the accessibility tree, a live region before its first message

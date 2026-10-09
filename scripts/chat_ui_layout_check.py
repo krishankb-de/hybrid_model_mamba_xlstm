@@ -14,6 +14,9 @@ page); six chips and a 140-character unbroken word are injected, and Stop is sho
   f  the focus ring of #sidebar-toggle (shown at 800 px and below) lies inside the viewport
   g  #stop and #drawer are rendered, with a size, when the case shows them, and are not rendered when it hides them; an
      open drawer lies inside the viewport's width
+  h  (P4-G, one more case for every viewport in every scheme) the drawer's Save button is rendered when the drawer is open and not
+     when it is closed; in the open drawer it lies inside the drawer's width, is at least 40 px tall, is in sight without scrolling
+     (it sticks to the bottom of the drawer) and is not covered once it is scrolled to
 
 On the short viewports, where the page scrolls instead (667x375, 320x256), c and d give way to: the report keeps its
 natural height (no scroller of its own, at least 120 px), the composer is not capped, the banner stays at the top of
@@ -49,6 +52,7 @@ TALL_HEIGHT = 568
 SCHEMES = ["light", "dark"]
 MIN_REPORT_PX = 120
 MIN_TALL_PX = 568
+MIN_TOUCH_PX = 40   # a control's height: the page's buttons are 40 px at the least
 CHIPS = ["beam 3", "100 tok", "cached", "k 4/3", "label on", "repair off"]
 LONG_WORD = "x" * 140
 REPORT_TEXT = ("The lungs are clear. There is no focal consolidation, pleural effusion or pneumothorax. The "
@@ -128,6 +132,54 @@ MEASURE_JS = """(args) => {
   }
   return out;
 }"""
+
+
+MEASURE_SAVE_JS = """(args) => {
+  const q = (s) => document.querySelector(s);
+  const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+  const drawn = (el) => { const r = el.getBoundingClientRect(); return el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden' && r.width > 0 && r.height > 0; };
+  const name = (e) => !e ? null : (e.id ? '#' + e.id : e.tagName.toLowerCase());
+  const save = q('#drawer-save');
+  window.scrollTo(0, 0);
+  if (!save) return { present: false };
+  const out = { present: true, rendered: drawn(save), drawer: drawn(q('#drawer')) ? box(q('#drawer')) : null, box: null, in_view: false, hit: null };
+  if (!out.rendered) return out;
+  const inside = (b) => b[0] >= -0.5 && b[2] <= innerWidth + 0.5 && b[1] >= -0.5 && b[3] <= innerHeight + 0.5;
+  out.in_view = inside(box(save));   // where it is, with nothing scrolled: a bar that sticks to the bottom of the drawer is in sight
+  save.scrollIntoView({ block: 'nearest', inline: 'nearest' });   // and where the user can scroll it to
+  const b = box(save), x = (b[0] + b[2]) / 2, y = (b[1] + b[3]) / 2, top = document.elementFromPoint(x, y);
+  out.box = b;
+  out.hit = { ok: !!top && (top === save || save.contains(top)) && inside(b), at: [Math.round(x), Math.round(y)], got: name(top) };
+  return out;
+}"""
+
+
+def check_save(m: Dict[str, Any], width: int, height: int, scroll: bool, drawer_open: bool) -> List[str]:
+    """The failures in one measurement of the Save button: with the drawer closed it is not rendered; with it open it is rendered, inside the
+    drawer's width and the viewport's, a touch target tall, in sight where it stands (not where the page scrolls: the page is then the one
+    that scrolls to it) and not covered once it is scrolled to."""
+    if not m["present"]:
+        return ["no #drawer-save in the page: the drawer is not a form that ends in Save"]
+    if not drawer_open:
+        return ["#drawer-save is rendered, but the case hides the drawer"] if m["rendered"] else []
+    if not m["rendered"]:
+        return ["#drawer-save is not rendered, but the case opens the drawer"]
+    failures = []
+    left, top, right, bottom = m["box"]
+    drawer = m["drawer"]
+    if drawer is not None and (left < drawer[0] - 0.5 or right > drawer[2] + 0.5):
+        failures.append("#drawer-save leaves the drawer: left {:.0f}, right {:.0f}, drawer {:.0f} to {:.0f}".format(left, right, drawer[0], drawer[2]))
+    if left < -0.5 or right > width + 0.5:
+        failures.append("#drawer-save leaves the viewport's width: left {:.0f}, right {:.0f}, viewport {}".format(left, right, width))
+    if bottom - top < MIN_TOUCH_PX - 0.5:
+        failures.append("#drawer-save is {:.0f} px tall, under {}".format(bottom - top, MIN_TOUCH_PX))
+    if m["hit"] is None or not m["hit"]["ok"]:
+        hit = m["hit"] or {"at": (), "got": None}
+        failures.append("#drawer-save is covered or outside the viewport once scrolled to: its centre {} hits {}".format(
+            tuple(hit["at"]), hit["got"] or "nothing"))
+    if not scroll and not m["in_view"]:
+        failures.append("#drawer-save is not in sight without scrolling (the bar should stick to the bottom of the drawer)")
+    return failures
 
 
 def check_state(m: Dict[str, Any], width: int, height: int, scroll: bool, drawer_open: bool = False,
@@ -237,6 +289,12 @@ def run_checks(browser: Browser, url: str) -> Tuple[int, List[str]]:
                     measured = browser.run(MEASURE_JS, {"scroll": scroll})
                     for failure in check_state(measured, width, height, scroll, drawer == "open", stop == "shown"):
                         seen.setdefault(("{}x{}".format(width, height), "drawer={} stop={}".format(drawer, stop), failure), []).append(scheme)
+            cases += 1   # the Save button, with the drawer closed and then open
+            browser.evaluate("document.querySelector('#stop').hidden = true")
+            for drawer in ("closed", "open"):
+                browser.evaluate("document.querySelector('#drawer').hidden = {}".format("false" if drawer == "open" else "true"))
+                for failure in check_save(browser.run(MEASURE_SAVE_JS, {"scroll": scroll}), width, height, scroll, drawer == "open"):
+                    seen.setdefault(("{}x{}".format(width, height), "drawer={} save".format(drawer), failure), []).append(scheme)
     for width in TALL_WIDTHS:   # a composer taller than the viewport: the report's floor
         for scheme in SCHEMES:
             serial += 1

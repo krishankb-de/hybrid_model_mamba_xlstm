@@ -13,6 +13,11 @@
 // cancel first and then drops the stream, and the poll brings the turn's own message_stop. Leaving a session drops the
 // stream and does not poll: coming back finds the turn running and polls it from its last seq.
 //
+// The settings drawer is a form that ends in Save (P4-G). A number applies as it is typed while it is a whole number inside its
+// bounds; anything else is left as typed, with a line under the field that says what it takes, and is never clamped, applied or stored.
+// Save (or Enter in a field) checks every field, then stores, closes the drawer and says so; closing it any other way puts the saved
+// value back in a field that holds a draft.
+//
 // Every control is shown or hidden with the hidden attribute and every string reaches the page as a text node (el() and
 // textContent), never as markup. Nothing is stored but the settings and the client id, both inside try/catch.
 import * as realApi from './api.js';
@@ -57,15 +62,23 @@ export function parseRoute(hash) {
 
 // ---- settings and options --------------------------------------------------------------------------------------------------
 
-export const BOUNDS = Object.freeze({   // the server's bounds (app/schemas.py Options)
+export const BOUNDS = Object.freeze({   // the server's bounds (app/schemas.py Options), in the order the drawer lists the fields
   beam_size: [1, 8], max_new_tokens: [16, 200], k_images: [0, 12], k_reports: [0, 10],
 });
-// The published protocol, as every Options default has it, but for display_repair: on here, off in the server's Options (its API
-// contract). It changes only what is shown. The report is the decoder's own text either way, and Show raw shows that text. model ''
-// is the server's default; token is the access token.
+const NUMBER_KEYS = Object.keys(BOUNDS);
+const rangeLabel = (title, key) => `${title} (${BOUNDS[key][0]}–${BOUNDS[key][1]})`;           // "Token budget (16–200)": the range is in the label
+const rangeMessage = (key) => `Enter a whole number from ${BOUNDS[key][0]} to ${BOUNDS[key][1]}.`;   // what a field says when its text is not one
+const SAVED_TEXT = 'Settings saved. They apply from your next Send.';
+const SAVED_MS = 4000;   // how long the page says so
+const STORAGE_TEXT = 'Browser storage is unavailable, so these settings last until the page closes.';
+// The published protocol, as every Options default has it, but for two switches that are on here and off in the server's Options (its
+// API contract). display_repair changes only what is shown: the report is the decoder's own text either way, and Show raw shows that
+// text. stop_on_repeat ends a decoder that has no stop condition of its own once the report begins to repeat itself, so that a turn
+// does not go on writing the same sentence to its token budget; off, the whole budget is decoded, which is the published protocol.
+// model '' is the server's default; token is the access token.
 export const DEFAULT_SETTINGS = Object.freeze({
   model: '', decode: 'beam', beam_size: 3, max_new_tokens: 100, cached_decode: true, compile: false,
-  k_images: 4, k_reports: 3, label: true, display_repair: true, token: '',
+  k_images: 4, k_reports: 3, label: true, display_repair: true, stop_on_repeat: true, token: '',
 });
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -98,6 +111,7 @@ function sanitize(raw) {
     k_reports: clampInt(o.k_reports, BOUNDS.k_reports, d.k_reports),
     label: flag('label'),
     display_repair: flag('display_repair'),
+    stop_on_repeat: flag('stop_on_repeat'),
     token: typeof o.token === 'string' ? o.token : d.token,
   };
 }
@@ -157,6 +171,7 @@ export function optionsFromSettings(settings, models) {
     k_reports: s.k_reports,
     label: s.label,
     display_repair: s.display_repair,
+    stop_on_repeat: s.stop_on_repeat,
   });
 }
 
@@ -394,6 +409,7 @@ export function createApp(env) {
     loadingMore: false,      // a page of the sidebar is being fetched: More is off, so it cannot be asked twice
     noticeRetry: null,
     noticeOwner: null,       // the turn whose failed Stop the notice says, if it is that: the end of the turn takes it down
+    savedTimer: null,        // the timer that takes "Settings saved." down again
     route: null,             // the route handleRoute showed last ('new' or 's/<id>'): a notice belongs to the route it was raised on
     missing: null,           // a session the server said it does not have: home never picks it
   };
@@ -1156,6 +1172,7 @@ export function createApp(env) {
 
   function closeDrawer({ restore = true } = {}) {
     if (ui.drawer.hidden) return false;
+    discardDrafts();
     ui.drawer.hidden = true;
     ui.settings.setAttribute('aria-expanded', 'false');
     if (restore) {
@@ -1175,31 +1192,113 @@ export function createApp(env) {
 
   // ---- the settings drawer ----------------------------------------------------------------------------------------------------------
 
-  const fields = {};
+  const fields = { inputs: {}, errors: {} };
+  const drafts = new Set();   // the number fields whose text the settings did not take: not a whole number inside the bounds
 
+  // true when the settings were stored; false when the browser would not (the note under the fields says so).
   function persist() {
     const ok = saveSettings(storage, state.settings);
     fields.storageNote.hidden = ok;
+    return ok;
   }
 
   // sync false leaves the drawer's controls as they are: the field being typed in is not rewritten under the hand that types.
   function update(patch, { sync = true } = {}) {
     state.settings = sanitize({ ...state.settings, ...patch });
-    persist();
+    const ok = persist();
     if (sync) syncDrawer();
     renderChips();
+    return ok;
+  }
+
+  // A number field's text is a draft until it is a whole number inside the bounds: the field then has the line that says what it takes
+  // under it (aria-invalid, and aria-describedby naming the line), and the settings, the chips and the stored copy stay as they were.
+  function showDraft(key, on) {
+    const input = fields.inputs[key];
+    if (on) drafts.add(key); else drafts.delete(key);
+    fields.errors[key].hidden = !on;
+    if (on) input.setAttribute('aria-invalid', 'true'); else input.removeAttribute('aria-invalid');
+    describe(input, fields.errors[key].id, on);
+  }
+
+  // Closing the drawer puts the saved value back in every field that holds a draft, and takes its line down.
+  function discardDrafts() {
+    if (!drafts.size) return;
+    for (const key of [...drafts]) showDraft(key, false);
+    syncDrawer();
+  }
+
+  // "Settings saved." in the visible live region beside the chips, for SAVED_MS; a second Save starts the time over.
+  function confirmSaved(message) {
+    if (state.savedTimer !== null) cancelLater(state.savedTimer);
+    ui.saved.textContent = message;
+    state.savedTimer = later(() => {
+      state.savedTimer = null;
+      ui.saved.textContent = '';
+    }, SAVED_MS);
+  }
+
+  // Save, which is the form's submit: Enter in a text field submits it too. Every number field the page lets the user edit must hold a
+  // whole number inside its bounds, else nothing is stored and the drawer stays open on the first that does not (with every wrong
+  // field's line showing). Otherwise the settings are stored, the drawer closes to where it was opened from, and the page says so. Where
+  // the browser will not store them, the note under the fields says that instead, the settings still apply in this tab, and the drawer
+  // stays open: the note is in it.
+  function saveDrawer() {
+    const wrong = NUMBER_KEYS.filter((key) => !fields.inputs[key].disabled && wholeNumber(fields.inputs[key].value, BOUNDS[key]) === null);
+    if (wrong.length) {
+      for (const key of wrong) showDraft(key, true);
+      fields.inputs[wrong[0]].focus();
+      announce(rangeMessage(wrong[0]));
+      return false;
+    }
+    const patch = {};
+    for (const key of NUMBER_KEYS) {
+      if (!fields.inputs[key].disabled) patch[key] = wholeNumber(fields.inputs[key].value, BOUNDS[key]);
+      showDraft(key, false);
+    }
+    if (!update(patch)) {
+      announce(STORAGE_TEXT);
+      return false;
+    }
+    closeDrawer();
+    confirmSaved(SAVED_TEXT);
+    return true;
   }
 
   function buildDrawer() {
+    // A number field: a whole number inside the bounds applies at once, so that the chips follow the keys; anything else stays as typed,
+    // with its line under it, until it is right or the drawer closes. Nothing is clamped (the "1" on the way to "150" is not 16).
     const number = (key) => {
       const input = el('input', { type: 'number', min: BOUNDS[key][0], max: BOUNDS[key][1], step: 1, inputmode: 'numeric', 'data-setting': key });
-      // While it is typed in, a whole number inside the bounds applies at once, so that the chips follow the keys. Anything else waits
-      // for change, which clamps: the "1" on the way to "150" is below the bound and must not be clamped under the hand that types it.
-      input.addEventListener('input', () => {
+      fields.inputs[key] = input;
+      fields.errors[key] = el('p', { class: 'field-error', id: `${key}-error`, hidden: true }, rangeMessage(key));
+      const read = () => {
         const n = wholeNumber(input.value, BOUNDS[key]);
+        showDraft(key, n === null);
+        return n;
+      };
+      input.addEventListener('input', () => {
+        const n = read();
         if (n !== null && n !== state.settings[key]) update({ [key]: n }, { sync: false });
       });
-      input.addEventListener('change', () => update({ [key]: clampInt(input.value, BOUNDS[key], state.settings[key]) }));
+      input.addEventListener('change', () => {
+        const n = read();
+        if (n !== null) update({ [key]: n });   // writes the number back as the setting has it: "0120" is 120
+      });
+      // Typing replaces what the field holds: it is selected whole when it gets focus, by Tab or by a click. A click ends in a mouseup,
+      // which would put the caret back and undo that, so the first mouseup after the focus is cancelled (the click that gave the field
+      // focus, when there was one); without this, "150" is typed after the "100" that was there, and 100150 is out of range. Later clicks
+      // in the field place the caret as they always do.
+      let guard = false;
+      input.addEventListener('focus', () => {
+        input.select();
+        guard = true;
+      });
+      input.addEventListener('mouseup', (event) => {
+        if (guard) event.preventDefault();
+        guard = false;
+      });
+      input.addEventListener('blur', () => { guard = false; });
       return input;
     };
     const choice = (key, ...options) => {
@@ -1229,6 +1328,9 @@ export function createApp(env) {
     fields.label = toggle('label');
     fields.labelsNote = el('p', { class: 'note', id: 'labels-note', hidden: true }, 'This server has no CheXbert labeller, so labels are skipped.');
     fields.repair = toggle('display_repair');
+    fields.stop = toggle('stop_on_repeat');
+    fields.stopHint = el('p', { class: 'hint', id: 'stop-hint' }, 'Off: the published protocol, which always decodes the whole token budget.');
+    fields.stop.setAttribute('aria-describedby', 'stop-hint');
     fields.applyNote = el('p', { class: 'hint', id: 'apply-note' }, 'Changes apply from your next Send.');
     fields.runningNote = el('p', { class: 'hint', id: 'running-note', hidden: true }, 'The running turn keeps the settings it started with.');
     fields.mode = el('input', { type: 'text', readonly: true });
@@ -1239,32 +1341,40 @@ export function createApp(env) {
       update({ token });
       detach(reloadAll());
     });
-    fields.storageNote = el('p', { class: 'hint', hidden: true }, 'Browser storage is unavailable, so these settings last until the page closes.');
-    ui.drawerClose = el('button', { type: 'button', id: 'drawer-close', 'aria-label': 'Close settings', onclick: () => closeDrawer() }, '✕');
-    ui.modelsSection = el('section', { id: 'models-section', 'aria-label': 'Models' });
-    ui.drawer.replaceChildren(
-      el('div', { class: 'drawer-head' }, el('h2', {}, 'Settings'), ui.drawerClose),
-      fields.applyNote, fields.runningNote,
+    fields.storageNote = el('p', { class: 'hint', hidden: true }, STORAGE_TEXT);
+    fields.save = el('button', { type: 'submit', id: 'drawer-save' }, 'Save');
+    // novalidate: the browser's own bubbles for min and max would stop the submit before the page could say what its fields take.
+    fields.form = el('form', { id: 'settings-form', novalidate: true },
       el('label', {}, 'Model', fields.model),
       el('label', {}, 'Decode', fields.decode),
-      el('label', {}, 'Beam size', fields.beam),
-      el('label', {}, 'Token budget', fields.tokens),
+      el('label', {}, rangeLabel('Beam size', 'beam_size'), fields.beam), fields.errors.beam_size,
+      el('label', {}, rangeLabel('Token budget', 'max_new_tokens'), fields.tokens), fields.errors.max_new_tokens,
       el('label', { class: 'check' }, fields.cached, 'Cached decode'), fields.cachedNote,
       fields.compileRow,
-      el('label', {}, 'Similar images (k_images)', fields.kImages),
-      el('label', {}, 'Matching reports (k_reports)', fields.kReports), fields.retrievalNote,
+      el('label', {}, rangeLabel('Similar images', 'k_images'), fields.kImages), fields.errors.k_images,
+      el('label', {}, rangeLabel('Matching reports', 'k_reports'), fields.kReports), fields.errors.k_reports, fields.retrievalNote,
       el('label', { class: 'check' }, fields.label, 'CheXbert labels'), fields.labelsNote,
       el('label', { class: 'check' }, fields.repair, 'Display repair'),
+      el('label', { class: 'check' }, fields.stop, 'Stop when the report starts repeating'), fields.stopHint,
       el('label', {}, 'Mode', fields.mode),
       el('label', {}, 'Access token', fields.token),
       el('p', { class: 'hint' }, 'Saved in this browser on this device, because you typed it here.'),
       fields.storageNote,
-      ui.modelsSection);
+      el('div', { class: 'drawer-actions' }, fields.save));
+    fields.form.addEventListener('submit', (event) => {
+      event.preventDefault();   // the page never reloads
+      saveDrawer();
+    });
+    ui.drawerClose = el('button', { type: 'button', id: 'drawer-close', 'aria-label': 'Close settings', onclick: () => closeDrawer() }, '✕');
+    ui.modelsSection = el('section', { id: 'models-section', 'aria-label': 'Models' });
+    ui.drawer.replaceChildren(
+      el('div', { class: 'drawer-head' }, el('h2', {}, 'Settings'), ui.drawerClose),
+      fields.applyNote, fields.runningNote, fields.form, ui.modelsSection);
     fields.token.value = state.settings.token;
     syncDrawer();
   }
 
-  // The drawer's controls from the settings and the models: the model list, what the chosen card allows, the clamped numbers.
+  // The drawer's controls from the settings and the models: the model list, what the chosen card allows, the numbers (a draft is kept).
   function fillModels() {
     const cards = cardsOf(state.models);
     fields.model.replaceChildren(...(cards.length ? cards.map((c) => el('option', { value: c.name }, c.name)) : [el('option', { value: '' }, 'Server default')]));
@@ -1273,39 +1383,44 @@ export function createApp(env) {
     syncDrawer();
   }
 
-  // aria-describedby names a note only while the note is shown: a hidden element that is named is still read out.
+  // aria-describedby is a list of ids: this adds or takes out one of them, and names a note only while the note is shown (a hidden
+  // element that is named is still read out).
   function describe(field, id, on) {
-    if (on) field.setAttribute('aria-describedby', id); else field.removeAttribute('aria-describedby');
+    const ids = (field.getAttribute('aria-describedby') ?? '').split(/\s+/).filter((x) => x && x !== id);
+    if (on) ids.push(id);
+    if (ids.length) field.setAttribute('aria-describedby', ids.join(' ')); else field.removeAttribute('aria-describedby');
   }
 
   function syncDrawer() {
     const s = state.settings;
     const card = chosenCard(s, state.models);
     const cachedOk = !(card && card.cached_decode_available === false);
+    const retrieval = serverHas(state.models, 'retrieval');
+    const labelling = serverHas(state.models, 'labels');
     fields.model.value = card?.name ?? '';
     fields.decode.value = s.decode;
-    fields.beam.value = String(s.beam_size);
     fields.beam.disabled = s.decode === 'greedy';
-    fields.tokens.value = String(s.max_new_tokens);
+    for (const field of [fields.kImages, fields.kReports]) {   // a stage the server skips has nothing to set; the note says so
+      field.disabled = !retrieval;
+      describe(field, 'retrieval-note', !retrieval);
+    }
+    for (const key of NUMBER_KEYS) {
+      const field = fields.inputs[key];
+      if (field.disabled) showDraft(key, false);              // nothing can be typed in it: there is no draft to keep
+      if (!drafts.has(key)) field.value = String(s[key]);    // a draft is not rewritten under the hand that is typing it
+    }
     fields.cached.disabled = !cachedOk;
     fields.cached.checked = cachedOk && s.cached_decode;
     fields.cachedNote.hidden = cachedOk;
     fields.compileRow.hidden = state.models?.allow_compile !== true;
     fields.compile.checked = s.compile && state.models?.allow_compile === true;
-    const retrieval = serverHas(state.models, 'retrieval');
-    const labelling = serverHas(state.models, 'labels');
-    fields.kImages.value = String(s.k_images);
-    fields.kReports.value = String(s.k_reports);
-    for (const field of [fields.kImages, fields.kReports]) {   // a stage the server skips has nothing to set; the note says so
-      field.disabled = !retrieval;
-      describe(field, 'retrieval-note', !retrieval);
-    }
     fields.retrievalNote.hidden = retrieval;
     fields.label.disabled = !labelling;
     fields.label.checked = labelling && s.label;
     describe(fields.label, 'labels-note', !labelling);
     fields.labelsNote.hidden = labelling;
     fields.repair.checked = s.display_repair;
+    fields.stop.checked = s.stop_on_repeat;
     fields.mode.value = text(state.models?.mode) || '—';
   }
 
@@ -1414,8 +1529,12 @@ export function createApp(env) {
     ui.notice = el('div', { id: 'notice', role: 'alert', hidden: true }, ui.noticeText, ui.noticeRetry,
       el('button', { type: 'button', 'aria-label': 'Dismiss', onclick: () => clearNotice() }, '✕'));
     ui.rerun = el('p', { id: 'rerun-hint', hidden: true });
+    // The page's own status line is visually hidden; this one is for the eye as well: "Settings saved." beside the chips, for a few seconds.
+    // It is there from the start (empty), so that a screen reader has the region before its first message.
+    ui.saved = el('p', { id: 'saved', role: 'status', 'aria-live': 'polite' });
     const rows = Array.from(ui.composer.children);
     rows.splice(rows.indexOf(ui.well) + 1, 0, ui.rerun);   // next to the image well
+    rows.splice(rows.indexOf(ui.chips) + 1, 0, ui.saved);   // and under the chips
     ui.composer.replaceChildren(ui.notice, ...rows);
 
     ui.exports = el('div', { id: 'exports', role: 'group', 'aria-label': 'Export this chat', hidden: true },

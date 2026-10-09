@@ -9,6 +9,10 @@
 // button, an input, an enabled select or textarea, a link with an href, or anything with a tabindex, and only while
 // it is in the document (the body of the installed document) and neither it nor anything above it has the hidden
 // attribute: a card that was replaced has lost its focus, and so has a control that is hidden under a focus holder.
+// Focus moving fires blur on the control that had it and then focus on the one that takes it (neither bubbles), and
+// select() selects the whole of an input's value (selectionStart, selectionEnd). A form submits as a browser's does
+// (P4-G): a click on a submit button (type="submit", or no type) fires a cancelable, bubbling submit on its form, and
+// Enter in a text-like input that no handler took presses the form's first submit button. Nothing is ever navigated.
 // It follows the DOM where a test could tell: append turns a string into a text node and never parses it (so a report
 // that contains markup stays text), and a value that is not a node is made a string, so an `undefined` or `false`
 // that slips into a card shows up as that word.
@@ -21,6 +25,8 @@
 
 const VOID_TAGS = new Set(['area', 'br', 'col', 'hr', 'img', 'input', 'link', 'meta', 'wbr']);
 const FOCUSABLE_TAGS = new Set(['button', 'input', 'select', 'textarea']);
+const TEXT_LIKE = new Set(['text', 'search', 'url', 'tel', 'email', 'password', 'number']);   // the inputs whose Enter submits their form
+const isSubmitButton = (node) => node.localName === 'button' && (node.getAttribute('type') ?? 'submit') === 'submit';
 let documentBody = null;   // the body of the document installed last: focus works inside it only
 let focused = null;        // the element that has focus, if it is still in that body
 const tripwire = (name) => { throw new Error(`the DOM shim has no ${name}: a renderer must build nodes, not parse strings`); };
@@ -202,9 +208,21 @@ class ShimElement extends ShimNode {
   focus() {
     const focusable = this.hasAttribute('tabindex') || (FOCUSABLE_TAGS.has(this.localName) && !this.hasAttribute('disabled'))
       || (this.localName === 'a' && this.hasAttribute('href'));
-    if (focusable && documentBody && documentBody.contains(this) && !inHiddenSubtree(this)) focused = this;
+    if (!focusable || !documentBody || !documentBody.contains(this) || inHiddenSubtree(this) || focused === this) return;
+    const had = focused;
+    focused = this;
+    if (had) had.dispatchEvent(new ShimEvent('blur'));   // the one that had focus first, then this one; neither bubbles
+    this.dispatchEvent(new ShimEvent('focus'));
   }
-  blur() { if (focused === this) focused = null; }
+  blur() {
+    if (focused !== this) return;
+    focused = null;
+    this.dispatchEvent(new ShimEvent('blur'));
+  }
+  select() {   // an input's whole value, as a click or a Tab into the field leaves it
+    this.selectionStart = 0;
+    this.selectionEnd = String(this.value ?? '').length;
+  }
   get id() { return this.getAttribute('id') ?? ''; }
   get className() { return this.getAttribute('class') ?? ''; }
   get hidden() { return this.hasAttribute('hidden'); }
@@ -244,9 +262,22 @@ class ShimElement extends ShimNode {
       for (const listener of [...(node.listeners.get(event.type) ?? [])]) listener.call(node, event);
       if (!event.bubbles || event.cancelBubble) break;
     }
+    if (!event.defaultPrevented && event.type === 'keydown' && event.key === 'Enter') this.implicitSubmission();
     return !event.defaultPrevented;
   }
-  click() { return this.dispatchEvent(new ShimEvent('click', { bubbles: true, cancelable: true })); }
+  click() {
+    const proceeded = this.dispatchEvent(new ShimEvent('click', { bubbles: true, cancelable: true }));
+    if (proceeded && isSubmitButton(this) && !this.hasAttribute('disabled')) {   // the button's own action: its form is submitted
+      this.closest('form')?.dispatchEvent(new ShimEvent('submit', { bubbles: true, cancelable: true }));
+    }
+    return proceeded;
+  }
+  // Enter in a text-like input that no handler took: the form's first submit button is pressed (a textarea takes a newline).
+  implicitSubmission() {
+    if (this.localName !== 'input' || !TEXT_LIKE.has(this.getAttribute('type') ?? 'text')) return;
+    const button = this.closest('form')?.querySelectorAll('button').find(isSubmitButton);
+    if (button && !button.hasAttribute('disabled')) button.click();
+  }
 
   matches(selector) { return matchesAny(this, compile(selector)); }
   closest(selector) {

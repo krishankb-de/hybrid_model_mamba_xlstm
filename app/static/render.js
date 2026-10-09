@@ -237,6 +237,23 @@ export function splitReport(text) {
   return sections;
 }
 
+// Why the report ends where it does (P4-G), from the generate stage's detail ({stopped, tokens}) and the options the turn ran with:
+//   stopped on a repeat   a quiet note, and never the budget's: the turn chose to stop
+//   the budget, with the display repair on and a sentence cut off   what the card hides, and where Show raw has it
+//   the budget, otherwise   the plain note (a repaired card hides the unfinished sentence, an unrepaired one shows it)
+// A log from before the stop reason was recorded has no `stopped`: it ran to the budget, as every report then did.
+function reportNote(v) {
+  const generate = isObject(v.stages.generate?.detail) ? v.stages.generate.detail : {};
+  const stopped = str(generate.stopped);
+  if (stopped === 'repeat') return el('p', { class: 'note', 'data-stopped': 'repeat' }, 'Stopped when the model began repeating itself.');
+  if (!v.truncated) return null;
+  if (!(isObject(v.options) && v.options.display_repair === true && (stopped === 'budget' || stopped === ''))) {
+    return el('p', { class: 'note truncated' }, 'Report stopped at the token budget mid-sentence');
+  }
+  const budget = isNum(generate.tokens) ? `${generate.tokens}-token budget` : 'token budget';
+  return el('p', { class: 'note truncated' }, `Reached the ${budget}; the unfinished last sentence is hidden (Show raw shows it).`);
+}
+
 export function renderReport(view, ctx) {
   const v = whole(view);
   const cx = ctx ?? {};
@@ -259,7 +276,7 @@ export function renderReport(view, ctx) {
   });
   return el('div', { class: v.provisional ? 'report provisional' : 'report' },
     body,
-    v.truncated ? el('p', { class: 'note truncated' }, 'Report stopped at the token budget mid-sentence') : null,
+    reportNote(v),
     el('div', { class: 'report-actions' }, typeof cx.copy === 'function' && !v.provisional ? copyButton(cx, () => (ui.raw ? raw : shown)) : null, toggle));
 }
 
@@ -403,7 +420,9 @@ const IMAGE_URL = /^(?:blob:|data:image\/(?:png|jpeg|webp|gif);base64,)/;
 const usable = (url) => typeof url === 'string' && IMAGE_URL.test(url);
 
 // The resolved options as small chips: beam 3 · 100 tok · cached · k 4/3, and what else deviates from the defaults. Display repair is
-// on by default in the page, so only its being off is said: "raw text", the report as the decoder wrote it.
+// on by default in the page, so only its being off is said: "raw text", the report as the decoder wrote it. So is stopping when the
+// report starts repeating: off is "full budget", the published protocol, which always decodes every token it is given. A turn whose
+// options do not say (a log from before the switch) makes no claim.
 export function optionChips(options) {
   if (!isObject(options)) return [];
   const o = options;
@@ -414,6 +433,7 @@ export function optionChips(options) {
     str(o.k_images) || str(o.k_reports) ? `k ${str(o.k_images) || NONE}/${str(o.k_reports) || NONE}` : null,
     o.label === false ? 'labels off' : null,
     o.display_repair === false ? 'raw text' : null,
+    o.stop_on_repeat === false ? 'full budget' : null,
     o.compile === true ? 'compiled' : null,
     typeof o.reference === 'string' && o.reference ? 'reference' : null,
     Number.isInteger(o.test_row) ? `test row ${o.test_row}` : null,
