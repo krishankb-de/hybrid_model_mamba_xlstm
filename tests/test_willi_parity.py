@@ -6731,6 +6731,154 @@ def test_chat_engine_golden_wrappers_compare_on_the_same_node():
     assert "#SBATCH --gpus=1" in gpu and "--uncached" in gpu
 
 
+# ── CHAT_UI_PLAN.md P5-B: the gallery build wrapper ───────────────────────────
+# Static pins on scripts/build_retrieval_gallery_h100.sh. Its behaviour (guards, R7 output, the three steps, the gate) is
+# rehearsed for real in tests/test_build_retrieval_gallery.py, together with the builder it runs.
+
+def _gallery_wrapper_text() -> str:
+    return (REPO_ROOT / "scripts" / "build_retrieval_gallery_h100.sh").read_text()
+
+
+def _gallery_wrapper_code(src: str) -> List[str]:
+    """The wrapper's logical lines minus comments and blanks: backslash continuations joined, whitespace squeezed (the #SBATCH
+    directives are comments to bash)."""
+    joined = src.replace("\\\n", " ")
+    return [" ".join(line.split()) for line in joined.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+
+
+def test_build_retrieval_gallery_wrapper_follows_the_slurm_invariants():
+    """P5-B. One H100 through --gpus=1 and never a typed --gres, the renamed partition, the three nodes that cannot run it
+    excluded, no --qos (that is the CPU-only combination), a requeue that appends to the SLURM log, logs where every other
+    wrapper puts them, and offline Hugging Face on a compute node."""
+    src = _gallery_wrapper_text()
+    options, flags = {}, []
+    for line in src.splitlines():
+        if line.startswith("#SBATCH"):
+            token = line.split()[1]
+            if "=" in token:
+                options[token.split("=", 1)[0]] = token.split("=", 1)[1]
+            else:
+                flags.append(token)
+    assert options == {
+        "--partition": "pot-hpi-aisc-batch", "--account": "aisc", "--gpus": "1", "--exclude": "ga03,gx17v1,gx13v1",
+        "--cpus-per-task": "16", "--mem": "64G", "--time": "04:00:00", "--job-name": "chat_gallery",
+        "--output": "logs/%x_%j.log", "--error": "logs/%x_%j.log", "--open-mode": "append"}, options
+    assert flags == ["--requeue"], flags
+    code = _gallery_wrapper_code(src)
+    assert not [l for l in code if "--gres" in l or "--qos" in l], "an untyped --gpus and a typed --gres do not mix; --qos is CPU-only"
+    assert 'cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"' in code
+    for needle in ("set -euo pipefail", 'SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"',
+                   'export HF_HOME="${SCRATCH_ROOT}/.hf"', "export HF_HUB_OFFLINE=1", "export HF_DATASETS_OFFLINE=1",
+                   'VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"', 'source "${VENV_ACTIVATE}"'):
+        assert needle in code, needle
+
+
+def test_build_retrieval_gallery_wrapper_defaults_are_the_plans_inputs_and_agree_with_the_other_chat_wrappers():
+    code = _gallery_wrapper_code(_gallery_wrapper_text())
+    for needle in ('CHAT_HOME="${CHAT_HOME:-/sc/home/$USER/chat_sessions}"', 'DATA="${DATA:-/sc/home/$USER/dataset/mimic_full}"',
+                   'CKPT_13D="${CKPT_13D:-./outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt}"',
+                   'CHECKPOINT="${CHECKPOINT:-./outputs/h100_report_gen_m3_tower13d_s42/checkpoints/last.ckpt}"',
+                   'MODEL_CONFIG="${MODEL_CONFIG:-hybrid_150m_m3_rrg}"',
+                   'BUILD_ID="${BUILD_ID:-$(date +%Y%m%d)_${SLURM_JOB_ID:-local}}"', 'OUT="${CHAT_HOME}/gallery/${BUILD_ID}"'):
+        assert needle in code, needle
+    assert not [l for l in code if l.startswith(("OUT=", "OUT_DIR=")) and ":-" in l], "OUT is derived, never an environment lever"
+    eos = (REPO_ROOT / "scripts" / "train_report_eos_h100.sh").read_text()
+    golden = (REPO_ROOT / "scripts" / "chat_engine_golden_gpu_h100.sh").read_text()
+    assert "IMAGE_ENCODER_CKPT=./outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt" in eos, "the 13D tower is one file"
+    assert 'CHECKPOINT="${CHECKPOINT:-./outputs/h100_report_gen_m3_tower13d_s42/checkpoints/last.ckpt}"' in golden
+    assert 'DATA="${DATA:-/sc/home/$USER/dataset/mimic_full}"' in golden
+
+
+def test_build_retrieval_gallery_wrapper_runs_three_steps_and_the_reference_script_is_unchanged_on_the_test_split():
+    """P5-B. The builder, then scripts/evaluate_cxr_retrieval.py with the brief's flags on the SAME 13D checkpoint and the
+    official test split, then --compare-rk. Never another split: the gate is the published test-split protocol."""
+    code = _gallery_wrapper_code(_gallery_wrapper_text())
+    text = "\n".join(code)
+    build = text.index("python scripts/build_retrieval_gallery.py --checkpoint-13d")
+    reference = text.index("python scripts/evaluate_cxr_retrieval.py")
+    compare = text.index("python scripts/build_retrieval_gallery.py --compare-rk")
+    assert build < reference < compare
+    assert ('python scripts/evaluate_cxr_retrieval.py --checkpoint "${CKPT_13D}" --dataset mimic --local-parquet-dir "${DATA}" '
+            '--mimic-split test --output-dir "${OUT}/reference_rk"') in text
+    assert ('python scripts/build_retrieval_gallery.py --checkpoint-13d "${CKPT_13D}" --decoder-checkpoint "${CHECKPOINT}" '
+            '--decoder-config "${MODEL_CONFIG}" --data "${DATA}" --out "${OUT}" --build-id "${BUILD_ID}" '
+            '--workers "${SLURM_CPUS_PER_TASK:-8}" --isbi-cache "${SCRATCH_ROOT}/isbi_gallery_adapted.pt"') in text
+    assert 'python scripts/build_retrieval_gallery.py --compare-rk "${OUT}" --wall-s "${SECONDS}"' in text
+    assert "--mimic-split validation" not in text and "--mimic-split train" not in text
+    for name in ("build_retrieval_gallery.py", "evaluate_cxr_retrieval.py"):
+        assert (REPO_ROOT / "scripts" / name).is_file(), name
+
+
+def test_build_retrieval_gallery_wrapper_keeps_every_python_steps_raw_output_out_of_the_job_log():
+    """R7. The raw stdout and stderr of the builder and of the thesis script go to files under ${OUT}; the job log gets [gallery]
+    lines that carry no path, the one RESULT line of the comparison, ERROR lines with a step name and an exit code, and === lines
+    that name no path. A `python scripts/...` that is neither redirected to such a file nor captured by $(...) would print into
+    the log."""
+    code = _gallery_wrapper_code(_gallery_wrapper_text())
+    steps = [l for l in code if "python scripts/" in l]
+    assert len(steps) == 3, steps
+    build, reference, compare = steps
+    assert build.endswith('> "${OUT}/build.log" 2>&1 || rc=$?'), build
+    assert reference.endswith('> "${OUT}/reference_rk.log" 2>&1 || rc=$?'), reference
+    assert compare.startswith('CMP_OUT="$(python scripts/build_retrieval_gallery.py') and compare.endswith(
+        '2>> "${OUT}/compare.err")" || rc=$?'), compare
+    text = "\n".join(code)
+    # the only things that leave a log file: [gallery] lines without a slash, and RESULT / ERROR lines
+    assert "tr '\\r' '\\n' < \"${OUT}/build.log\" | grep -aE '^\\[gallery\\] ' | grep -av '/' | tail -n 60 || true" in text
+    assert "printf '%s\\n' \"${CMP_OUT}\" | grep -aE '^(RESULT |ERROR)' || true" in text
+    for step in ("build", "reference", "compare"):
+        assert 'echo "ERROR {} exit=${{rc}}"'.format(step) in text, step
+    printed = [l for l in code if re.match(r"^(echo|printf) ", l)]
+    stray = [l for l in printed if not re.match(r'^(echo "(===|ERROR) |printf \'%s\\n\' "\$\{CMP_OUT\}")', l)]
+    assert not stray, "every printed line starts === or ERROR, or is the filtered comparison output: {}".format(stray)
+    paths = ("${OUT}", "${DATA}", "${CKPT_13D}", "${CHECKPOINT}", "${CHAT_HOME}", "${SCRATCH_ROOT}")
+    messages = [m for l in code for m in re.findall(r'(?:echo|fail) "([^"]*)"', l)]       # what is printed, not what is tested
+    assert len(messages) > 10, messages
+    leaking = [m for m in messages if any(p in m for p in paths)]
+    assert not leaking, "a printed message names a path: {}".format(leaking)
+
+
+def test_build_retrieval_gallery_wrapper_prints_its_sync_stamp_before_anything_else():
+    """Provenance. `scripts/chat_remote.sh sync` leaves .sync_stamp in the tree it ships; the job prints the commit and
+    cleanliness it reads there as its very first line (behaviour, against the real producer's output:
+    tests/test_build_retrieval_gallery.py)."""
+    code = "\n".join(_gallery_wrapper_code(_gallery_wrapper_text()))
+    sync = code.index('echo "=== sync ${SYNC} ==="')
+    assert code.index('echo "') == sync, "something is printed before the sync line"
+    assert code.index("python ") > sync and code.index("source ") > sync
+    assert ".sync_stamp" in code[:sync]
+
+
+def test_build_retrieval_gallery_wrapper_checks_every_path_before_it_creates_or_runs_anything():
+    """R8. No directory is made and no step started before the guards have passed: OUT is under CHAT_HOME and neither inside an
+    outputs directory nor under the thesis checkout, a finished build (manifest.json) is never overwritten, the inputs exist, a
+    GPU is visible."""
+    code = "\n".join(_gallery_wrapper_code(_gallery_wrapper_text()))
+    mkdir = code.index('mkdir -p "${OUT}"')
+    first_step = code.index("python scripts/build_retrieval_gallery.py --checkpoint-13d")
+    for guard in ('fail "OUT is inside an outputs directory"', 'fail "OUT resolves into an outputs directory"',
+                  'fail "OUT is under the thesis checkout (R8)"', 'fail "CHAT_HOME does not exist: run chat_cluster_setup_h100.sh first"',
+                  '[ -e "${OUT}/manifest.json" ]', 'fail "13D checkpoint (the retrieval tower and text encoder) not found"',
+                  'fail "decoder checkpoint not found"', 'fail "train.parquet not found in DATA"', 'fail "test.parquet not found in DATA"',
+                  '"${GPUS}" -ge 1'):
+        assert guard in code, guard
+        assert code.index(guard) < mkdir < first_step, guard
+    plain_name = '"${BUILD_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$'
+    assert plain_name in code and code.index(plain_name) < code.index('OUT="${CHAT_HOME}/gallery/')
+    assert not re.search(r"(^|[\s;&|(])rm(\s|$)", code, re.M), "additive only: no deletion"
+
+
+def test_build_retrieval_gallery_wrapper_passes_the_bash_syntax_check():
+    import shutil
+    import subprocess
+    shells = [s for s in ("/bin/bash", shutil.which("bash")) if s and os.path.exists(s)]
+    assert shells
+    for shell in set(shells):
+        done = subprocess.run([shell, "-n", str(REPO_ROOT / "scripts" / "build_retrieval_gallery_h100.sh")],
+                              capture_output=True, text=True)
+        assert done.returncode == 0, (shell, done.stderr)
+
+
 def test_no_yaml_turns_the_report_eos_target_on():
     """CHAT_UI_PLAN.md P9-G1. dataset.report_eos_target changes what a report-gen run trains on (one supervised
     EOS per report that fits), so it is off by default and no yaml under configs/ may set it: every published
