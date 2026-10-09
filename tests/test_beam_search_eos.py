@@ -1,17 +1,20 @@
 """CHAT_UI_PLAN.md P9-G2: the EOS-stop beam searches (tiny model and scripted logits, CPU, synthetic only).
 
 `beam_search_decode_eos` (scripts/evaluate_report_generation.py) and `HybridLanguageModel.beam_search_cached_eos` sit beside the published
-decoders, which stay as they are. The rulings they implement, at every decoding step:
+decoders, which stay as they are. The rules they implement (the rulings, as amended by fix 0), at every decoding step:
   1. rank all beam x vocab candidates exactly as the published code does and take the top 2 * beam;
   2. walk them in rank order: an EOS candidate within the first `beam` goes to the finished pool (its score is normalised by the length
      with the EOS counted); the others fill the `beam` live slots; an EOS further down is dropped;
-  3. stop when `beam` hypotheses have finished, or at the budget;
-  4. return the best of finished + live by normalised score (a tie goes to the finished one, then to the live beams in rank order),
-     without its trailing EOS, and whether that was a finished one.
+  3. the answer is the best of finished + live by normalised score (a tie goes to the finished one, then to the live beams in rank
+     order). on_step gets the answer's ids, and the search returns right after that call once the answer is a finished hypothesis
+     (OpenNMT-style top-hypothesis stopping), or at the budget. There is no "beam hypotheses have finished" stop;
+  4. an on_step callback may raise StopDecoding: the search then returns its best finished hypothesis if it has one, and lets the
+     exception propagate, the same object, if it has not. Any other exception propagates.
+The returned ids lack the trailing EOS; the flag says whether the answer was a finished hypothesis.
 
 The hard gate is the first block: with no EOS in reach each twin returns the published decoder's tokens. Everything after it needs an
 EOS that does occur, which no random-init model produces on demand, so the logits are scripted (tests/app_helpers.py) and a slow
-oracle written from the rulings (every candidate, a list sort, no cache) is the expected answer.
+oracle written from the rules (every candidate, a list sort, no cache) is the expected answer.
 """
 import argparse
 import math
@@ -76,11 +79,13 @@ def _forbid(model, token):
 
 
 def _oracle(script, eos, beam, budget, length_penalty=1.0):
-    """The rulings written out the slow way over a script: every candidate, a stable list sort, no cache. -> (ids, ended_by_eos)."""
+    """The rules written out the slow way over a script: every candidate, a stable list sort, no cache.
+    -> (ids, ended_by_eos, the answer's ids at every step, whether a finished hypothesis became the answer only after the step it ended)."""
     vocab = len(script(0, None))
     live = [((), 0.0)]
-    finished = []
-    for _ in range(budget):
+    best_done = None            # (normalised score, ids, the step it ended at): the best one that ended; of equals, the earliest
+    stream = []
+    for step in range(budget):
         length = len(live[0][0]) + 1
         candidates = []
         for tokens, score in live:
@@ -91,17 +96,21 @@ def _oracle(script, eos, beam, budget, length_penalty=1.0):
         for rank, (tokens, score) in enumerate(candidates[:2 * beam]):
             if tokens[-1] == eos:
                 if rank < beam:
-                    finished.append((score / (length ** length_penalty), tokens[:-1]))
+                    done = score / (length ** length_penalty)
+                    if best_done is None or done > best_done[0]:
+                        best_done = (done, tokens[:-1], step)
                 continue
             kept.append((tokens, score))
             if len(kept) == beam:
                 break
         live = kept
-        if len(finished) >= beam:
-            break
-    pool = finished + [(score / (len(tokens) ** length_penalty), tokens) for tokens, score in live]
-    best = max(range(len(pool)), key=lambda i: pool[i][0])    # the first maximum: finished in order, then live in rank order
-    return list(pool[best][1]), best < len(finished)
+        live_score = live[0][1] / (len(live[0][0]) ** length_penalty)
+        done_wins = best_done is not None and best_done[0] >= live_score    # a tie goes to the finished one
+        answer = best_done[1] if done_wins else live[0][0]
+        stream.append(list(answer))
+        if done_wins:
+            return list(answer), True, stream, best_done[2] < step
+    return list(live[0][0]), False, stream, False
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -189,9 +198,9 @@ def test_a_model_that_ends_the_report_at_step_n_stops_there_and_returns_it_witho
     assert ended is True and type(ended) is bool
     assert torch.equal(got, want) and got.shape == (1, N) and EOS not in got[0].tolist()
     assert [step for step, _ in seen] == list(range(N + 1))                 # it stopped at step N: one call per step, that one's too
-    assert all(EOS not in ids for _, ids in seen)                           # a live beam never holds an EOS
+    assert all(EOS not in ids for _, ids in seen)                           # nothing the callback is shown holds an EOS
     assert seen[:N] == published_seen                                       # before step N, what the published decoder shows
-    assert len(seen[N][1]) == N + 1                                         # at it, the best live beam: a token past the end
+    assert seen[N][1] == got[0].tolist() == seen[N - 1][1]                  # at it, the answer is the finished report: no overshoot
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -232,7 +241,7 @@ def test_an_eos_that_ranks_second_with_a_beam_of_one_is_dropped_not_taken(kind):
     assert ended is False and torch.equal(got, want) and got[0].tolist() == [0] * 9
 
 
-# ---- which hypothesis is returned: finished against live, by normalised score ------------------------------------
+# ---- the answer: the best of finished + live, and the search stops once that is a finished hypothesis -------------
 
 def _poor(n, last):
     """Twenty near-equally likely tokens (p of about 0.05 each) and no end: each token costs about 3 nats."""
@@ -258,45 +267,73 @@ def _ends_early_then(later):
     return markov_script(table, default=later)
 
 
+def _non_top_end_then(later):
+    """Beam 2. Token 0 (p .6) is followed by token 0 again (p .8); after token 1 (p .4) the report may end (p .6). That end is the second
+    best candidate of step 1, -0.71 normalised behind [0, 0] at -0.37, so a live beam is the answer until it falls below -0.71.
+    From the third token on, `later`."""
+    table = {
+        (0, None): {0: .6, 1: .4},
+        (1, 0): {0: .8, 2: .2},
+        (1, 1): {EOS: .6, 3: .4},
+    }
+    return markov_script(table, default=later)
+
+
+TWO_END = {   # beam 2: [1] + EOS ends at step 1 (-0.65) and [1, 1] + EOS at step 2 (-0.74), while [0, 0, 0, ...] lives on at about -0.2
+    (0, None): {0: .55, 1: .45},
+    (1, 0): {0: .99, 7: .01}, (1, 1): {EOS: .6, 1: .4},
+    (2, 0): {0: .99, 8: .01}, (2, 1): {EOS: .6, 1: .4},
+}
+
+
 @pytest.mark.parametrize("kind", KINDS)
-def test_a_finished_hypothesis_beats_a_longer_live_one_when_its_normalised_score_is_higher(kind):
-    # finished: [0] + EOS, ln(.6 * .5) / 2 = -0.60; the live beams are 8 tokens long and cost about 3 nats a token: about -2.4
+def test_a_hypothesis_that_ends_ahead_of_every_live_beam_is_the_answer_at_once_and_the_search_stops(kind):
+    # [0] + EOS scores ln(.6 * .5) / 2 = -0.60 at step 1, the best candidate there (the best live beam, [1, 2], scores -0.79).
     script, seen = _ends_early_then(_poor), []
     model = tiny_decoder()
     with scripted_decoder(model, script):
-        got, ended = _eos(kind, model, EMPTY, _prefix(), 2, 8, on_step=lambda step, ids: seen.append(step), eos=EOS)
+        got, ended = _eos(kind, model, EMPTY, _prefix(), 2, 8, on_step=lambda step, ids: seen.append((step, ids)), eos=EOS)
     assert (got[0].tolist(), ended) == ([0], True)
-    assert seen == list(range(8))        # one hypothesis ended and two were needed: the search ran to its budget
-    assert (got[0].tolist(), ended) == _oracle(script, EOS, 2, 8)
+    assert seen == [(0, [0]), (1, [0])]               # the live answer, then the finished one: the same report, no overshoot
+    assert (got[0].tolist(), ended) == _oracle(script, EOS, 2, 8)[:2]
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_a_live_beam_beats_a_finished_hypothesis_when_its_normalised_score_is_higher(kind):
-    # the same finished hypothesis (-0.60), against a live beam that costs a hundredth of a nat a token: [1, 2, 4, 4, ...], about -0.20
-    script = _ends_early_then(_strong)
+def test_an_end_that_is_not_the_top_candidate_becomes_the_answer_once_the_live_beams_fall_below_it(kind):   # (a)
+    # step 1: [0, 0] (-0.37) is the answer and [1] + EOS (-0.71) enters the pool behind it; step 2: the live beams cost 3 nats a token and
+    # the best of them is -1.1, so the finished [1] is the answer, and the search stops at the first step where that is so.
+    script, seen = _non_top_end_then(_poor), []
     model = tiny_decoder()
     with scripted_decoder(model, script):
-        got, ended = _eos(kind, model, EMPTY, _prefix(), 2, 8, eos=EOS)
-    assert (got[0].tolist(), ended) == ([1, 2, 4, 4, 4, 4, 4, 4], False)
-    assert (got[0].tolist(), ended) == _oracle(script, EOS, 2, 8)
+        got, ended = _eos(kind, model, EMPTY, _prefix(), 2, 8, on_step=lambda step, ids: seen.append((step, ids)), eos=EOS)
+    assert (got[0].tolist(), ended) == ([1], True)
+    assert seen == [(0, [0]), (1, [0, 0]), (2, [1])]  # stopped at step 2, six steps before its budget; the last frame is the report
+    assert (got[0].tolist(), ended) == _oracle(script, EOS, 2, 8)[:2]
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_when_beam_hypotheses_have_ended_a_live_beam_that_still_scores_higher_is_returned(kind):
-    # "the best of finished + live" holds when the pool is full too: two hypotheses end by step 2 (-0.65 and -0.74) and the search
-    # stops there, but the best live beam, [0, 0, 0], scores -0.21. It is returned, and it did not end in EOS.
-    table = {
-        (0, None): {0: .55, 1: .45},
-        (1, 0): {0: .99, 7: .01}, (1, 1): {EOS: .6, 1: .4},
-        (2, 0): {0: .99, 8: .01}, (2, 1): {EOS: .6, 1: .4},
-    }
-    script, seen = markov_script(table, default=_poor), []
+def test_a_live_beam_that_keeps_scoring_higher_is_the_answer_to_the_budget_in_full_length(kind):
+    # the same end enters the pool at step 1, but the live beam costs a hundredth of a nat a token and scores about -0.1 by step 7
+    script, seen = _non_top_end_then(_strong), []
     model = tiny_decoder()
     with scripted_decoder(model, script):
-        got, ended = _eos(kind, model, EMPTY, _prefix(), 2, 20, on_step=lambda step, ids: seen.append(step), eos=EOS)
-    assert (got[0].tolist(), ended) == ([0, 0, 0], False)
-    assert seen == [0, 1, 2]             # stopped at step 2, long before its budget of 20
-    assert (got[0].tolist(), ended) == _oracle(script, EOS, 2, 20)
+        got, ended = _eos(kind, model, EMPTY, _prefix(), 2, 8, on_step=lambda step, ids: seen.append((step, ids)), eos=EOS)
+    assert (got[0].tolist(), ended) == ([0, 0, 4, 4, 4, 4, 4, 4], False)
+    assert [step for step, _ in seen] == list(range(8)) and seen[-1][1] == got[0].tolist()
+    assert (got[0].tolist(), ended) == _oracle(script, EOS, 2, 8)[:2]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_decoding_goes_on_while_a_live_beam_scores_higher_than_everything_that_ended(kind):
+    # two hypotheses end, by step 2 (-0.65 and -0.74), but the best live beam scores -0.2 and improves: it is the answer step after step.
+    # No early stop. At the budget the live answer is returned in full length, and it did not end in EOS.
+    script, seen = markov_script(TWO_END, default=_strong), []
+    model = tiny_decoder()
+    with scripted_decoder(model, script):
+        got, ended = _eos(kind, model, EMPTY, _prefix(), 2, 20, on_step=lambda step, ids: seen.append((step, ids)), eos=EOS)
+    assert (got[0].tolist(), ended) == ([0, 0, 0] + [4] * 17, False)
+    assert [step for step, _ in seen] == list(range(20)) and seen[-1][1] == got[0].tolist()
+    assert (got[0].tolist(), ended) == _oracle(script, EOS, 2, 20)[:2]
 
 
 def _tie_rows(n, last):
@@ -314,11 +351,14 @@ def _tie_rows(n, last):
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_a_tie_between_a_finished_hypothesis_and_a_live_one_goes_to_the_finished_one(kind):
-    # [0] + EOS and [1, 5] both have the normalised score -ln 2 / 2 to the last bit, at the end of a budget of two.
+    # at step 1, [0] + EOS and the best live beam [1, 5] both score -ln 2 / 2 to the last bit. The finished one is the answer and the
+    # search stops there. With the live beam first it would go on: [1, 5, 5, ...] scores better as it lengthens, up to the budget of 5.
+    seen = []
     model = tiny_decoder()
     with scripted_decoder(model, _tie_rows):
-        got, ended = _eos(kind, model, EMPTY, _prefix(), 2, 2, eos=EOS)
-    assert (got[0].tolist(), ended) == ([0], True)      # not [1, 5]: finished first, then live beams in rank order
+        got, ended = _eos(kind, model, EMPTY, _prefix(), 2, 5, on_step=lambda step, ids: seen.append((step, ids)), eos=EOS)
+    assert (got[0].tolist(), ended) == ([0], True)
+    assert [step for step, _ in seen] == [0, 1]
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -333,35 +373,53 @@ GRID = [(family, beam, seed) for family in FAMILIES for beam in (1, 2, 3, 4) for
 BUDGET = 20
 
 
+def _decode_with_stream(kind, model, script, beam, budget=BUDGET, **kw):
+    """-> (ids, ended_by_eos, the ids on_step was shown at every step) for one decode over a script."""
+    stream = []
+    with scripted_decoder(model, script):
+        ids, ended = _eos(kind, model, EMPTY, _prefix(), beam, budget, eos=EOS, on_step=lambda step, frame: stream.append(frame), **kw)
+    return ids[0].tolist(), ended, stream
+
+
 @pytest.mark.parametrize("family,beam,seed", GRID)
 def test_the_twins_and_the_oracle_agree_when_the_eos_competes(family, beam, seed):
     script = noise_script(seed, EOS, FAMILIES[family])
-    model, got = tiny_decoder(), {}
-    with scripted_decoder(model, script):
-        for kind in KINDS:
-            ids, ended = _eos(kind, model, EMPTY, _prefix(), beam, BUDGET, eos=EOS)
-            got[kind] = (ids[0].tolist(), ended)
-    want = _oracle(script, EOS, beam, BUDGET)
-    assert got["uncached"] == want, "uncached"
-    assert got["cached"] == want, "cached"
+    want_ids, want_ended, want_stream, _ = _oracle(script, EOS, beam, BUDGET)
+    model = tiny_decoder()
+    for kind in KINDS:
+        got = _decode_with_stream(kind, model, script, beam)
+        assert got == (want_ids, want_ended, want_stream), kind    # the report, how it ended, and what the callback was shown
+
+
+@pytest.mark.parametrize("family", list(FAMILIES))
+@pytest.mark.parametrize("beam", [5, 6, 8])                          # (g) wide beams
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_wide_beams_agree_with_the_oracle_too(family, beam, seed):
+    script = noise_script(seed, EOS, FAMILIES[family])
+    want_ids, want_ended, want_stream, _ = _oracle(script, EOS, beam, BUDGET)
+    model = tiny_decoder()
+    for kind in KINDS:
+        assert _decode_with_stream(kind, model, script, beam) == (want_ids, want_ended, want_stream), kind
 
 
 def test_that_grid_ends_every_way_a_search_can_end():
-    outcomes = [_oracle(noise_script(seed, EOS, FAMILIES[family]), EOS, beam, BUDGET) for family, beam, seed in GRID]
-    assert any(ended and len(ids) < BUDGET for ids, ended in outcomes)       # a report that ended in EOS, before the budget
-    assert any(not ended and len(ids) == BUDGET for ids, ended in outcomes)  # one cut at the budget
-    assert any(not ended and len(ids) < BUDGET for ids, ended in outcomes)   # beam hypotheses ended, yet a live beam still scored higher
+    runs = [_oracle(noise_script(seed, EOS, FAMILIES[family]), EOS, beam, BUDGET) for family, beam, seed in GRID]
+    assert any(ended and not late and len(stream) < BUDGET for _, ended, stream, late in runs)   # the answer finished the step it ended
+    assert any(late for _, _, _, late in runs)                                                    # one that became the answer later
+    assert any(not ended for _, ended, _, _ in runs)                                              # a live answer at the budget ...
+    assert all(len(ids) == BUDGET for ids, ended, _, _ in runs if not ended)                      # ... always in full length
+    assert all(stream[-1] == ids for ids, _, stream, _ in runs)                                   # the last frame is the returned report
 
 
 @pytest.mark.parametrize("length_penalty", [0.0, 2.0])
 @pytest.mark.parametrize("beam", [2, 3])
 def test_the_length_penalty_scores_finished_and_live_alike(beam, length_penalty):
     script = noise_script(3, EOS, FAMILIES["plausible"])
+    want_ids, want_ended, want_stream, _ = _oracle(script, EOS, beam, BUDGET, length_penalty)
     model = tiny_decoder()
-    with scripted_decoder(model, script):
-        for kind in KINDS:
-            ids, ended = _eos(kind, model, EMPTY, _prefix(), beam, BUDGET, eos=EOS, length_penalty=length_penalty)
-            assert (ids[0].tolist(), ended) == _oracle(script, EOS, beam, BUDGET, length_penalty), kind
+    for kind in KINDS:
+        got = _decode_with_stream(kind, model, script, beam, length_penalty=length_penalty)
+        assert got == (want_ids, want_ended, want_stream), kind
 
 
 @pytest.mark.parametrize("beam", [1, 3])
@@ -369,11 +427,15 @@ def test_on_the_real_tiny_weights_cached_and_uncached_agree_once_a_token_the_mod
     model = tiny_decoder()
     published = _published("uncached", model, EMPTY, _prefix(), beam, 24)
     eos = published[0, 5].item()                                  # the published decode uses it at step 5: the model likes it
-    unc = _eos("uncached", model, EMPTY, _prefix(), beam, 24, eos=eos)
-    cac = _eos("cached", model, EMPTY, _prefix(), beam, 24, eos=eos)
-    assert torch.equal(unc[0], cac[0]) and unc[1] == cac[1]
+    results = {}
+    for kind in KINDS:
+        stream = []
+        results[kind] = (_eos(kind, model, EMPTY, _prefix(), beam, 24, eos=eos, on_step=lambda step, frame: stream.append(frame)), stream)
+    (unc, unc_stream), (cac, cac_stream) = results["uncached"], results["cached"]
+    assert torch.equal(unc[0], cac[0]) and unc[1] == cac[1] and unc_stream == cac_stream
     assert eos not in unc[0][0].tolist()                          # a returned report never holds the EOS ...
     assert unc[1] is True and unc[0].shape[1] < 24                # ... and this one did end in it, before the budget
+    assert unc_stream[-1] == unc[0][0].tolist()                   # on a stream that ends on the report
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -412,6 +474,119 @@ def test_a_raise_from_the_step_that_ends_the_report_is_not_swallowed(kind):
         with pytest.raises(Stop):
             _eos(kind, model, EMPTY, _prefix(), 3, 30, on_step=cb, eos=EOS)
     assert calls == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("beam", [1, 3])
+def test_the_last_frame_is_the_returned_report_at_the_budget_too(kind, beam):   # (b): an answer that is live at the budget
+    model, seen = tiny_decoder(), []
+    got, ended = _eos(kind, model, EMPTY, _prefix(), beam, 12, on_step=lambda step, ids: seen.append(ids))
+    assert ended is False and got.shape == (1, 12)                      # the budget, in full length: so "budget" is always truthful
+    assert seen[-1] == got[0].tolist()
+
+
+# ---- the soft stop: StopDecoding ----------------------------------------------------------------------------------------------
+
+def _stop_decoding():
+    from hybrid_xmamba.models.hybrid_lm import StopDecoding
+    return StopDecoding
+
+
+def test_stop_decoding_has_one_home_and_the_script_imports_it():
+    import scripts.evaluate_report_generation as erg
+    from hybrid_xmamba.models import hybrid_lm
+    assert issubclass(hybrid_lm.StopDecoding, Exception) and erg.StopDecoding is hybrid_lm.StopDecoding   # no second class
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_soft_stop_after_a_hypothesis_ended_returns_the_best_one_that_ended(kind):   # (c)
+    StopDecoding, seen = _stop_decoding(), []
+
+    class Soft(StopDecoding):                           # as the chat app's _RepeatStop, which carries what it saw
+        def __init__(self, ids):
+            super().__init__("enough")
+            self.ids = ids
+
+    def cb(step, ids):
+        seen.append((step, ids))
+        if step == 4:
+            raise Soft(ids)
+
+    model = tiny_decoder()
+    with scripted_decoder(model, markov_script(TWO_END, default=_strong)):
+        got, ended = _eos(kind, model, EMPTY, _prefix(), 2, 20, on_step=cb, eos=EOS)
+    assert (got[0].tolist(), ended) == ([1], True)      # the best of the two that ended ([1] at -0.65, not the later [1, 1] at -0.74)
+    assert [step for step, _ in seen] == [0, 1, 2, 3, 4]
+    assert seen[-1][1] == [0, 0, 0, 4, 4]               # the callback was looking at the live answer when it stopped the search
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_soft_stop_with_nothing_ended_propagates_the_same_object(kind):   # (d)
+    StopDecoding = _stop_decoding()
+
+    class Soft(StopDecoding):
+        def __init__(self, ids):
+            super().__init__("enough")
+            self.ids = ids
+
+    raised, calls = Soft([1, 2, 3]), []
+
+    def cb(step, ids):
+        calls.append(step)
+        if step == 2:
+            raise raised
+
+    with pytest.raises(Soft) as info:
+        _eos(kind, tiny_decoder(), EMPTY, _prefix(), 3, 8, on_step=cb)       # the default id is out of reach: nothing ever ends
+    assert info.value is raised and info.value.ids == [1, 2, 3] and calls == [0, 1, 2]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_any_other_exception_propagates_even_when_a_hypothesis_has_ended(kind):   # (e): Cancelled is one
+    class Cancelled(Exception):
+        pass
+    calls = []
+
+    def cb(step, ids):
+        calls.append(step)
+        if step == 4:
+            raise Cancelled()
+
+    model = tiny_decoder()
+    with scripted_decoder(model, markov_script(TWO_END, default=_strong)):
+        with pytest.raises(Cancelled):
+            _eos(kind, model, EMPTY, _prefix(), 2, 20, on_step=cb, eos=EOS)
+    assert calls == [0, 1, 2, 3, 4]                     # [1] had ended at step 1: the pool was not empty, and the exception still came out
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_soft_stop_at_the_step_that_ends_the_report_returns_it_and_the_stream_ends_on_it(kind):
+    StopDecoding, seen = _stop_decoding(), []
+
+    def cb(step, ids):
+        seen.append((step, ids))
+        if step == 5:                                   # the step at which every beam ends, so the answer is the finished report
+            raise StopDecoding("enough")
+
+    model = tiny_decoder()
+    with scripted_decoder(model, noise_script(5, EOS, lambda n, last: 40.0 if n == 5 else -1e4)):
+        got, ended = _eos(kind, model, EMPTY, _prefix(), 3, 30, on_step=cb, eos=EOS)
+    assert ended is True and got.shape == (1, 5) and seen[-1] == (5, got[0].tolist())
+
+
+def test_the_published_decoders_catch_nothing_so_a_soft_stop_leaves_them_as_any_exception_does():
+    from scripts.evaluate_report_generation import beam_search_decode
+    StopDecoding = _stop_decoding()
+
+    def cb(step, ids):
+        if step == 2:
+            raise StopDecoding("enough")
+
+    model = tiny_decoder()
+    with pytest.raises(StopDecoding):
+        beam_search_decode(model, EMPTY, prefix_embeds=_prefix(), beam_size=3, max_new_tokens=8, on_step=cb)
+    with pytest.raises(StopDecoding):
+        model.beam_search_cached(EMPTY, prefix_embeds=_prefix(), beam_size=3, max_new_tokens=8, on_step=cb)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -518,14 +693,18 @@ def test_the_inspection_run_stops_at_the_eos_with_the_flag_and_counts_the_report
     script = noise_script(5, EOS, lambda n, last: 40.0 if n == N else -1e4)
     on, hyps_on = _inspect(tmp_path, monkeypatch, capsys, script, stop_at_eos=True, cached_decode=cached)
     assert len(hyps_on) == 3 and all(len(h.split()) == N for h in hyps_on)         # N words each: the report, without its EOS
-    assert "EOS stop: 3/3 reports ended at the end-of-report token" in on
+    assert "EOS stop: 3/3 reports ended at the end-of-report token, 0 were cut at max_new_tokens=30" in on
     off, hyps_off = _inspect(tmp_path, monkeypatch, capsys, script, stop_at_eos=False, cached_decode=cached)
     assert all(len(h.split()) > N + 15 for h in hyps_off)                           # the published protocol runs on past the end
     assert "EOS stop" not in off and "stops at EOS" not in off                      # and says nothing of it
 
 
+def test_the_inspection_run_counts_the_reports_it_had_to_cut_at_the_budget(tmp_path, monkeypatch, capsys):
+    on, hyps = _inspect(tmp_path, monkeypatch, capsys, noise_script(5, EOS, lambda n, last: -1e4), stop_at_eos=True)   # no EOS in reach
+    assert "EOS stop: 0/3 reports ended at the end-of-report token, 3 were cut at max_new_tokens=30" in on
+
+
 def test_the_inspection_run_without_the_flag_is_what_it_was(tmp_path, monkeypatch, capsys):
-    from scripts.evaluate_report_generation import generate_from_patch_grid
     plain, hyps_plain = _inspect(tmp_path, monkeypatch, capsys)                       # the args carry no stop_at_eos at all
     flagged, hyps_flagged = _inspect(tmp_path, monkeypatch, capsys, stop_at_eos=False)
     assert hyps_plain == hyps_flagged and len(hyps_plain) == 3

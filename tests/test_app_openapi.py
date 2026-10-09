@@ -124,6 +124,7 @@ def test_the_options_description_says_a_model_trained_to_end_its_reports_stops_t
     text = _body_schema(client.get("/openapi.json").json())["properties"]["options"]["description"]
     about = text.split("`eos_trained: true`", 1)[1].split(".")[0]
     assert "`stopped: eos`" in about and "stop_on_repeat" in about, about
+    assert "already ended" in text and "the stop is `eos` too" in text      # a repeat stop after a report ended keeps that report
 
 
 def test_the_streaming_route_documents_its_event_stream(client, monkeypatch):

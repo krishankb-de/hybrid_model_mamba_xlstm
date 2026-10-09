@@ -121,8 +121,9 @@ OPTIONS_DOC = ("The turn's options as a JSON object with the keys " + ", ".join(
                "`report` ends in the start of the next sentence; left out, the whole `max_new_tokens` is decoded, as in "
                "the published protocol. A model whose card says `eos_trained: true` was trained to end its reports: its "
                "decoding also stops where it does, whatever `stop_on_repeat` says, and the generate stage then reports "
-               "`stopped: eos`. `reference` and `test_row` work in private mode only. A command in `text` is "
-               "applied on top.")
+               "`stopped: eos`. If `stop_on_repeat` ends the search after a report has already ended, that report is the "
+               "answer and the stop is `eos` too. `reference` and `test_row` work in private mode only. A command in `text` "
+               "is applied on top.")
 REFUSALS = {   # what a status means in the reference; a route that can answer it declares it with _refusals()
     400: "The request is malformed: `options` is not a JSON object, or in public mode `X-Client-Id` is missing or "
          "invalid.",

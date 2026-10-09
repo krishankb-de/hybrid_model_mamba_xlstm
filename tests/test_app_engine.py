@@ -24,7 +24,7 @@ from app.schemas import Options
 from app.tiny import (TINY_VOCAB, TinyTokenizer, TinyTower, tiny_decoder, tiny_decoder_config,
                       tiny_prefix_mapper)
 from scripts.repair_generations import repair_report, split_sentences
-from tests.app_helpers import noise_script, png_bytes, scripted_decoder
+from tests.app_helpers import markov_script, noise_script, png_bytes, scripted_decoder
 
 EMPTY = torch.zeros((1, 0), dtype=torch.long)   # report generation seeds with no BOS
 
@@ -817,7 +817,7 @@ def test_an_eos_trained_model_stops_where_its_report_ends_and_says_so(cached, de
     assert gen.report == " ".join(WORDS[:11]) == "The heart is normal. The lungs are clear. No pleural effusion."
     assert gen.truncated_mid_sentence is False and gen.display_report == gen.report
     assert [step for step, _ in snaps] == list(range(12))                     # one snapshot per step, the step that ended it too
-    assert [text for _, text in snaps[:11]] == [" ".join(WORDS[:n]) for n in range(1, 12)]
+    assert [text for _, text in snaps] == [" ".join(WORDS[:n]) for n in range(1, 12)] + [gen.report]   # and the stream ends on the report
     json.dumps(res.detail)
     assert set(res.detail) == {"decode", "beam_size", "tokens", "stopped", "cached_decode", "compiled", "prefill_ms",
                                "per_token_ms", "device", "threads", "drift_note"}   # the stop reason is a value, not a new field
@@ -881,6 +881,62 @@ def test_stop_on_repeat_is_still_a_backstop_and_the_first_stop_to_fire_wins(cach
     with _eos_model(end_at=8, text=loop) as eng:                               # and the same model with the switch off
         res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=40, cached_decode=cached), _noop, threading.Event())
     assert res.detail["stopped"] == "eos" and len(gen.token_ids) == 8
+
+
+LOOP = "The heart is normal. The lungs are clear. The heart is normal. The lungs are clear. Impression: no effusion."   # repeats at word 12
+
+
+def _ends_at_eight_while_a_better_beam_lives_on():
+    """Beam 2: every step takes token 4 with p .99, except step 8, where the end has p .3 behind token 4's .6. So the report that ends there
+    (8 tokens, -0.14 normalised) is not the best candidate, the live beam (-0.07, improving) stays the answer, and it is that beam that
+    the loop text repeats in."""
+    table = {(0, None): {4: .99, 5: .01}}
+    table.update({(n, 4): {4: .99, 5: .01} for n in range(1, 60)})
+    table[(8, 4)] = {4: .6, EOS_ID: .3, 5: .1}
+    return markov_script(table, default=noise_script(3, EOS_ID, lambda n, last: -1e4))
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_a_report_that_ended_before_the_repeat_is_kept_when_stop_on_repeat_fires(cached):
+    # The answer (a live beam) starts repeating at word 12, after a hypothesis ended at word 8. The repeat stop ends the search, and the
+    # search hands back what ended: the engine says eos, with the report that ended, not the repeating beam.
+    eng = build_engine("tiny")
+    eng._card["eos_trained"], eng.eos_token_id, eng.tokenizer = True, EOS_ID, _GrowingText(LOOP)
+    words, snaps = LOOP.split(), []
+    with scripted_decoder(eng.decoder, _ends_at_eight_while_a_better_beam_lives_on()):
+        res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=40, beam_size=2, cached_decode=cached, stop_on_repeat=True),
+                                lambda step, text: snaps.append(text), threading.Event())
+    assert res.detail["stopped"] == "eos"
+    assert gen.report == " ".join(words[:8]) == "The heart is normal. The lungs are clear."
+    assert res.detail["tokens"] == len(gen.token_ids) == 8 and gen.truncated_mid_sentence is False
+    assert len(snaps) == 12 and snaps[-1] == " ".join(words[:12])   # the callback was shown the repeating answer, and stopped the search
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_the_same_model_with_the_switch_off_decodes_on_to_its_budget_with_the_live_answer(cached):
+    eng = build_engine("tiny")
+    eng._card["eos_trained"], eng.eos_token_id, eng.tokenizer = True, EOS_ID, _GrowingText(LOOP)
+    with scripted_decoder(eng.decoder, _ends_at_eight_while_a_better_beam_lives_on()):
+        res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=20, beam_size=2, cached_decode=cached), _noop, threading.Event())
+    assert res.detail["stopped"] == "budget" and res.detail["tokens"] == len(gen.token_ids) == 20   # a live answer: full length, so "budget"
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_a_repeat_before_anything_ended_is_a_repeat_stop_with_the_beam_that_repeated(cached):
+    eng = build_engine("tiny")                                                 # the model never ends a report (its EOS is out of reach)
+    eng._card["eos_trained"], eng.eos_token_id, eng.tokenizer = True, EOS_ID, _GrowingText(LOOP)
+    with scripted_decoder(eng.decoder, noise_script(5, EOS_ID, lambda n, last: -1e4)):
+        res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=40, cached_decode=cached, stop_on_repeat=True), _noop, threading.Event())
+    assert res.detail["stopped"] == "repeat" and len(gen.token_ids) == res.detail["tokens"] == 12
+    assert gen.report == " ".join(LOOP.split()[:12]) and gen.truncated_mid_sentence is False
+
+
+def test_the_repeat_stop_is_a_stop_decoding_and_the_engine_still_cancels_through_it():
+    from app.engine import _RepeatStop
+    from hybrid_xmamba.models.hybrid_lm import StopDecoding
+    stop = _RepeatStop([1, 2, 3])
+    assert isinstance(stop, StopDecoding) and stop.ids == [1, 2, 3]            # what the EOS searches catch, and what they re-raise
+    assert not issubclass(Cancelled, StopDecoding)                              # a cancel is never softened into a report
 
 
 @pytest.mark.parametrize("cached", [True, False])

@@ -124,7 +124,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import torch
 
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
-from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel
+from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel, StopDecoding
 from hybrid_xmamba.models.prefix_mapper import ImagePrefixMapper
 
 
@@ -222,21 +222,21 @@ def beam_search_decode_eos(
 
     The published search runs exactly max_new_tokens steps and takes an EOS for any other token, which is all a model that never
     learned one can use. A model trained with dataset.report_eos_target (P9-G1) ends its reports, and this search lets it. It sits
-    beside the published one, which is untouched; both rank the same way and break ties the same way. At every step, as in Hugging
-    Face's early stopping:
+    beside the published one, which is untouched; both rank the same way and break ties the same way. At every step:
       1. rank the candidates as beam_search_decode does and keep the top 2 * beam_size (each live beam offers its 2 * beam_size
          best tokens, which contains the overall top 2 * beam_size);
       2. walk them in rank order. An EOS candidate within the first beam_size is set aside as finished, scored like any other
-         candidate (the EOS counts in the length); the rest fill the beam_size live slots; an EOS further down is dropped. A beam has
-         one EOS candidate at most, so the top 2 * beam_size always hold beam_size others;
-      3. stop once beam_size hypotheses have finished, or at max_new_tokens.
-    The answer is the best normalised score of finished + live, so a live beam that still outscores the finished ones is returned
-    (ended_by_eos False). A tie goes to a finished hypothesis (the earliest to finish), then to the live beams in rank order.
-    `ids` is shaped like beam_search_decode's (prompt + generated), without the EOS of a finished hypothesis.
+         candidate (the EOS counts in the length); the rest fill the beam_size live slots; an EOS further down is dropped;
+      3. the ANSWER is the best normalised score of the best finished hypothesis and the live beams (a tie goes to the finished one,
+         then to the live beams in rank order). on_step gets its ids, and the search returns right after that call once the answer
+         is a finished hypothesis (OpenNMT-style top-hypothesis stopping), or at max_new_tokens. A live answer at the budget has the
+         full length, and ended_by_eos is False.
+    `ids` is shaped like beam_search_decode's (prompt + generated), without the EOS of a finished hypothesis. With no EOS among the
+    first beam_size candidates at any step nothing ever finishes, and this is beam_search_decode: the same ids, and on_step sees the same.
 
-    With no EOS among the first beam_size candidates at any step this is beam_search_decode: the same ids, and on_step sees the same.
-    `on_step(step, ids)` is called once per step, after its selection, with the best LIVE beam's ids; it only observes, and raising
-    from it stops decoding (the chat app's cancel).
+    `on_step(step, answer_ids)` is called once per step, after its selection. It only observes, with one exception: raising
+    `StopDecoding` (hybrid_xmamba.models.hybrid_lm) ends the search, which returns the best finished hypothesis if there is one, and
+    lets the same exception propagate if there is none. Any other exception propagates (the chat app's cancel).
     """
     if input_ids.shape[0] != 1:
         raise ValueError(
@@ -250,9 +250,10 @@ def beam_search_decode_eos(
     else:
         base_hidden = model.embeddings(input_ids)
 
-    # Live beams, best first: (hidden_states, token_ids, cumulative_log_prob). Finished: (normalised score, token_ids sans EOS).
+    # Live beams, best first: (hidden_states, token_ids, cumulative_log_prob). Best hypothesis that ended: (normalised score, token_ids
+    # sans EOS), the earliest of equals.
     beams = [(base_hidden, input_ids, 0.0)]
-    finished = []
+    best_done = None
 
     for step in range(max_new_tokens):
         length = beams[0][1].shape[1] + 1      # every live beam has this many tokens once it takes one more
@@ -269,7 +270,9 @@ def beam_search_decode_eos(
         for rank, (parent, idx, score) in enumerate(candidates[:2 * beam_size]):
             if idx == eos_token_id:
                 if rank < beam_size:
-                    finished.append((score / (length ** length_penalty), beams[parent][1]))
+                    done = score / (length ** length_penalty)
+                    if best_done is None or done > best_done[0]:
+                        best_done = (done, beams[parent][1])
                 continue
             stay.append((parent, idx, score))
             if len(stay) == beam_size:
@@ -282,14 +285,21 @@ def beam_search_decode_eos(
             next_beams.append((torch.cat([hidden_states, model.embeddings(next_token)], dim=1),
                                torch.cat([token_ids, next_token], dim=1), score))
         beams = next_beams
-        if on_step is not None:   # observe only; beams[0] is the best live beam
-            on_step(step, beams[0][1][0].tolist())
-        if len(finished) >= beam_size:
-            break
+        # beams[0] is the best live beam: what beam_search_decode shows and returns.
+        live_score = beams[0][2] / (beams[0][1].shape[1] ** length_penalty)
+        answer_done = best_done is not None and best_done[0] >= live_score
+        answer = best_done[1] if answer_done else beams[0][1]
+        if on_step is not None:
+            try:
+                on_step(step, answer[0].tolist())
+            except StopDecoding:
+                if best_done is None:
+                    raise
+                return best_done[1], True
+        if answer_done:
+            return answer, True
 
-    pool = finished + [(c[2] / (c[1].shape[1] ** length_penalty), c[1]) for c in beams]
-    best = max(range(len(pool)), key=lambda i: pool[i][0])   # the first maximum: the tie order named above
-    return pool[best][1], best < len(finished)
+    return beams[0][1], False
 
 
 # ---------------------------------------------------------------------------
@@ -701,7 +711,8 @@ def run_checkpoint_inspection(args) -> None:
         refs.append(reference)
 
     if stop_at_eos:   # the dumps hold text only, so this is where a run says how many of its reports the model ended itself
-        print(f"EOS stop: {ended_by_eos}/{n} reports ended at the end-of-report token (max_new_tokens={args.max_new_tokens})")
+        print(f"EOS stop: {ended_by_eos}/{n} reports ended at the end-of-report token, {n - ended_by_eos} were cut at "
+              f"max_new_tokens={args.max_new_tokens}")
 
     # E7: checked BEFORE the dump is written. A dump produced by an accidental
     # eager run is indistinguishable from a real one on disk, and would be
@@ -1044,11 +1055,12 @@ def main():
                              "available when every mixer has a step(). Off by default: the "
                              "published numbers came from the uncached path.")
     parser.add_argument("--stop-at-eos", action="store_true",
-                        help="P9-G2: beam search that sets a beam aside when it ends in EOS and stops once beam-size have "
-                             "ended, or at --max-new-tokens; the report is the best of those and the live beams, without "
-                             "its EOS. For a model trained with dataset.report_eos_target (P9-G1): the published models "
-                             "never learned an EOS. Needs --decode beam; with --cached-decode it uses the cached twin. Off "
-                             "by default: the published protocol decodes the whole budget.")
+                        help="P9-G2: beam search that sets a beam aside when it ends in EOS and stops as soon as the best "
+                             "hypothesis, one that ended or a live beam, by normalised score, is one that ended, or at "
+                             "--max-new-tokens; the report is that hypothesis, without its EOS. For a model trained with "
+                             "dataset.report_eos_target (P9-G1): the published models never learned an EOS. Needs --decode beam; "
+                             "with --cached-decode it uses the cached twin. Off by default: the published protocol decodes the "
+                             "whole budget.")
     parser.add_argument("--beam-size", type=int, default=3,
                         help="Beam size when --decode beam (for --checkpoint mode)")
     parser.add_argument("--max-new-tokens", type=int, default=100,

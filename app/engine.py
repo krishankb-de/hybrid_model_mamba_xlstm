@@ -24,6 +24,7 @@ from PIL import Image
 from app.imaging import load_upload, model_input_image, model_transform
 from app.schemas import DISCLAIMER  # noqa: F401  (the one copy lives in app.schemas; engine keeps the name)
 from app.tiny import TinyTokenizer, TinyTower, tiny_decoder, tiny_prefix_mapper
+from hybrid_xmamba.models.hybrid_lm import StopDecoding
 from scripts.repair_generations import is_sentence_end, repair_report, split_sentences   # stdlib only: no decoding code
 
 if TYPE_CHECKING:
@@ -68,9 +69,11 @@ class Cancelled(Exception):
     """The turn's cancel event was set; generation stopped at a step boundary."""
 
 
-class _RepeatStop(Exception):
-    """The best beam's report began to repeat itself and the turn asked to stop there (Options.stop_on_repeat). Raised from the step
-    callback, the way Cancelled is, to leave the decoder: the thesis decoders are not edited (R3). Carries that step's best-beam ids."""
+class _RepeatStop(StopDecoding):
+    """The decoder's answer began to repeat itself and the turn asked to stop there (Options.stop_on_repeat). Raised from the step
+    callback, the way Cancelled is, to leave the decoder: the published decoders are not edited (R3) and catch nothing, so it leaves them
+    and the engine reads the ids it carries. The EOS-stop searches (P9-G2) catch it, being a StopDecoding: one that holds a hypothesis
+    that ended returns that, and the engine reports eos; one that holds none lets this escape, unchanged. Carries that step's answer."""
 
     def __init__(self, ids: List[int]):
         super().__init__("the report began to repeat itself")
@@ -265,8 +268,8 @@ class Engine:
         with torch.no_grad():
             try:
                 ended = False
-                # The step callback sees the best LIVE beam, so on an EOS stop the last snapshot can run a token past the end of
-                # the report; the report itself is what message_stop carries.
+                # The EOS searches show the callback their answer (the best of the hypotheses that ended and the live beams), and stop once
+                # it is one that ended: the last snapshot of an EOS stop is the report itself, with no token past its end.
                 if eos_trained and opts.cached_decode:
                     out, ended = self.decoder.beam_search_cached_eos(
                         empty, prefix_embeds=enc.prefix, beam_size=beam, max_new_tokens=opts.max_new_tokens,

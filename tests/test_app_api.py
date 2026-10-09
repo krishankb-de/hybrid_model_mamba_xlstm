@@ -1177,7 +1177,9 @@ def test_an_eos_stop_streams_stopped_eos_no_cut_off_flag_and_a_card_that_says_eo
     start, stop, generate = frames[0]["data"], frames[-1]["data"], _stage_ends(frames)["generate"]["detail"]
     assert start["model"]["eos_trained"] is True
     assert (generate["stopped"], generate["tokens"]) == ("eos", 13)
-    assert len([f for f in frames if f["event"] == "content_block_delta"]) == 14             # a snapshot per step, the one that ended it too
+    snapshots = [f["data"]["delta"]["text"] for f in frames if f["event"] == "content_block_delta"]
+    assert len(snapshots) == 14                                                              # a snapshot per step, the one that ended it too
+    assert snapshots[-1] == stop["report"] == " ".join(words[:13])                           # the last one is the report: no overshoot, no snap-back
     assert stop["status"] == "done" and stop["truncated_mid_sentence"] is False              # "... Impression: no" is a cut-off only at the budget
     assert stop["report"] == " ".join(words[:13]) and stop["display_report"] == " ".join(words[:11])
     assistant = client.get("/v1/sessions/{}".format(sid)).json()["messages"][-1]
