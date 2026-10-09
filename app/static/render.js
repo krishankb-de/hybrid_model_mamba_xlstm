@@ -204,12 +204,21 @@ function clipped(text, name, env) {
 // ---- notes: warnings, a stop, an error ---------------------------------------------------------------------------------
 
 const errorText = (v) => `Error: ${str(v.error?.message) || 'the turn failed'}`;
+// The server says "Internal error (<class>)" for a failure it did not foresee, and only the class: never the exception's text, which can
+// hold report text and paths (a public server says a fixed sentence instead). A line under it says what to try (P4-H A3): the one such
+// error users have met is a server that ran on while its code changed on disk, which a restart cures.
+const INTERNAL_ERROR = /^Internal error \(/;
+const INTERNAL_ERROR_HINT = 'The server hit an internal error. If you just updated the code, restart the server.';
 
 export function renderNotes(view) {
   const v = whole(view);
   const notes = noticesOf(v).map((n) => el('p', { class: 'note notice', 'data-code': str(n.code) || null }, str(n.message) || str(n.code)));
-  if (v.error || v.status === 'error') notes.push(el('p', { class: 'note error' }, errorText(v)));
-  else if (v.status === 'aborted') notes.push(el('p', { class: 'note stopped' }, 'Turn stopped'));
+  if (v.error || v.status === 'error') {
+    notes.push(el('p', { class: 'note error' }, errorText(v)));
+    if (INTERNAL_ERROR.test(str(v.error?.message))) notes.push(el('p', { class: 'note error-hint' }, INTERNAL_ERROR_HINT));
+  } else if (v.status === 'aborted') {
+    notes.push(el('p', { class: 'note stopped' }, 'Turn stopped'));
+  }
   return el('div', { class: 'notes', hidden: !notes.length }, ...notes);
 }
 

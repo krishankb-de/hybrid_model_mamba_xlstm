@@ -1,5 +1,6 @@
 """CHAT_UI_PLAN.md P3-D: the streaming API on the tiny engine."""
 import asyncio
+import datetime
 import hashlib
 import http.client
 import ipaddress
@@ -15,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+import app.engine as engine_module
 from app import server
 from app.commands import NOT_A_QA_BOT
 from app.engine import REPO_ROOT, TinyEngine, build_engine
@@ -1359,10 +1361,46 @@ def test_markdown_export_has_a_heading_per_turn_and_exports_download(client):
     assert r.status_code == 422 and r.json()["error"]["type"] == "validation_error"
 
 
-def test_health_reports_mode_and_load_without_a_token(tmp_path):
+GIT_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _provenance(sha):
+    return lambda root: {"git_sha": sha, "git_dirty": None if sha is None else False, "git_source": None if sha is None else "git"}
+
+
+def test_health_reports_mode_and_load_without_a_token(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine_module, "git_provenance", _provenance(GIT_SHA))
     with TestClient(create_app(engine="tiny", home=str(tmp_path), token="t", queue_cap=3)) as c:
-        assert c.get("/healthz").json() == {"status": "ok", "mode": "private", "default_model": "tiny",
-                                            "turns_in_flight": 0, "queue_cap": 3}
+        health = c.get("/healthz").json()
+    assert set(health) == {"status", "mode", "default_model", "turns_in_flight", "queue_cap", "code_version", "started_at"}
+    health.pop("started_at")
+    assert health == {"status": "ok", "mode": "private", "default_model": "tiny", "turns_in_flight": 0, "queue_cap": 3,
+                      "code_version": "0123456"}
+
+
+def test_health_says_which_code_the_server_started_from_and_when(tmp_path, monkeypatch):
+    """P4-H A2: a server that runs on while its code changes on disk is stale (the ImportError of 2026-10-09). /healthz says the short
+    sha of the code it started from (the engine card's git_sha: the checkout, else the .sync_stamp) and when it started. Both are read
+    once, at the start: a later change on disk changes neither."""
+    monkeypatch.setattr(engine_module, "git_provenance", _provenance(GIT_SHA))
+    before = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    with TestClient(create_app(engine="tiny", home=str(tmp_path))) as c:
+        after = datetime.datetime.now(datetime.timezone.utc)
+        first = c.get("/healthz").json()
+        monkeypatch.setattr(engine_module, "git_provenance", _provenance("f" * 40))   # the code on disk moves on
+        assert c.get("/healthz").json() == first
+    started = datetime.datetime.fromisoformat(first["started_at"])
+    assert started.utcoffset() == datetime.timedelta(0) and before <= started <= after
+    assert first["code_version"] == GIT_SHA[:7]
+    assert first["code_version"] == c.app.state.engines["tiny"].card()["git_sha"][:7]
+
+
+def test_health_says_null_when_the_server_cannot_tell_its_code_version(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine_module, "git_provenance", _provenance(None))   # no git binary, no checkout and no .sync_stamp
+    with TestClient(create_app(engine="tiny", home=str(tmp_path))) as c:
+        health = c.get("/healthz").json()
+    assert health["code_version"] is None and health["status"] == "ok"
+    datetime.datetime.fromisoformat(health["started_at"])
 
 
 # ---- the SSE bridge -----------------------------------------------------------------------------------------------

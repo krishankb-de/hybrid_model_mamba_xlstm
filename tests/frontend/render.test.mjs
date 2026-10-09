@@ -1021,6 +1021,30 @@ test('a failed turn shows its error message; a stopped one says so', () => {
   assert.equal(q(renderAssistantCard(finished(), {}), '.note.error, .note.stopped'), null);
 });
 
+test('an internal error also says what to try, on a line of its own; its error text and the status are unchanged (P4-H A3)', () => {
+  const HINT = 'The server hit an internal error. If you just updated the code, restart the server.';
+  const failed = viewOf([START, stageStart('generate', 3),
+                         step('error', { type: 'error', error: { type: 'model_error', message: 'Internal error (ImportError)' } }), stopOf('error')]);
+  const card = renderAssistantCard(failed, {});
+  assert.equal(q(card, '.note.error').textContent, 'Error: Internal error (ImportError)');   // the class name only, never exception text
+  assert.equal(q(card, '.note.error-hint').textContent, HINT);
+  const notes = q(card, '.notes').children;                                                   // right under the error it explains
+  assert.equal(notes.indexOf(q(card, '.note.error-hint')), notes.indexOf(q(card, '.note.error')) + 1);
+  assert.equal(statusText(failed), 'Error: Internal error (ImportError)');
+  assert.equal(q(renderNotes(failed), '.note.error-hint').textContent, HINT);
+  // Only the server's own "Internal error (<class>)", which private mode shows. A public server's fixed message, an upload it refused, a
+  // restart: none is about code on disk, so none gets the line.
+  const others = [{ type: 'model_error', message: 'The model could not finish this turn.' },
+                  { type: 'validation_error', message: 'Each side must be at least 64 pixels.' },
+                  { type: 'server_restart', message: 'The server restarted while this turn was running.' },
+                  { type: 'model_error', message: 'Out of memory' }];
+  for (const error of others) {
+    const view = viewOf([START, stageStart('generate', 3), step('error', { type: 'error', error }), stopOf('error')]);
+    assert.equal(q(renderAssistantCard(view, {}), '.note.error-hint'), null, error.message);
+  }
+  assert.equal(q(renderAssistantCard(viewOf([START, stopOf('error')]), {}), '.note.error-hint'), null);   // an error with no message
+});
+
 test('warnings are shown in arrival order', () => {
   const view = viewOf([START, step('warning', { code: 'reference_ignored_public', message: 'First.' }),
                        step('warning', { code: 'other', message: 'Second.' }), stopOf('done')]);

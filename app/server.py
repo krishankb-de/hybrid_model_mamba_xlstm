@@ -20,6 +20,7 @@ import logging
 import os
 import re
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Tuple
 
@@ -79,6 +80,10 @@ MODELS_EXAMPLE = {"default_model": "hybrid_150m_m3_rrg", "mode": "private", "all
                   "features": {"retrieval": False, "labels": False},
                   "models": [{"name": "hybrid_150m_m3_rrg", "prefix_k": 32, "cached_decode_available": True, "eos_trained": False,
                               "device": "cpu"}]}
+# GET /healthz as /docs shows it (test_app_openapi pins its keys to the real answer). code_version and started_at (P4-H A2) tell a server
+# that runs older code than the checkout: the dev server of 2026-10-09 had, and its turns ended "Internal error (ImportError)".
+HEALTHZ_EXAMPLE = {"status": "ok", "mode": "private", "default_model": "hybrid_150m_m3_rrg", "turns_in_flight": 0, "queue_cap": 4,
+                   "code_version": "a8e7efe", "started_at": "2026-10-09T14:24:00+00:00"}
 
 
 def _option_ranges() -> str:
@@ -414,6 +419,10 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     default_model = next(iter(engines))
     worker = Worker(Pipeline(engines, default_model, store, mode, drift_note=drift_note), queue_cap)
     static_dir = STATIC_DIR
+    # Read once, here: the code this process runs is what it imported at the start, whatever the checkout says later (P4-H A2).
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    git_sha = engines[default_model].card().get("git_sha")   # the card's provenance: the checkout's HEAD, else the .sync_stamp
+    code_version = git_sha[:7] if isinstance(git_sha, str) and git_sha else None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -471,11 +480,15 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
 
     app.mount("/static", _StaticFiles(directory=str(static_dir), check_dir=False), name="static")
 
-    @app.get("/healthz", summary="Check the server", responses=_refusals({}, token=False, client_id=False),
-             description="The server's mode, default model, turns in flight and queue cap. It needs no token.")
+    @app.get("/healthz", summary="Check the server",
+             responses={200: {"description": "The server is up.", "content": {"application/json": {"example": HEALTHZ_EXAMPLE}}},
+                        **_refusals({}, token=False, client_id=False)},
+             description="The server's mode, default model, turns in flight and queue cap, with `code_version` (the short git sha "
+                         "of the code it started from, which it runs until it restarts; null when it cannot tell) and `started_at` "
+                         "(ISO 8601, UTC). It needs no token.")
     def healthz():
         return {"status": "ok", "mode": mode, "default_model": default_model, "turns_in_flight": worker.in_flight,
-                "queue_cap": queue_cap}
+                "queue_cap": queue_cap, "code_version": code_version, "started_at": started_at}
 
     @app.get("/v1/models", summary="List models",
              responses={200: {"description": "The models, the default, and the stages this server runs.",

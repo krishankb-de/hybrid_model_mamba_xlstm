@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -204,6 +205,50 @@ def test_uncached_and_greedy_paths_equal_the_published_functions():
     assert unc.token_ids == ref[0].tolist()
     _, grd = eng.generate(enc, Options(max_new_tokens=16, decode="greedy"), _noop, threading.Event())
     assert grd.token_ids == greedy_decode(eng.decoder, EMPTY, prefix_embeds=enc.prefix, max_new_tokens=16)[0].tolist()
+
+
+TEST_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_the_published_decoders_are_loaded_when_the_engine_is_built_not_at_its_first_turn():
+    """P4-H A1. A dev server ran on while the decoding code changed on disk: its first turn imported the new
+    scripts/evaluate_report_generation.py, which imports StopDecoding from the hybrid_lm the process had loaded at start, before
+    StopDecoding existed, and every turn ended "Internal error (ImportError)". The decoders now load with app.engine, so a server
+    holds the code it started with until it restarts. A fresh interpreter: in this one, some other test may have loaded it."""
+    code = ("import sys; from app.engine import TinyEngine; TinyEngine(); "
+            "print('scripts.evaluate_report_generation' in sys.modules)")
+    done = subprocess.run([sys.executable, "-c", code], cwd=TEST_REPO, capture_output=True, text=True, timeout=180,
+                          env=dict(os.environ, PYTHONPATH=TEST_REPO))
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert done.stdout.strip().splitlines()[-1] == "True"
+
+
+@pytest.mark.parametrize("cached,decode,eos_trained", [(True, "beam", False), (False, "beam", False), (True, "greedy", False),
+                                                       (False, "greedy", False), (True, "beam", True), (False, "beam", True)])
+def test_a_turn_imports_no_project_code_so_code_changed_on_disk_cannot_break_a_running_server(monkeypatch, cached, decode,
+                                                                                              eos_trained):
+    """P4-H A1: generate imports nothing. With the decoders' module made unimportable, as a changed file on disk made it for the stale
+    server, every decoding path (cached and uncached, beam and greedy, the published searches and the EOS ones) still runs, and gives
+    exactly the tokens it gives without that."""
+    import builtins
+    eng = build_engine("tiny")
+    eng._card["eos_trained"] = eos_trained   # the tiny vocab has no EOS token, so the EOS searches decode what the published ones do
+    enc = _encoded(eng)
+    opts = Options(max_new_tokens=16, cached_decode=cached, decode=decode)
+    _, before = eng.generate(enc, opts, _noop, threading.Event())
+    monkeypatch.setitem(sys.modules, "scripts.evaluate_report_generation", None)   # an import of it now raises ImportError
+    imported = []
+    real_import = builtins.__import__
+
+    def recording(name, *args, **kwargs):
+        imported.append(name)
+        return real_import(name, *args, **kwargs)
+
+    with mock.patch.object(builtins, "__import__", recording):
+        res, after = eng.generate(enc, opts, _noop, threading.Event())
+    assert after.token_ids == before.token_ids and after.report == before.report
+    assert res.detail["stopped"] == "budget" and res.detail["tokens"] == 16
+    assert [name for name in imported if name.split(".")[0] in ("scripts", "hybrid_xmamba", "app")] == []
 
 
 def test_display_repair_only_changes_the_display_copy():

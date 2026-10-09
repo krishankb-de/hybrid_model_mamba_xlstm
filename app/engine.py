@@ -25,6 +25,11 @@ from app.imaging import load_upload, model_input_image, model_transform
 from app.schemas import DISCLAIMER  # noqa: F401  (the one copy lives in app.schemas; engine keeps the name)
 from app.tiny import TinyTokenizer, TinyTower, tiny_decoder, tiny_prefix_mapper
 from hybrid_xmamba.models.hybrid_lm import StopDecoding
+# The published decoders load with this module, when the server starts, and never at a turn (P4-H A1): a server holds the decoding code
+# it started with until it restarts. Imported at its first turn, after that code had changed on disk, the new file met the hybrid_lm the
+# process had loaded at start, and every turn ended "Internal error (ImportError)". The module, not its names: a test that patches
+# erg.beam_search_decode still reaches generate.
+import scripts.evaluate_report_generation as erg
 from scripts.repair_generations import is_sentence_end, repair_report, split_sentences   # stdlib only: no decoding code
 
 if TYPE_CHECKING:
@@ -242,8 +247,6 @@ class Engine:
 
     def generate(self, enc: Encoded, opts: "Options", on_snapshot: Callable[[int, str], None],
                  cancel: threading.Event) -> Tuple[StageResult, Generated]:
-        from scripts.evaluate_report_generation import beam_search_decode, beam_search_decode_eos
-
         if opts.cached_decode and not self.decoder.supports_cached_decode():
             raise ValueError("{} has no O(1) decode cache; set cached_decode=false.".format(self.name))
         if cancel.is_set():   # pressed during an earlier stage: do not pay for a prefill first
@@ -275,15 +278,15 @@ class Engine:
                         empty, prefix_embeds=enc.prefix, beam_size=beam, max_new_tokens=opts.max_new_tokens,
                         eos_token_id=self.eos_token_id, on_step=cb)
                 elif eos_trained:
-                    out, ended = beam_search_decode_eos(
+                    out, ended = erg.beam_search_decode_eos(
                         self.decoder, empty, prefix_embeds=enc.prefix, beam_size=beam, max_new_tokens=opts.max_new_tokens,
                         eos_token_id=self.eos_token_id, on_step=cb)
                 elif opts.cached_decode:
                     out = self.decoder.beam_search_cached(empty, prefix_embeds=enc.prefix, beam_size=beam,
                                                           max_new_tokens=opts.max_new_tokens, on_step=cb)
                 else:
-                    out = beam_search_decode(self.decoder, empty, prefix_embeds=enc.prefix, beam_size=beam,
-                                             max_new_tokens=opts.max_new_tokens, on_step=cb)
+                    out = erg.beam_search_decode(self.decoder, empty, prefix_embeds=enc.prefix, beam_size=beam,
+                                                 max_new_tokens=opts.max_new_tokens, on_step=cb)
                 ids = out[0].tolist()
                 if ended:   # the report it returned is one that ended in the model's own EOS
                     stopped = "eos"

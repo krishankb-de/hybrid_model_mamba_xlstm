@@ -366,7 +366,7 @@ def test_the_banner_stays_above_the_viewer_the_drawer_the_sidebar_and_the_scrim(
 
 # Classes render.js gives an element for the scripts to find and the tests to read, that no rule needs to style.
 HOOK_ONLY = {"label", "notice", "stopped", "error", "truncated", "unknown", "user", "values", "more", "clip", "clip-text",
-             "report-body", "mark"}
+             "report-body", "mark", "error-hint"}
 
 
 def test_every_class_render_js_emits_is_styled_or_a_plain_hook():
