@@ -580,6 +580,103 @@ class HybridLanguageModel(nn.Module):
             best = int(torch.argmax(scores / (tokens.shape[1] ** length_penalty)))
         return tokens[best : best + 1]
 
+    def beam_search_cached_eos(
+        self,
+        input_ids: torch.Tensor,
+        prefix_embeds: Optional[torch.Tensor] = None,
+        beam_size: int = 3,
+        max_new_tokens: int = 100,
+        length_penalty: float = 1.0,
+        eos_token_id: int = 50256,
+        on_step: Optional[Callable[[int, List[int]], None]] = None,
+    ) -> Tuple[torch.Tensor, bool]:
+        """`beam_search_cached` that stops at an end-of-report token (CHAT_UI_PLAN.md P9-G2). -> (ids, ended_by_eos).
+
+        The cached twin of `beam_search_decode_eos` in `scripts/evaluate_report_generation.py`; the two return the same ids and flag
+        (tests/test_beam_search_eos.py), as the published pair do. `beam_search_cached` is untouched. At every step, as in Hugging
+        Face's early stopping:
+          1. rank all beam x vocab candidates as `beam_search_cached` does and keep the top 2 * beam_size;
+          2. walk them in rank order. An EOS candidate within the first beam_size is set aside as finished, scored like any other
+             candidate (the EOS counts in the length); the rest fill the beam_size live slots, in the cache's batch axis as there; an
+             EOS further down is dropped. A beam has one EOS candidate at most, so the top 2 * beam_size always hold beam_size others;
+          3. stop once beam_size hypotheses have finished, or at max_new_tokens.
+        The answer is the best normalised score of finished + live, so a live beam that still outscores the finished ones is
+        returned (ended_by_eos False). A tie goes to a finished hypothesis (the earliest to finish), then to the live beams in rank
+        order. `ids` is shaped like `beam_search_cached`'s (prompt + generated), without the EOS of a finished hypothesis.
+
+        With no EOS among the first beam_size candidates at any step this is `beam_search_cached`: the same ids, and on_step sees the
+        same. `on_step(step, best_ids)` is called once per step, after its selection and before the next forward, with the best LIVE
+        beam's ids; it only observes, and raising from it stops decoding (the chat app's cancel).
+        """
+        if input_ids.shape[0] != 1:
+            raise ValueError(
+                "beam_search_cached_eos operates on one sample at a time (got batch "
+                "{})".format(input_ids.shape[0])
+            )
+        if not self.supports_cached_decode():
+            raise NotImplementedError("cached decode needs every mixer to implement step()")
+        self.eval()
+        device = input_ids.device
+        param = self.lm_head.weight
+        finished = []   # (normalised score, ids without the EOS), in the order they finished
+
+        with torch.no_grad():
+            hidden = self.embeddings(input_ids)
+            if prefix_embeds is not None:
+                hidden = torch.cat([prefix_embeds, hidden], dim=1)
+            # All beams start from the same prompt, so prefill once, replicated.
+            hidden = hidden.expand(beam_size, -1, -1).contiguous()
+            caches = self.allocate_inference_cache(
+                beam_size, device=param.device, dtype=param.dtype
+            )
+            logits = self.prefill(hidden, caches)                    # (beam, vocab)
+
+            tokens = input_ids.expand(beam_size, -1).contiguous()
+            # Only beam 0 is live at the start, as in beam_search_cached.
+            scores = torch.full((beam_size,), float("-inf"), device=device)
+            scores[0] = 0.0
+
+            for step in range(max_new_tokens):
+                log_probs = torch.log_softmax(logits.float(), dim=-1)     # (beam, vocab)
+                total = scores.unsqueeze(-1) + log_probs
+                length = tokens.shape[1] + 1
+                ranked = total / (length ** length_penalty)
+                flat_rank, flat_idx = ranked.view(-1).topk(min(2 * beam_size, ranked.numel()))
+                beam_idx = torch.div(flat_idx, log_probs.shape[-1], rounding_mode="floor")
+                token_idx = flat_idx % log_probs.shape[-1]
+
+                stay = []   # the ranks that fill the live slots, best first
+                for rank, token in enumerate(token_idx.tolist()):
+                    if token == eos_token_id:
+                        if rank < beam_size:
+                            parent = int(beam_idx[rank])
+                            finished.append((float(flat_rank[rank]), tokens[parent : parent + 1].clone()))
+                        continue
+                    stay.append(rank)
+                    if len(stay) == beam_size:
+                        break
+                stay = torch.tensor(stay, device=flat_idx.device)
+                flat_idx, beam_idx, token_idx = flat_idx[stay], beam_idx[stay], token_idx[stay]
+
+                scores = total.view(-1)[flat_idx]
+                tokens = torch.cat([tokens.index_select(0, beam_idx),
+                                    token_idx.unsqueeze(-1)], dim=1)
+                caches = self.reorder_cache(caches, beam_idx)
+                if on_step is not None:
+                    # Observe only. The live beams have the same length, so argmax(scores) is the best of them.
+                    on_step(step, tokens[int(torch.argmax(scores))].tolist())
+                if len(finished) >= beam_size:
+                    break
+                logits = self.step_logits(self.embeddings(token_idx.unsqueeze(-1))[:, 0], caches)
+
+            live = (scores / (tokens.shape[1] ** length_penalty)).tolist()
+            pool = [score for score, _ in finished] + live
+            best = max(range(len(pool)), key=pool.__getitem__)   # the first maximum: the tie order named above
+        if best < len(finished):
+            return finished[best][1], True
+        best -= len(finished)
+        return tokens[best : best + 1], False
+
     def get_num_params(self, non_embedding: bool = True) -> int:
         """Get number of parameters.
         

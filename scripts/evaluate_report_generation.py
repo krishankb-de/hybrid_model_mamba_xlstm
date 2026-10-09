@@ -101,6 +101,12 @@ Usage:
         --checkpoint outputs/h100_report_gen_full/checkpoints/last.ckpt \\
         --parquet /sc/home/$USER/dataset/mimic_full/validate.parquet \\
         --num-samples 1433 --dump-dir results/report_gen_full_n1433
+
+    # P9-G2: a model trained with dataset.report_eos_target (P9-G1), decoded so that it can stop at its own EOS
+    python scripts/evaluate_report_generation.py \\
+        --checkpoint <run>/checkpoints/last.ckpt --model-config hybrid_150m_m3_rrg \\
+        --parquet /sc/home/$USER/dataset/mimic_full/test.parquet \\
+        --decode beam --beam-size 3 --max-new-tokens 200 --stop-at-eos --cached-decode
 """
 
 import sys
@@ -199,6 +205,91 @@ def beam_search_decode(
 
     best = max(beams, key=lambda c: c[2] / (c[1].shape[1] ** length_penalty))
     return best[1]
+
+
+@torch.no_grad()
+def beam_search_decode_eos(
+    model: HybridLanguageModel,
+    input_ids: torch.Tensor,
+    prefix_embeds: Optional[torch.Tensor] = None,
+    beam_size: int = 3,
+    max_new_tokens: int = 100,
+    length_penalty: float = 1.0,
+    eos_token_id: int = 50256,
+    on_step=None,
+) -> Tuple[torch.Tensor, bool]:
+    """`beam_search_decode` that stops at an end-of-report token (CHAT_UI_PLAN.md P9-G2). -> (ids, ended_by_eos).
+
+    The published search runs exactly max_new_tokens steps and takes an EOS for any other token, which is all a model that never
+    learned one can use. A model trained with dataset.report_eos_target (P9-G1) ends its reports, and this search lets it. It sits
+    beside the published one, which is untouched; both rank the same way and break ties the same way. At every step, as in Hugging
+    Face's early stopping:
+      1. rank the candidates as beam_search_decode does and keep the top 2 * beam_size (each live beam offers its 2 * beam_size
+         best tokens, which contains the overall top 2 * beam_size);
+      2. walk them in rank order. An EOS candidate within the first beam_size is set aside as finished, scored like any other
+         candidate (the EOS counts in the length); the rest fill the beam_size live slots; an EOS further down is dropped. A beam has
+         one EOS candidate at most, so the top 2 * beam_size always hold beam_size others;
+      3. stop once beam_size hypotheses have finished, or at max_new_tokens.
+    The answer is the best normalised score of finished + live, so a live beam that still outscores the finished ones is returned
+    (ended_by_eos False). A tie goes to a finished hypothesis (the earliest to finish), then to the live beams in rank order.
+    `ids` is shaped like beam_search_decode's (prompt + generated), without the EOS of a finished hypothesis.
+
+    With no EOS among the first beam_size candidates at any step this is beam_search_decode: the same ids, and on_step sees the same.
+    `on_step(step, ids)` is called once per step, after its selection, with the best LIVE beam's ids; it only observes, and raising
+    from it stops decoding (the chat app's cancel).
+    """
+    if input_ids.shape[0] != 1:
+        raise ValueError(
+            "beam_search_decode_eos operates on one sample at a time "
+            "(got batch size {})".format(input_ids.shape[0])
+        )
+    device = input_ids.device
+
+    if prefix_embeds is not None:
+        base_hidden = torch.cat([prefix_embeds, model.embeddings(input_ids)], dim=1)
+    else:
+        base_hidden = model.embeddings(input_ids)
+
+    # Live beams, best first: (hidden_states, token_ids, cumulative_log_prob). Finished: (normalised score, token_ids sans EOS).
+    beams = [(base_hidden, input_ids, 0.0)]
+    finished = []
+
+    for step in range(max_new_tokens):
+        length = beams[0][1].shape[1] + 1      # every live beam has this many tokens once it takes one more
+        candidates = []                        # (parent beam, token, cumulative_log_prob); hidden states only for those that stay live
+        for parent, (hidden_states, token_ids, score) in enumerate(beams):
+            logits = model.forward(inputs_embeds=hidden_states, return_dict=True).logits
+            log_probs = torch.log_softmax(logits[:, -1, :], dim=-1).squeeze(0)
+            topk_logp, topk_idx = log_probs.topk(min(2 * beam_size, log_probs.shape[-1]))
+            for lp, idx in zip(topk_logp.tolist(), topk_idx.tolist()):
+                candidates.append((parent, idx, score + lp))
+
+        candidates.sort(key=lambda c: c[2] / (length ** length_penalty), reverse=True)
+        stay = []
+        for rank, (parent, idx, score) in enumerate(candidates[:2 * beam_size]):
+            if idx == eos_token_id:
+                if rank < beam_size:
+                    finished.append((score / (length ** length_penalty), beams[parent][1]))
+                continue
+            stay.append((parent, idx, score))
+            if len(stay) == beam_size:
+                break
+
+        next_beams = []
+        for parent, idx, score in stay:
+            hidden_states, token_ids, _ = beams[parent]
+            next_token = torch.tensor([[idx]], device=device, dtype=token_ids.dtype)
+            next_beams.append((torch.cat([hidden_states, model.embeddings(next_token)], dim=1),
+                               torch.cat([token_ids, next_token], dim=1), score))
+        beams = next_beams
+        if on_step is not None:   # observe only; beams[0] is the best live beam
+            on_step(step, beams[0][1][0].tolist())
+        if len(finished) >= beam_size:
+            break
+
+    pool = finished + [(c[2] / (c[1].shape[1] ** length_penalty), c[1]) for c in beams]
+    best = max(range(len(pool)), key=lambda i: pool[i][0])   # the first maximum: the tie order named above
+    return pool[best][1], best < len(finished)
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +505,34 @@ def generate_from_patch_grid(
     raise ValueError(f"Unknown decode mode: {decode!r} (expected 'greedy' or 'beam')")
 
 
+@torch.no_grad()
+def generate_from_patch_grid_eos(
+    module,
+    patch_grid: torch.Tensor,
+    beam_size: int = 3,
+    max_new_tokens: int = 100,
+    cached: bool = False,
+    eos_token_id: int = 50256,
+) -> Tuple[torch.Tensor, bool]:
+    """`generate_from_patch_grid(decode="beam")` with the EOS-stop searches (CHAT_UI_PLAN.md P9-G2): (1, N) ids without the
+    EOS, N up to max_new_tokens, and whether the report ended in the model's own EOS. Same empty input_ids, no BOS. Beam search
+    only: a greedy run is the beam of one, which beam_size=1 gives. With cached=True it is `beam_search_cached_eos` and needs a
+    stack with a step path, as `generate_from_patch_grid` does."""
+    prefix_embeds = module.prefix_mapper(patch_grid)
+    input_ids = torch.zeros((patch_grid.shape[0], 0), dtype=torch.long, device=patch_grid.device)
+    if cached:
+        if not module.decoder.supports_cached_decode():
+            raise RuntimeError(
+                "--cached-decode was requested but this stack has no O(1) step path "
+                "(mamba-1 and attention mixers have none, and mLSTM needs tfla_impl=exact). "
+                "Re-run without it.")
+        return module.decoder.beam_search_cached_eos(
+            input_ids, prefix_embeds=prefix_embeds, beam_size=beam_size,
+            max_new_tokens=max_new_tokens, eos_token_id=eos_token_id)
+    return beam_search_decode_eos(module.decoder, input_ids, prefix_embeds=prefix_embeds, beam_size=beam_size,
+                                  max_new_tokens=max_new_tokens, eos_token_id=eos_token_id)
+
+
 def write_hyps_refs(dump_dir: str, hyps: List[str], refs: List[str]) -> None:
     """Write hyps.txt/refs.txt under dump_dir, one report per line, aligned by
     line number -- lets a separate process (e.g. score_chexbert_standalone.py
@@ -544,21 +663,33 @@ def run_checkpoint_inspection(args) -> None:
     if getattr(args, "cached_decode", False):
         print("Decode path: O(1) recurrent cache (M6). Token-identical to the uncached path by "
               "test; the published numbers used the uncached path.")
+    stop_at_eos = getattr(args, "stop_at_eos", False)
+    if stop_at_eos:
+        print("Decode path: beam search that stops at the model's EOS (P9-G2). NOT the published protocol, which "
+              "decodes the whole budget; meant for a model trained with dataset.report_eos_target.")
     df = pd.read_parquet(args.parquet)
     n = min(args.num_samples, len(df))
     print(f"Loaded {len(df)} rows from {args.parquet}; inspecting first {n}\n")
 
     hyps, refs = [], []
+    ended_by_eos = 0
     for i in range(n):
         row = df.iloc[i]
         img = Image.open(row["image"]).convert("RGB")
         pixel_values = img_transform(img).unsqueeze(0).to(device)
         patch_grid = module._patch_grid(pixel_values)
-        out_ids = generate_from_patch_grid(
-            module, patch_grid, decode=args.decode,
-            beam_size=args.beam_size, max_new_tokens=args.max_new_tokens,
-            cached=getattr(args, "cached_decode", False),
-        )
+        if stop_at_eos:
+            out_ids, ended = generate_from_patch_grid_eos(
+                module, patch_grid, beam_size=args.beam_size, max_new_tokens=args.max_new_tokens,
+                cached=getattr(args, "cached_decode", False), eos_token_id=tokenizer.eos_token_id,
+            )
+            ended_by_eos += int(ended)
+        else:
+            out_ids = generate_from_patch_grid(
+                module, patch_grid, decode=args.decode,
+                beam_size=args.beam_size, max_new_tokens=args.max_new_tokens,
+                cached=getattr(args, "cached_decode", False),
+            )
         generated = tokenizer.decode(out_ids[0].tolist(), skip_special_tokens=True)
         reference = f"Findings: {row.get('findings', '')} Impression: {row.get('impression', '')}".strip()
 
@@ -568,6 +699,9 @@ def run_checkpoint_inspection(args) -> None:
         print(f"ROUGE-L (single sample): {rouge_l_score(generated.split(), reference.split()):.3f}\n")
         hyps.append(generated)
         refs.append(reference)
+
+    if stop_at_eos:   # the dumps hold text only, so this is where a run says how many of its reports the model ended itself
+        print(f"EOS stop: {ended_by_eos}/{n} reports ended at the end-of-report token (max_new_tokens={args.max_new_tokens})")
 
     # E7: checked BEFORE the dump is written. A dump produced by an accidental
     # eager run is indistinguishable from a real one on disk, and would be
@@ -909,6 +1043,12 @@ def main():
                              "to the default path by test and ~5x faster per token, but only "
                              "available when every mixer has a step(). Off by default: the "
                              "published numbers came from the uncached path.")
+    parser.add_argument("--stop-at-eos", action="store_true",
+                        help="P9-G2: beam search that sets a beam aside when it ends in EOS and stops once beam-size have "
+                             "ended, or at --max-new-tokens; the report is the best of those and the live beams, without "
+                             "its EOS. For a model trained with dataset.report_eos_target (P9-G1): the published models "
+                             "never learned an EOS. Needs --decode beam; with --cached-decode it uses the cached twin. Off "
+                             "by default: the published protocol decodes the whole budget.")
     parser.add_argument("--beam-size", type=int, default=3,
                         help="Beam size when --decode beam (for --checkpoint mode)")
     parser.add_argument("--max-new-tokens", type=int, default=100,
@@ -935,6 +1075,9 @@ def main():
                              "process/venv can score them later (e.g. CheXbert via "
                              "score_chexbert_standalone.py -- see module docstring)")
     args = parser.parse_args()
+
+    if args.stop_at_eos and args.decode != "beam":
+        parser.error("--stop-at-eos needs --decode beam")
 
     if args.smoke_test:
         run_smoke_test()
