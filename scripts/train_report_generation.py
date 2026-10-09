@@ -289,9 +289,31 @@ def main(cfg: DictConfig):
     image_encoder_ckpt = cfg.get("image_encoder_checkpoint", None)
     if image_encoder_ckpt:
         print(f"Image tower: fine-tuned checkpoint {image_encoder_ckpt}")
+    # ISBI B8-A. Default "biomedclip" = every published arm. Any other encoder must arrive with
+    # its own input size, normalisation and patch width, or the run fails here rather than
+    # training on images the encoder was never meant to see.
+    encoder_name = str(cfg.model.get("report_image_encoder", "biomedclip"))
+    spec = ReportGenerationLightningModule.REPORT_IMAGE_ENCODERS.get(encoder_name)
+    if spec is None:
+        raise ValueError(f"unknown model.report_image_encoder={encoder_name!r}")
+    if encoder_name != "biomedclip":
+        checks = {
+            "dataset.image_size": (int(cfg.dataset.get("image_size", 224)), spec["image_size"]),
+            "dataset.image_mean": (list(cfg.dataset.get("image_mean", [])), spec["mean"]),
+            "dataset.image_std": (list(cfg.dataset.get("image_std", [])), spec["std"]),
+            "model.image_patch_dim": (int(cfg.model.get("image_patch_dim", 768)), spec["patch_dim"]),
+        }
+        bad = {k: v for k, v in checks.items()
+               if (v[0] != v[1] if not isinstance(v[0], list)
+                   else [round(float(a), 6) for a in v[0]] != [round(float(b), 6) for b in v[1]])}
+        if bad:
+            raise ValueError(f"report_image_encoder={encoder_name} needs " +
+                             ", ".join(f"{k}={v[1]} (got {v[0]})" for k, v in bad.items()))
+    print(f"Report image encoder: {encoder_name}")
     module.load_image_encoder(
         vit_lr=float(cfg.model.get("vit_lr", 1e-6)),
         image_encoder_checkpoint=image_encoder_ckpt,
+        encoder_name=encoder_name,
     )
 
     num_params = sum(p.numel() for p in module.parameters() if p.requires_grad)

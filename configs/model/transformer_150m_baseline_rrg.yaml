@@ -56,6 +56,9 @@ pooling_strategy: attention
 
 # Phase 10B — image prefix. Same k=32 the hybrid uses.
 image_patch_dim: 768
+# ISBI B8-A: image tower of the report decoder. "biomedclip" = every published run;
+# "xrayclip" / "medsiglip" need matching dataset.image_size/mean/std and image_patch_dim.
+report_image_encoder: "biomedclip"
 prefix_k: 32
 
 # Phase 10C — image-tower unfreeze. Must be declared (not just defaulted in

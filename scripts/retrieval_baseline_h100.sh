@@ -60,9 +60,18 @@ CHEXBERT="${CHEXBERT:-false}"
 # the isolated venv (see score_chexbert_h100.sh) instead of/in addition to
 # --chexbert above. Off by default.
 DUMP_DIR="${DUMP_DIR:-}"
+# ISBI_BASELINES_PLAN.md B2-A: which image encoder the floor uses. The default
+# is the published BiomedCLIP floor, unchanged. Others: clip, pubmedclip,
+# xrayclip, medsiglip (see FLOOR_ENCODERS in evaluate_report_generation.py).
+FLOOR_ENCODER="${FLOOR_ENCODER:-biomedclip}"
+LOAD_WORKERS="${LOAD_WORKERS:-${SLURM_CPUS_PER_TASK:-4}}"
+# Gated models (medsiglip) need a Hugging Face token. It is read from a file
+# (mode 600) into HF_TOKEN and never echoed. First use of a new encoder also
+# needs HF_HUB_OFFLINE=0 so the weights can be downloaded into HF_HOME.
+HF_TOKEN_FILE="${HF_TOKEN_FILE:-$HOME/.hf_token}"
 
 echo "=== Phase 11C retrieval-NN baseline: gallery=${TRAIN_PARQUET} query=${PARQUET} ==="
-echo "=== num_samples=${NUM_SAMPLES} max_gallery=${MAX_GALLERY} ==="
+echo "=== num_samples=${NUM_SAMPLES} max_gallery=${MAX_GALLERY} floor_encoder=${FLOOR_ENCODER} ==="
 date; hostname
 mkdir -p logs
 
@@ -73,6 +82,13 @@ export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export PYTHONUNBUFFERED=1
+if [ -f "${HF_TOKEN_FILE}" ]; then
+  HF_TOKEN="$(tr -d '[:space:]' < "${HF_TOKEN_FILE}")"
+  export HF_TOKEN
+  echo "HF token: loaded from ${HF_TOKEN_FILE}"
+else
+  echo "HF token: none (fine for public encoders; medsiglip is gated)"
+fi
 
 source "${VENV_ACTIVATE}"
 python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
@@ -91,6 +107,8 @@ python scripts/evaluate_report_generation.py \
   --parquet "${PARQUET}" \
   --num-samples "${NUM_SAMPLES}" \
   --max-gallery "${MAX_GALLERY}" \
+  --floor-encoder "${FLOOR_ENCODER}" \
+  --load-workers "${LOAD_WORKERS}" \
   ${CHEXBERT_ARGS[@]+"${CHEXBERT_ARGS[@]}"}
 
 echo "=== END ==="

@@ -1457,6 +1457,20 @@ def load_image_tower_checkpoint(image_encoder: nn.Module, checkpoint_path: str) 
     return list(missing), list(unexpected)
 
 
+def hf_vision_patch_grid(vision_model: nn.Module, pixel_values: torch.Tensor) -> torch.Tensor:
+    """(B, 3, H, W) -> (B, N, D) final-normed token grid of a HF CLIP or SigLIP vision tower.
+
+    Matches what the BiomedCLIP path returns (timm `forward_features`: every token after the
+    final norm). CLIP's `last_hidden_state` is BEFORE `post_layernorm` (that norm is applied to
+    the pooled CLS only), so it is applied here to the whole sequence. SigLIP already applies
+    `post_layernorm` to the whole sequence and has no CLS token.
+    """
+    out = vision_model(pixel_values=pixel_values).last_hidden_state
+    if type(vision_model).__name__.startswith("CLIP"):
+        out = vision_model.post_layernorm(out)
+    return out
+
+
 class ReportGenerationLightningModule(pl.LightningModule):
     """Phase 10E: image-conditioned radiology report generation (prefix-tuning).
 
@@ -1550,7 +1564,23 @@ class ReportGenerationLightningModule(pl.LightningModule):
                 "aux_pos_weight", torch.ones(self.aux_num_labels), persistent=True,
             )
 
-    def load_image_encoder(self, vit_lr: float = 1e-6, image_encoder_checkpoint: Optional[str] = None):
+    # ISBI_BASELINES_PLAN.md B8-A: the report decoder's image tower is swappable. "biomedclip" is
+    # the published path and is left byte-for-byte as it was. The others are Hugging Face
+    # CLIP/SigLIP vision towers, frozen, whose full token sequence (CLS + patches) is the
+    # patch grid. Each needs its own input size and normalisation -- see REPORT_IMAGE_ENCODERS.
+    REPORT_IMAGE_ENCODERS = {
+        "biomedclip": {"hf_id": None, "image_size": 224,
+                       "mean": [0.48145466, 0.4578275, 0.40821073],
+                       "std": [0.26862954, 0.26130258, 0.27577711], "patch_dim": 768},
+        "xrayclip": {"hf_id": "StanfordAIMI/XrayCLIP__vit-b-16__laion2b-s34b-b88k", "image_size": 512,
+                     "mean": [0.48145466, 0.4578275, 0.40821073],
+                     "std": [0.26862954, 0.26130258, 0.27577711], "patch_dim": 768},
+        "medsiglip": {"hf_id": "google/medsiglip-448", "image_size": 448,
+                      "mean": [0.5, 0.5, 0.5], "std": [0.5, 0.5, 0.5], "patch_dim": 1152},
+    }
+
+    def load_image_encoder(self, vit_lr: float = 1e-6, image_encoder_checkpoint: Optional[str] = None,
+                           encoder_name: str = "biomedclip"):
         """Load the frozen (or partially unfrozen) BiomedCLIP visual tower.
 
         Mirrors HybridContrastiveLightningModule's CLIP-loading branch
@@ -1569,6 +1599,26 @@ class ReportGenerationLightningModule(pl.LightningModule):
                 will differ from stock). None (default) keeps stock weights,
                 unchanged behaviour.
         """
+        if encoder_name not in self.REPORT_IMAGE_ENCODERS:
+            raise ValueError(f"unknown report image encoder {encoder_name!r}; "
+                             f"choose from {sorted(self.REPORT_IMAGE_ENCODERS)}")
+        self.image_encoder_name = encoder_name
+        if encoder_name != "biomedclip":
+            if image_encoder_checkpoint:
+                raise ValueError("image_encoder_checkpoint is a BiomedCLIP tower; it cannot be "
+                                 f"loaded into {encoder_name}")
+            if self.vit_unfreeze_blocks > 0:
+                raise ValueError(f"vit_unfreeze_blocks > 0 is only supported for biomedclip")
+            from transformers import AutoModel
+            hf = AutoModel.from_pretrained(self.REPORT_IMAGE_ENCODERS[encoder_name]["hf_id"])
+            self.image_encoder = hf.vision_model
+            del hf
+            self.image_encoder.eval()
+            for p in self.image_encoder.parameters():
+                p.requires_grad = False
+            self.vit_lr = vit_lr
+            return
+
         import open_clip
 
         biomedclip_id = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
@@ -1614,7 +1664,9 @@ class ReportGenerationLightningModule(pl.LightningModule):
                 "image_encoder not loaded — call load_image_encoder() first, "
                 "or pass batch['patch_grid'] directly (e.g. for CPU unit tests)."
             )
-        return self.image_encoder.trunk.forward_features(pixel_values)
+        if getattr(self, "image_encoder_name", "biomedclip") == "biomedclip":
+            return self.image_encoder.trunk.forward_features(pixel_values)
+        return hf_vision_patch_grid(self.image_encoder, pixel_values)
 
     def _step(self, batch: Dict[str, torch.Tensor], split: str) -> torch.Tensor:
         input_ids = batch["input_ids"]

@@ -273,6 +273,39 @@ def resolve_prefix_k(checkpoint_path, yaml_prefix_k: int, override: Optional[int
     return int(yaml_prefix_k)
 
 
+def resolve_report_image_encoder(checkpoint_path) -> str:
+    """ISBI B8-A: which image tower a report-generation checkpoint was TRAINED with.
+
+    Read from run_metadata.json beside the run (resolved Hydra config), the same source
+    resolve_prefix_k() trusts. Absent key or absent file = "biomedclip", which is what every run
+    before B8 used. Getting this wrong cannot be caught by key counts (the tower is loaded fresh
+    and its keys are overwritten from the checkpoint), so it is resolved, not guessed."""
+    import json as _json
+    meta_path = Path(checkpoint_path).resolve().parent.parent / "run_metadata.json"
+    if meta_path.exists():
+        try:
+            with open(meta_path) as fh:
+                cfg = _json.load(fh).get("resolved_config", {})
+            return str(cfg.get("model", {}).get("report_image_encoder", "biomedclip"))
+        except Exception as exc:  # malformed metadata must not block an eval
+            print("  WARNING: could not read %s (%s)" % (meta_path, exc))
+    return "biomedclip"
+
+
+def report_image_transform(encoder_name: str):
+    """Eval-time image transform for a report image encoder (no augmentation)."""
+    import torchvision.transforms as T
+    from hybrid_xmamba.training.lightning_module import ReportGenerationLightningModule
+    spec = ReportGenerationLightningModule.REPORT_IMAGE_ENCODERS[encoder_name]
+    size = spec["image_size"]
+    return T.Compose([
+        T.Resize((size, size)),
+        T.Grayscale(num_output_channels=3),
+        T.ToTensor(),
+        T.Normalize(mean=spec["mean"], std=spec["std"]),
+    ])
+
+
 def load_report_generation_module(checkpoint_path, model_config_name: str = "hybrid_150m_v2_rrg", device: str = "cpu", prefix_k: Optional[int] = None, scan_impl: Optional[str] = None, tfla_impl: Optional[str] = None, chunk_size: Optional[int] = None):
     """Load a trained ReportGenerationLightningModule from a Lightning .ckpt
     for inference. Mirrors evaluate_lm.py's checkpoint-loading convention
@@ -318,13 +351,18 @@ def load_report_generation_module(checkpoint_path, model_config_name: str = "hyb
     resolved_k = resolve_prefix_k(
         checkpoint_path, int(raw.get("prefix_k", 32)), override=prefix_k
     )
+    encoder_name = resolve_report_image_encoder(checkpoint_path)
+    patch_dim = int(raw.get("image_patch_dim", 768))
+    if encoder_name != "biomedclip":
+        patch_dim = ReportGenerationLightningModule.REPORT_IMAGE_ENCODERS[encoder_name]["patch_dim"]
     module = ReportGenerationLightningModule(
         decoder_config=decoder_config,
-        image_patch_dim=int(raw.get("image_patch_dim", 768)),
+        image_patch_dim=patch_dim,
         prefix_k=resolved_k,
     )
     print("  prefix_k = %d" % resolved_k)
-    module.load_image_encoder()  # registers image_encoder as a submodule so its
+    print("  report image encoder = %s" % encoder_name)
+    module.load_image_encoder(encoder_name=encoder_name)  # registers image_encoder as a submodule so its
                                   # keys (saved in the .ckpt — see 10E's note that
                                   # the frozen ViT is checkpointed too) actually load.
 
@@ -529,14 +567,10 @@ def run_checkpoint_inspection(args) -> None:
         module = compile_decoder_for_inference(module)
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
-    # BiomedCLIP CLIP normalisation — matches cxr_mimic_arm0.yaml/cxr_mimic_full.yaml.
-    img_transform = T.Compose([
-        T.Resize((224, 224)),
-        T.Grayscale(num_output_channels=3),
-        T.ToTensor(),
-        T.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
-                    std=[0.26862954, 0.26130258, 0.27577711]),
-    ])
+    # BiomedCLIP CLIP normalisation — matches cxr_mimic_arm0.yaml/cxr_mimic_full.yaml. ISBI B8-A:
+    # the transform follows the encoder the checkpoint was trained with; for "biomedclip" it is
+    # exactly the 224 px CLIP-normalised transform used for every published number.
+    img_transform = report_image_transform(getattr(module, "image_encoder_name", "biomedclip"))
 
     if getattr(args, "cached_decode", False):
         print("Decode path: O(1) recurrent cache (M6). Token-identical to the uncached path by "
@@ -601,6 +635,70 @@ def nearest_neighbor_indices(query_embeds: torch.Tensor, gallery_embeds: torch.T
     return sims.argmax(dim=1)
 
 
+# ISBI_BASELINES_PLAN.md B2-A: the floor's image encoder is swappable so the
+# paper can compare foundation models as retrieval floors. "biomedclip" is the
+# published floor and keeps its original open_clip code path untouched (rule
+# R1: it must reproduce results/retrieval_floor_test_split/hyps.txt byte for
+# byte). Every other entry is a Hugging Face CLIP/SigLIP model embedded with
+# its OWN image processor, so each encoder sees the input it was trained on.
+FLOOR_ENCODERS = {
+    "biomedclip": {"loader": "open_clip",
+                   "id": "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"},
+    "clip": {"loader": "hf", "id": "openai/clip-vit-base-patch16"},
+    "pubmedclip": {"loader": "hf", "id": "flaviagiammarino/pubmed-clip-vit-base-patch32"},
+    "xrayclip": {"loader": "hf", "id": "StanfordAIMI/XrayCLIP__vit-b-16__laion2b-s34b-b88k"},
+    "medsiglip": {"loader": "hf", "id": "google/medsiglip-448", "gated": True},
+}
+DEFAULT_FLOOR_ENCODER = "biomedclip"
+
+
+def hf_image_features(model, pixel_values: torch.Tensor) -> torch.Tensor:
+    """L2-normalised image embedding of a Hugging Face CLIP or SigLIP model.
+
+    Computed from the vision tower explicitly instead of get_image_features(),
+    whose return type changed across transformers releases (tensor vs model
+    output). CLIP projects the pooled output with visual_projection. SigLIP
+    has no projection: its pooled output (attention-pool head) IS the
+    embedding it was trained to align with text."""
+    pooled = model.vision_model(pixel_values=pixel_values).pooler_output
+    proj = getattr(model, "visual_projection", None)
+    feats = proj(pooled) if proj is not None else pooled
+    return torch.nn.functional.normalize(feats.float(), dim=-1)
+
+
+def build_floor_embedder(name: str, device: str):
+    """Return embed(list_of_PIL_RGB_images) -> (B, D) normalised CPU tensor."""
+    if name not in FLOOR_ENCODERS:
+        raise ValueError(f"unknown floor encoder {name!r}; choose from {sorted(FLOOR_ENCODERS)}")
+    spec = FLOOR_ENCODERS[name]
+    if spec["loader"] == "open_clip":
+        import open_clip
+        from omegaconf import OmegaConf
+        from scripts.train_contrastive import build_image_transform
+
+        clip_model, _ = open_clip.create_model_from_pretrained("hf-hub:" + spec["id"])
+        visual = clip_model.visual.to(device).eval()
+        # is_train=False unconditionally -- embedding for retrieval is inference,
+        # never training, regardless of which split the image happens to come from.
+        img_transform = build_image_transform(OmegaConf.create({"dataset": {}}), is_train=False)
+
+        @torch.no_grad()
+        def embed(imgs):
+            x = torch.stack([img_transform(im) for im in imgs]).to(device)
+            return torch.nn.functional.normalize(visual(x), dim=-1).cpu()
+        return embed
+
+    from transformers import AutoImageProcessor, AutoModel
+    processor = AutoImageProcessor.from_pretrained(spec["id"])
+    model = AutoModel.from_pretrained(spec["id"]).to(device).eval()
+
+    @torch.no_grad()
+    def embed(imgs):
+        pv = processor(images=imgs, return_tensors="pt")["pixel_values"].to(device)
+        return hf_image_features(model, pv).cpu()
+    return embed
+
+
 def run_retrieval_baseline(args) -> None:
     """Phase 11C: for each query (validation) image, retrieve the training
     report whose image has the highest BiomedCLIP cosine similarity and emit
@@ -608,30 +706,27 @@ def run_retrieval_baseline(args) -> None:
     (generated/reference/ROUGE-L per sample + aggregate metrics) for direct
     side-by-side comparison."""
     import pandas as pd
+    from concurrent.futures import ThreadPoolExecutor
     from PIL import Image
-    import open_clip
-    from omegaconf import OmegaConf
-    from scripts.train_contrastive import build_image_transform
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    biomedclip_id = "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
-    clip_model, _ = open_clip.create_model_from_pretrained("hf-hub:" + biomedclip_id)
-    visual = clip_model.visual.to(device).eval()
+    encoder_name = getattr(args, "floor_encoder", None) or DEFAULT_FLOOR_ENCODER
+    print(f"Floor encoder: {encoder_name} ({FLOOR_ENCODERS.get(encoder_name, {}).get('id', '?')})")
+    embed = build_floor_embedder(encoder_name, device)
 
-    # is_train=False unconditionally -- embedding for retrieval is inference,
-    # never training, regardless of which split the image happens to come from.
-    img_transform = build_image_transform(OmegaConf.create({"dataset": {}}), is_train=False)
+    def _load(p: str):
+        return Image.open(p).convert("RGB")
 
-    @torch.no_grad()
+    # Decoding 191k JPEGs is the slow part, so images are opened on a thread
+    # pool. map() keeps the order, so the embeddings are the same as a serial loop.
     def embed_images(image_paths: List[str], batch_size: int = 64) -> torch.Tensor:
         embeds = []
-        for i in range(0, len(image_paths), batch_size):
-            batch = image_paths[i:i + batch_size]
-            imgs = torch.stack([img_transform(Image.open(p).convert("RGB")) for p in batch]).to(device)
-            feats = torch.nn.functional.normalize(visual(imgs), dim=-1)
-            embeds.append(feats.cpu())
-            print(f"  embedded {min(i + batch_size, len(image_paths))}/{len(image_paths)}")
+        with ThreadPoolExecutor(max_workers=getattr(args, "load_workers", 8)) as pool:
+            for i in range(0, len(image_paths), batch_size):
+                batch = list(pool.map(_load, image_paths[i:i + batch_size]))
+                embeds.append(embed(batch))
+                print(f"  embedded {min(i + batch_size, len(image_paths))}/{len(image_paths)}")
         return torch.cat(embeds, dim=0)
 
     train_df = pd.read_parquet(args.train_parquet)
@@ -917,6 +1012,12 @@ def main():
     parser.add_argument("--train-parquet", type=str, default=None,
                         help="Path to the training parquet used as the retrieval gallery "
                              "(for --retrieval-baseline)")
+    parser.add_argument("--floor-encoder", type=str, default=DEFAULT_FLOOR_ENCODER,
+                        choices=sorted(FLOOR_ENCODERS),
+                        help="ISBI B2-A: image encoder for --retrieval-baseline. The default "
+                             "'biomedclip' is the published floor, unchanged.")
+    parser.add_argument("--load-workers", type=int, default=8,
+                        help="Threads that open gallery/query JPEGs (--retrieval-baseline)")
     parser.add_argument("--max-gallery", type=int, default=0,
                         help="Cap the gallery to the first N training rows, 0=all "
                              "(for --retrieval-baseline)")

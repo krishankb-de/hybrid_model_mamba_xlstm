@@ -47,6 +47,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from hybrid_xmamba.layers.normalization import RMSNorm
 
@@ -245,6 +246,57 @@ class AttentionBlock(nn.Module):
 
         attn = attn.transpose(1, 2).reshape(batch, seq_len, self.dim)
         return self.out_proj(attn)
+
+    # -- ISBI_BASELINES_PLAN.md B7-B: KV-cache decode ------------------------------------------
+    # Gives the Transformer the same kind of cached decode the recurrent mixers have, so a
+    # decode-speed comparison is between two cached paths. The cache GROWS with context (that is
+    # the point being measured); it is a doubling buffer so a step does not copy the whole cache.
+    supports_step = True
+
+    def allocate_inference_cache(self, batch_size, device=None, dtype=torch.float32):
+        device = device or self.qkv_proj.weight.device
+        empty = torch.zeros(batch_size, self.num_heads, 0, self.head_dim, device=device, dtype=dtype)
+        return {"k": empty, "v": empty.clone(), "seen": 0}
+
+    def step(self, x_t: torch.Tensor, cache: dict) -> torch.Tensor:
+        """One token, `(B, dim)` or `(B, 1, dim)` in, `(B, dim)` out, attending to every cached
+        position. Same projections, Q/K norm and RoPE as `forward`, so it is exact."""
+        if x_t.dim() == 3:
+            if x_t.shape[1] != 1:
+                raise ValueError(f"step() takes one token, got seqlen {x_t.shape[1]}")
+            x_t = x_t[:, 0]
+        batch = x_t.shape[0]
+        pos = cache["seen"]
+
+        qkv = self.qkv_proj(x_t).view(batch, 3, self.num_heads, 1, self.head_dim)
+        q, k, v = qkv.unbind(1)                                           # each (B, H, 1, hd)
+        if self.use_hybrid_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        cos, sin = self._rope_tables(pos + 1, x_t.device)
+        q = apply_rope(q, cos[pos:pos + 1], sin[pos:pos + 1])
+        k = apply_rope(k, cos[pos:pos + 1], sin[pos:pos + 1])
+
+        cap = cache["k"].shape[2]
+        if pos >= cap:                                                    # grow by doubling
+            new_cap = max(64, 2 * cap)
+            for key in ("k", "v"):
+                buf = cache[key]
+                grown = buf.new_zeros(buf.shape[0], buf.shape[1], new_cap, buf.shape[3])
+                grown[:, :, :cap] = buf
+                cache[key] = grown
+        cache["k"][:, :, pos] = k[:, :, 0].to(cache["k"].dtype)
+        cache["v"][:, :, pos] = v[:, :, 0].to(cache["v"].dtype)
+        cache["seen"] = pos + 1
+
+        keys = cache["k"][:, :, :pos + 1].to(q.dtype)
+        values = cache["v"][:, :, :pos + 1].to(q.dtype)
+        # Not cuDNN: for one query against a key length that changes every token, the cuDNN
+        # SDPA backend rebuilds its execution plan on the CPU at each step (~15 ms per layer on
+        # an H100, job 2624647), which would make the Transformer look ~30x slower than it is.
+        with sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]):
+            attn = F.scaled_dot_product_attention(q, keys, values)       # (B, H, 1, hd)
+        return self.out_proj(attn.reshape(batch, self.dim))
 
     def extra_repr(self) -> str:
         return "dim=%d, num_heads=%d, head_dim=%d, hybrid_norm=%s" % (

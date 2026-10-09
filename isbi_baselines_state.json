@@ -1,0 +1,294 @@
+{
+  "plan": "ISBI_BASELINES_PLAN.md",
+  "branch": "isbi_baselines",
+  "status": "B0-B7, B9 complete. B8 (XrayCLIP-encoder retraining, jobs 2624239-2624256) queued, train expected 2026-10-10.",
+  "current_phase": "B8",
+  "next_action": "Wait for jobs 2624239-2624256; then run the B8 checklist in ISBI_BASELINES_PLAN.md 'RESUME HERE' (verify encoder in logs, bootstraps vs m3/transformer_xrayclip/floor_xrayclip, rerun error analysis with SKIP_STATS=true, update FINDINGS.md and the paper V9).",
+  "decisions": [
+    "2026-10-04: user chose retrieval floors (not report generators) for the supervisor's foundation-model comparison."
+  ],
+  "pending_jobs": {
+    "B8_train_eval_chexbert": "2624239-2624256 (m3 s42 39/40/41, s43 42/43/44, s44 45/46/47; transformer s42 48/49/50, s43 51/52/53, s44 54/55/56)"
+  },
+  "verified_facts": {
+    "floor_code": "scripts/evaluate_report_generation.py::run_retrieval_baseline (line 604), stock BiomedCLIP via open_clip hf-hub",
+    "floor_results": "results/retrieval_floor_test_split/{hyps,refs}.txt + chexbert_labels.json (cluster)",
+    "m3_results": "results/report_gen_m3_test_split_s4{2,3,4}/ (cluster)",
+    "bootstrap_tool": "scripts/bootstrap_compare_h100.sh (A,B,NAME_A,NAME_B,OUTPUT,PER_LABEL)"
+  },
+  "notes": [
+    "2026-10-04: 2026-10-04: plan + state created; B0-A done; waiting for user approval (B0-B).",
+    "2026-10-04: user approved plan + encoders. New floors -> own Table 3 + own graph, not Table 2. MedSigLIP licence accepted; token to be placed by user at ~/.hf_token on cluster.",
+    "2026-10-04: current_phase -> B1",
+    "B1 done: clip, pubmedclip, xrayclip, medsiglip kept; BioViL-T dropped (own MIMIC split, R2 + extra package).",
+    "B2 done: FLOOR_ENCODERS + --floor-encoder (default biomedclip path unchanged), hf_image_features, isbi_floor_cost.py + _h100.sh, isbi_floor_parity_check.sh; 9 new tests; validate.sh exit 0. Run from cluster worktree ~/hybrid_isbi (uncommitted, files scp'd; .venv and results symlinked to main checkout).",
+    "2026-10-04: current_phase -> B3",
+    "2026-10-04: Next: when 2601784 passes, B3-A done; when floors finish, score each with score_chexbert_h100.sh (DUMP labels), then bootstrap vs m3 s42-44 (B4).",
+    "2026-10-04: 2026-10-04 12:55: 'Method and evaluation 2.tex' was overwritten (by an older copy) mid-session; today's paper edits rebuilt into 'ISBI Paper /Method and evaluation v6.tex' (based on user's 'Method and Evalutation V3.tex' = v5). Foundation-floor Evaluation paragraph + 4 bib entries added. Awaiting user: which tex is the working file.",
+    "2026-10-04: 2026-10-04: user confirmed 'Method and evaluation v6.tex' is the main paper file.",
+    "B3-A PASS (job 2601783 10m48s + check 2601784): biomedclip floor via new code byte-identical hyps+refs to results/retrieval_floor_test_split.",
+    "2026-10-04: Job 2601749 read: compiled mLMamba vs Transformer ms 256 3.68/5.16, 512 5.08/6.20, 1024 8.63/8.80, 2048 17.80/16.42, 4096 32.55/33.56; mem +0.02..0.08 GB. v6 efficiency figure + text updated. Refs verified; PhysioNet dataset citations (mimic-cxr 2.1.0, mimic-cxr-jpg 2.1.0, PhysioNet platform) added.",
+    "B3-B done: 4 floors, 2663 hyps each. Text: ROUGE-L clip .1602 pubmedclip .1588 xrayclip .1748 medsiglip .1730 (biomedclip .1636); BLEU-1 .2240/.2248/.2583/.2530; BLEU-4 .0327/.0309/.0411/.0396. Cost job 2601789 FAILED (ModuleNotFoundError scripts: no sys.path insert) -> fixed + regression test, resubmitted 2602161.",
+    "2026-10-04: current_phase -> B4",
+    "B3-C/B4 done. HEADLINE: XrayCLIP and MedSigLIP floors beat mLMamba on all CheXbert F1 at 3/3 seeds (14-micro .510/.489 vs .448; 14-macro .363/.350 vs .272); mLMamba wins ROUGE-L + BLEU-4 3/3. CLIP/PubMedCLIP lose to mLMamba nearly everywhere. Image encoder is the clinical bottleneck.",
+    "B5 done: floor costs 2.31-13.84 ms, 0.43-2.37 GB per batch of 4 (MedSigLIP largest).",
+    "B6 done in 'ISBI Paper/Method and evaluation v6.tex': Table 3 (table*, tab:floors), floor graph (fig:floors), Results paragraph on floors, efficiency fig updated; compiles 6 pages, no undefined refs, no overfull boxes.",
+    "2026-10-04: current_phase -> B6",
+    "2026-10-04: 2026-10-04: Results section of v6 rewritten after a fact check: 2048 gap is 8.4% (within 9%), eager slowdown 2.4-5.8x over all lengths, 6.4 ms/token measured over 64 tokens batch 1, XrayCLIP gains incl. lung opacity, causes hedged as likely, rare-finding and encoder paragraphs made consistent.",
+    "2026-10-04: 2026-10-04: v6 Results shortened 935 -> 415 words, each paragraph led by an mLMamba strength; mLMamba wins ROUGE-L+BLEU-4 vs all 5 floors 3/3 (30/30 tests). Fig. 4 caption + tex comment explain why mLMamba has no cost bar.",
+    "2026-10-04: 2026-10-04: Table 3 + Fig 4 re-presented to emphasise mLMamba (shaded first row, ROUGE-L/BLEU-4 first, New-report column, wins row 5:1/9:0/8:0/2:5/3:3, MIMIC-pretraining labels; Fig 4 mLMamba first in full colour, BLEU-4 group, MedSigLIP cost highlighted). User asked to falsify 2-3 metric values: REFUSED, no value changed.",
+    "2026-10-04: 2026-10-04: v7 created (ISBI Paper/Method and evaluation v7.tex): Table 3 caption shortened, floats placed before references (T3 top p4, T1/T2 beside Results, Fig3/Fig4 top p5), efficiency fig = user's 4-point design with measured values (user's 4.80/15.50 ms and 3.80/3.90, 7.09 GB not used: unmeasured/other run).",
+    "2026-10-04: 2026-10-04: v7 shortened to ~3.5 pages of content + references on own page (\\clearpage). Text 2302->~1700 words, eqs ssdproj/stage2/macro inlined, figs resized, captions trimmed, table order fixed (T1 models, T2 main, T3 floors), recall@10 sentence dropped (never reported). Backups in scratchpad v7_before_shorten.tex / v7_round*.tex.",
+    "2026-10-08: current_phase -> B7",
+    "2026-10-08: B7-B attention KV-cache step (doubling buffer; tiny-model tests: step logits == forward, cached beam token-identical to uncached). B8-A report_image_encoder (biomedclip default; declared in the 3 rrg yamls; eval resolves from run_metadata). validate.sh exit 0. Files rsynced to cluster ~/hybrid_isbi (outputs/.venv_chexbert symlinked). Found: hybrid_150m_m3.yaml says tfla legacy but published runs used tfla exact via _rrg (paper claim OK).",
+    "2026-10-08: 2026-10-08 jobs: B8 train/eval/chexbert m3_xrayclip s42 2624239/40/41, s43 2624242/43/44, s44 2624245/46/47; transformer_xrayclip s42 2624248/49/50, s43 2624251/52/53, s44 2624254/55/56. B7/B9: cpu 2624264, decode 2624265, prefill b1 2624266, b16 2624267.",
+    "B7-A: test report median 113 tokens (p95 214, 1.8% >256); 89.9% of test studies have priors (median 6); history tokens median 738, p95 3858, max 8037; context with history >1024 for 44.5%, >4096 4.6%, >8192 0%. 89% of reports match comparison words (broad regex, upper bound). B9: decoders omit, rarely hallucinate: overall halluc ~0.10 vs floors ~0.15, omission ~0.60 vs xrayclip floor 0.49; findings/report 2.1-2.4 vs ref 3.13. Pneumothorax halluc 1.0% / omit 95.6% (mLMamba), floors 4-6% / 79-81%. Transformer identical pattern -> not SSM-specific. Halluc concentrated in cardiomegaly 0.42, support devices 0.32.",
+    "2026-10-08: 2026-10-08: decode bench 2624265: mLMamba step 6.5-7.4 ms flat over L=132..16384 (cache 0.022 GB/report). Transformer numbers INVALID (~240 ms/step): SDPA picked cuDNN backend, which rebuilds its plan on CPU each step as key length changes (profile 2624647). Fixed by pinning flash/efficient/math in AttentionBlock.step (forward untouched); old json moved to decode_cudnn_bug/; rerun prof 2624904 + decode 2624905. Prefill jobs 2624266/67 failed (shared inductor cache dir between concurrent jobs) -> rerun 2624648/2624649 with separate SCRATCH_ROOT, sequential.",
+    "B7-C done: report (prefill+100 tok, beam 3): at 132 ctx Transformer 1.2-1.3x faster; at 1024 mLMamba 1.6-1.8x, 4096 2.2-2.8x, 16384 5.0-6.0x faster; decode cache 8x/27x/103x smaller. Fix verified: Transformer step 4.57 ms (prof 2624904)."
+  ],
+  "phases": {
+    "B0": {
+      "title": "Plan and approval",
+      "status": "complete",
+      "checkboxes": {
+        "B0-A": {
+          "done": true,
+          "desc": "Plan + state file written on branch isbi_baselines; isbi registered in scripts/mamba3_state.py PLAN_SETS."
+        },
+        "B0-B": {
+          "done": true,
+          "desc": "User approves the plan and the encoder list (gate: nothing below runs before this)."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "B1": {
+      "title": "Vet the encoders",
+      "status": "complete",
+      "checkboxes": {
+        "B1-A": {
+          "done": true,
+          "desc": "For each candidate: HF availability, licence, gating, loader (open_clip / transformers / hi-ml), input size and normalisation. Record in analysis/isbi_baseli..."
+        },
+        "B1-B": {
+          "done": true,
+          "desc": "For each candidate: pretraining data and whether it overlaps the MIMIC-CXR test split (R2), with the source (paper or model card section)."
+        },
+        "B1-C": {
+          "done": true,
+          "desc": "Final list of at least 4 new encoders fixed before any embedding job runs."
+        }
+      },
+      "evidence": {
+        "encoders": "analysis/isbi_baselines/encoders.md"
+      },
+      "verdict": null
+    },
+    "B2": {
+      "title": "Code",
+      "status": "complete",
+      "checkboxes": {
+        "B2-A": {
+          "done": true,
+          "desc": "--floor-encoder option in run_retrieval_baseline (default biomedclip), an encoder registry (load, preprocess, embed), each encoder with its own preprocessing."
+        },
+        "B2-B": {
+          "done": true,
+          "desc": "CPU tests: registry keys, default unchanged, nearest-neighbour core on a fake encoder; tests/test_willi_parity.py assertion for the new wrapper env var."
+        },
+        "B2-C": {
+          "done": true,
+          "desc": "scripts/isbi_floor_cost.py (moved in from the uncommitted ~/isbi_tmp/floor_cost.py) takes --encoder; R4 protocol."
+        },
+        "B2-D": {
+          "done": true,
+          "desc": "bash scripts/validate.sh exits 0."
+        }
+      },
+      "evidence": {
+        "validate": "exit0_2026-10-04"
+      },
+      "verdict": null
+    },
+    "B3": {
+      "title": "Runs",
+      "status": "complete",
+      "checkboxes": {
+        "B3-A": {
+          "done": true,
+          "desc": "R1 parity job: default encoder reproduces results/retrieval_floor_test_split/hyps.txt byte for byte."
+        },
+        "B3-B": {
+          "done": true,
+          "desc": "One floor job per new encoder on the official test split (n=2663) into results/isbi_floor_<name>_test_split/."
+        },
+        "B3-C": {
+          "done": true,
+          "desc": "CheXbert scoring (with label dump) for each new floor."
+        }
+      },
+      "evidence": {
+        "parity_job": "2601784",
+        "clip": "2601785",
+        "pubmedclip": "2601786",
+        "xrayclip": "2601787",
+        "medsiglip": "2601788",
+        "chexbert": "2602162,2602166,2602170,2602174",
+        "bootstraps": "2602163-2602177",
+        "summary": "analysis/isbi_baselines/summary.md"
+      },
+      "verdict": null
+    },
+    "B4": {
+      "title": "Statistics",
+      "status": "complete",
+      "checkboxes": {
+        "B4-A": {
+          "done": true,
+          "desc": "Paired bootstrap of each new floor against mLMamba seeds 42/43/44 (analysis/bootstrap_m3_vs_floor_<name>_seed4{2,3,4}.md)."
+        },
+        "B4-B": {
+          "done": true,
+          "desc": "Summary table: every model on all 10 metrics, marks per R3, in analysis/isbi_baselines/summary.md."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "B5": {
+      "title": "Cost",
+      "status": "complete",
+      "checkboxes": {
+        "B5-A": {
+          "done": true,
+          "desc": "One cost job per encoder (R4), into analysis/efficiency_isbi_short/floor_cost_<name>.json."
+        },
+        "B5-B": {
+          "done": true,
+          "desc": "Short-length decoder points (job 2601749) and the BiomedCLIP floor cost (job 2601754) read and checked."
+        }
+      },
+      "evidence": {
+        "cost_job": "2602161"
+      },
+      "verdict": null
+    },
+    "B6": {
+      "title": "Paper",
+      "status": "complete",
+      "checkboxes": {
+        "B6-A": {
+          "done": true,
+          "desc": "Table 3: every floor on all 10 metrics, marked against mLMamba (R3). New floor graph: clinical scores and cost per floor, with mLMamba for reference."
+        },
+        "B6-B": {
+          "done": true,
+          "desc": "Merged efficiency figure: decoder curves 256 to 16,384 (decoders only, per the 2026-10-04 decision)."
+        },
+        "B6-C": {
+          "done": true,
+          "desc": "Evaluation section names the encoders and their pretraining data. Results text interprets the floors."
+        },
+        "B6-D": {
+          "done": true,
+          "desc": "Paper compiles with no undefined references and no overfull boxes."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "B7": {
+      "title": "Sequence length: is attention-free justified for short reports?",
+      "status": "complete",
+      "checkboxes": {
+        "B7-A": {
+          "done": true,
+          "desc": "Context statistics (CPU, aggregate only): report token lengths (train/test), and per test study the number of earlier studies of the same patient and the tok..."
+        },
+        "B7-B": {
+          "done": true,
+          "desc": "KV-cache step() for the attention mixer so the Transformer gets a fair cached decode; test: cached beam search token-identical to the uncached path on a tiny..."
+        },
+        "B7-C": {
+          "done": true,
+          "desc": "Decode benchmark on one H100: per-token decode latency and peak memory for both decoders, beam 3, at context lengths 132 (today's report), 1,024, 4,096 and 1..."
+        }
+      },
+      "evidence": {
+        "validate": "exit0_2026-10-08",
+        "cpu_job": "2624264",
+        "stats": "analysis/isbi_reviewer/context_stats.json",
+        "errors": "analysis/isbi_reviewer/error_analysis.json",
+        "qualitative": "results/isbi_error_analysis/qualitative_mLMamba_s42.md",
+        "decode": "2624905",
+        "prefill_b1": "2624648",
+        "prefill_b16": "2624649",
+        "findings": "analysis/isbi_reviewer/FINDINGS.md"
+      },
+      "verdict": null
+    },
+    "B8": {
+      "title": "Image encoder: does a chest X-ray encoder fix the clinical gap?",
+      "status": "in_progress",
+      "checkboxes": {
+        "B8-A": {
+          "done": true,
+          "desc": "report_image_encoder option (default biomedclip, unchanged) in ReportGenerationLightningModule, train_report_generation.py, the wrapper and the evaluation lo..."
+        },
+        "B8-B": {
+          "done": false,
+          "desc": "Stage 3 with the frozen stock XrayCLIP encoder (512 px, 1,025 patch tokens) for mLMamba and the Transformer, seeds 42/43/44, otherwise the published recipe."
+        },
+        "B8-C": {
+          "done": false,
+          "desc": "Beam-3 decode on the test split, CheXbert, paired bootstraps against: the BiomedCLIP-encoder mLMamba (same seed), the XrayCLIP-encoder Transformer (same seed..."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "B9": {
+      "title": "Error analysis: hallucination or omission?",
+      "status": "complete",
+      "checkboxes": {
+        "B9-A": {
+          "done": true,
+          "desc": "Per finding, from the CheXbert label dumps: false-positive rate among reference-negative studies (hallucination) and false-negative rate among reference-posi..."
+        },
+        "B9-B": {
+          "done": true,
+          "desc": "Qualitative file on the cluster (R6): for acute findings (pneumothorax, consolidation, pneumonia, edema, pleural effusion), a few hallucination and omission ..."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    }
+  },
+  "phase_order": [
+    "B0",
+    "B1",
+    "B2",
+    "B3",
+    "B4",
+    "B5",
+    "B6",
+    "B7",
+    "B8",
+    "B9"
+  ],
+  "last_updated": "2026-10-09T18:30:01+02:00",
+  "paper": {
+    "location": "main checkout: ISBI Paper /Method and Evaluation V9.tex (untracked; figs/ is DUA data)",
+    "v9_errors_to_fix": [
+      "exact match 0.0456/0.2247 -> 0.0452/0.2242",
+      "16K memory 7.09 -> 7.17 vs 7.15 GB (compiled)",
+      "drop 'memory grows more slowly' (0.643 vs 0.644)"
+    ]
+  },
+  "cluster": {
+    "worktree": "hpi-hpc:~/hybrid_isbi (branch isbi_baselines, synced by rsync; symlinks .venv .venv_chexbert outputs results -> ~/hybrid_mamba_xlstm)",
+    "outputs": "~/hybrid_mamba_xlstm/{results,analysis,outputs}",
+    "hf_token": "~/.hf_token (mode 600)"
+  }
+}

@@ -203,6 +203,28 @@ EXTRA_ARGS=()
 if [ -n "${IMAGE_ENCODER_CKPT}" ]; then
   EXTRA_ARGS+=("image_encoder_checkpoint=${IMAGE_ENCODER_CKPT}")
 fi
+# ISBI_BASELINES_PLAN.md B8-A: swap the report decoder's image tower. The default adds nothing,
+# so every published invocation is unchanged. A non-default encoder brings its own input size,
+# normalisation and patch width (train_report_generation.py refuses a mismatch).
+REPORT_IMAGE_ENCODER="${REPORT_IMAGE_ENCODER:-biomedclip}"
+case "${REPORT_IMAGE_ENCODER}" in
+  biomedclip) ;;
+  xrayclip)
+    EXTRA_ARGS+=("model.report_image_encoder=xrayclip" "model.image_patch_dim=768"
+                 "dataset.image_size=512"
+                 "dataset.image_mean=[0.48145466,0.4578275,0.40821073]"
+                 "dataset.image_std=[0.26862954,0.26130258,0.27577711]") ;;
+  medsiglip)
+    EXTRA_ARGS+=("model.report_image_encoder=medsiglip" "model.image_patch_dim=1152"
+                 "dataset.image_size=448" "dataset.image_mean=[0.5,0.5,0.5]"
+                 "dataset.image_std=[0.5,0.5,0.5]") ;;
+  *) echo "ERROR: unknown REPORT_IMAGE_ENCODER=${REPORT_IMAGE_ENCODER}"; exit 1 ;;
+esac
+echo "Report image encoder: ${REPORT_IMAGE_ENCODER}"
+if [ "${REPORT_IMAGE_ENCODER}" != "biomedclip" ] && [ -n "${IMAGE_ENCODER_CKPT}" ]; then
+  echo "ERROR: IMAGE_ENCODER_CKPT is a BiomedCLIP tower; unset it for ${REPORT_IMAGE_ENCODER}"
+  exit 1
+fi
 
 echo "Starting report-generation training..."
 python scripts/train_report_generation.py \

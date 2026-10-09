@@ -6523,3 +6523,16 @@ def test_no_slurm_script_uses_the_retired_aisc_batch_partition():
         if "--partition=aisc-batch" in p.read_text()
     ]
     assert not offenders, offenders
+
+
+@pytest.mark.willi_parity
+def test_retrieval_baseline_wrapper_floor_encoder_defaults_to_published_biomedclip():
+    """ISBI_BASELINES_PLAN.md B2-A, rule R1: the floor encoder lever exists and
+    its default is the published BiomedCLIP floor, so every existing invocation
+    of retrieval_baseline_h100.sh reproduces the old hyps.txt unchanged."""
+    sh = (REPO_ROOT / "scripts" / "retrieval_baseline_h100.sh").read_text()
+    assert 'FLOOR_ENCODER="${FLOOR_ENCODER:-biomedclip}"' in sh
+    assert '--floor-encoder "${FLOOR_ENCODER}"' in sh
+    cost = (REPO_ROOT / "scripts" / "isbi_floor_cost_h100.sh").read_text()
+    assert "--partition=pot-hpi-aisc-batch" in cost
+    assert "#SBATCH --gpus=1" in cost
