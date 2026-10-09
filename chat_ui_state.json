@@ -5,15 +5,20 @@
   "base": "h100_efficiency @ 5c45527 (2026-09-30, 'SLURM: partition aisc-batch renamed to pot-hpi-aisc-batch')",
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P5",
-  "status": "P0-P4 complete 2026-10-09 (browser UI on the tiny engine; P4-F clean display, P4-G stop on repeat + Settings Save). Next: P9-G (learned stop condition, user-approved 2026-10-09), then P5.",
-  "next_action": "P9-G1 (EOS target flag, laptop) via an implementer with .superpowers/sdd/CHAT_UI_PLAN/task-P9-G1-brief.md + task-P9-G1-rulings.md; then P9-G2 (EOS-stop decoders + engine), P9-G3 (H100 training job, ~1.3 h, outputs in CHAT_HOME/models), P9-G4 (test-split eval with CIs), then P5 while it trains. The user pushes chat_ui.",
+  "status": "P0-P4 complete 2026-10-09 (tiny-engine browser UI; P4-F clean display; P4-G stop on repeat + Settings Save). P9-G (learned stop condition) approved 2026-10-09 and scheduled before P5; P9-G1 committed, its review pending.",
+  "next_action": "1) Review P9-G1 (EOS target flag; committed by the controller after the implementer hit a rate limit: 41 focused tests + validate.sh green, no implementer report). Dispatch an SDD task reviewer on the P9-G1 diff (brief: `bash .superpowers/sdd/CHAT_UI_PLAN/brief.sh P9-G1`; the rulings are in CHAT_UI_PLAN.md under P9-G1). 2) P9-G2: EOS-stop decoders + engine (implementer + review; rulings under P9-G2). 3) P9-G3: H100 training job (new wrapper, outputs in CHAT_HOME/models; prediction first, R4). 4) P5 while it trains, then P9-G4 evaluation. The agent cannot push (permission classifier): the user pushes chat_ui.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
     "read this file's status, next_action, decisions, open_questions; then the phase section in CHAT_UI_PLAN.md",
     "work one task at a time with the task loop (CHAT_UI_PLAN.md section 8): failing test -> implement -> green -> bash scripts/validate.sh -> tick with evidence -> update next_action -> commit",
     "cluster: one sbatch (or one 'ssh lx01 <command>') per step; the login node runs nothing scripted; record job ids as evidence",
-    "if this file is lost: venv/bin/python scripts/mamba3_state.py --plan chat_ui sync (rebuilds phases from the plan's checkboxes; evidence must be recovered from git log)"
+    "if this file is lost: venv/bin/python scripts/mamba3_state.py --plan chat_ui sync (rebuilds phases from the plan's checkboxes; evidence must be recovered from git log)",
+    "execution (user, 2026-10-01): subagent-driven development - a fresh implementer per task, then a task reviewer, fix rounds resume the implementer, then a scoped re-review; implementers and reviewers never spawn subagents",
+    "task briefs: bash .superpowers/sdd/CHAT_UI_PLAN/brief.sh <ID> --contracts (extracts the box, its rulings and the plan's constraints); controller rulings live in CHAT_UI_PLAN.md under each task",
+    "the SDD ledger .superpowers/sdd/CHAT_UI_PLAN/progress.md is git-ignored (local only); everything a fresh clone needs is in this file (carried_items, decisions, next_action) and in CHAT_UI_PLAN.md",
+    "local dev server for the user: venv/bin/python -c \"import uvicorn; from app.server import create_app; uvicorn.run(create_app(home='/tmp/cxrchat_dev', tiny_step_delay_s=0.05), host='127.0.0.1', port=8000)\"",
+    "checks before closing a UI task: node --test --test-timeout=30000 tests/frontend/*.test.mjs; venv/bin/python scripts/chat_ui_layout_check.py; venv/bin/python scripts/chat_ui_browser_check.py (evidence) ; bash scripts/validate.sh"
   ],
   "scope": "Claude-style chat UI for the report-generation model: upload a chest X-ray, streamed stage timeline (preprocess, encode, retrieve, generate, label, score), similar training X-rays + matching reports (13D image and text encoders) with images, CheXbert labels, sessions stored/replayed/exported. Served from one CPU sbatch job, reached over an SSH tunnel, zero cost. Changes no published number: the only edit to thesis code is an additive on_step=None callback with parity tests. NO MERGE into h100_scaling or main without an explicit user instruction.",
   "user_requirements_2026_10_01": {
@@ -600,5 +605,49 @@
     "2026-10-08: P4-F (user's own test): clean report display (dedup=all + stream view; raw report unchanged, R2), UI repair default on, live chips, drawer + re-run hints, /v1/models features with disabled fields; 10th browser check 'settings'; review approved",
     "2026-10-09: P4-G stop condition (stop_on_repeat: UI default on, server off = published protocol; 200 tok/17.9 s -> 21 tok/2.3 s on tiny) + Settings drawer with Save, ranges, select-on-focus, revert-on-invalid; review clean after 1 fix round"
   ],
-  "last_updated": "2026-10-09T14:24:41+02:00"
+  "last_updated": "2026-10-09T14:24:41+02:00",
+  "carried_items": {
+    "P5-E": [
+      "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
+      "_previous_image walks only image_sha256 (no test rows): extend it for test-row turns (also P6-D)",
+      "browser check 8 switches from the seeded synthetic labelled turn to a live labelled turn",
+      "set /v1/models features.retrieval / features.labels true when the gallery / labeller are wired",
+      "published comparisons (live_equals_published) must decode with stop_on_repeat false"
+    ],
+    "P6-A": [
+      "composer layout: inject the re-run hint and #preview into the layout check (801/820/834x568 drawer open, 320x568 long name); Send sits below the composer fold at 801-820 x 568-650 with the drawer open - fix (one-line ellipsis hint under max-height 640px) or accept explicitly",
+      "reword or hide the re-run hint while a non-command note (a question) is typed",
+      "'Cancel upload' (abort-only Stop before accept) and an 'Uploading...' status between Send and accept",
+      "empty 'New chat' left after a refused first turn; command text becomes the chat title (title from note minus commands, else filename); health strip lags while streaming (refresh /healthz on accept/settle)"
+    ],
+    "P6-B": [
+      "tests/test_app_openapi.py pins the full route set: every new route adds an entry plus summary/description/responses"
+    ],
+    "P6-F": [
+      "as its own first commit 'P4-E follow-up': try/finally in Browser.close; _arm() at the top of WebSocket.send; widen the trap-order test margin; one-shot SIGTERM handler; straggler sweep of the Chrome session after a graceful exit; test that the autouse fixture calls _kill_the_fakes()"
+    ],
+    "P7-B": [
+      "pass RealEngine cache_dir so the 2.4 GB checkpoint is not re-hashed at every start",
+      "uvicorn timeout_graceful_shutdown"
+    ],
+    "P7-D": [
+      "the live-equals-golden check runs with stop_on_repeat off; a second pass measures the stop on real decoders (see the plan's P7-D note)"
+    ],
+    "P8-A": [
+      "timeouts on cancel/poll/request fetches (a half-open tunnel can hang Stop at 'Stopping...'); document 413 on all routes",
+      "optional raw field in snapshots so Show raw is raw on a stopped card",
+      "settings-version migration for a stored display_repair:false",
+      "static files: consider ETag revalidation beside no-cache"
+    ],
+    "P9-B": [
+      "loadImage takes no base: a cross-origin API base needs an explicit base applied after the path check"
+    ],
+    "final_review": [
+      "cdp harness: no straggler sweep after a graceful Chrome exit; SIGTERM handler not one-shot (cleanup up to ~11 s); websocket send side has no deadline",
+      "dom_shim implicit submission fires no change before submit (real order covered by the browser check)",
+      "the select-on-focus guard can stay armed after a drag-out/right-click/pointercancel (at most one swallowed click)",
+      "announce(msg, true) re-read by assistive tech is unverified",
+      "a header glued to a sentence ('Findings: X.') does not dedup a later 'X.' (repair_report key)"
+    ]
+  }
 }

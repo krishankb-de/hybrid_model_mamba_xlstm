@@ -3904,6 +3904,18 @@ What it means for the plan:
     - a unit test on the dataset and collate output, for both settings;
     - a parity test that the flag-off batch is unchanged;
     - one `test_willi_parity.py` assertion that every published `_rrg` yaml leaves the flag off.
+
+  *Rulings (controller, 2026-10-09):*
+  - **R3 exception.** For P9-G the user approved an R3 exception: thesis code may change additively, behind the flag.
+  - **Where the flag is read.** `ImageTextDataset` (`scripts/train_contrastive.py`; the report-gen trainer reuses it through `load_mimic_cxr`) reads `cfg.dataset.get("report_eos_target", False)` once, in `__init__`.
+    - It is not a constructor argument, so the shared loaders stay untouched.
+    - A non-boolean value raises.
+    - No yaml declares the key. Hydra's struct mode therefore needs `+dataset.report_eos_target=true` on the command line.
+  - **Flag on.** Tokenise the report without padding. If it is at most `max_length - 1` tokens, append the EOS (`attention_mask` 1) and pad with `attention_mask` 0. Otherwise keep today's encoding exactly: empty, exact fit, or cut by `max_length`.
+  - **Where the EOS becomes a target.** `ReportGenerationLightningModule._step` masks only `attention_mask == 0` (`hybrid_xmamba/training/lightning_module.py:1634-1640`), so the appended EOS is a supervised target.
+  - **Tests.**
+    - `tests/test_report_eos_target.py`: synthetic text, and flag-off byte parity for short, exact-fit and over-long texts.
+    - `tests/test_willi_parity.py`: no yaml under `configs/` sets the flag.
 - [ ] **P9-G2** (laptop) EOS-stop decoders and the engine.
   - `beam_search_decode_eos` and a cached twin live beside the published decoders, which stay byte-identical (R3).
   - A beam that emits EOS is finished and set aside. Decoding ends when the best `beam_size` candidates are all finished, or at the budget.
@@ -3916,11 +3928,39 @@ What it means for the plan:
     - sets `generate.detail.stopped` to `"eos"`;
     - P4-G's repeat stop stays as a backstop.
   - The card shows no budget note on an EOS stop.
+
+  *Rulings (controller, 2026-10-09):*
+  - **Placement.** New functions sit beside the published ones, which stay byte-identical. The EOS token id is `eos_token_id=50256` (GPT-2; also the pad id).
+    - `beam_search_decode_eos` sits next to `beam_search_decode` (`scripts/evaluate_report_generation.py`).
+    - `HybridLanguageModel.beam_search_cached_eos` sits next to `beam_search_cached` (`hybrid_xmamba/models/hybrid_lm.py`). The live beams stay in the cache's batch axis.
+  - **Early stopping, as in Hugging Face.** These steps repeat at every decoding step:
+    1. Rank all `beam × vocab` candidates exactly as the published code does. Take the top `2 * beam`.
+    2. Walk them in rank order:
+       - an EOS candidate ranked within the first `beam` goes to the finished pool, with its normalised score (the EOS counts in the length);
+       - non-EOS candidates fill the `beam` live slots.
+    3. Stop at `beam` finished hypotheses, or at the budget.
+  - **Output.** Return the best of finished ∪ live, without the trailing EOS, together with whether EOS ended it.
+  - **Hard gate.** When EOS never ranks in the top `2 * beam`, both functions equal the published decoders token for token: beam 1 and beam 3, cached and uncached. A scripted model that emits EOS stops there.
+  - **Evaluation flag.** `evaluate_report_generation.py --stop-at-eos` (default off) selects these functions for P9-G4.
+  - **Engine.**
+    - `RealEngine` reads `eos_trained` from `run_metadata.json` (`resolved_config.dataset.report_eos_target`) and puts it on the card.
+    - `Engine.generate` uses the EOS decoders for such a model and reports `stopped: "eos"`, with no card note.
+    - `stop_on_repeat` stays as a backstop.
+    - The tiny engine stays `eos_trained: false`. A scripted tiny decoder drives the `"eos"` path end to end.
 - [ ] **P9-G3** (cluster) The training job.
   - The recipe is the published `h100_report_gen_m3_tower13d_s42` (`hybrid_150m_m3_rrg`, the same tower, Mamba-3 backbone, data and seed 42), with only `dataset.report_eos_target=true`.
   - It writes to a new directory outside `MAIN_REPO` (R8): `CHAT_HOME/models/report_gen_m3_eos_s42/`. Checkpoints are MIMIC-derived (Class R), so they stay on the cluster.
   - Before submitting, record a prediction (R4): wall time ≈ the published 1.3 h, and a final val loss close to the published run's, because the target gains one token per report.
   - Read the job's results only through `scripts/chat_remote.sh summary` (R7).
+
+  *Rulings (controller, 2026-10-09):*
+  - **The recipe.** Copy it from the published run's own `run_metadata.json` `resolved_config`: config fields and paths only, no MIMIC content (R7). Change nothing except the override `+dataset.report_eos_target=true`.
+  - **The wrapper.** It is a new `scripts/train_report_eos_h100.sh`. It follows the SLURM invariants:
+    - H100 via `--gpus=N`, never `--gres`;
+    - `--requeue` and `--open-mode=append`;
+    - `HF_HUB_OFFLINE=1`.
+  - **Its output** goes under `CHAT_HOME/models/report_gen_m3_eos_s42/`, never `MAIN_REPO/outputs`.
+  - **Tests.** Parity tests for the wrapper go in `tests/test_willi_parity.py`.
 - [ ] **P9-G4** (cluster) The evaluation job, on the official test split (n = 2,663).
   - The EOS model is decoded with the EOS-stop beam search (beam 3, budget 200, so the model, not the budget, ends the report).
   - The baseline is the published Mamba-3 run, decoded with the published protocol.
