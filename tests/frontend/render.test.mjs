@@ -77,7 +77,7 @@ const START = step('message_start', {
   },
   image: { sha256: SHA, filename: 'chest.png', source: 'upload', urls: { thumb: '/v1/messages/u_test/image?variant=thumb' } },
 });
-const GENERATE = { decode: 'beam', beam_size: 3, tokens: 87, stopped: 'eos', cached_decode: true, device: 'cpu',
+const GENERATE = { decode: 'beam', beam_size: 3, tokens: 87, stopped: 'budget', cached_decode: true, device: 'cpu',
                    drift_note: 'CPU decode can drift from the published GPU run' };
 
 const viewOf = (steps) => replay(steps.map((s, i) => ({ event: s.event, data: { ...s.data, seq: i + 1 } })));
@@ -493,8 +493,28 @@ test('the card says why the report ended: a repeat stop gets a quiet note and no
                    ['Reached the 64-token budget; the unfinished last sentence is hidden (Show raw shows it).']);   // a log from before the stop reason: it was the budget
   assert.deepEqual(notes(finished({ ...cutOff, truncated: true, options: { display_repair: true }, generate: { stopped: 'budget', tokens: undefined } })),
                    ['Reached the token budget; the unfinished last sentence is hidden (Show raw shows it).']);   // no number to give
-  assert.deepEqual(notes(finished({ ...cutOff, truncated: true, options: { display_repair: true }, generate: { stopped: 'eos', tokens: 87 } })),
+  assert.deepEqual(notes(finished({ ...cutOff, truncated: true, options: { display_repair: true }, generate: { stopped: 'timeout', tokens: 87 } })),
                    ['Report stopped at the token budget mid-sentence']);   // any other reason keeps the plain note
+});
+
+test('an EOS stop has no note: the model ended the report itself, so nothing was cut off and no budget is named (P9-G2)', () => {
+  const notes = (view) => texts(qa(renderReport(view), '.note'));
+  const cutOff = { report: 'Findings: The lungs are clear. Impression: No acute', display: 'Findings: The lungs are clear.' };
+  const eos = { stopped: 'eos', tokens: 87 };
+  assert.deepEqual(notes(finished({ generate: eos })), []);
+  assert.equal(q(renderReport(finished({ generate: eos })), '.note'), null);
+  // what the engine sends is truncated false whatever the text ends in; a server that flagged it anyway still gets no budget note
+  for (const display_repair of [true, false, undefined]) {
+    for (const truncated of [false, true]) {
+      assert.deepEqual(notes(finished({ ...cutOff, truncated, options: { display_repair }, generate: eos })), [], `repair ${display_repair}, truncated ${truncated}`);
+    }
+  }
+  assert.deepEqual(notes(finished({ options: { display_repair: true, stop_on_repeat: true }, generate: eos })), []);   // the switch being on changes nothing
+  // the neighbours keep their notes: the repeat's, and the budget's
+  assert.deepEqual(notes(finished({ generate: { stopped: 'repeat', tokens: 21 } })), ['Stopped when the model began repeating itself.']);
+  assert.deepEqual(notes(finished({ ...cutOff, truncated: true, generate: { stopped: 'budget', tokens: 87 } })), ['Report stopped at the token budget mid-sentence']);
+  // the turn's report is still the card's body: only the note is absent
+  assert.equal(q(renderReport(finished({ generate: eos })), '.report-body p').textContent, 'The lungs are clear.');
 });
 
 test('with the repair on, the budget note says what is hidden only when the card does hide something: no complete sentence is kept as it is (P4-G fix 1)', () => {

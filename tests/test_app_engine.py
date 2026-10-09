@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
 
@@ -23,7 +24,7 @@ from app.schemas import Options
 from app.tiny import (TINY_VOCAB, TinyTokenizer, TinyTower, tiny_decoder, tiny_decoder_config,
                       tiny_prefix_mapper)
 from scripts.repair_generations import repair_report, split_sentences
-from tests.app_helpers import png_bytes
+from tests.app_helpers import noise_script, png_bytes, scripted_decoder
 
 EMPTY = torch.zeros((1, 0), dtype=torch.long)   # report generation seeds with no BOS
 
@@ -786,6 +787,140 @@ def test_without_stop_on_repeat_the_users_case_is_the_published_decoder_to_the_l
     assert gen.report == same.report and gen.display_report == same.display_report and gen.truncated_mid_sentence == same.truncated_mid_sentence
 
 
+# ---- P9-G2: a model trained to end its reports ---------------------------------------------------------------------------------
+
+EOS_ID = len(TINY_VOCAB) - 1   # the last id of the tiny vocab: in reach of the scripted decoders, unlike the real engine's 50256
+REPORT = ("The heart is normal. The lungs are clear. No pleural effusion. Impression: no acute disease. Findings: the heart "
+          "is mildly enlarged and there is a small effusion.")   # 27 words: ends in sentences 4, 8, 11, 15 and 27
+WORDS = REPORT.split()
+
+
+@contextmanager
+def _eos_model(end_at=None, text=REPORT, eos_trained=True):
+    """The tiny engine as a model whose card says it was trained to end its reports, with a scripted decoder that ends every
+    beam's report after `end_at` tokens (never, with None) and a tokenizer that writes `text` a word per token."""
+    eng = build_engine("tiny")
+    eng._card["eos_trained"], eng.eos_token_id, eng.tokenizer = eos_trained, EOS_ID, _GrowingText(text)
+    script = noise_script(5, EOS_ID, lambda n, last: 40.0 if n == end_at else -1e4)
+    with scripted_decoder(eng.decoder, script):
+        yield eng
+
+
+@pytest.mark.parametrize("cached", [True, False])
+@pytest.mark.parametrize("decode", ["beam", "greedy"])
+def test_an_eos_trained_model_stops_where_its_report_ends_and_says_so(cached, decode):
+    with _eos_model(end_at=11) as eng:
+        snaps = []
+        res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=40, decode=decode, cached_decode=cached),
+                                lambda step, text: snaps.append((step, text)), threading.Event())
+    assert res.detail["stopped"] == "eos" and res.detail["tokens"] == len(gen.token_ids) == 11
+    assert gen.report == " ".join(WORDS[:11]) == "The heart is normal. The lungs are clear. No pleural effusion."
+    assert gen.truncated_mid_sentence is False and gen.display_report == gen.report
+    assert [step for step, _ in snaps] == list(range(12))                     # one snapshot per step, the step that ended it too
+    assert [text for _, text in snaps[:11]] == [" ".join(WORDS[:n]) for n in range(1, 12)]
+    json.dumps(res.detail)
+    assert set(res.detail) == {"decode", "beam_size", "tokens", "stopped", "cached_decode", "compiled", "prefill_ms",
+                               "per_token_ms", "device", "threads", "drift_note"}   # the stop reason is a value, not a new field
+
+
+def test_an_eos_stop_is_never_a_cut_off_whatever_the_text_ends_in_and_the_display_copy_follows_p4f():
+    with _eos_model(end_at=13) as eng:                                         # "... Impression: no", the 13th word ends no sentence
+        _, plain = eng.generate(_encoded(eng), Options(max_new_tokens=40), _noop, threading.Event())
+        res, shown = eng.generate(_encoded(eng), Options(max_new_tokens=40, display_repair=True), _noop, threading.Event())
+    assert res.detail["stopped"] == "eos" and plain.report == shown.report == " ".join(WORDS[:13])
+    assert plain.truncated_mid_sentence is False and shown.truncated_mid_sentence is False
+    assert plain.display_report == plain.report                                # repair off: the raw text is the display
+    assert shown.display_report == repair_report(shown.report, dedup="all", truncate=True)[0] == " ".join(WORDS[:11])
+    with _eos_model(end_at=None) as eng:                                       # the same text cut by the budget is a cut-off
+        res, cut = eng.generate(_encoded(eng), Options(max_new_tokens=18), _noop, threading.Event())
+    assert res.detail["stopped"] == "budget" and cut.truncated_mid_sentence is True
+
+
+def test_the_eos_decoders_run_for_a_model_whose_card_says_so_and_only_then():
+    from scripts import evaluate_report_generation as erg
+    with _eos_model(end_at=None, eos_trained=False) as eng:
+        with mock.patch.object(erg, "beam_search_decode_eos", side_effect=AssertionError("EOS decoder")), \
+                mock.patch.object(eng.decoder, "beam_search_cached_eos", side_effect=AssertionError("EOS decoder")):
+            for cached in (True, False):
+                res, _ = eng.generate(_encoded(eng), Options(max_new_tokens=16, cached_decode=cached), _noop, threading.Event())
+                assert res.detail["stopped"] == "budget"
+            del eng._card["eos_trained"]                                      # a card with no such key (an old one) is not trained to stop
+            for cached in (True, False):
+                eng.generate(_encoded(eng), Options(max_new_tokens=16, cached_decode=cached), _noop, threading.Event())
+    with _eos_model(end_at=None) as eng:
+        with mock.patch.object(erg, "beam_search_decode", side_effect=AssertionError("published decoder")), \
+                mock.patch.object(eng.decoder, "beam_search_cached", side_effect=AssertionError("published decoder")):
+            for cached in (True, False):
+                eng.generate(_encoded(eng), Options(max_new_tokens=16, cached_decode=cached), _noop, threading.Event())
+
+
+@pytest.mark.parametrize("cached", [True, False])
+@pytest.mark.parametrize("decode", ["beam", "greedy"])
+def test_a_card_that_says_eos_trained_changes_no_token_of_a_model_that_never_emits_one(cached, decode):
+    eng = build_engine("tiny")                                                 # the real engine's id, 50256, is no token of the tiny vocab
+    enc = _encoded(eng)
+    opts = Options(max_new_tokens=24, decode=decode, cached_decode=cached, display_repair=True)
+    _, plain = eng.generate(enc, opts, _noop, threading.Event())
+    eng._card["eos_trained"] = True
+    res, eos = eng.generate(enc, opts, _noop, threading.Event())
+    assert eos.token_ids == plain.token_ids and len(eos.token_ids) == 24
+    assert (eos.report, eos.display_report, eos.truncated_mid_sentence) == (plain.report, plain.display_report, plain.truncated_mid_sentence)
+    assert res.detail["stopped"] == "budget" and res.detail["tokens"] == 24
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_stop_on_repeat_is_still_a_backstop_and_the_first_stop_to_fire_wins(cached):
+    loop = "The heart is normal. The lungs are clear. The heart is normal. The lungs are clear. Impression: no effusion."
+    opts = Options(max_new_tokens=40, cached_decode=cached, stop_on_repeat=True)
+    with _eos_model(end_at=30, text=loop) as eng:                              # the report repeats (word 12) before the model would end it
+        res, gen = eng.generate(_encoded(eng), opts, _noop, threading.Event())
+    assert res.detail["stopped"] == "repeat" and len(gen.token_ids) == 12 and gen.truncated_mid_sentence is False
+    with _eos_model(end_at=8, text=loop) as eng:                               # the model ends it (word 8) first: the switch is on, and it is EOS
+        res, gen = eng.generate(_encoded(eng), opts, _noop, threading.Event())
+    assert res.detail["stopped"] == "eos" and gen.report == " ".join(loop.split()[:8])
+    with _eos_model(end_at=8, text=loop) as eng:                               # and the same model with the switch off
+        res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=40, cached_decode=cached), _noop, threading.Event())
+    assert res.detail["stopped"] == "eos" and len(gen.token_ids) == 8
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_cancel_stops_an_eos_decode_within_one_step(cached):
+    with _eos_model(end_at=30) as eng:
+        enc, cancel, seen = _encoded(eng), threading.Event(), []
+
+        def snap(step, text):
+            seen.append(step)
+            if step == 3:
+                cancel.set()
+
+        with pytest.raises(Cancelled):
+            eng.generate(enc, Options(max_new_tokens=50, cached_decode=cached), snap, cancel)
+    assert seen == [0, 1, 2, 3]
+
+
+def test_a_cancel_set_before_an_eos_decode_starts_does_no_decoding():
+    with _eos_model(end_at=11) as eng:
+        cancel = threading.Event()
+        cancel.set()
+        with mock.patch.object(eng.decoder, "beam_search_cached_eos", side_effect=AssertionError("decoded")):
+            with pytest.raises(Cancelled):
+                eng.generate(_encoded(eng), Options(), _noop, cancel)
+
+
+def test_cached_decode_is_still_refused_for_a_stack_without_a_cache_on_the_eos_path():
+    with _eos_model(end_at=11) as eng:
+        with mock.patch.object(eng.decoder, "supports_cached_decode", return_value=False):
+            with pytest.raises(ValueError, match="cached_decode"):
+                eng.generate(_encoded(eng), Options(max_new_tokens=16), _noop, threading.Event())
+            res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=16, cached_decode=False), _noop, threading.Event())
+    assert res.detail["stopped"] == "eos" and len(gen.token_ids) == 11          # the uncached EOS search serves it
+
+
+def test_the_engines_eos_id_is_gpt2s_and_the_tiny_engine_is_not_trained_to_stop():
+    from app.engine import Engine
+    assert Engine.eos_token_id == 50256 and build_engine("tiny").card()["eos_trained"] is False
+
+
 # ---- the card and its provenance -------------------------------------------------------------------------
 
 def test_tiny_engine_card_is_complete_and_json_safe():
@@ -795,7 +930,8 @@ def test_tiny_engine_card_is_complete_and_json_safe():
     assert (card["name"], card["checkpoint"], card["prefix_k"]) == ("tiny", None, 4)
     assert card["cached_decode_available"] is True and card["drift_note"] == "tiny random-init model"
     assert {"checkpoint_sha256", "scan_impl", "tfla_impl", "mamba3_chunk_size", "layer_pattern", "train_experiment",
-            "torch", "device", "threads", "cpu", "git_sha", "git_dirty", "git_source"} <= set(card)
+            "torch", "device", "threads", "cpu", "git_sha", "git_dirty", "git_source", "eos_trained"} <= set(card)
+    assert card["eos_trained"] is False                                 # P9-G2: no model that ships today was trained to end a report
     card["layer_pattern"].append("x")                                   # a copy: callers cannot edit the record
     assert "x" not in eng.card()["layer_pattern"]
 
@@ -877,14 +1013,17 @@ def keep_threads():
     torch.set_num_threads(threads)
 
 
-def _fake_run(tmp_path, experiment="h100_report_gen_m3_tower13d_s42", prefix_k=4):
-    """outputs/<run>/{run_metadata.json, checkpoints/last.ckpt}: the layout resolve_prefix_k reads."""
+def _fake_run(tmp_path, experiment="h100_report_gen_m3_tower13d_s42", prefix_k=4, dataset=None):
+    """outputs/<run>/{run_metadata.json, checkpoints/last.ckpt}: the layout resolve_prefix_k reads. `dataset`, when given, is the
+    resolved config's dataset block (where P9-G1's report_eos_target lands)."""
     run = tmp_path / "outputs" / "run_x"
     (run / "checkpoints").mkdir(parents=True)
     ckpt = run / "checkpoints" / "last.ckpt"
     ckpt.write_bytes(b"not a real checkpoint" * 100)
-    (run / "run_metadata.json").write_text(json.dumps(
-        {"git_sha": "x", "resolved_config": {"experiment_name": experiment, "model": {"prefix_k": prefix_k}}}))
+    resolved = {"experiment_name": experiment, "model": {"prefix_k": prefix_k}}
+    if dataset is not None:
+        resolved["dataset"] = dataset
+    (run / "run_metadata.json").write_text(json.dumps({"git_sha": "x", "resolved_config": resolved}))
     return ckpt
 
 
@@ -936,7 +1075,40 @@ def test_real_engine_card_survives_missing_or_damaged_run_metadata(tmp_path, mon
     meta.write_text("{broken")
     assert build_engine("real", checkpoint=str(ckpt), model_config="m")._card["train_experiment"] is None
     meta.unlink()
-    assert build_engine("real", checkpoint=str(ckpt), model_config="m")._card["train_experiment"] is None
+    card = build_engine("real", checkpoint=str(ckpt), model_config="m")._card
+    assert card["train_experiment"] is None and card["eos_trained"] is False    # unknown is not "trained to stop"
+
+
+@pytest.mark.parametrize("dataset,trained", [
+    ({"report_eos_target": True}, True),
+    ({"report_eos_target": False}, False),
+    ({"report_eos_target": None}, False),
+    ({"report_eos_target": "true"}, False),     # P9-G1 insists on a bool: anything else is not "trained to stop"
+    ({"report_eos_target": 1}, False),
+    ({}, False),                                # a run from before the flag existed
+    (None, False),                              # no dataset block at all
+    ([], False),                                # a block of the wrong shape
+])
+def test_real_engine_card_says_a_run_was_trained_to_end_its_reports_only_when_its_config_says_true(
+        tmp_path, monkeypatch, keep_threads, dataset, trained):
+    ckpt = _fake_run(tmp_path, dataset=dataset)
+    _stub_loader(monkeypatch)
+    card = build_engine("real", checkpoint=str(ckpt), model_config="m").card()
+    assert card["eos_trained"] is trained and card["train_experiment"] == "h100_report_gen_m3_tower13d_s42"
+    json.dumps(card)
+
+
+def test_real_engine_of_an_eos_trained_run_decodes_with_the_eos_search_and_a_published_run_does_not(tmp_path, monkeypatch, keep_threads):
+    _stub_loader(monkeypatch)
+    trained = build_engine("real", checkpoint=str(_fake_run(tmp_path, dataset={"report_eos_target": True})), model_config="m")
+    with mock.patch.object(trained.decoder, "beam_search_cached_eos", wraps=trained.decoder.beam_search_cached_eos) as eos_search:
+        _, gen = trained.generate(_encoded(trained), Options(max_new_tokens=16), _noop, threading.Event())
+    assert eos_search.call_count == 1 and eos_search.call_args.kwargs["eos_token_id"] == 50256 and len(gen.token_ids) == 16
+    other = tmp_path / "other"
+    other.mkdir()
+    published = build_engine("real", checkpoint=str(_fake_run(other)), model_config="m")
+    with mock.patch.object(published.decoder, "beam_search_cached_eos", side_effect=AssertionError("EOS search")):
+        published.generate(_encoded(published), Options(max_new_tokens=16), _noop, threading.Event())
 
 
 def test_real_engine_card_takes_git_fields_from_the_repo_root_stamp(tmp_path, monkeypatch, keep_threads):

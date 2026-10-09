@@ -238,8 +238,9 @@ export function splitReport(text) {
   return sections;
 }
 
-// Why the report ends where it does (P4-G), from the generate stage's detail ({stopped, tokens}) and the options the turn ran with:
+// Why the report ends where it does (P4-G, P9-G2), from the generate stage's detail ({stopped, tokens}) and the options the turn ran with:
 //   stopped on a repeat   a quiet note, and never the budget's: the turn chose to stop
+//   stopped on the model's own end of report (eos)   no note at all: the report ends where the model meant it to, so nothing was cut off
 //   the budget, with the display repair on and a sentence cut off   what the card hides, and where Show raw has it
 //   the budget, otherwise   the plain note (a repaired card hides the unfinished sentence, an unrepaired one shows it)
 // A log from before the stop reason was recorded has no `stopped`: it ran to the budget, as every report then did.
@@ -247,6 +248,7 @@ function reportNote(v) {
   const generate = isObject(v.stages.generate?.detail) ? v.stages.generate.detail : {};
   const stopped = str(generate.stopped);
   if (stopped === 'repeat') return el('p', { class: 'note', 'data-stopped': 'repeat' }, 'Stopped when the model began repeating itself.');
+  if (stopped === 'eos') return null;   // the engine never flags an EOS stop as cut off; whatever a server sent, no budget is to blame
   if (!v.truncated) return null;
   // The card hides something only if the repair left something out of it: with no complete sentence to cut back to, the repair keeps the
   // text as it is, and the card shows all of it.

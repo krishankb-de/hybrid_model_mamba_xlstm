@@ -2,7 +2,8 @@
 
 A thin layer over code the thesis already trusts: load_report_generation_module (prefix_k from
 run_metadata.json, the operator flags, the missing-key guard), the published transform, and the two
-beam searches with the observe-only on_step callback (P2-B). Nothing here re-implements decoding.
+beam searches with the observe-only on_step callback (P2-B), or their EOS-stop twins for a model whose
+card says it was trained to end its reports (P9-G2). Nothing here re-implements decoding.
 """
 import copy
 import hashlib
@@ -209,6 +210,7 @@ class Engine:
     name = "engine"
     device = torch.device("cpu")
     drift_note = ""
+    eos_token_id = 50256   # GPT-2's <|endoftext|>, also its pad id: the token P9-G1 trains a report to end with
 
     def preprocess(self, data: bytes) -> Tuple[StageResult, Prepared]:
         t0 = time.perf_counter()
@@ -237,7 +239,7 @@ class Engine:
 
     def generate(self, enc: Encoded, opts: "Options", on_snapshot: Callable[[int, str], None],
                  cancel: threading.Event) -> Tuple[StageResult, Generated]:
-        from scripts.evaluate_report_generation import beam_search_decode
+        from scripts.evaluate_report_generation import beam_search_decode, beam_search_decode_eos
 
         if opts.cached_decode and not self.decoder.supports_cached_decode():
             raise ValueError("{} has no O(1) decode cache; set cached_decode=false.".format(self.name))
@@ -258,16 +260,30 @@ class Engine:
 
         beam = 1 if opts.decode == "greedy" else opts.beam_size
         empty = torch.zeros((1, 0), dtype=torch.long, device=self.device)   # no BOS, as in training
-        stopped = "budget"
+        eos_trained = bool(self._card.get("eos_trained"))   # P9-G2: such a model is decoded so that it can end its report
+        stopped = "budget"   # or "repeat" (P4-G), or "eos" (P9-G2)
         with torch.no_grad():
             try:
-                if opts.cached_decode:
+                ended = False
+                # The step callback sees the best LIVE beam, so on an EOS stop the last snapshot can run a token past the end of
+                # the report; the report itself is what message_stop carries.
+                if eos_trained and opts.cached_decode:
+                    out, ended = self.decoder.beam_search_cached_eos(
+                        empty, prefix_embeds=enc.prefix, beam_size=beam, max_new_tokens=opts.max_new_tokens,
+                        eos_token_id=self.eos_token_id, on_step=cb)
+                elif eos_trained:
+                    out, ended = beam_search_decode_eos(
+                        self.decoder, empty, prefix_embeds=enc.prefix, beam_size=beam, max_new_tokens=opts.max_new_tokens,
+                        eos_token_id=self.eos_token_id, on_step=cb)
+                elif opts.cached_decode:
                     out = self.decoder.beam_search_cached(empty, prefix_embeds=enc.prefix, beam_size=beam,
                                                           max_new_tokens=opts.max_new_tokens, on_step=cb)
                 else:
                     out = beam_search_decode(self.decoder, empty, prefix_embeds=enc.prefix, beam_size=beam,
                                              max_new_tokens=opts.max_new_tokens, on_step=cb)
                 ids = out[0].tolist()
+                if ended:   # the report it returned is one that ended in the model's own EOS
+                    stopped = "eos"
             except _RepeatStop as stop:   # the best beam of that step is what the published decoder returns at that length
                 ids, stopped = stop.ids, "repeat"
         decoded = time.perf_counter()
@@ -277,7 +293,8 @@ class Engine:
         repaired, stats = repair_report(report, dedup="all", truncate=True)
         # Cut off means truncation only, whatever dedup dropped. With no complete sentence at all the repair keeps the
         # original and reports a fallback, not a truncation. Only the budget cuts a report off: a turn that stopped on a repeat chose
-        # to, even when its best beam was already into the next sentence (the display copy drops that fragment, as it does the repeat).
+        # to, even when its best beam was already into the next sentence (the display copy drops that fragment, as it does the repeat),
+        # and one that ended in the model's own EOS ended where the model meant it to.
         truncated = stopped == "budget" and (stats.get("sentences_truncated", 0) > 0
                                              or (bool(report) and stats.get("fallbacks", 0) > 0))
         start = first[0] if first else t0
@@ -296,7 +313,7 @@ class Engine:
         return tensor_sha256(self.tower)
 
     def _make_card(self, prefix_k: int, checkpoint: Optional[str] = None, checkpoint_sha256: Optional[str] = None,
-                   train_experiment: Optional[str] = None) -> Dict[str, Any]:
+                   train_experiment: Optional[str] = None, eos_trained: bool = False) -> Dict[str, Any]:
         cfg = self.decoder.config
         card = {"name": self.name, "checkpoint": checkpoint, "checkpoint_sha256": checkpoint_sha256,
                 "prefix_k": int(prefix_k), "scan_impl": cfg.scan_impl, "tfla_impl": cfg.tfla_impl,
@@ -304,6 +321,7 @@ class Engine:
                 "layer_pattern": list(cfg.layer_pattern),
                 "cached_decode_available": bool(self.decoder.supports_cached_decode()),
                 "train_experiment": train_experiment,
+                "eos_trained": bool(eos_trained),   # P9-G2: trained to end a report in EOS, so decoded to stop there
                 "torch": torch.__version__, "device": str(self.device), "threads": torch.get_num_threads(),
                 "cpu": platform.processor() or platform.machine(), "drift_note": self.drift_note}
         card.update(git_provenance(REPO_ROOT))
@@ -351,14 +369,18 @@ class RealEngine(Engine):
 
     def _provenance(self, ckpt: Path, cache_dir: Optional[Path]) -> Dict[str, Any]:
         meta = ckpt.resolve().parent.parent / "run_metadata.json"    # beside the run, where resolve_prefix_k reads k
-        experiment = None
+        experiment, eos_trained = None, False
         try:   # write_run_metadata files the Hydra config under "resolved_config"
-            experiment = json.loads(meta.read_text()).get("resolved_config", {}).get("experiment_name")
-        except (OSError, ValueError, AttributeError):   # absent or damaged: the card just has no experiment name
+            resolved = json.loads(meta.read_text()).get("resolved_config", {})
+            experiment = resolved.get("experiment_name")
+            # P9-G1's flag lands under dataset. Trained to end its reports means true there; a run from before the flag has no
+            # such key, and a missing or damaged file says nothing, so both stay False: the published decoders, as today.
+            eos_trained = resolved.get("dataset", {}).get("report_eos_target") is True
+        except (OSError, ValueError, AttributeError):   # absent or damaged: the card just has no experiment name, and no EOS
             pass
         sha = file_sha256(ckpt, (Path(cache_dir) / "sha256.json") if cache_dir else None)
         return self._make_card(prefix_k=self.module.prefix_k, checkpoint=str(ckpt), checkpoint_sha256=sha,
-                               train_experiment=experiment)
+                               train_experiment=experiment, eos_trained=eos_trained)
 
 
 def build_engine(kind: str, **kw: Any) -> Engine:

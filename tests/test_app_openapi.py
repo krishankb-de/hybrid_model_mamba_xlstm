@@ -66,6 +66,8 @@ def test_the_models_route_documents_its_features_and_its_example_has_the_real_ke
     assert set(example) == set(live)                                  # the example cannot drift from the answer
     assert set(example["features"]) == set(live["features"]) == {"retrieval", "labels"}
     assert set(example["models"][0]) <= set(live["models"][0])        # and the card it shows is made of real card fields
+    assert "`eos_trained`" in op["description"] and "stopped: eos" in op["description"]   # P9-G2: the field and what it changes
+    assert example["models"][0]["eos_trained"] is False and live["models"][0]["eos_trained"] is False
 
 
 def test_curl_walkthrough_options_validate():
@@ -116,6 +118,12 @@ def test_the_options_description_says_what_stop_on_repeat_does_and_that_leaving_
     assert "`stopped: repeat`" in about, about                              # and the generate stage says so
     assert "`truncated_mid_sentence` is false" in about and "raw `report`" in about, about   # a repeat stop is no cut-off, whatever the raw text ends in
     assert "max_new_tokens" in about and "published protocol" in about, about   # left out, the whole budget is decoded
+
+
+def test_the_options_description_says_a_model_trained_to_end_its_reports_stops_there_whatever_stop_on_repeat_says(client):   # P9-G2
+    text = _body_schema(client.get("/openapi.json").json())["properties"]["options"]["description"]
+    about = text.split("`eos_trained: true`", 1)[1].split(".")[0]
+    assert "`stopped: eos`" in about and "stop_on_repeat" in about, about
 
 
 def test_the_streaming_route_documents_its_event_stream(client, monkeypatch):

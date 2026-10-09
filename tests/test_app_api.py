@@ -24,7 +24,7 @@ from app.redact import PUBLIC_ERROR_MESSAGE
 from app.schemas import Options
 from app.server import create_app
 from app.store import RESTART_MESSAGE, Store
-from tests.app_helpers import iter_sse, png_bytes, start_live_server, wait_until
+from tests.app_helpers import iter_sse, noise_script, png_bytes, scripted_decoder, start_live_server, wait_until
 
 STAGES = ["preprocess", "encode", "retrieve", "generate", "label", "score"]
 
@@ -1160,6 +1160,29 @@ def test_stop_on_repeat_ends_a_long_turn_early_and_the_stream_says_why(client): 
     default = _turn(client, sid, options={"max_new_tokens": 24})                                     # the API's default: the published protocol
     assert default[0]["data"]["options"]["stop_on_repeat"] is False
     assert (_stage_ends(default)["generate"]["detail"]["stopped"], _stage_ends(default)["generate"]["detail"]["tokens"]) == ("budget", 24)
+
+
+def test_an_eos_stop_streams_stopped_eos_no_cut_off_flag_and_a_card_that_says_eos_trained(client, monkeypatch):   # P9-G2
+    from tests.test_app_engine import EOS_ID as eos, REPORT, _GrowingText
+    words = REPORT.split()
+    engine = client.app.state.engines["tiny"]
+    sid = client.post("/v1/sessions", json={}).json()["id"]
+    assert _turn(client, sid)[0]["data"]["model"]["eos_trained"] is False                  # no model that ships today
+    assert [m["eos_trained"] for m in client.get("/v1/models").json()["models"]] == [False]
+    monkeypatch.setitem(engine._card, "eos_trained", True)                                  # the card says it was trained to end a report
+    monkeypatch.setattr(engine, "eos_token_id", eos)                                        # an id the tiny vocab has
+    monkeypatch.setattr(engine, "tokenizer", _GrowingText(REPORT))
+    with scripted_decoder(engine.decoder, noise_script(5, eos, lambda n, last: 40.0 if n == 13 else -1e4)):   # it ends after 13 tokens
+        frames = _turn(client, sid, options={"max_new_tokens": 40, "display_repair": True})
+    start, stop, generate = frames[0]["data"], frames[-1]["data"], _stage_ends(frames)["generate"]["detail"]
+    assert start["model"]["eos_trained"] is True
+    assert (generate["stopped"], generate["tokens"]) == ("eos", 13)
+    assert len([f for f in frames if f["event"] == "content_block_delta"]) == 14             # a snapshot per step, the one that ended it too
+    assert stop["status"] == "done" and stop["truncated_mid_sentence"] is False              # "... Impression: no" is a cut-off only at the budget
+    assert stop["report"] == " ".join(words[:13]) and stop["display_report"] == " ".join(words[:11])
+    assistant = client.get("/v1/sessions/{}".format(sid)).json()["messages"][-1]
+    assert assistant["provenance"]["eos_trained"] is True                                    # stored with the turn
+    assert [m["eos_trained"] for m in client.get("/v1/models").json()["models"]] == [True]
 
 
 # ---- the turn: message_start, uploads, text-only turns, commands ----------------------------------------------------

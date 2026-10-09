@@ -77,7 +77,8 @@ OPTIONS_EXAMPLE = ('{"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "c
 # runs, so a client can tell a skipped stage from one it switched off.
 MODELS_EXAMPLE = {"default_model": "hybrid_150m_m3_rrg", "mode": "private", "allow_compile": False,
                   "features": {"retrieval": False, "labels": False},
-                  "models": [{"name": "hybrid_150m_m3_rrg", "prefix_k": 32, "cached_decode_available": True, "device": "cpu"}]}
+                  "models": [{"name": "hybrid_150m_m3_rrg", "prefix_k": 32, "cached_decode_available": True, "eos_trained": False,
+                              "device": "cpu"}]}
 
 
 def _option_ranges() -> str:
@@ -118,7 +119,9 @@ OPTIONS_DOC = ("The turn's options as a JSON object with the keys " + ", ".join(
                "decoding at the first sentence that repeats an earlier one word for word (case and spacing aside): the "
                "generate stage then reports `stopped: repeat`, and `truncated_mid_sentence` is false even when the raw "
                "`report` ends in the start of the next sentence; left out, the whole `max_new_tokens` is decoded, as in "
-               "the published protocol. `reference` and `test_row` work in private mode only. A command in `text` is "
+               "the published protocol. A model whose card says `eos_trained: true` was trained to end its reports: its "
+               "decoding also stops where it does, whatever `stop_on_repeat` says, and the generate stage then reports "
+               "`stopped: eos`. `reference` and `test_row` work in private mode only. A command in `text` is "
                "applied on top.")
 REFUSALS = {   # what a status means in the reference; a route that can answer it declares it with _refusals()
     400: "The request is malformed: `options` is not a JSON object, or in public mode `X-Client-Id` is missing or "
@@ -478,7 +481,9 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
                               "content": {"application/json": {"example": MODELS_EXAMPLE}}},
                         **_refusals({}, client_id=False)},
              description="The models this server can run, each with its card (checkpoint, device, architecture "
-                         "settings, whether decoding can be cached), and the default model, the mode, whether "
+                         "settings, whether decoding can be cached, and `eos_trained`: whether it was trained to end its "
+                         "reports, in which case decoding stops where it does and the generate stage reports "
+                         "`stopped: eos`), and the default model, the mode, whether "
                          "`compile` is allowed and, in `features`, whether it runs the retrieval and labels stages. "
                          "In public mode a card names its checkpoint by file name only.")
     def list_models():
