@@ -13,7 +13,13 @@ def test_defaults_are_the_published_protocol():
     o = Options()
     assert (o.decode, o.beam_size, o.max_new_tokens, o.cached_decode) == ("beam", 3, 100, True)
     assert (o.k_images, o.k_reports, o.label, o.display_repair, o.compile) == (4, 3, True, False, False)
+    assert o.stop_on_repeat is False   # P4-G: the API keeps the published protocol, which always decodes the whole budget
     assert (o.model, o.reference, o.test_row) == (None, None, None)
+
+
+def test_stop_on_repeat_is_a_plain_flag_that_follows_display_repair_in_the_field_order():
+    assert Options(stop_on_repeat=True).stop_on_repeat is True
+    assert list(Options.model_fields)[list(Options.model_fields).index("display_repair") + 1] == "stop_on_repeat"
 
 
 @pytest.mark.parametrize("bad", [

@@ -1148,6 +1148,20 @@ def test_message_stop_carries_exactly_the_contract_fields(client):
     assert stop["report"] and stop["total_ms"] > 0 and isinstance(stop["truncated_mid_sentence"], bool)
 
 
+def test_stop_on_repeat_ends_a_long_turn_early_and_the_stream_says_why(client):   # P4-G
+    sid = client.post("/v1/sessions", json={}).json()["id"]
+    frames = _turn(client, sid, options={"max_new_tokens": 200, "stop_on_repeat": True, "display_repair": True})
+    start, stop, generate = frames[0]["data"], frames[-1]["data"], _stage_ends(frames)["generate"]["detail"]
+    assert start["options"]["stop_on_repeat"] is True and start["options"]["max_new_tokens"] == 200
+    assert generate["stopped"] == "repeat" and 0 < generate["tokens"] < 200
+    assert len([f for f in frames if f["event"] == "content_block_delta"]) == generate["tokens"]   # a snapshot per step, the last included
+    assert stop["status"] == "done" and stop["truncated_mid_sentence"] is False
+    assert stop["report"] and stop["display_report"] and len(stop["display_report"]) < len(stop["report"])   # the repeat is only in the raw text
+    default = _turn(client, sid, options={"max_new_tokens": 24})                                     # the API's default: the published protocol
+    assert default[0]["data"]["options"]["stop_on_repeat"] is False
+    assert (_stage_ends(default)["generate"]["detail"]["stopped"], _stage_ends(default)["generate"]["detail"]["tokens"]) == ("budget", 24)
+
+
 # ---- the turn: message_start, uploads, text-only turns, commands ----------------------------------------------------
 
 def test_message_start_names_the_turn_and_points_at_the_user_messages_image(client):

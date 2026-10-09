@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from PIL import Image
 from pydantic import ValidationError
 
-from app.engine import Cancelled, build_engine, file_sha256, git_provenance, stream_view, tensor_sha256
+from app.engine import Cancelled, build_engine, file_sha256, git_provenance, repeat_started, stream_view, tensor_sha256
 from app.schemas import Options
 from app.tiny import (TINY_VOCAB, TinyTokenizer, TinyTower, tiny_decoder, tiny_decoder_config,
                       tiny_prefix_mapper)
@@ -242,6 +242,7 @@ def test_options_are_the_published_protocol_by_default_and_bounded():
     o = Options()
     assert (o.decode, o.beam_size, o.max_new_tokens, o.cached_decode, o.compile) == ("beam", 3, 100, True, False)
     assert (o.k_images, o.k_reports, o.label, o.display_repair) == (4, 3, True, False)
+    assert o.stop_on_repeat is False   # P4-G: the API's default is the published protocol, which decodes the whole budget
     assert o.model is None and o.reference is None and o.test_row is None
     for edge in ({"beam_size": 1}, {"beam_size": 8}, {"max_new_tokens": 16}, {"max_new_tokens": 200},
                  {"k_images": 0}, {"k_images": 12}, {"k_reports": 0}, {"k_reports": 10}, {"test_row": 0}):
@@ -611,6 +612,178 @@ def test_tiny_step_delay_paces_the_stream_and_a_cancel_cuts_the_pause_short():
     with pytest.raises(Cancelled):
         slow.generate(enc, Options(max_new_tokens=50), snap, cancel)
     assert seen == [0] and time.perf_counter() - t0 < 10
+
+
+# ---- P4-G: stop decoding when the report starts repeating --------------------------------------------------------------------
+
+def test_repeat_started_is_false_while_nothing_has_been_said_twice():
+    for text in ("", "  \n ", "The heart is normal.", "The heart is normal. The lungs are clear.",
+                 "The heart is normal. The lungs are clear. No pleural",
+                 "Findings: The heart is normal. Impression: Clear."):
+        assert repeat_started(text) is False, text
+
+
+def test_repeat_started_is_true_once_a_finished_sentence_repeats_an_earlier_one():
+    assert repeat_started("The heart is normal. The heart is normal.") is True                            # a consecutive repeat
+    assert repeat_started("The heart is normal. The lungs are clear. The heart is normal.") is True       # A B A
+    assert repeat_started("The heart is normal. The lungs are clear. The heart is normal. The lungs are clear.") is True   # A B A B
+    assert repeat_started("Findings: no effusion. Impression: Clear. Findings: no effusion.") is True     # after a header
+
+
+def test_repeat_started_waits_for_the_terminal_of_a_repeat_and_is_not_undone_by_what_follows_it():
+    shown, repeat = "The heart is normal. The lungs are clear.", "The heart is normal."
+    for n in range(1, len(repeat)):          # every prefix of the repeat, mid-word ones included: still being written
+        assert repeat_started(shown + " " + repeat[:n]) is False, repeat[:n]
+    assert repeat_started(shown + " " + repeat) is True                  # its terminal has arrived
+    assert repeat_started(shown + " " + repeat + " The") is True         # the best beam can already be into the next sentence
+    header = "Findings: The heart is normal."
+    for n in range(1, len(header)):
+        assert repeat_started(header + " " + header[:n]) is False, header[:n]
+    assert repeat_started(header + " " + header) is True
+
+
+def test_repeat_started_reads_case_and_whitespace_as_the_repair_does():
+    assert repeat_started("The heart is normal. the HEART is   normal.") is True
+    assert repeat_started("The heart is normal.\n\nthe heart\tis normal.") is True
+    assert repeat_started("The heart is normal. The heart is normal!") is False   # the terminal is part of the key, as in repair_report
+
+
+def test_a_header_alone_is_not_a_sentence_and_so_not_a_repeat():
+    for text in ("Findings:", "Findings: Impression:", "Findings: The heart is normal. Findings:",
+                 "Findings: The heart is normal. Impression: The heart is normal."):   # the header is part of the sentence it starts
+        assert repeat_started(text) is False, text
+    assert repeat_started("Findings: Findings:") is False                               # two headers and no sentence between them
+
+
+def test_repeat_started_is_about_the_last_finished_sentence_and_uses_the_repairs_splitter():
+    loop = "The heart is normal. The lungs are clear. The heart is normal. The lungs are clear. Impression: no effusion."
+    words = loop.split()
+    fired = [n for n in range(1, len(words) + 1) if repeat_started(" ".join(words[:n]))]
+    assert fired == list(range(12, 19))      # from the terminal of the third sentence until a new sentence is finished
+    # the repair's list-marker rule ("1." ends no sentence) decides what a sentence is, not a second splitter of this file's own
+    assert repeat_started("1. Heart size is normal. 2. Heart size is normal.") is False
+    assert repeat_started("1. Heart size is normal. 2. Lungs are clear. 1. Heart size is normal.") is True
+    assert repeat_started("Seen by Dr. Smith. Seen by Dr. Jones.") is False       # an abbreviation ends no sentence either
+    assert repeat_started("The mass is 4.5 cm. The mass is 4.5 cm.") is True       # nor does a decimal point
+
+
+class _Scripted:
+    """A tokenizer whose text depends on how many ids it is given: the best beam of a beam search can change between two steps, and
+    then its texts are not prefixes of one another."""
+
+    def __init__(self, default, at):
+        self.default, self.at = default, at
+
+    def decode(self, ids, skip_special_tokens=True):
+        return self.at.get(len(ids), self.default)
+
+
+def test_stop_on_repeat_ends_decoding_at_the_step_where_a_repeat_is_finished_and_not_before():
+    text = "The heart is normal. The lungs are clear. The heart is normal. The lungs are clear. Impression: no effusion."
+    words = text.split()
+    assert len(words) >= 16
+    eng = build_engine("tiny")
+    eng.tokenizer = _GrowingText(text)
+    enc = _encoded(eng)
+    snaps = []
+    res, gen = eng.generate(enc, Options(max_new_tokens=len(words), stop_on_repeat=True, display_repair=True),
+                            lambda step, t: snaps.append((step, t)), threading.Event())
+    assert len(gen.token_ids) == res.detail["tokens"] == 12                   # the third sentence ends at the 12th word
+    assert res.detail["stopped"] == "repeat"
+    assert gen.report == " ".join(words[:12])                                  # the raw text includes the one repeated sentence
+    assert [step for step, _ in snaps] == list(range(12))                      # one snapshot per step, the stopping step's included
+    assert snaps[-1][1] == stream_view(gen.report)                             # and the last one is the answer, as it is for a budget run
+    assert gen.display_report == "The heart is normal. The lungs are clear."   # the display copy has no repeat
+    assert gen.truncated_mid_sentence is False
+    _, full = eng.generate(enc, Options(max_new_tokens=len(words)), _noop, threading.Event())
+    assert (len(full.token_ids), full.report) == (len(words), text)           # switched off, the whole budget is decoded
+    assert full.truncated_mid_sentence is False
+
+
+def test_stop_on_repeat_with_repair_off_streams_and_stores_the_raw_text():
+    text = "The heart is normal. The lungs are clear. The heart is normal. The lungs are clear. Impression: no effusion."
+    eng = build_engine("tiny")
+    eng.tokenizer = _GrowingText(text)
+    snaps = []
+    res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=19, stop_on_repeat=True), lambda step, t: snaps.append(t), threading.Event())
+    assert snaps[-1] == gen.report == gen.display_report == " ".join(text.split()[:12])   # the repeat is in all three: repair is off
+    assert res.detail["stopped"] == "repeat" and gen.truncated_mid_sentence is False
+
+
+def test_a_repeat_stop_is_a_decision_and_not_a_cut_off_even_when_the_best_beam_is_already_into_the_next_sentence():
+    # The tiny model, beam 3, token 21: 'and heart and heart without. catheter acute right large heart without. catheter acute
+    # right large heart without. catheter'. The beam that finished the repeat was not the best one a step earlier.
+    repeated = "The heart is normal. The lungs are clear. The heart is normal. The lungs"
+    eng = build_engine("tiny")
+    eng.tokenizer = _Scripted("The heart is normal. The lungs are clear.", {17: repeated})
+    res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=40, stop_on_repeat=True, display_repair=True), _noop, threading.Event())
+    assert len(gen.token_ids) == 17 and res.detail["stopped"] == "repeat"
+    assert gen.report == repeated                                              # the decoder's text, fragment and all
+    assert gen.display_report == "The heart is normal. The lungs are clear."   # the display copy drops the repeat and the fragment
+    assert gen.truncated_mid_sentence is False                                 # the budget did not cut it off: the turn chose to stop
+
+
+def test_a_text_that_does_not_repeat_runs_to_the_budget_with_the_switch_on():
+    eng = build_engine("tiny")
+    eng.tokenizer = _GrowingText("The heart is normal. The lungs are clear. Impression: no effusion. Findings: the heart is mildly enlarged. "
+                                 "No pleural effusion or pneumothorax is seen.")
+    res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=16, stop_on_repeat=True), _noop, threading.Event())
+    assert res.detail["stopped"] == "budget" and len(gen.token_ids) == res.detail["tokens"] == 16
+    assert gen.report.endswith("Findings: the heart is mildly")
+    assert gen.truncated_mid_sentence is True          # cut off by the budget: the flag keeps its meaning there
+
+
+def test_cancel_is_looked_at_before_the_repeat():
+    at = {n: "The heart is normal. The heart is normal." for n in range(4, 40)}   # from the 4th step on, the text repeats
+    eng = build_engine("tiny")
+    eng.tokenizer = _Scripted("The heart is normal.", at)
+    enc = _encoded(eng)
+    cancel, seen = threading.Event(), []
+
+    def snap(step, text):
+        seen.append(step)
+        if step == 2:
+            cancel.set()
+
+    with pytest.raises(Cancelled):
+        eng.generate(enc, Options(max_new_tokens=40, stop_on_repeat=True), snap, cancel)
+    assert seen == [0, 1, 2]                                                   # step 3 was cancelled before its text was read for a repeat
+
+
+@pytest.mark.parametrize("cached,decode", [(True, "beam"), (False, "beam"), (True, "greedy"), (False, "greedy")])
+def test_the_users_case_stops_at_its_first_repeat_and_what_it_stopped_with_is_the_published_decoder_at_that_length(cached, decode):
+    eng = build_engine("tiny")
+    enc = _encoded(eng)
+    snaps = []
+    res, stopped = eng.generate(enc, Options(max_new_tokens=200, decode=decode, cached_decode=cached, display_repair=True, stop_on_repeat=True),
+                                lambda step, t: snaps.append(t), threading.Event())
+    n = len(stopped.token_ids)
+    assert 16 <= n < 200                                                       # the tiny model repeats within a few dozen tokens, not at 200
+    assert (res.detail["stopped"], res.detail["tokens"]) == ("repeat", n)
+    assert repeat_started(stopped.report) and _repeats(stopped.report) >= 1    # it stopped because the report repeated itself ...
+    assert _repeats(stopped.display_report) == 0                               # ... and the card shows no repeat
+    assert stopped.truncated_mid_sentence is False                             # no "stopped at the token budget" for a turn that did not reach it
+    assert len(snaps) == n and all(_repeats(t) == 0 for t in snaps)            # not one frame of the stream repeats a sentence
+    _, raw = eng.generate(enc, Options(max_new_tokens=200, decode=decode, cached_decode=cached, stop_on_repeat=True),
+                          lambda step, t: snaps.append(t), threading.Event())
+    assert raw.token_ids == stopped.token_ids and raw.display_report == raw.report == stopped.report   # repair off: the raw text is the display
+    seen = snaps[n:]
+    assert len(seen) == n and repeat_started(seen[-1]) and not any(repeat_started(t) for t in seen[:-1])   # the first step that repeats, no later
+    ran, published = eng.generate(enc, Options(max_new_tokens=n, decode=decode, cached_decode=cached), _noop, threading.Event())
+    assert published.token_ids == stopped.token_ids and published.report == stopped.report   # the published run, cut at that length
+    assert ran.detail["stopped"] == "budget"                                                   # which is where only it says "budget"
+
+
+def test_without_stop_on_repeat_the_users_case_is_the_published_decoder_to_the_last_token():
+    eng = build_engine("tiny")
+    enc = _encoded(eng)
+    res, gen = eng.generate(enc, Options(max_new_tokens=200, display_repair=True), _noop, threading.Event())
+    explicit, same = eng.generate(enc, Options(max_new_tokens=200, display_repair=True, stop_on_repeat=False), _noop, threading.Event())
+    published = eng.decoder.beam_search_cached(EMPTY, prefix_embeds=enc.prefix, beam_size=3, max_new_tokens=200)
+    assert gen.token_ids == same.token_ids == published[0].tolist() and len(gen.token_ids) == 200
+    assert (res.detail["stopped"], explicit.detail["stopped"]) == ("budget", "budget")
+    assert (res.detail["tokens"], explicit.detail["tokens"]) == (200, 200)
+    assert gen.report == same.report and gen.display_report == same.display_report and gen.truncated_mid_sentence == same.truncated_mid_sentence
 
 
 # ---- the card and its provenance -------------------------------------------------------------------------

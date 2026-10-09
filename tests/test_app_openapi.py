@@ -21,7 +21,8 @@ STREAM_EVENTS = ["message_start", "stage_start", "stage_end", "content_block_sta
                  "content_block_stop", "warning", "error", "message_stop"]   # every event name of the stream
 # The Options dict test_curl_walkthrough_options_validate pins: what the README's curl walkthrough sends (P8-E).
 WALKTHROUGH_OPTIONS = {"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "cached_decode": True, "compile": False,
-                       "k_images": 4, "k_reports": 3, "label": True, "reference": None, "display_repair": False}
+                       "k_images": 4, "k_reports": 3, "label": True, "reference": None, "display_repair": False,
+                       "stop_on_repeat": False}
 
 
 @pytest.fixture
@@ -70,7 +71,8 @@ def test_the_models_route_documents_its_features_and_its_example_has_the_real_ke
 def test_curl_walkthrough_options_validate():
     from app.schemas import Options
     Options(**{"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "cached_decode": True, "compile": False,
-               "k_images": 4, "k_reports": 3, "label": True, "reference": None, "display_repair": False})
+               "k_images": 4, "k_reports": 3, "label": True, "reference": None, "display_repair": False,
+               "stop_on_repeat": False})
 
 
 # ---- beyond the brief: what makes /docs a reference rather than a list of function names ----------------------------
@@ -105,6 +107,13 @@ def test_form_fields_and_the_client_id_header_are_described(client):
     assert all(key in fields["options"]["description"] for key in Options.model_fields)   # every option is named
     headers = [p for p in spec["paths"][MESSAGES]["post"]["parameters"] if p["in"] == "header"]
     assert [p["name"] for p in headers] == ["x-client-id"] and headers[0].get("description")
+
+
+def test_the_options_description_says_what_stop_on_repeat_does_and_that_leaving_it_out_decodes_the_whole_budget(client):   # P4-G
+    text = _body_schema(client.get("/openapi.json").json())["properties"]["options"]["description"]
+    about = text.split("`stop_on_repeat`", 1)[1].split(".")[0:2]      # the sentence or two that follow its name
+    about = " ".join(about)
+    assert "repeat" in about and "stopped" in about and "max_new_tokens" in about and "published protocol" in about, about
 
 
 def test_the_streaming_route_documents_its_event_stream(client, monkeypatch):

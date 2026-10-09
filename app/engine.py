@@ -67,6 +67,15 @@ class Cancelled(Exception):
     """The turn's cancel event was set; generation stopped at a step boundary."""
 
 
+class _RepeatStop(Exception):
+    """The best beam's report began to repeat itself and the turn asked to stop there (Options.stop_on_repeat). Raised from the step
+    callback, the way Cancelled is, to leave the decoder: the thesis decoders are not edited (R3). Carries that step's best-beam ids."""
+
+    def __init__(self, ids: List[int]):
+        super().__init__("the report began to repeat itself")
+        self.ids = ids
+
+
 def _finished(sentence: str) -> bool:
     """Did split_sentences close this sentence, rather than leave it as the text after its last boundary?"""
     return is_sentence_end(sentence.rsplit(" ", 1)[-1])
@@ -98,6 +107,22 @@ def stream_view(text: str) -> str:
     if fragment is not None and not any(key.startswith(fragment.lower()) for key in seen):
         shown.append(fragment)
     return " ".join(shown)
+
+
+def repeat_started(text: str) -> bool:
+    """Has the report begun to repeat itself (CHAT_UI_PLAN.md P4-G)? True when the last finished sentence of the raw text has the key of
+    an earlier one. The split and the key are stream_view's, which are the repair's: scripts/repair_generations.py split_sentences, and
+    the sentence lower-cased. A trailing fragment is no sentence yet, so a repeat counts from its terminal and not a word before; what
+    follows that terminal does not take it back, since the best beam of a beam search can already be into the next sentence by the
+    time it is the best. The decoder has no stop condition, so this is the one place the app decides that the report is as good as it
+    will get: it is a pure function of the text, which a step callback can ask at every step."""
+    sentences = split_sentences(text)
+    if sentences and not _finished(sentences[-1]):
+        sentences.pop()
+    if not sentences:
+        return False
+    last = sentences.pop().lower()
+    return any(sentence.lower() == last for sentence in sentences)
 
 
 def _ms(t0: float) -> float:
@@ -228,27 +253,35 @@ class Engine:
                 first.append(time.perf_counter())
             text = self._decode_text(ids)
             on_snapshot(step, stream_view(text) if opts.display_repair else text)   # only what is shown changes, never the report
+            if opts.stop_on_repeat and repeat_started(text):   # after the snapshot, so that the last frame of the stream is the answer
+                raise _RepeatStop(ids)
 
         beam = 1 if opts.decode == "greedy" else opts.beam_size
         empty = torch.zeros((1, 0), dtype=torch.long, device=self.device)   # no BOS, as in training
+        stopped = "budget"
         with torch.no_grad():
-            if opts.cached_decode:
-                out = self.decoder.beam_search_cached(empty, prefix_embeds=enc.prefix, beam_size=beam,
-                                                      max_new_tokens=opts.max_new_tokens, on_step=cb)
-            else:
-                out = beam_search_decode(self.decoder, empty, prefix_embeds=enc.prefix, beam_size=beam,
-                                         max_new_tokens=opts.max_new_tokens, on_step=cb)
+            try:
+                if opts.cached_decode:
+                    out = self.decoder.beam_search_cached(empty, prefix_embeds=enc.prefix, beam_size=beam,
+                                                          max_new_tokens=opts.max_new_tokens, on_step=cb)
+                else:
+                    out = beam_search_decode(self.decoder, empty, prefix_embeds=enc.prefix, beam_size=beam,
+                                             max_new_tokens=opts.max_new_tokens, on_step=cb)
+                ids = out[0].tolist()
+            except _RepeatStop as stop:   # the best beam of that step is what the published decoder returns at that length
+                ids, stopped = stop.ids, "repeat"
         decoded = time.perf_counter()
-        ids = out[0].tolist()
         report = self._decode_text(ids)
         # The display copy drops every repeated sentence and the cut-off ending ("all", not "consecutive": a degenerate beam
         # loops with period 2 or more, which only "all" sees). Decoding itself is the published protocol, so `report` is not touched.
         repaired, stats = repair_report(report, dedup="all", truncate=True)
         # Cut off means truncation only, whatever dedup dropped. With no complete sentence at all the repair keeps the
-        # original and reports a fallback, not a truncation.
-        truncated = stats.get("sentences_truncated", 0) > 0 or (bool(report) and stats.get("fallbacks", 0) > 0)
+        # original and reports a fallback, not a truncation. Only the budget cuts a report off: a turn that stopped on a repeat chose
+        # to, even when its best beam was already into the next sentence (the display copy drops that fragment, as it does the repeat).
+        truncated = stopped == "budget" and (stats.get("sentences_truncated", 0) > 0
+                                             or (bool(report) and stats.get("fallbacks", 0) > 0))
         start = first[0] if first else t0
-        detail = {"decode": opts.decode, "beam_size": beam, "tokens": len(ids), "stopped": "budget",
+        detail = {"decode": opts.decode, "beam_size": beam, "tokens": len(ids), "stopped": stopped,
                   "cached_decode": bool(opts.cached_decode), "compiled": False,
                   "prefill_ms": round((start - t0) * 1000.0, 1),
                   "per_token_ms": round((decoded - start) * 1000.0 / max(len(ids) - 1, 1), 2),

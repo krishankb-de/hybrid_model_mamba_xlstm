@@ -71,7 +71,8 @@ UPLOAD_MB = MAX_UPLOAD_BYTES // (1024 * 1024)
 # The published protocol as the options form field's string. FastAPI drops Form(openapi_examples=...) from the spec (a
 # form's fields become one body model), so it is the field's own `examples`; P8-E's README walkthrough copies it.
 OPTIONS_EXAMPLE = ('{"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "cached_decode": true, "compile": false, '
-                   '"k_images": 4, "k_reports": 3, "label": true, "reference": null, "display_repair": false}')
+                   '"k_images": 4, "k_reports": 3, "label": true, "reference": null, "display_repair": false, '
+                   '"stop_on_repeat": false}')
 # GET /v1/models as /docs shows it (test_app_openapi pins its keys to the real answer): `features` says which stages this server
 # runs, so a client can tell a skipped stage from one it switched off.
 MODELS_EXAMPLE = {"default_model": "hybrid_150m_m3_rrg", "mode": "private", "allow_compile": False,
@@ -113,7 +114,9 @@ TEXT_DOC = ("A command that changes this turn's options, or a note kept with the
             "with a 422.")
 OPTIONS_DOC = ("The turn's options as a JSON object with the keys " + ", ".join(Options.model_fields) + ". A key left "
                "out takes its default, the published protocol; the ranges are " + _option_ranges() + ". An unknown "
-               "key or a value out of range is a 422, and anything that is not a JSON object a 400. `reference` and "
+               "key or a value out of range is a 422, and anything that is not a JSON object a 400. `stop_on_repeat` ends "
+               "decoding as soon as a sentence repeats an earlier one, and the generate stage then reports `stopped: "
+               "repeat`; left out, the whole `max_new_tokens` is decoded, as in the published protocol. `reference` and "
                "`test_row` work in private mode only. A command in `text` is applied on top.")
 REFUSALS = {   # what a status means in the reference; a route that can answer it declares it with _refusals()
     400: "The request is malformed: `options` is not a JSON object, or in public mode `X-Client-Id` is missing or "

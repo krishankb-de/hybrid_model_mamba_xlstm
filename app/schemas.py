@@ -20,6 +20,7 @@ class Options(BaseModel):
     label: bool = True
     reference: Optional[str] = Field(default=None, max_length=20000)   # private mode only
     display_repair: bool = False
+    stop_on_repeat: bool = False                         # end decoding once the report repeats a sentence (P4-G); off: the published protocol
     test_row: Optional[Annotated[int, Field(ge=0)]] = None             # private mode only (picker)
 
 
