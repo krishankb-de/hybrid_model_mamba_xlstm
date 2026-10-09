@@ -774,6 +774,9 @@ export function createApp(env) {
       scroller.toEnd(turn.card);
       announce(statusText(turn.view));
     });
+    // The server has stored the turn, which counts it and, in a new chat, titles the chat: the sidebar says so now, not only when the
+    // turn ends (P4-H; a new chat was listed as an empty "New chat" for as long as its first turn ran).
+    detach(refreshSessions());
   }
 
   // The turn never started (the request was refused, or the network was down): take its user turn back out, show why,
@@ -802,10 +805,12 @@ export function createApp(env) {
     const options = optionsFromSettings(state.settings, state.models);
     setBusy(true);
     ui.stop.disabled = true;
+    const fresh = !session.id;   // this Send makes the chat
     try {
-      if (!session.id) await createSession(session);
+      if (fresh) await createSession(session);
       if (state.session !== session) return;   // the user moved to another chat while this one was being made
       await runTurn(session, { text: note, file, options });
+      if (fresh && !session.turns.length) await dropEmptySession(session);   // its first turn was refused: no chat was started after all
     } catch (err) {   // the chat could not be made, or something broke that runTurn does not deal with itself
       if (state.session === session) {
         showNotice(errorMessage(err));
@@ -817,7 +822,8 @@ export function createApp(env) {
   }
 
   // An empty chat becomes a session at its first turn. The address follows without a navigation (replaceState fires no
-  // hashchange), so the turn that is about to stream is not torn down by the route handler.
+  // hashchange), so the turn that is about to stream is not torn down by the route handler. The sidebar lists it once the server
+  // has that turn (accept), titled; until then it would only be an empty "New chat".
   async function createSession(session) {
     const made = await request('/v1/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     session.id = made.id;
@@ -825,7 +831,24 @@ export function createApp(env) {
       setAddress(`#/s/${made.id}`);
       syncControls();
     }
-    detach(refreshSessions());
+  }
+
+  // The chat this page made for a first turn that the server then refused holds nothing: it is deleted again and the page is back on the
+  // empty chat it was, so a refused upload does not leave an empty "New chat" in the sidebar (P4-H). The notice that says why stays, and so
+  // does the composer. A delete that fails leaves the chat as it is: empty, and harmless.
+  async function dropEmptySession(session) {
+    try {
+      await request(`/v1/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
+    } catch {
+      return;
+    }
+    if (state.session === session) {
+      session.id = null;
+      setAddress('#/new');
+      state.route = 'new';   // the page is where it was, so its notice is not one of a route left behind
+      syncControls();
+    }
+    await refreshSessions();
   }
 
   // Stop: ask the server to cancel, then drop the stream. The turn's own message_stop (status aborted) settles the card;

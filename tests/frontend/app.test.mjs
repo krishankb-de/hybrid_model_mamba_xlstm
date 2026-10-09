@@ -897,6 +897,72 @@ test('the status region says a thing only when it changes', async () => {
   assert.deepEqual(spoken, ['Queued', 'encode running', 'Report ready']);
 });
 
+const NEW_SESSION = { id: 's_new', title: '', mode: 'private', turns: 0, created_at: iso(3), updated_at: iso(3) };
+
+test('a new chat is listed under its title as soon as the server has its first turn, not as an empty "New chat" until the turn ends (P4-H)', async () => {
+  const h = harness({ routes: { 'POST /v1/sessions': NEW_SESSION } });
+  await h.app.start();
+  await flush();
+  const listed = h.fetch.to('GET', '/v1/sessions?').length;
+  attach(imageFile('chest.png'));
+  const turn = h.app.send();
+  await flush();
+  assert.equal(h.fetch.to('GET', '/v1/sessions?').length, listed);   // made, but with no turn yet: nothing to list that the turn will not change
+  h.sessions = [sess('s_new', 'chest.png', 1)];                      // what the server says once it has the turn: the turn titled the chat
+  h.api.streams[0].accept('m_a');
+  await flush();
+  assert.equal(h.fetch.to('GET', '/v1/sessions?').length, listed + 1);
+  const [row] = qa($('session-list'), 'li');
+  assert.deepEqual([row.getAttribute('data-session'), q(row, '.session-title').textContent], ['s_new', 'chest.png']);
+  assert.match(q(row, '.session-meta').textContent, /· 1 turn$/);
+  assert.equal(q(row, 'a').getAttribute('aria-current'), 'page');
+  assert.equal(cardOf().getAttribute('data-status'), 'running');   // while it runs
+  h.api.streams[0].channel.push(...fullTurn());
+  h.api.streams[0].channel.end();
+  await turn;
+});
+
+test('a first turn the server refuses leaves no empty chat behind: the chat made for it is deleted and the page is back on an empty one (P4-H)', async (t) => {
+  const logged = captureErrors(t);
+  const h = harness({ routes: { 'POST /v1/sessions': NEW_SESSION, 'DELETE /v1/sessions/s_new': () => new Response(null, { status: 204 }) } });
+  await h.app.start();
+  await flush();
+  attach(imageFile('notes.png'));
+  $('prompt').value = 'a note';
+  h.api.refuse = refusal(422, 'Use a PNG, JPEG or WEBP image.');
+  await h.app.send();
+  await flush();
+  assert.deepEqual(h.fetch.to('DELETE', '/v1/sessions/').map((c) => c.url), ['/v1/sessions/s_new']);
+  assert.equal(h.win.location.hash, '#/new');
+  assert.equal(q($('notice'), 'p').textContent, 'Use a PNG, JPEG or WEBP image.');   // the reason stays
+  assert.equal($('prompt').value, 'a note');                                         // and so does the composer
+  assert.equal($('preview').hidden, false);
+  assert.equal($('exports').hidden, true);                                           // no chat to export
+  assert.deepEqual(qa($('session-list'), 'li'), []);
+  assert.equal($('send').disabled, false);
+  assert.deepEqual(logged, []);
+  h.api.refuse = null;                                                               // Send again makes a chat again
+  const turn = h.app.send();
+  await flush();
+  assert.equal(h.fetch.to('POST', '/v1/sessions').length, 2);
+  h.api.streams.at(-1).accept('m_a');
+  await flush();
+  h.api.streams.at(-1).channel.push(...fullTurn());
+  h.api.streams.at(-1).channel.end();
+  await turn;
+  assert.equal(h.win.location.hash, '#/s/s_new');
+  assert.equal(h.fetch.to('DELETE', '/v1/sessions/').length, 1);                    // a chat with a turn is never deleted
+});
+
+test('a refused turn in a chat that was there before deletes nothing, even when the chat has no turn yet', async () => {
+  const h = await ready();   // s_a: an existing chat with no turns
+  h.api.refuse = refusal(422, 'Use a PNG, JPEG or WEBP image.');
+  await h.app.send();
+  await flush();
+  assert.deepEqual(h.fetch.to('DELETE', '/v1/sessions/'), []);
+  assert.equal(h.win.location.hash, '#/s/s_a');
+});
+
 test('Send pressed while it has the focus hands the focus to the note field before it is switched off, so the keyboard keeps its place (P4-H)', async () => {
   const h = await ready();
   $('send').focus();
