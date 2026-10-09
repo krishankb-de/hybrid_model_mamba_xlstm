@@ -6729,3 +6729,32 @@ def test_chat_engine_golden_wrappers_compare_on_the_same_node():
     assert "scripts/evaluate_report_generation.py" in cpu   # the GPU arm compares with the published dump instead
     assert not [l for l in cpu.splitlines() if l.startswith("#SBATCH") and "--gpus" in l]
     assert "#SBATCH --gpus=1" in gpu and "--uncached" in gpu
+
+
+def test_no_yaml_turns_the_report_eos_target_on():
+    """CHAT_UI_PLAN.md P9-G1. dataset.report_eos_target changes what a report-gen run trains on (one supervised
+    EOS per report that fits), so it is off by default and no yaml under configs/ may set it: every published
+    _rrg recipe, the dataset yaml it composes with and the contrastive recipes keep the target every published
+    checkpoint was trained on. A run opts in on the command line with +dataset.report_eos_target=true; the '+'
+    is required because no yaml declares the key (behaviour: tests/test_report_eos_target.py)."""
+    import yaml
+
+    def occurrences(node, trail):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "report_eos_target":
+                    yield trail + "/" + key, value
+                yield from occurrences(value, trail + "/" + str(key))
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                yield from occurrences(value, "{}[{}]".format(trail, i))
+
+    paths = sorted((REPO_ROOT / "configs").rglob("*.yaml"))
+    scanned = {p.name for p in paths}
+    assert {"hybrid_150m_v2_rrg.yaml", "transformer_150m_baseline_rrg.yaml", "hybrid_150m_m3_rrg.yaml",
+            "cxr_mimic_full.yaml", "config.yaml"} <= scanned, "the scan missed a published recipe"
+    on = [(str(p.relative_to(REPO_ROOT)), where, value)
+          for p in paths
+          for where, value in occurrences(yaml.safe_load(p.read_text()), "")
+          if value is not False and value is not None]
+    assert not on, "yaml sets report_eos_target: {}".format(on)

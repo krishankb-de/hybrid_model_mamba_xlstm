@@ -206,6 +206,12 @@ class ImageTextDataset(Dataset):
     Expects a HuggingFace dataset with fields:
       - image (PIL or path)
       - findings / impression (text)
+
+    P9-G1 (CHAT_UI_PLAN.md): dataset.report_eos_target, default false and declared in no yaml, makes every
+    report that fits in max_length end in one supervised EOS (see _eos_row). Switch it on from the command
+    line with
+        +dataset.report_eos_target=true
+    (the leading + is required: Hydra's struct mode rejects an override for a key no yaml declares).
     """
 
     def __init__(self, hf_dataset, tokenizer, cfg, is_train: bool = False,
@@ -232,8 +238,53 @@ class ImageTextDataset(Dataset):
         self.chexpert_num_labels = chexpert_num_labels
         self.study_id_field = study_id_field
 
+        # P9-G1 -- OPTIONAL end-of-report training target, DEFAULT off. Off leaves every row's
+        # input_ids / attention_mask exactly what it has always been: this class is shared with the
+        # closed retrieval chapter and with every published report-gen run, none of which ever
+        # supervised an EOS (train_report_generation.py sets pad = eos, and the pad positions are
+        # masked out of the loss, so an EOS could only appear as masked padding). Read from the
+        # dataset config here, not taken as an argument, so load_mimic_cxr / load_indiana_cxr stay
+        # untouched; no yaml declares the key, so a run opts in with +dataset.report_eos_target=true.
+        # A non-boolean must fail here: Hydra parses 'no' as a string and bool("no") is True, which
+        # would silently train the wrong target for hours.
+        report_eos_target = cfg.dataset.get("report_eos_target", False)
+        if report_eos_target is None:
+            report_eos_target = False
+        if not isinstance(report_eos_target, bool):
+            raise ValueError(
+                f"dataset.report_eos_target must be true or false, got {report_eos_target!r}"
+            )
+        if report_eos_target and (getattr(tokenizer, "eos_token_id", None) is None
+                                  or getattr(tokenizer, "pad_token_id", None) is None):
+            raise ValueError(
+                "dataset.report_eos_target needs a tokenizer with eos_token_id and pad_token_id "
+                "(train_report_generation.py sets pad_token = eos_token)"
+            )
+        self.report_eos_target = report_eos_target
+
     def __len__(self):
         return len(self.data)
+
+    def _eos_row(self, text):
+        """(input_ids, attention_mask) for a report that ends in one supervised EOS, else None.
+
+        P9-G1. The report is tokenised without padding. When it is at most max_length - 1 tokens long
+        the EOS goes right after it with attention_mask 1, so the loss sees it, and the rest of the row
+        is the pad id with attention_mask 0, as before. None means "keep today's encoding unchanged":
+        an empty report has nothing to end, and one that fills max_length or is cut by it was ended by
+        the budget, not by itself, and has no room for the EOS.
+        """
+        ids = self.tokenizer(text, max_length=self.max_length, truncation=True, padding=False)["input_ids"]
+        n = len(ids)
+        if n == 0 or n >= self.max_length:
+            return None
+        fill = self.max_length - n - 1
+        input_ids = torch.tensor(
+            list(ids) + [self.tokenizer.eos_token_id] + [self.tokenizer.pad_token_id] * fill,
+            dtype=torch.long,
+        )
+        attention_mask = torch.tensor([1] * (n + 1) + [0] * fill, dtype=torch.long)
+        return input_ids, attention_mask
 
     def __getitem__(self, idx):
         item = self.data[idx]
@@ -246,15 +297,20 @@ class ImageTextDataset(Dataset):
         else:
             text = findings or impression
 
-        enc = self.tokenizer(
-            text,
-            max_length=self.max_length,
-            truncation=True,
-            padding="max_length",
-            return_tensors="pt",
-        )
-        input_ids = enc["input_ids"].squeeze(0)
-        attention_mask = enc["attention_mask"].squeeze(0)
+        # P9-G1: flag off, and any row the flag leaves alone, takes the one call this class has always made.
+        eos_row = self._eos_row(text) if self.report_eos_target else None
+        if eos_row is not None:
+            input_ids, attention_mask = eos_row
+        else:
+            enc = self.tokenizer(
+                text,
+                max_length=self.max_length,
+                truncation=True,
+                padding="max_length",
+                return_tensors="pt",
+            )
+            input_ids = enc["input_ids"].squeeze(0)
+            attention_mask = enc["attention_mask"].squeeze(0)
 
         # --- image ---
         img = item.get("image")
