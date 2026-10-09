@@ -222,17 +222,21 @@ def beam_search_decode_eos(
 
     The published search runs exactly max_new_tokens steps and takes an EOS for any other token, which is all a model that never
     learned one can use. A model trained with dataset.report_eos_target (P9-G1) ends its reports, and this search lets it. It sits
-    beside the published one, which is untouched; both rank the same way and break ties the same way. At every step:
-      1. rank the candidates as beam_search_decode does and keep the top 2 * beam_size (each live beam offers its 2 * beam_size
-         best tokens, which contains the overall top 2 * beam_size);
+    beside the published one, which is untouched; both rank the same way. At every step:
+      1. take the candidates published-first: each live beam offers exactly the `topk(beam_size)` tokens beam_search_decode takes, in
+         its order, and then the rest of its top 2 * beam_size, after every published one. Ties break as there, because the first
+         beam_size candidates after the stable sort ARE the published ones (an extra ranks after its own parent's beam_size
+         published candidates, so never among the first beam_size); the extras only fill a live slot that an EOS has freed;
       2. walk them in rank order. An EOS candidate within the first beam_size is set aside as finished, scored like any other
-         candidate (the EOS counts in the length); the rest fill the beam_size live slots; an EOS further down is dropped;
+         candidate (the EOS counts in the length); the rest fill the beam_size live slots; an EOS further down is dropped, and so is
+         one at step 0, before any token has been generated: no turn ends with an empty report (Hugging Face's min_new_tokens=1);
       3. the ANSWER is the best normalised score of the best finished hypothesis and the live beams (a tie goes to the finished one,
          then to the live beams in rank order). on_step gets its ids, and the search returns right after that call once the answer
          is a finished hypothesis (OpenNMT-style top-hypothesis stopping), or at max_new_tokens. A live answer at the budget has the
          full length, and ended_by_eos is False.
     `ids` is shaped like beam_search_decode's (prompt + generated), without the EOS of a finished hypothesis. With no EOS among the
-    first beam_size candidates at any step nothing ever finishes, and this is beam_search_decode: the same ids, and on_step sees the same.
+    first beam_size candidates at any step nothing ever finishes, and this is beam_search_decode: the same ids and the same on_step
+    stream, ties included (tests build exact ties on purpose).
 
     `on_step(step, answer_ids)` is called once per step, after its selection. It only observes, with one exception: raising
     `StopDecoding` (hybrid_xmamba.models.hybrid_lm) ends the search, which returns the best finished hypothesis if there is one, and
@@ -257,19 +261,25 @@ def beam_search_decode_eos(
 
     for step in range(max_new_tokens):
         length = beams[0][1].shape[1] + 1      # every live beam has this many tokens once it takes one more
-        candidates = []                        # (parent beam, token, cumulative_log_prob); hidden states only for those that stay live
+        candidates, extras = [], []            # (parent beam, token, cumulative_log_prob); hidden states only for those that stay live
         for parent, (hidden_states, token_ids, score) in enumerate(beams):
             logits = model.forward(inputs_embeds=hidden_states, return_dict=True).logits
             log_probs = torch.log_softmax(logits[:, -1, :], dim=-1).squeeze(0)
-            topk_logp, topk_idx = log_probs.topk(min(2 * beam_size, log_probs.shape[-1]))
-            for lp, idx in zip(topk_logp.tolist(), topk_idx.tolist()):
+            topk_logp, topk_idx = log_probs.topk(beam_size)                     # exactly the published call, and its order ...
+            taken = topk_idx.tolist()
+            for lp, idx in zip(topk_logp.tolist(), taken):
                 candidates.append((parent, idx, score + lp))
+            wide_logp, wide_idx = log_probs.topk(min(2 * beam_size, log_probs.shape[-1]))   # ... then what else its top 2 * beam_size holds
+            for lp, idx in zip(wide_logp.tolist(), wide_idx.tolist()):
+                if idx not in taken:
+                    extras.append((parent, idx, score + lp))
 
+        candidates += extras                   # every published candidate first, so that the stable sort breaks ties as the published one does
         candidates.sort(key=lambda c: c[2] / (length ** length_penalty), reverse=True)
         stay = []
         for rank, (parent, idx, score) in enumerate(candidates[:2 * beam_size]):
             if idx == eos_token_id:
-                if rank < beam_size:
+                if step > 0 and rank < beam_size:   # at step 0 an EOS is dropped like a later one: no empty report
                     done = score / (length ** length_penalty)
                     if best_done is None or done > best_done[0]:
                         best_done = (done, beams[parent][1])
@@ -525,7 +535,8 @@ def generate_from_patch_grid_eos(
     eos_token_id: int = 50256,
 ) -> Tuple[torch.Tensor, bool]:
     """`generate_from_patch_grid(decode="beam")` with the EOS-stop searches (CHAT_UI_PLAN.md P9-G2): (1, N) ids without the
-    EOS, N up to max_new_tokens, and whether the report ended in the model's own EOS. Same empty input_ids, no BOS. Beam search
+    EOS, N from 1 to max_new_tokens (an EOS before the first token is skipped), and whether the report ended in the model's own
+    EOS. Same empty input_ids, no BOS. Beam search
     only: a greedy run is the beam of one, which beam_size=1 gives. With cached=True it is `beam_search_cached_eos` and needs a
     stack with a step path, as `generate_from_patch_grid` does."""
     prefix_embeds = module.prefix_mapper(patch_grid)
@@ -1057,9 +1068,10 @@ def main():
     parser.add_argument("--stop-at-eos", action="store_true",
                         help="P9-G2: beam search that sets a beam aside when it ends in EOS and stops as soon as the best "
                              "hypothesis, one that ended or a live beam, by normalised score, is one that ended, or at "
-                             "--max-new-tokens; the report is that hypothesis, without its EOS. For a model trained with "
-                             "dataset.report_eos_target (P9-G1): the published models never learned an EOS. Needs --decode beam; "
-                             "with --cached-decode it uses the cached twin. Off by default: the published protocol decodes the "
+                             "--max-new-tokens; the report is that hypothesis, without its EOS, and never an empty one (an EOS "
+                             "before the first token is skipped). For a model trained with dataset.report_eos_target (P9-G1): "
+                             "the published models never learned an EOS. Needs --checkpoint and --decode beam; with "
+                             "--cached-decode it uses the cached twin. Off by default: the published protocol decodes the "
                              "whole budget.")
     parser.add_argument("--beam-size", type=int, default=3,
                         help="Beam size when --decode beam (for --checkpoint mode)")
@@ -1088,8 +1100,13 @@ def main():
                              "score_chexbert_standalone.py -- see module docstring)")
     args = parser.parse_args()
 
-    if args.stop_at_eos and args.decode != "beam":
-        parser.error("--stop-at-eos needs --decode beam")
+    if args.stop_at_eos:   # it selects the decoder of --checkpoint mode: anywhere else it would be ignored without a word
+        if args.smoke_test or args.retrieval_baseline or not args.checkpoint:
+            parser.error("--stop-at-eos only applies to --checkpoint decoding, not to {}".format(
+                "--smoke-test" if args.smoke_test else "--retrieval-baseline" if args.retrieval_baseline
+                else "--hyp-file/--ref-file metrics"))
+        if args.decode != "beam":
+            parser.error("--stop-at-eos needs --decode beam")
 
     if args.smoke_test:
         run_smoke_test()

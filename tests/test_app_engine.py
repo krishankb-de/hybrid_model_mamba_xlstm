@@ -24,7 +24,7 @@ from app.schemas import Options
 from app.tiny import (TINY_VOCAB, TinyTokenizer, TinyTower, tiny_decoder, tiny_decoder_config,
                       tiny_prefix_mapper)
 from scripts.repair_generations import repair_report, split_sentences
-from tests.app_helpers import markov_script, noise_script, png_bytes, scripted_decoder
+from tests.app_helpers import EOS_ID, REPORT, GrowingText, markov_script, noise_script, png_bytes, scripted_decoder
 
 EMPTY = torch.zeros((1, 0), dtype=torch.long)   # report generation seeds with no BOS
 
@@ -549,23 +549,13 @@ def test_stream_view_does_not_flash_a_list_marker_at_the_start_of_a_repeat():
     assert stream_view("Seen by Dr. Smith. Seen by Dr.") == "Seen by Dr. Smith."   # an abbreviation does not end a sentence either
 
 
-class _GrowingText:
-    """A tokenizer for a report written one word per step: n ids decode to the first n words of one text."""
-
-    def __init__(self, text):
-        self.words = text.split()
-
-    def decode(self, ids, skip_special_tokens=True):
-        return " ".join(self.words[:len(ids)])
-
-
 def test_the_stream_is_the_stream_view_with_repair_on_and_the_raw_snapshot_without_it():
     text = ("The heart is normal. The lungs are clear. The heart is normal. The lungs are clear. "
             "Findings: no effusion. Findings: no effusion. Findings: no")
     words = text.split()
     assert len(words) >= 16                                                      # Options: at least 16 tokens
     eng = build_engine("tiny")
-    eng.tokenizer = _GrowingText(text)
+    eng.tokenizer = GrowingText(text)
     enc = _encoded(eng)
     raw, shown = [], []
     _, plain = eng.generate(enc, Options(max_new_tokens=len(words)), lambda step, t: raw.append(t), threading.Event())
@@ -684,7 +674,7 @@ def test_stop_on_repeat_ends_decoding_at_the_step_where_a_repeat_is_finished_and
     words = text.split()
     assert len(words) >= 16
     eng = build_engine("tiny")
-    eng.tokenizer = _GrowingText(text)
+    eng.tokenizer = GrowingText(text)
     enc = _encoded(eng)
     snaps = []
     res, gen = eng.generate(enc, Options(max_new_tokens=len(words), stop_on_repeat=True, display_repair=True),
@@ -704,7 +694,7 @@ def test_stop_on_repeat_ends_decoding_at_the_step_where_a_repeat_is_finished_and
 def test_stop_on_repeat_with_repair_off_streams_and_stores_the_raw_text():
     text = "The heart is normal. The lungs are clear. The heart is normal. The lungs are clear. Impression: no effusion."
     eng = build_engine("tiny")
-    eng.tokenizer = _GrowingText(text)
+    eng.tokenizer = GrowingText(text)
     snaps = []
     res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=19, stop_on_repeat=True), lambda step, t: snaps.append(t), threading.Event())
     assert snaps[-1] == gen.report == gen.display_report == " ".join(text.split()[:12])   # the repeat is in all three: repair is off
@@ -726,7 +716,7 @@ def test_a_repeat_stop_is_a_decision_and_not_a_cut_off_even_when_the_best_beam_i
 
 def test_a_text_that_does_not_repeat_runs_to_the_budget_with_the_switch_on():
     eng = build_engine("tiny")
-    eng.tokenizer = _GrowingText("The heart is normal. The lungs are clear. Impression: no effusion. Findings: the heart is mildly enlarged. "
+    eng.tokenizer = GrowingText("The heart is normal. The lungs are clear. Impression: no effusion. Findings: the heart is mildly enlarged. "
                                  "No pleural effusion or pneumothorax is seen.")
     res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=16, stop_on_repeat=True), _noop, threading.Event())
     assert res.detail["stopped"] == "budget" and len(gen.token_ids) == res.detail["tokens"] == 16
@@ -789,9 +779,6 @@ def test_without_stop_on_repeat_the_users_case_is_the_published_decoder_to_the_l
 
 # ---- P9-G2: a model trained to end its reports ---------------------------------------------------------------------------------
 
-EOS_ID = len(TINY_VOCAB) - 1   # the last id of the tiny vocab: in reach of the scripted decoders, unlike the real engine's 50256
-REPORT = ("The heart is normal. The lungs are clear. No pleural effusion. Impression: no acute disease. Findings: the heart "
-          "is mildly enlarged and there is a small effusion.")   # 27 words: ends in sentences 4, 8, 11, 15 and 27
 WORDS = REPORT.split()
 
 
@@ -800,7 +787,7 @@ def _eos_model(end_at=None, text=REPORT, eos_trained=True):
     """The tiny engine as a model whose card says it was trained to end its reports, with a scripted decoder that ends every
     beam's report after `end_at` tokens (never, with None) and a tokenizer that writes `text` a word per token."""
     eng = build_engine("tiny")
-    eng._card["eos_trained"], eng.eos_token_id, eng.tokenizer = eos_trained, EOS_ID, _GrowingText(text)
+    eng._card["eos_trained"], eng.eos_token_id, eng.tokenizer = eos_trained, EOS_ID, GrowingText(text)
     script = noise_script(5, EOS_ID, lambda n, last: 40.0 if n == end_at else -1e4)
     with scripted_decoder(eng.decoder, script):
         yield eng
@@ -821,6 +808,17 @@ def test_an_eos_trained_model_stops_where_its_report_ends_and_says_so(cached, de
     json.dumps(res.detail)
     assert set(res.detail) == {"decode", "beam_size", "tokens", "stopped", "cached_decode", "compiled", "prefill_ms",
                                "per_token_ms", "device", "threads", "drift_note"}   # the stop reason is a value, not a new field
+
+
+@pytest.mark.parametrize("cached", [True, False])
+@pytest.mark.parametrize("decode", ["beam", "greedy"])
+def test_an_eos_ranked_first_never_gives_an_empty_report(cached, decode):   # fix 1: no EOS before the first generated token
+    with _eos_model(end_at=0) as eng:                  # the end is certain at step 0, and impossible after it
+        snaps = []
+        res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=16, decode=decode, cached_decode=cached),
+                                lambda step, text: snaps.append(text), threading.Event())
+    assert res.detail["stopped"] == "budget" and res.detail["tokens"] == len(gen.token_ids) == 16     # skipped: the live beams went on
+    assert gen.report == " ".join(WORDS[:16]) != "" and snaps[0] == WORDS[0]                           # a report, from its first word
 
 
 def test_an_eos_stop_is_never_a_cut_off_whatever_the_text_ends_in_and_the_display_copy_follows_p4f():
@@ -901,7 +899,7 @@ def test_a_report_that_ended_before_the_repeat_is_kept_when_stop_on_repeat_fires
     # The answer (a live beam) starts repeating at word 12, after a hypothesis ended at word 8. The repeat stop ends the search, and the
     # search hands back what ended: the engine says eos, with the report that ended, not the repeating beam.
     eng = build_engine("tiny")
-    eng._card["eos_trained"], eng.eos_token_id, eng.tokenizer = True, EOS_ID, _GrowingText(LOOP)
+    eng._card["eos_trained"], eng.eos_token_id, eng.tokenizer = True, EOS_ID, GrowingText(LOOP)
     words, snaps = LOOP.split(), []
     with scripted_decoder(eng.decoder, _ends_at_eight_while_a_better_beam_lives_on()):
         res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=40, beam_size=2, cached_decode=cached, stop_on_repeat=True),
@@ -915,7 +913,7 @@ def test_a_report_that_ended_before_the_repeat_is_kept_when_stop_on_repeat_fires
 @pytest.mark.parametrize("cached", [True, False])
 def test_the_same_model_with_the_switch_off_decodes_on_to_its_budget_with_the_live_answer(cached):
     eng = build_engine("tiny")
-    eng._card["eos_trained"], eng.eos_token_id, eng.tokenizer = True, EOS_ID, _GrowingText(LOOP)
+    eng._card["eos_trained"], eng.eos_token_id, eng.tokenizer = True, EOS_ID, GrowingText(LOOP)
     with scripted_decoder(eng.decoder, _ends_at_eight_while_a_better_beam_lives_on()):
         res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=20, beam_size=2, cached_decode=cached), _noop, threading.Event())
     assert res.detail["stopped"] == "budget" and res.detail["tokens"] == len(gen.token_ids) == 20   # a live answer: full length, so "budget"
@@ -924,7 +922,7 @@ def test_the_same_model_with_the_switch_off_decodes_on_to_its_budget_with_the_li
 @pytest.mark.parametrize("cached", [True, False])
 def test_a_repeat_before_anything_ended_is_a_repeat_stop_with_the_beam_that_repeated(cached):
     eng = build_engine("tiny")                                                 # the model never ends a report (its EOS is out of reach)
-    eng._card["eos_trained"], eng.eos_token_id, eng.tokenizer = True, EOS_ID, _GrowingText(LOOP)
+    eng._card["eos_trained"], eng.eos_token_id, eng.tokenizer = True, EOS_ID, GrowingText(LOOP)
     with scripted_decoder(eng.decoder, noise_script(5, EOS_ID, lambda n, last: -1e4)):
         res, gen = eng.generate(_encoded(eng), Options(max_new_tokens=40, cached_decode=cached, stop_on_repeat=True), _noop, threading.Event())
     assert res.detail["stopped"] == "repeat" and len(gen.token_ids) == res.detail["tokens"] == 12

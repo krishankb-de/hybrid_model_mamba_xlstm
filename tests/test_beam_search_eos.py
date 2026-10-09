@@ -1,10 +1,12 @@
 """CHAT_UI_PLAN.md P9-G2: the EOS-stop beam searches (tiny model and scripted logits, CPU, synthetic only).
 
 `beam_search_decode_eos` (scripts/evaluate_report_generation.py) and `HybridLanguageModel.beam_search_cached_eos` sit beside the published
-decoders, which stay as they are. The rules they implement (the rulings, as amended by fix 0), at every decoding step:
-  1. rank all beam x vocab candidates exactly as the published code does and take the top 2 * beam;
+decoders, which stay as they are. The rules they implement (the rulings, as amended by fixes 0 and 1), at every decoding step:
+  1. take the candidates published-first: exactly the ones the published decoder takes, in its order (so that ties break as there),
+     then the rest of the top 2 * beam, which can never rank among the first `beam`;
   2. walk them in rank order: an EOS candidate within the first `beam` goes to the finished pool (its score is normalised by the length
-     with the EOS counted); the others fill the `beam` live slots; an EOS further down is dropped;
+     with the EOS counted); the others fill the `beam` live slots; an EOS further down is dropped, and so is one at step 0, before any
+     token has been generated (a turn never ends with an empty report);
   3. the answer is the best of finished + live by normalised score (a tie goes to the finished one, then to the live beams in rank
      order). on_step gets the answer's ids, and the search returns right after that call once the answer is a finished hypothesis
      (OpenNMT-style top-hypothesis stopping), or at the budget. There is no "beam hypotheses have finished" stop;
@@ -26,9 +28,9 @@ import pytest
 import torch
 
 from app.tiny import TINY_PREFIX_K, TinyTokenizer, TinyTower, tiny_decoder, tiny_prefix_mapper
-from tests.app_helpers import TINY_VOCAB_SIZE, markov_script, noise_script, png_bytes, scripted_decoder
+from tests.app_helpers import EOS_ID, TINY_VOCAB_SIZE, markov_script, noise_script, png_bytes, scripted_decoder
 
-EOS = TINY_VOCAB_SIZE - 1                   # the last id of the tiny vocab; the default, 50256, is out of it
+EOS = EOS_ID                                # the last id of the tiny vocab; the default, 50256, is out of it
 EMPTY = torch.zeros((1, 0), dtype=torch.long)
 KINDS = ["uncached", "cached"]
 
@@ -95,7 +97,7 @@ def _oracle(script, eos, beam, budget, length_penalty=1.0):
         kept = []
         for rank, (tokens, score) in enumerate(candidates[:2 * beam]):
             if tokens[-1] == eos:
-                if rank < beam:
+                if step > 0 and rank < beam:         # an EOS at step 0 is dropped like a later one: no empty report
                     done = score / (length ** length_penalty)
                     if best_done is None or done > best_done[0]:
                         best_done = (done, tokens[:-1], step)
@@ -164,6 +166,61 @@ def test_on_step_shows_what_the_published_decoder_shows_while_no_beam_has_ended(
     assert twin == published and [s for s, _ in twin] == list(range(16))    # once per step, the same ids
 
 
+def _tied_at(seed, rank):
+    """Seeded noise logits, EOS out of reach, with the entries at descending ranks `rank` and `rank + 1` made exactly equal at every
+    state (rank 0: the two best tokens tie, the reviewer's scenario; rank beam - 1: the tie straddles the beam boundary)."""
+    base = noise_script(seed, EOS, lambda n, last: -1e4)
+
+    def script(n, last):
+        logits = base(n, last)
+        order = torch.argsort(logits, descending=True)
+        logits[order[rank + 1]] = logits[order[rank]]
+        return logits
+    return script
+
+
+def _flat_rows(seed):
+    """The same row at every state: two best tokens tied, then three tied, then one. Every candidate of every beam ties with others,
+    across beams too (a path and its reorderings add the same two log-probs, so they score the same to the last bit)."""
+    def script(n, last):
+        logits = torch.full((TINY_VOCAB_SIZE,), -1e4)
+        first = 3 * seed
+        logits[first], logits[first + 1] = 3.0, 3.0
+        logits[first + 2], logits[first + 3], logits[first + 4] = 2.0, 2.0, 2.0
+        logits[first + 5] = 1.0
+        return logits
+    return script
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("beam", [1, 2, 3])
+@pytest.mark.parametrize("tie", ["the two best", "the beam boundary", "flat rows"])
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_exact_ties_break_as_in_the_published_decoder_ids_and_stream(kind, beam, tie, seed):
+    script = {"the two best": _tied_at(seed, 0), "the beam boundary": _tied_at(seed, beam - 1), "flat rows": _flat_rows(seed)}[tie]
+    model, published, twin = tiny_decoder(), [], []
+    with scripted_decoder(model, script):
+        want = _published(kind, model, EMPTY, _prefix(), beam, 14, on_step=lambda step, ids: published.append(ids))
+        got, ended = _eos(kind, model, EMPTY, _prefix(), beam, 14, on_step=lambda step, ids: twin.append(ids))   # the id 50256: out of reach
+    assert torch.equal(got, want) and ended is False
+    assert twin == published
+
+
+@pytest.mark.parametrize("beam", [1, 3])
+def test_while_nothing_has_finished_the_cached_twin_shows_the_row_torch_argmax_picks(beam):
+    # The published cached decoder shows tokens[argmax(scores)]. That is row 0 but for a float32 normalisation tie, which no script can
+    # make on demand, so argmax is forced to the last row: the twin has to ask the same question for its frames to be the published ones.
+    real_argmax, model, published, twin = torch.argmax, tiny_decoder(), [], []
+
+    def last_row(tensor, *args, **kwargs):
+        return torch.tensor(tensor.shape[0] - 1) if tensor.dim() == 1 and tensor.shape[0] == beam else real_argmax(tensor, *args, **kwargs)
+
+    with mock.patch.object(torch, "argmax", last_row):
+        model.beam_search_cached(EMPTY, prefix_embeds=_prefix(), beam_size=beam, max_new_tokens=10, on_step=lambda step, ids: published.append(ids))
+        model.beam_search_cached_eos(EMPTY, prefix_embeds=_prefix(), beam_size=beam, max_new_tokens=10, on_step=lambda step, ids: twin.append(ids))
+    assert twin == published and len(twin) == 10
+
+
 @pytest.mark.parametrize("kind", KINDS)
 def test_each_twin_decodes_one_sample_at_a_time(kind):
     with pytest.raises(ValueError, match="one sample at a time"):
@@ -216,12 +273,29 @@ def test_a_prompt_stays_in_the_returned_ids_and_the_eos_does_not(kind):
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_a_report_that_is_ended_by_its_very_first_token_is_empty(kind):
-    script = noise_script(2, EOS, lambda n, last: 40.0 if n == 0 else -1e4)
+@pytest.mark.parametrize("beam", [1, 3])
+def test_an_eos_before_the_first_generated_token_is_skipped_and_the_next_candidates_are_live(kind, beam):
+    script, seen = noise_script(2, EOS, lambda n, last: 40.0 if n == 0 else -1e4), []     # at step 0 the end is certain; never after
     model = tiny_decoder()
     with scripted_decoder(model, script):
-        got, ended = _eos(kind, model, EMPTY, _prefix(), 1, 30, eos=EOS)
-    assert ended is True and got.shape == (1, 0) and got.dtype == torch.long
+        got, ended = _eos(kind, model, EMPTY, _prefix(), beam, 30, on_step=lambda step, ids: seen.append(ids), eos=EOS)
+    rows = script(0, None)
+    rows[EOS] = float("-inf")
+    best_first = int(rows.argmax())                      # the best token that is not the end: what a live slot is filled with
+    assert ended is False and got.shape == (1, 30) and got[0, 0].item() == best_first   # no empty report; the budget, in full length
+    assert seen[0] == [best_first] and len(seen) == 30 and seen[-1] == got[0].tolist()
+    assert (got[0].tolist(), ended) == _oracle(script, EOS, beam, 30)[:2]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("beam", [1, 3])
+def test_only_the_first_step_is_special_a_later_eos_still_ends_the_report(kind, beam):
+    script = noise_script(2, EOS, lambda n, last: 40.0 if n in (0, 5) else -1e4)    # the end is certain at step 0 (skipped) and at step 5
+    model = tiny_decoder()
+    with scripted_decoder(model, script):
+        got, ended = _eos(kind, model, EMPTY, _prefix(), beam, 30, eos=EOS)
+    assert ended is True and got.shape == (1, 5)
+    assert (got[0].tolist(), ended) == _oracle(script, EOS, beam, 30)[:2]
 
 
 def _greedy_rows(n, last):
@@ -616,6 +690,25 @@ def test_stop_at_eos_needs_beam_decoding(monkeypatch, capsys, decode):
     with pytest.raises(SystemExit) as stop:
         _main(monkeypatch, "--checkpoint", "c.ckpt", "--parquet", "p.parquet", "--stop-at-eos", *decode)
     assert stop.value.code == 2 and "--stop-at-eos needs --decode beam" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv,mode", [
+    (["--retrieval-baseline", "--parquet", "q.parquet", "--train-parquet", "t.parquet", "--decode", "beam"], "--retrieval-baseline"),
+    (["--hyp-file", "hyps.txt", "--ref-file", "refs.txt", "--decode", "beam"], "--hyp-file/--ref-file"),
+    (["--smoke-test", "--decode", "beam"], "--smoke-test"),
+    # with a checkpoint too, which main() then ignores: the dispatcher runs the retrieval baseline, or the smoke test, first
+    (["--retrieval-baseline", "--parquet", "q.parquet", "--train-parquet", "t.parquet", "--checkpoint", "c.ckpt", "--decode", "beam"],
+     "--retrieval-baseline"),
+    (["--smoke-test", "--checkpoint", "c.ckpt", "--decode", "beam"], "--smoke-test"),
+])
+def test_stop_at_eos_fails_where_nothing_would_decode_with_it_instead_of_being_ignored(monkeypatch, capsys, argv, mode):
+    import scripts.evaluate_report_generation as erg
+    for name in ("run_retrieval_baseline", "run_checkpoint_inspection", "run_smoke_test"):
+        monkeypatch.setattr(erg, name, lambda *args, **kwargs: pytest.fail("the run started"))
+    with pytest.raises(SystemExit) as stop:
+        _main(monkeypatch, *argv, "--stop-at-eos")
+    err = capsys.readouterr().err
+    assert stop.value.code == 2 and "--stop-at-eos only applies to --checkpoint decoding" in err and mode in err
 
 
 def _patch_grid_module():

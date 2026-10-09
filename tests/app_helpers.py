@@ -90,6 +90,19 @@ def wait_until(predicate: Callable[[], Any], timeout: float = 10.0, interval: fl
 # "the report ends after 7 tokens" and check where each search stops, which no random-init model will do.
 
 TINY_VOCAB_SIZE = len(TINY_VOCAB)
+EOS_ID = TINY_VOCAB_SIZE - 1   # the last id of the tiny vocab: in reach of the scripted decoders, unlike the real engine's 50256
+REPORT = ("The heart is normal. The lungs are clear. No pleural effusion. Impression: no acute disease. Findings: the heart "
+          "is mildly enlarged and there is a small effusion.")   # 27 words: ends in sentences 4, 8, 11, 15 and 27
+
+
+class GrowingText:
+    """A tokenizer for a report written one word per step: n ids decode to the first n words of one text."""
+
+    def __init__(self, text):
+        self.words = text.split()
+
+    def decode(self, ids, skip_special_tokens=True):
+        return " ".join(self.words[:len(ids)])
 
 
 def noise_script(seed: int, eos: int, eos_logit: Callable[[int, Optional[int]], float], vocab: int = TINY_VOCAB_SIZE):

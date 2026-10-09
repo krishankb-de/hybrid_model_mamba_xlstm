@@ -601,23 +601,30 @@ class HybridLanguageModel(nn.Module):
         """`beam_search_cached` that stops at an end-of-report token (CHAT_UI_PLAN.md P9-G2). -> (ids, ended_by_eos).
 
         The cached twin of `beam_search_decode_eos` in `scripts/evaluate_report_generation.py`; the two return the same ids, flag and
-        callback stream (tests/test_beam_search_eos.py), as the published pair return the same ids. `beam_search_cached` is untouched.
+        callback stream (tests/test_beam_search_eos.py) when no two candidates tie exactly, as the published pair do. On an exact tie
+        each follows its own published twin, and those can differ. `beam_search_cached` is untouched.
         At every step:
-          1. rank all beam x vocab candidates as `beam_search_cached` does and keep the top 2 * beam_size;
+          1. take the candidates published-first: exactly the `ranked.view(-1).topk(beam_size)` that `beam_search_cached` takes, in its
+             order, then the entries of the top 2 * beam_size that it did not take. Ties break as there, because the first beam_size
+             candidates ARE the published ones; the later ones only fill a live slot that an EOS has freed, and can never rank among
+             the first beam_size;
           2. walk them in rank order. An EOS candidate within the first beam_size is set aside as finished, scored like any other
              candidate (the EOS counts in the length); the rest fill the beam_size live slots, in the cache's batch axis as there; an
-             EOS further down is dropped;
+             EOS further down is dropped, and so is one at step 0, before any token has been generated: no turn ends with an empty
+             report (Hugging Face's min_new_tokens=1);
           3. the ANSWER is the best normalised score of the best finished hypothesis and the live beams (a tie goes to the finished
              one, then to the live beams in rank order). on_step gets its ids, and the search returns right after that call once the
              answer is a finished hypothesis (OpenNMT-style top-hypothesis stopping), or at max_new_tokens. A live answer at the
              budget has the full length, and ended_by_eos is False.
         `ids` is shaped like `beam_search_cached`'s (prompt + generated), without the EOS of a finished hypothesis. With no EOS among
-        the first beam_size candidates at any step nothing ever finishes, and this is `beam_search_cached`: the same ids, and on_step
-        sees the same.
+        the first beam_size candidates at any step nothing ever finishes, and this is `beam_search_cached`: the same ids and the same
+        on_step stream, ties included (tests build exact ties on purpose).
 
-        `on_step(step, answer_ids)` is called once per step, after the step's selection and before the next forward. It only observes,
-        with one exception: raising `StopDecoding` ends the search, which returns the best finished hypothesis if there is one, and lets
-        the same exception propagate if there is none. Any other exception propagates (the chat app's cancel).
+        `on_step(step, answer_ids)` is called once per step, after the step's selection and before the next forward. While the answer is
+        a live beam it is `tokens[argmax(scores)]`, as in `beam_search_cached`; the returned live answer is row 0, which that decoder
+        returns too (the two differ only on a float32 normalisation tie). It only observes, with one exception: raising `StopDecoding`
+        ends the search, which returns the best finished hypothesis if there is one, and lets the same exception propagate if there is
+        none. Any other exception propagates (the chat app's cancel).
         """
         if input_ids.shape[0] != 1:
             raise ValueError(
@@ -652,14 +659,19 @@ class HybridLanguageModel(nn.Module):
                 total = scores.unsqueeze(-1) + log_probs
                 length = tokens.shape[1] + 1
                 ranked = total / (length ** length_penalty)
-                flat_rank, flat_idx = ranked.view(-1).topk(min(2 * beam_size, ranked.numel()))
+                flat = ranked.view(-1)
+                flat_rank, flat_idx = flat.topk(beam_size)                          # exactly the published call, and its order ...
+                wide_rank, wide_idx = flat.topk(min(2 * beam_size, flat.numel()))   # ... then what else the top 2 * beam_size holds
+                fresh = ~torch.isin(wide_idx, flat_idx)
+                flat_rank = torch.cat([flat_rank, wide_rank[fresh]])[: 2 * beam_size]
+                flat_idx = torch.cat([flat_idx, wide_idx[fresh]])[: 2 * beam_size]
                 beam_idx = torch.div(flat_idx, log_probs.shape[-1], rounding_mode="floor")
                 token_idx = flat_idx % log_probs.shape[-1]
 
                 stay = []   # the ranks that fill the live slots, best first
                 for rank, token in enumerate(token_idx.tolist()):
                     if token == eos_token_id:
-                        if rank < beam_size:
+                        if step > 0 and rank < beam_size:   # at step 0 an EOS is dropped like a later one: no empty report
                             done = float(flat_rank[rank])
                             if best_done is None or done > best_done[0]:
                                 parent = int(beam_idx[rank])
@@ -677,16 +689,20 @@ class HybridLanguageModel(nn.Module):
                 # The live beams are in rank order, so row 0 is the best of them: what beam_search_cached shows and returns.
                 live_score = float(scores[0] / (tokens.shape[1] ** length_penalty))
                 answer_done = best_done is not None and best_done[0] >= live_score
-                answer = best_done[1] if answer_done else tokens[:1]
                 if on_step is not None:
+                    if answer_done:
+                        shown = best_done[1]
+                    else:   # what beam_search_cached shows: row 0 but for a float32 normalisation tie
+                        row = int(torch.argmax(scores))
+                        shown = tokens[row : row + 1]
                     try:
-                        on_step(step, answer[0].tolist())
+                        on_step(step, shown[0].tolist())
                     except StopDecoding:
                         if best_done is None:
                             raise
                         return best_done[1], True
                 if answer_done:
-                    return answer, True
+                    return best_done[1], True
                 if step + 1 == max_new_tokens:
                     break
                 caches = self.reorder_cache(caches, beam_idx)
