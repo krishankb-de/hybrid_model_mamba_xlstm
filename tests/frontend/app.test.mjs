@@ -978,6 +978,35 @@ test('a stream the network drops mid-turn is followed by the poll and logs nothi
   assert.deepEqual(logged, []);
 });
 
+test('a Send right after a refused first turn makes a new chat, and does not send its turn into the one being deleted (P4-H)', async () => {
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  let made = 0;
+  const h = harness({ routes: {
+    'POST /v1/sessions': () => ({ ...NEW_SESSION, id: made++ ? 's_two' : 's_new' }),
+    'DELETE /v1/sessions/s_new': async () => { await held; return new Response(null, { status: 204 }); },   // a slow delete
+  } });
+  await h.app.start();
+  await flush();
+  attach(imageFile('notes.png'));
+  h.api.refuse = refusal(422, 'Use a PNG, JPEG or WEBP image.');
+  await h.app.send();
+  await flush();
+  assert.equal(h.win.location.hash, '#/new');   // back on the empty chat at once, while the delete is still on its way
+  h.api.refuse = null;
+  const turn = h.app.send();   // the composer is free again: the user sends straight away
+  await flush();
+  assert.equal(h.fetch.to('POST', '/v1/sessions').length, 2);
+  assert.equal(h.api.streams.at(-1).opts.sessionId, 's_two');   // not the chat being deleted
+  release();
+  h.api.streams.at(-1).accept('m_a');
+  await flush();
+  h.api.streams.at(-1).channel.push(...fullTurn());
+  h.api.streams.at(-1).channel.end();
+  await turn;
+  assert.equal(h.win.location.hash, '#/s/s_two');
+});
+
 test('a refused turn in a chat that was there before deletes nothing, even when the chat has no turn yet', async () => {
   const h = await ready();   // s_a: an existing chat with no turns
   h.api.refuse = refusal(422, 'Use a PNG, JPEG or WEBP image.');

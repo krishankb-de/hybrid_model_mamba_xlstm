@@ -812,7 +812,7 @@ export function createApp(env) {
       if (fresh) await createSession(session);
       if (state.session !== session) return;   // the user moved to another chat while this one was being made
       await runTurn(session, { text: note, file, options });
-      if (fresh && !session.turns.length) await dropEmptySession(session);   // its first turn was refused: no chat was started after all
+      if (fresh && !session.turns.length) dropEmptySession(session);   // its first turn was refused: no chat was started after all
     } catch (err) {   // the chat could not be made, or something broke that runTurn does not deal with itself
       if (state.session === session) {
         showNotice(errorMessage(err));
@@ -837,20 +837,18 @@ export function createApp(env) {
 
   // The chat this page made for a first turn that the server then refused holds nothing: it is deleted again and the page is back on the
   // empty chat it was, so a refused upload does not leave an empty "New chat" in the sidebar (P4-H). The notice that says why stays, and so
-  // does the composer. A delete that fails leaves the chat as it is: empty, and harmless.
-  async function dropEmptySession(session) {
-    try {
-      await request(`/v1/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
-    } catch {
-      return;
-    }
+  // does the composer. The page lets go of the chat first and deletes it after, in the background: the composer is free again already, and
+  // a Send meanwhile makes a chat of its own instead of sending into the one being deleted. A delete that fails leaves the chat as it is:
+  // empty, and harmless.
+  function dropEmptySession(session) {
+    const id = session.id;
     if (state.session === session) {
       session.id = null;
       setAddress('#/new');
       state.route = 'new';   // the page is where it was, so its notice is not one of a route left behind
       syncControls();
     }
-    await refreshSessions();
+    detach(request(`/v1/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(() => refreshSessions(), () => {}));
   }
 
   // Stop: ask the server to cancel, then drop the stream. The turn's own message_stop (status aborted) settles the card;
