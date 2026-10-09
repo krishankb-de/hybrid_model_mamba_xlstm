@@ -1,6 +1,9 @@
 """P9-G4 (CHAT_UI_PLAN.md): the numbers the three EOS evaluation jobs print. One module, four subcommands. Each prints
-`RESULT {json}` lines of numbers, flags and plain names and `ERROR ...` lines of literals, and nothing else (R7: anything an agent
-reads has left the cluster, which the DUA forbids for MIMIC text, study ids and paths).
+`RESULT {json}` lines and `ERROR ...` lines, and nothing else (R7: anything an agent reads has left the cluster, which the DUA
+forbids for MIMIC text, study ids and paths). A RESULT line holds numbers under 10 million, flags, null, and strings only from an
+explicit allowlist (ALLOWED_NAMES: the wrapper's own constants, the metric names bootstrap_compare emits, the 14 CheXbert labels),
+so nothing read from a log or a file can reach one as text. An ERROR line holds literals and numbers this script has validated,
+never a value read out of a log or a file.
 
     decode   --log eval.log --dump-dir DIR --budget 200 --wall-s S                         job 1, scripts/eval_report_eos_h100.sh
     chexbert --dump-dir DIR --wall-s S                                                      job 2, eval_report_eos_chexbert_h100.sh
@@ -33,13 +36,16 @@ the 95% CI) become one RESULT line each, and the last line is the verdict. The g
 entirely below zero, that is, the EOS system is significantly worse than the published run on it. The sign is read from the printed
 text, which keeps it for a rounded zero: [-0.0123, -0.0000] excludes zero and [-0.0123, +0.0000] spans it, as `hi < 0` does at full
 precision. Per-label rows are printed and do not gate: bootstrap_compare's own summary does not count them either, and fourteen
-more one-sided looks would make a gate fire by chance. A report that does not parse, whose columns are not A then B (swapped
-columns would flip every difference), whose A - B does not match its own A and B, or that lacks the label metrics (it was run without
-the label matrices) is an error and prints no gate line at all. A failing gate is a finding, not a crash: exit 0 either way.
+more one-sided looks would make a gate fire by chance. The verdict names them anyway, for the reader, in `label_worse` (the label
+rows whose CI is entirely below zero, by the same sign rule), which never changes `gate`; when both lists do not fit in 300
+characters the labels go on a RESULT line of their own just before the verdict, which stays last. A report that does not parse,
+whose columns are not A then B (swapped columns would flip every difference), whose A - B does not match its own A and B, whose
+row names are not the metrics and labels this job prints, or that lacks the label metrics (it was run without the label matrices)
+is an error and prints no gate line at all. A failing gate is a finding, not a crash: exit 0 either way.
     RESULT {"bootstrap":"paired","name_a":..,"name_b":..,"n":N,"samples":S,"seed":s}
     RESULT {"metric":"rouge_l","a":x,"b":x,"diff":x,"lo":x,"hi":x}        one per main-table metric
     RESULT {"label":"Lung Lesion","a":x,"b":x,"diff":x,"lo":x,"hi":x}     one per label
-    RESULT {"gate":"pass"|"fail","worse":[metric, ...]}
+    RESULT {"gate":"pass"|"fail","worse":[metric, ...],"label_worse":[label, ...]}
 
 Exit codes: 0 done; 2 a check failed (an ERROR line says which, in literals and numbers); 1 anything unexpected (the traceback goes
 to stderr, which the wrapper keeps in a file on the cluster, and one ERROR line names the exception class).
@@ -61,7 +67,16 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 RESULT_LIMIT = 300                                    # what `chat_remote.sh summary` keeps of a line
-_NAME = re.compile(r"[A-Za-z][A-Za-z0-9 _.-]{0,39}")   # a metric, label or system name (fullmatch): starts with a letter, so never an id or a path
+MAX_NUMBER = 10 ** 7                                  # 8 digits or more could be an id (study 5xxxxxxx, subject 1xxxxxxx)
+
+# The only strings a RESULT line may hold, as a value or as a list item (R7). A name is printed only if it is in ALLOWED_NAMES, so
+# report text, a study or subject id or a path cannot reach a line, whatever file or log it was read from.
+WRAPPER_NAMES = ("done", "paired", "pass", "fail", "eos_s42", "m3_s42", "refs")      # step results, verdicts, the systems compared
+BOOTSTRAP_METRICS = ("rouge_l", "bleu_1", "bleu_4", "chexbert_14_micro", "chexbert_14_macro", "chexbert_5_micro", "chexbert_5_macro",
+                     "exact_match_accuracy_14", "exact_match_accuracy_5")           # bootstrap_compare's main table (a test reads it)
+CHEXBERT_14 = ("Enlarged Cardiomediastinum", "Cardiomegaly", "Lung Opacity", "Lung Lesion", "Edema", "Consolidation", "Pneumonia",
+               "Atelectasis", "Pneumothorax", "Pleural Effusion", "Pleural Other", "Fracture", "Support Devices", "No Finding")
+ALLOWED_NAMES = frozenset(WRAPPER_NAMES + BOOTSTRAP_METRICS + CHEXBERT_14)    # CHEXBERT_14 is app/labels.py's (a test ties them)
 
 
 class ResultError(Exception):
@@ -74,20 +89,26 @@ def _plain(value: Any) -> bool:
     if value is None or isinstance(value, bool):
         return True
     if isinstance(value, (int, float)):
-        return math.isfinite(value)
+        return math.isfinite(value) and abs(value) < MAX_NUMBER
     if isinstance(value, str):
-        return bool(_NAME.fullmatch(value))
+        return value in ALLOWED_NAMES
     if isinstance(value, list):
         return all(_plain(item) for item in value)
     return False
 
 
-def result_line(payload: Dict[str, Any]) -> str:
-    """`RESULT {compact json}`. R7: every value is a number, a flag, null, a plain name or a list of those, so no text, id or
-    path can ride along, and the line stays under what `chat_remote.sh summary` keeps. Anything else is a ValueError."""
+def _render(payload: Dict[str, Any]) -> str:
     if not all(_plain(value) for value in payload.values()):
-        raise ValueError("a RESULT value must be a number, a flag, null, a plain name or a list of those")
-    line = "RESULT " + json.dumps(payload, separators=(",", ":"))
+        raise ValueError("a RESULT value must be a number under {}, a flag, null, an allowlisted name or a list of those".format(
+            MAX_NUMBER))
+    return "RESULT " + json.dumps(payload, separators=(",", ":"))
+
+
+def result_line(payload: Dict[str, Any]) -> str:
+    """`RESULT {compact json}`. R7: every number is finite and under 10 million, and every string is one of ALLOWED_NAMES, matched
+    exactly (the wrapper's constants, the metric names bootstrap_compare emits, the 14 CheXbert labels), so no report text, id or
+    path can ride along; and the line stays under what `chat_remote.sh summary` keeps. Anything else is a ValueError."""
+    line = _render(payload)
     if len(line) >= RESULT_LIMIT:
         raise ValueError("a RESULT line must stay under {} characters".format(RESULT_LIMIT))
     return line
@@ -161,9 +182,11 @@ def decode_result(log_text: str, dump_dir: Path, budget: int, wall_s: int) -> Tu
     if aggregate is None:
         notes.append("=== no aggregate metrics in eval.log: rouge_l, bleu_1 and bleu_4 are left out ===")
     else:
-        if aggregate.get("num_examples") != n:
-            raise ResultError("the aggregate metrics are over {} reports, the EOS stop line says n={}".format(
-                aggregate.get("num_examples"), n))
+        examples = aggregate.get("num_examples")
+        if type(examples) is not int:                      # whatever JSON the log holds: not a bool, float or text, and never echoed
+            raise ResultError("the aggregate metrics do not hold an integer count of reports")
+        if examples != n:
+            raise ResultError("the aggregate metrics count a different number of reports than the EOS stop line")
         for key in TEXT_METRICS:
             value = aggregate.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -184,7 +207,9 @@ def chexbert_result(dump_dir: Path, wall_s: int) -> Dict[str, Any]:
     except (OSError, ValueError):
         raise ResultError("chexbert_labels.json is missing or unreadable: bootstrap_compare needs it") from None
     try:
-        n = int(metrics["num_examples"])
+        n = metrics["num_examples"]
+        if type(n) is not int:                             # a number the scorer wrote, not text, a float or a bool: never echoed
+            raise ResultError("chexbert_metrics.json does not hold an integer example count")
         found = {"micro_14": metrics["chexbert_14"]["micro avg"]["f1-score"], "macro_14": metrics["chexbert_14"]["macro avg"]["f1-score"],
                  "micro_5": metrics["chexbert_5"]["micro avg"]["f1-score"], "macro_5": metrics["chexbert_5"]["macro avg"]["f1-score"]}
         label_rows = (len(labels["y_true"]), len(labels["y_pred"]))
@@ -285,6 +310,10 @@ def parse_bootstrap(text: str, name_a: str, name_b: str) -> Dict[str, Any]:
         if abs(row["diff"] - (row["a"] - row["b"])) > _ROUNDING or row["lo"] > row["hi"]:
             raise ResultError("a table row's difference is not its A minus its B, or its interval is upside down")
         rows[mode].append(row)
+    foreign = (sum(1 for row in rows["metrics"] if row["name"] not in BOOTSTRAP_METRICS)
+               + sum(1 for row in rows["labels"] if row["name"] not in CHEXBERT_14))
+    if foreign:
+        raise ResultError("the report has {} row(s) named otherwise than the metrics and labels this job prints".format(foreign))
     names = [row["name"] for row in rows["metrics"]]
     if len(set(names)) != len(names):
         raise ResultError("a metric appears twice in the report")
@@ -297,8 +326,8 @@ def parse_bootstrap(text: str, name_a: str, name_b: str) -> Dict[str, Any]:
 
 
 def worse_metrics(metrics: Sequence[Dict[str, Any]]) -> List[str]:
-    """The metrics whose 95% CI of (A - B) lies entirely below zero. The sign is read off the rounded text, which keeps it:
-    float('-0.0000') is -0.0, a CI that stops just short of zero, and copysign sees it where `< 0` would not."""
+    """The rows (metrics, or labels) whose 95% CI of (A - B) lies entirely below zero. The sign is read off the rounded text,
+    which keeps it: float('-0.0000') is -0.0, a CI that stops just short of zero, and copysign sees it where `< 0` would not."""
     return [row["name"] for row in metrics if math.copysign(1.0, row["hi"]) < 0]
 
 
@@ -310,7 +339,13 @@ def comparison_lines(parsed: Dict[str, Any], name_a: str, name_b: str) -> List[s
             lines.append(result_line({kind: row["name"], "a": row["a"], "b": row["b"], "diff": row["diff"], "lo": row["lo"],
                                       "hi": row["hi"]}))
     worse = worse_metrics(parsed["metrics"])
-    lines.append(result_line({"gate": "fail" if worse else "pass", "worse": worse}))
+    verdict = {"gate": "fail" if worse else "pass", "worse": worse}
+    together = dict(verdict, label_worse=worse_metrics(parsed["labels"]))     # for the reader: it never changes the gate
+    if len(_render(together)) < RESULT_LIMIT:
+        lines.append(result_line(together))
+    else:                                          # 9 metrics and 14 labels do not fit: the labels get a line, the verdict stays last
+        lines.append(result_line({"label_worse": together["label_worse"]}))
+        lines.append(result_line(verdict))
     return lines
 
 
@@ -329,8 +364,8 @@ def _cmd_hyps(args: argparse.Namespace) -> List[str]:
     systems = []
     for spec in args.systems:
         name, sep, path = spec.partition("=")
-        if not sep or not _NAME.fullmatch(name):
-            raise ResultError("a system is NAME=PATH, with a plain name")
+        if not sep or name not in ALLOWED_NAMES:
+            raise ResultError("a system is NAME=PATH, with a name this job prints")
         systems.append((name, path))
     counter = load_token_counter(args.tokenizer)
     lines = []
@@ -343,6 +378,9 @@ def _cmd_hyps(args: argparse.Namespace) -> List[str]:
 
 
 def _cmd_gate(args: argparse.Namespace) -> List[str]:
+    for name in (args.name_a, args.name_b):
+        if name not in ALLOWED_NAMES:
+            raise ResultError("a system name is not one this job prints")
     parsed = parse_bootstrap(_read_text(Path(args.bootstrap)), args.name_a, args.name_b)
     return comparison_lines(parsed, args.name_a, args.name_b)
 

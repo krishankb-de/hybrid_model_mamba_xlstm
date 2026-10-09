@@ -6,17 +6,19 @@
 #
 # THE THREE JOBS, CHAINED. The controller submits them, from the Mac, in this order, one afterok on the one before (`submit`
 # prints the job id; ${DEC%%;*} drops a ;cluster suffix a multi-cluster sbatch --parsable may add, as submit_v3_chain.sh does).
-# Job 1 is the decode (GPU, `-- --time=04:00:00` after it for more margin), job 2 the CheXbert scoring, job 3 this one:
+# Job 1 is the decode (GPU: submitted with the 4 h override, because 2 h is thin at the full budget; see its TIME paragraph),
+# job 2 the CheXbert scoring, job 3 this one:
 #   bash scripts/chat_remote.sh sync
-#   DEC=$(bash scripts/chat_remote.sh submit scripts/eval_report_eos_h100.sh)
+#   DEC=$(bash scripts/chat_remote.sh submit scripts/eval_report_eos_h100.sh -- --time=04:00:00)
 #   CHX=$(bash scripts/chat_remote.sh submit scripts/eval_report_eos_chexbert_h100.sh DUMP_DIR=results/chat_report_eos_test_split_s42 -- --dependency=afterok:${DEC%%;*})
 #   CMP=$(bash scripts/chat_remote.sh submit scripts/eval_report_eos_compare_h100.sh DUMP_DIR=results/chat_report_eos_test_split_s42 PUBLISHED_DIR=results/report_gen_m3_test_split_s42 -- --dependency=afterok:${CHX%%;*})
 # Read each job, when it ends, only through `bash scripts/chat_remote.sh state <jobid>` and
 #   bash scripts/chat_remote.sh summary logs/chat_eos_eval_<jobid>.log        (job 1: the EOS share, the wall time, the text metrics)
 #   bash scripts/chat_remote.sh summary logs/chat_eos_chexbert_<jobid>.log    (job 2: the four CheXbert F1 headlines)
 #   bash scripts/chat_remote.sh summary logs/chat_eos_compare_<jobid>.log     (job 3: this job)
-# All three default to the same DUMP_DIR, so the settings above only spell the defaults out. The decode needs the training run's
-# DONE marker (P9-G3); this job needs the first two to have finished, and each refuses to run on what the one before did not write.
+# All three default to the same DUMP_DIR (and job 1 to the same PUBLISHED_DIR), so the settings above only spell the defaults out.
+# The decode needs the training run's DONE marker (P9-G3) and compares its refs.txt with the published dump's before the chain goes
+# on; this job needs the first two to have finished, and each refuses to run on what the one before did not write.
 #
 # THE COMPARISON IS FIXED HERE, NOT AN ENVIRONMENT LEVER. A is the EOS dump (eos_s42), B the published Mamba-3 s42 dump, decoded with
 # the published protocol (beam 3, 100 tokens, uncached; V3 chain, stages 3 and 4: it already holds hyps, refs and the CheXbert
@@ -24,15 +26,18 @@
 # and resample count that wrapper defaults to (0 and 1000); tests/test_willi_parity.py parses that wrapper and pins all of it. The
 # report is written beside the EOS dump. The two dumps must be the same studies: their refs.txt files must be byte-identical.
 #
-# WHAT IT PRINTS (RESULT lines, numbers and plain names only; scripts/report_eos_stats.py says what each holds):
+# WHAT IT PRINTS (RESULT lines, numbers and allowlisted names only; scripts/report_eos_stats.py says what each holds):
 #   the stats of A, then of B, then of the references (the baseline: some reference reports lack a final period too, and the length
 #   BLEU and ROUGE are scored against): mean words and GPT-2 tokens (null when the tokenizer is not cached offline), empty reports,
 #   repeated sentences per report, the share with a repeat, the share whose last sentence is unterminated (V5-D's cut-short measure);
 #   then the bootstrap's n, resamples and seed, one line per metric (A, B, A - B and its 95% CI, parsed from bootstrap_compare's own
 #   report and never recomputed) and one per label; and last the gate:
-#     RESULT {"gate":"pass"|"fail","worse":[...]}      worse = every main-table metric whose CI of (EOS - published) is entirely below 0
-# Per-label rows are informational and do not gate (the module docstring says why). A failing gate is a finding, not a crash: the
-# job exits 0 either way. A report that cannot be parsed prints an ERROR and NO gate line, and the job exits 1.
+#     RESULT {"gate":"pass"|"fail","worse":[...],"label_worse":[...]}
+#   worse = every main-table metric whose CI of (EOS - published) is entirely below 0, and the only list the gate reads. label_worse
+#   = every label whose CI is entirely below 0: for the reader, it never changes the gate (the module docstring says why per-label
+#   rows do not gate). When both lists do not fit in 300 characters the labels get a RESULT line of their own just before the gate
+#   line, which stays last. A failing gate is a finding, not a crash: the job exits 0 either way. A report that cannot be parsed
+#   prints an ERROR and NO gate line, and the job exits 1.
 # R7: the bootstrap's stdout and stderr go to ${DUMP_DIR}/bootstrap.log, the stats script's stderr to ${DUMP_DIR}/compare.err, and the
 # job log carries only === / RESULT / ERROR lines with no path. R8: everything is written under DUMP_DIR; the published dump is read.
 # Output, beside the EOS dump: results/chat_report_eos_test_split_s42/{bootstrap_eos_s42_vs_m3_s42.md, bootstrap.log, compare.err}

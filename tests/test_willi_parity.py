@@ -7045,6 +7045,12 @@ def test_eval_report_eos_decode_is_the_published_eval_command_plus_the_eos_flags
         "MODEL_CONFIG": "hybrid_150m_m3_rrg", "PREFIX_K": "32", "DECODE": "beam", "BEAM_SIZE": "3", "NUM_SAMPLES": "999999",
         "MAX_NEW_TOKENS": "100"}
     assert defaults["CACHED_DECODE"] == "false", "the published eval is uncached: --cached-decode is the first difference"
+    # Nothing else the inspect wrapper can switch on is on in the published eval, and the chain sets none of it. If it ever does,
+    # the published run is no longer "this command minus three flags" and this decode would silently compare against another one.
+    for name in ("SCAN_IMPL", "TFLA_IMPL", "CHUNK_SIZE"):
+        assert defaults[name] == "" and name not in chain_values, "the published eval pins {}: this decode must too".format(name)
+    for name in ("COMPILE", "CHEXBERT", "CACHED_DECODE"):
+        assert defaults[name] == "false" and name not in chain_values, "the published eval turns {} on".format(name)
 
     inspect_flags = set(re.findall(r"--[a-z][a-z-]*", _command(inspect_src, "python scripts/evaluate_report_generation.py")))
     inspect_flags |= set(re.findall(r"\+=\((--[a-z][a-z-]*)", inspect_src))        # --chexbert and --dump-dir ride in an array
@@ -7074,12 +7080,21 @@ def test_eval_report_eos_decode_is_the_published_eval_command_plus_the_eos_flags
                  'DUMP_DIR="${DUMP_DIR:-results/chat_report_eos_test_split_s42}"'):
         assert line in mine_src, line
     levers = set(re.findall(r'(?m)^([A-Z][A-Z0-9_]*)="\$\{\1:-', mine_src))
-    assert levers == {"SCRATCH_ROOT", "VENV_ACTIVATE", "CKPT", "PARQUET", "DUMP_DIR"}, levers
+    assert levers == {"SCRATCH_ROOT", "VENV_ACTIVATE", "CKPT", "PARQUET", "DUMP_DIR", "PUBLISHED_DIR"}, levers
+    assert 'PUBLISHED_DIR="${PUBLISHED_DIR:-results/report_gen_m3_test_split_s42}"' in mine_src
 
 
-def test_eval_report_eos_decode_header_says_why_two_hours_are_enough():
+def test_eval_report_eos_decode_header_says_two_hours_are_enough_for_the_expected_decode_and_thin_at_the_full_budget():
+    """The first sentence of the TIME paragraph must say what its own arithmetic says: at 12.7 ms a step the expected decode takes
+    1.4 h and a run at the full budget 2.2 h, which is over the limit. The controller submits with the 4 h override."""
     header = "\n".join(l for l in _eval_text("decode").splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))
-    assert "--time=02:00:00" in header and "6.35 ms" in header and "TIMEOUT" in header and "--time=04:00:00" in header
+    time_paragraph = header[header.index("# TIME."):header.index("# It refuses")]
+    label, first_sentence = " ".join(l.lstrip("# ") for l in time_paragraph.splitlines()).split(". ")[:2]
+    assert label == "TIME" and "enough for the expected decode" in first_sentence and "thin at the full budget" in first_sentence, (
+        label, first_sentence)
+    assert "even at the full" not in header and "holds the cached decode" not in header, "the sentence the arithmetic contradicts"
+    for needle in ("--time=02:00:00", "6.35 ms", "12.7 ms", "1.4 h", "2.2 h", "TIMEOUT", "--time=04:00:00"):
+        assert needle in time_paragraph, needle
 
 
 def test_eval_report_eos_decode_refuses_without_done_and_over_an_existing_dump_and_outside_results_chat():
@@ -7090,8 +7105,15 @@ def test_eval_report_eos_decode_refuses_without_done_and_over_an_existing_dump_a
     code = "\n".join(_eos_wrapper_code(src))
     first_write = code.index('mkdir -p "${DUMP_DIR}"')
     for message in ("DUMP_DIR is not a new chat_ directory", "checkpoint not found", "the training run has no DONE marker",
-                    "test parquet not found", "the dump already holds hyps.txt or refs.txt", "venv not found", "GPU(s) visible"):
+                    "test parquet not found", "the dump already holds hyps.txt or refs.txt", "venv not found", "GPU(s) visible",
+                    "the published dump has no refs.txt"):
         assert 0 <= code.index(message) < first_write, "no directory is created before the guard '{}' has passed".format(message)
+    # Job 3 refuses two dumps that are not the same studies. Job 1 says so first, after its own result and before its END line, so
+    # that afterok stops the chain before the CheXbert hour: the same byte-for-byte test, on the same two files.
+    compare = 'cmp -s "${DUMP_DIR}/refs.txt" "${PUBLISHED_DIR}/refs.txt" || fail "refs differ from the published dump"'
+    assert compare in code
+    assert code.index("report_eos_stats.py decode") < code.index(compare) < code.index('echo "=== END decode ==="')
+    assert 'cmp -s "${DUMP_DIR}/refs.txt" "${PUBLISHED_DIR}/refs.txt"' in _eval_text("compare")
 
 
 def test_eval_report_eos_wrappers_send_raw_output_to_files_in_the_dump_dir_and_print_only_wrapper_authored_lines():
@@ -7196,6 +7218,7 @@ def test_eval_report_eos_compare_header_documents_the_three_chained_submit_lines
                "PUBLISHED_DIR=results/report_gen_m3_test_split_s42 -- --dependency=afterok:")
     for line in (decode, chexbert, compare):
         assert line in header, line
+    assert decode + " -- --time=04:00:00)" in header, "job 1 is documented with the 4 h override the controller submits it with"
     assert header.index(decode) < header.index(chexbert) < header.index(compare)
     assert "chat_remote.sh sync" in header and "chat_remote.sh summary logs/chat_eos_eval_" in header
 

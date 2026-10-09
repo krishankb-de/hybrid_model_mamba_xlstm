@@ -51,35 +51,72 @@ AWAY = ("stubs", "scratch", "home")
 
 # ── the result line ───────────────────────────────────────────────────────────
 
-def test_result_line_is_compact_json_of_numbers_flags_null_and_plain_names():
+def test_result_line_is_compact_json_of_numbers_flags_null_and_allowlisted_names():
     line = stats.result_line({"decode": "done", "n": 5, "share": 0.2, "ok": True, "gone": None, "worse": ["rouge_l", "Lung Lesion"]})
     assert line == 'RESULT {"decode":"done","n":5,"share":0.2,"ok":true,"gone":null,"worse":["rouge_l","Lung Lesion"]}'
 
 
+# Every string a RESULT line may carry (R7), written out here on purpose: the wrapper's own constants, the metric names
+# bootstrap_compare emits and the 14 CheXbert labels. A name is printed only if it is in this set, whatever file or log it came from.
+ALLOWED = {"done", "paired", "pass", "fail", "eos_s42", "m3_s42", "refs"} | set(MAIN_METRICS) | set(LABEL_NAMES)
+
+
+def test_the_allowlist_is_exactly_the_wrapper_constants_the_bootstrap_metrics_and_the_14_labels():
+    assert stats.ALLOWED_NAMES == frozenset(ALLOWED) and len(ALLOWED) == 7 + 9 + 14
+
+
+@pytest.mark.parametrize("name", sorted(ALLOWED))
+def test_result_line_accepts_each_allowlisted_name_alone_and_in_a_list(name):
+    assert stats.result_line({"x": name}) == 'RESULT {"x":"%s"}' % name
+    assert stats.result_line({"x": [name, name]}) == 'RESULT {"x":["%s","%s"]}' % (name, name)
+
+
+def test_the_label_allowlist_is_the_apps_canonical_chexbert_14():
+    from app.labels import CHEXBERT_14
+    assert list(stats.CHEXBERT_14) == CHEXBERT_14 == LABEL_NAMES
+
+
+def test_the_metric_allowlist_is_what_bootstrap_compare_emits():
+    bc = bootstrap_module()
+    refs, y_true = synthetic_studies(12)
+    cache = {"rouge": [0.5] * 12, "hyp_toks": [["a", "b"]] * 12, "ref_toks": [["a", "c"]] * 12, "y_true": y_true, "y_pred": y_true,
+             "five_idx": FIVE, "label_names": LABEL_NAMES}
+    emitted = list(bc.evaluate_subset(range(12), cache, per_label=True))
+    assert [m for m in emitted if not m.startswith(bc.PER_LABEL_PREFIX)] == list(stats.BOOTSTRAP_METRICS) == MAIN_METRICS
+    assert [m[len(bc.PER_LABEL_PREFIX):] for m in emitted if m.startswith(bc.PER_LABEL_PREFIX)] == list(stats.CHEXBERT_14)
+
+
 @pytest.mark.parametrize("bad", [
+    "No acute cardiopulmonary process.",                     # report text: what a free-name rule let through
+    "s50414267",                                             # a study id
+    "p10000032",                                             # a subject id
     "results/chat_report_eos_test_split_s42/hyps.txt",       # a path
     "/sc/home/someone",
-    "Findings: no acute disease.",                           # free text
+    "Findings: no acute disease.",
     "line\nbreak",
-    "name\n",                                                 # `$` would let a trailing newline through
-    "",
-    "x" * 41,
-    "12345678",                                              # an id: a name starts with a letter
+    "", "x" * 41, "12345678",
+    "eos_s42\n", "eos_s42 ", " eos_s42", "Eos_s42", "EOS_S42", "rouge_l2", "lung lesion", "No Finding\n",   # near misses: exact only
     {"nested": 1},
-    float("nan"),
-    float("inf"),
+    float("nan"), float("inf"),
+    50414267, -50414267, 10000032.0, 10 ** 7,                # a number of 8 digits or more could be an id
 ])
-def test_result_line_refuses_anything_that_could_carry_text_a_path_or_an_id(bad):
+def test_result_line_refuses_anything_not_on_the_allowlist_and_any_number_an_id_could_hide_in(bad):
     with pytest.raises(ValueError):
         stats.result_line({"x": bad})
     with pytest.raises(ValueError):
         stats.result_line({"x": [bad]})
 
 
+def test_result_line_keeps_the_numbers_a_job_prints():
+    assert stats.result_line({"n": 2663, "wall_s": 14400, "big": 9999999, "m": -5.5, "tiny": 1e-05}) == (
+        'RESULT {"n":2663,"wall_s":14400,"big":9999999,"m":-5.5,"tiny":1e-05}')
+
+
 def test_result_line_stays_under_the_300_characters_the_summary_keeps():
-    assert len(stats.result_line({"worse": ["m%d" % i for i in range(20)]})) < 300
+    assert len(stats.result_line({"worse": MAIN_METRICS})) < 300
+    assert len(stats.result_line({"label_worse": LABEL_NAMES})) < 300, "all 14 labels fit alone: a split gate line always fits"
     with pytest.raises(ValueError):
-        stats.result_line({"worse": ["m%d" % i for i in range(80)]})
+        stats.result_line({"worse": MAIN_METRICS, "label_worse": LABEL_NAMES})
 
 
 # ── hyps: mean length, repeats, unterminated endings ──────────────────────────
@@ -306,6 +343,25 @@ def test_decode_result_refuses_a_dump_it_cannot_tie_to_the_log(tmp_path, what):
     assert "/" not in str(raised.value) and len(str(raised.value)) < 200, "the message is printed: literals and numbers only"
 
 
+@pytest.mark.parametrize("poison", ['"Findings: no acute cardiopulmonary process. s50414267"', "50414267.5", "true", "[50414267]",
+                                    '{"id": 50414267}', "null", "41", "40.0"])        # 40.0 == 40: only the type check refuses it
+def test_an_aggregate_count_that_is_not_the_integer_n_is_refused_with_a_message_that_holds_none_of_it(tmp_path, poison):
+    """ERROR lines carry literals and numbers the script validated, never a value read out of the log. The count in the aggregate
+    block is whatever JSON the log holds: it must be an int (not a bool, float or text) before it is compared, and it is not echoed."""
+    log, _ = decode_log(n=40, ended=36)
+    write_dump(tmp_path, 40)
+    poisoned = log.replace('"num_examples": 40', '"num_examples": ' + poison)
+    assert poisoned != log
+    with pytest.raises(stats.ResultError) as raised:
+        stats.decode_result(poisoned, tmp_path, budget=200, wall_s=1)
+    message = str(raised.value)
+    assert not any(bit in message for bit in ("50414267", "Findings", "acute", "41", "id")), message
+    (tmp_path / "eval.log").write_text(poisoned)
+    done = run_stats("decode", "--log", str(tmp_path / "eval.log"), "--dump-dir", str(tmp_path), "--budget", "200", "--wall-s", "1")
+    assert done.returncode == 2 and done.stdout.startswith("ERROR ") and "RESULT" not in done.stdout
+    assert not any(bit in done.stdout + done.stderr for bit in ("50414267", "Findings", "acute")), done.stdout
+
+
 # ── the CheXbert scorer's files ───────────────────────────────────────────────
 
 def write_chexbert_files(directory: Path, n: int, labels_n: Optional[int] = None, micro_14: float = 0.4) -> None:
@@ -316,6 +372,18 @@ def write_chexbert_files(directory: Path, n: int, labels_n: Optional[int] = None
         "accuracy": 0.2, "chexbert_14": {"micro avg": avg(micro_14), "macro avg": avg(0.25)},
         "chexbert_5": {"micro avg": avg(0.45), "macro avg": avg(0.3)}, "num_examples": n}))
     (directory / "chexbert_labels.json").write_text(json.dumps({"y_true": rows, "y_pred": rows, "label_names": LABEL_NAMES}))
+
+
+@pytest.mark.parametrize("poison", ['"50414267"', "50414267.0", '"Findings: no acute cardiopulmonary process."', "true", "[50414267]"])
+def test_a_chexbert_example_count_that_is_not_an_int_is_refused_with_a_message_that_holds_none_of_it(tmp_path, poison):
+    write_dump(tmp_path, 7)
+    write_chexbert_files(tmp_path, 7)
+    metrics = (tmp_path / "chexbert_metrics.json").read_text()
+    (tmp_path / "chexbert_metrics.json").write_text(metrics.replace('"num_examples": 7', '"num_examples": ' + poison))
+    assert (tmp_path / "chexbert_metrics.json").read_text() != metrics
+    with pytest.raises(stats.ResultError) as raised:
+        stats.chexbert_result(tmp_path, 1)
+    assert not any(bit in str(raised.value) for bit in ("50414267", "Findings", "acute")), str(raised.value)
 
 
 def test_chexbert_result_has_the_four_f1_headlines_and_the_example_count(tmp_path):
@@ -402,7 +470,7 @@ def test_parse_bootstrap_round_trips_every_number_of_the_real_report(tmp_path):
 def test_the_gate_fails_and_names_every_metric_the_ci_puts_entirely_below_zero(tmp_path):
     text, results = real_bootstrap(tmp_path, "bad", "good")                      # the EOS system is worse on everything
     lines = stats.comparison_lines(stats.parse_bootstrap(text, "eos_s42", "m3_s42"), "eos_s42", "m3_s42")
-    assert lines[-1] == stats.result_line({"gate": "fail", "worse": MAIN_METRICS})
+    assert lines[-1] == stats.result_line({"gate": "fail", "worse": MAIN_METRICS}), "the verdict is the last line, whatever else is split off"
     assert all(results[m]["ci_high"] < 0 for m in MAIN_METRICS)
 
 
@@ -410,7 +478,7 @@ def test_the_gate_passes_when_the_eos_system_is_better_or_the_same(tmp_path):
     for a, b in (("good", "bad"), ("good", "good")):
         text, _ = real_bootstrap(tmp_path / (a + b), a, b)
         lines = stats.comparison_lines(stats.parse_bootstrap(text, "eos_s42", "m3_s42"), "eos_s42", "m3_s42")
-        assert lines[-1] == 'RESULT {"gate":"pass","worse":[]}', (a, b)
+        assert lines[-1] == 'RESULT {"gate":"pass","worse":[],"label_worse":[]}', (a, b)
 
 
 def test_a_system_better_on_text_and_worse_on_labels_fails_on_the_label_metrics_only(tmp_path):
@@ -427,14 +495,15 @@ def test_a_system_better_on_text_and_worse_on_labels_fails_on_the_label_metrics_
                                                        "chexbert_5_macro", "exact_match_accuracy_14", "exact_match_accuracy_5"]
 
 
-def rendered(rows: Dict[str, Tuple[float, float, float, float, float]], labels: Optional[Dict] = None) -> str:
+def rendered(rows: Dict[str, Tuple[float, float, float, float, float]], labels: Optional[Dict] = None,
+             names: Tuple[str, str] = ("eos_s42", "m3_s42")) -> str:
     """bootstrap_compare.render over hand-made rows: name -> (a, b, diff, ci_low, ci_high)."""
     bc = bootstrap_module()
     results = {}
     for name, (a, b, diff, lo, hi) in list(rows.items()) + [("label::" + k, v) for k, v in (labels or {}).items()]:
         results[name] = {"a": a, "b": b, "diff": diff, "ci_low": lo, "ci_high": hi,
                          "significant": lo > 0 or hi < 0, "frac_sign_flipped": 0.0}
-    return bc.render(results, {"n": 2663, "bootstrap_samples": 1000, "seed": 0}, "eos_s42", "m3_s42")
+    return bc.render(results, {"n": 2663, "bootstrap_samples": 1000, "seed": 0}, names[0], names[1])
 
 
 FLAT = {name: (0.3, 0.3, 0.0, -0.01, 0.01) for name in MAIN_METRICS}
@@ -454,8 +523,36 @@ def test_per_label_rows_are_printed_but_do_not_gate():
     text = rendered(FLAT, labels={"Lung Lesion": (0.1, 0.3, -0.2, -0.3, -0.1)})
     parsed = stats.parse_bootstrap(text, "eos_s42", "m3_s42")
     lines = stats.comparison_lines(parsed, "eos_s42", "m3_s42")
-    assert lines[-1] == 'RESULT {"gate":"pass","worse":[]}'
+    assert lines[-1] == 'RESULT {"gate":"pass","worse":[],"label_worse":["Lung Lesion"]}', "named for the reader, not counted by the gate"
     assert stats.result_line({"label": "Lung Lesion", "a": 0.1, "b": 0.3, "diff": -0.2, "lo": -0.3, "hi": -0.1}) in lines
+
+
+def test_label_worse_lists_the_labels_whose_ci_is_entirely_below_zero_by_the_same_sign_rule_and_never_changes_the_gate():
+    labels = {"Lung Lesion": (0.1, 0.3, -0.2, -0.3, -0.1),            # entirely below zero
+              "Edema": (0.2, 0.25, -0.05, -0.1, 0.02),                # spans zero
+              "Pneumonia": (0.2, 0.25, -0.05, -0.1, -0.00001),        # stops just short of zero: prints -0.0000, still below
+              "Fracture": (0.2, 0.25, -0.05, -0.1, 0.00001),          # touches zero from below: prints +0.0000, spans it
+              "Cardiomegaly": (0.4, 0.3, 0.1, 0.05, 0.15)}            # better
+    parsed = stats.parse_bootstrap(rendered(FLAT, labels=labels), "eos_s42", "m3_s42")
+    assert stats.worse_metrics(parsed["labels"]) == ["Lung Lesion", "Pneumonia"], "in the report's own order: by size of difference"
+    lines = stats.comparison_lines(parsed, "eos_s42", "m3_s42")
+    assert lines[-1] == 'RESULT {"gate":"pass","worse":[],"label_worse":["Lung Lesion","Pneumonia"]}'
+    failing = dict(FLAT, rouge_l=(0.19, 0.2, -0.01, -0.02, -0.005))
+    lines = stats.comparison_lines(stats.parse_bootstrap(rendered(failing), "eos_s42", "m3_s42"), "eos_s42", "m3_s42")
+    assert lines[-1] == 'RESULT {"gate":"fail","worse":["rouge_l"],"label_worse":[]}'
+
+
+def test_a_gate_line_too_long_for_both_lists_puts_label_worse_on_its_own_line_before_the_verdict(tmp_path):
+    """Every metric and every label worse: 9 + 14 names do not fit in 300 characters together, so the labels get a line of
+    their own and the verdict, which `chat_remote.sh summary` readers look for last, stays last."""
+    text, results = real_bootstrap(tmp_path, "bad", "good")
+    lines = stats.comparison_lines(stats.parse_bootstrap(text, "eos_s42", "m3_s42"), "eos_s42", "m3_s42")
+    expected_labels = [m[len("label::"):] for m, r in results.items() if m.startswith("label::") and r["ci_high"] < 0]
+    assert len(expected_labels) == 14
+    first = json.loads(lines[-2][len("RESULT "):])
+    assert list(first) == ["label_worse"] and sorted(first["label_worse"]) == sorted(expected_labels)
+    assert lines[-1] == stats.result_line({"gate": "fail", "worse": MAIN_METRICS})
+    assert all(len(line) < 300 for line in lines)
 
 
 def test_comparison_lines_are_the_meta_then_one_line_per_metric_then_the_gate():
@@ -484,6 +581,18 @@ def test_parse_bootstrap_refuses_a_report_without_the_label_metrics_the_gate_is_
     text_only = rendered({k: v for k, v in FLAT.items() if k in ("rouge_l", "bleu_1", "bleu_4")})
     with pytest.raises(stats.ResultError):
         stats.parse_bootstrap(text_only, "eos_s42", "m3_s42")
+
+
+def test_parse_bootstrap_refuses_a_row_name_the_job_does_not_print_and_does_not_echo_it():
+    """A name read out of the report is printed only if it is on the allowlist, and each table has its own: metrics in the first,
+    CheXbert labels in the second."""
+    poisoned_label = rendered(FLAT, labels={"s50414267": (0.1, 0.3, -0.2, -0.3, -0.1)})
+    label_in_metrics = rendered(dict(FLAT, **{"Lung Lesion": (0.1, 0.3, -0.2, -0.3, -0.1)}))
+    metric_in_labels = rendered(FLAT, labels={"rouge_l": (0.1, 0.3, -0.2, -0.3, -0.1)})
+    for text in (poisoned_label, label_in_metrics, metric_in_labels):
+        with pytest.raises(stats.ResultError) as raised:
+            stats.parse_bootstrap(text, "eos_s42", "m3_s42")
+        assert not any(bit in str(raised.value) for bit in ("s50414267", "Lung Lesion", "rouge_l")), str(raised.value)
 
 
 @pytest.mark.parametrize("text", ["", "# nothing\n", "| metric | eos_s42 | m3_s42 | diff | 95% CI | verdict |\n|---|---|---|---|---|---|\n| rouge_l | nan |\n"])
@@ -559,10 +668,23 @@ def test_cli_hyps_says_so_when_the_tokenizer_is_not_cached_and_still_reports_eve
     assert json.loads(result[len("RESULT "):])["mean_tokens"] is None
 
 
-def test_cli_hyps_refuses_a_system_name_that_is_not_a_plain_name(tmp_path):
+@pytest.mark.parametrize("name", ["results/chat_x", "my_system", "s50414267", "No acute cardiopulmonary process.", ""])
+def test_cli_hyps_refuses_a_system_name_that_is_not_on_the_allowlist(tmp_path, name):
     write_dump(tmp_path, 2)
-    done = run_stats("hyps", "results/chat_x=" + str(tmp_path / "hyps.txt"), "--tokenizer", "none")
-    assert done.returncode == 2 and done.stdout.startswith("ERROR ")
+    done = run_stats("hyps", name + "=" + str(tmp_path / "hyps.txt"), "--tokenizer", "none")
+    assert done.returncode == 2 and done.stdout.startswith("ERROR ") and "RESULT" not in done.stdout
+    if name:
+        assert name not in done.stdout
+
+
+def test_cli_gate_refuses_a_system_name_that_is_not_on_the_allowlist_before_it_could_reach_a_line(tmp_path):
+    """The report is rendered with the poisoned name as system A, so its header matches what is asked and the allowlist check is
+    the only thing in the way: a clean refusal (2), not a crash (1) when the name reaches the first RESULT line."""
+    md = tmp_path / "bootstrap.md"
+    md.write_text(rendered(FLAT, names=("s50414267", "m3_s42")))
+    done = run_stats("gate", "--bootstrap", str(md), "--name-a", "s50414267", "--name-b", "m3_s42")
+    assert done.returncode == 2 and done.stdout.startswith("ERROR ") and "RESULT" not in done.stdout
+    assert "s50414267" not in done.stdout + done.stderr
 
 
 def test_cli_gate_prints_the_comparison_and_exits_0_even_when_the_gate_fails(tmp_path):
@@ -571,7 +693,7 @@ def test_cli_gate_prints_the_comparison_and_exits_0_even_when_the_gate_fails(tmp
     done = run_stats("gate", "--bootstrap", str(md), "--name-a", "eos_s42", "--name-b", "m3_s42")
     assert done.returncode == 0, done.stdout + done.stderr
     only_summary_lines(done.stdout)
-    assert done.stdout.splitlines()[-1] == 'RESULT {"gate":"fail","worse":["rouge_l"]}', "the gate line comes last"
+    assert done.stdout.splitlines()[-1] == 'RESULT {"gate":"fail","worse":["rouge_l"],"label_worse":[]}', "the gate line comes last"
 
 
 def test_cli_gate_that_cannot_parse_prints_no_gate_line_at_all(tmp_path):
@@ -808,6 +930,8 @@ def decode_box(tmp_path: Path, n: int = 5, ended: int = 4, mode: str = "ok", sta
     (box.root / "data" / "test.parquet").write_bytes(b"")
     for name, value in (("eval.mode", mode), ("eval.n", n), ("eval.ended", ended)):
         box.stub(name, value)
+    box.published.mkdir(parents=True)                   # the published dump: job 1 reads its refs.txt, the same studies in the same order
+    (box.published / "refs.txt").write_text("".join("Findings: clear. Impression: none %d.\n" % i for i in range(n)))
     return box
 
 
@@ -956,6 +1080,59 @@ def test_a_dump_directory_outside_results_chat_is_refused_before_anything_is_cre
     assert done.returncode == 1 and [l for l in lines_of(done) if l.startswith("ERROR")], dump
     assert box.calls_of("evaluate_report_generation.py") == []
     assert snapshot(box.root, skip=AWAY) == before
+
+
+def test_a_dump_whose_refs_differ_from_the_published_dump_fails_the_job_after_its_result(tmp_path):
+    """Job 3 refuses two dumps that are not the same studies; job 1 says so first, so that afterok stops the chain before the
+    CheXbert hour. The decode's own numbers are still printed, before the verdict, and the finished dump is not touched (R8)."""
+    box = decode_box(tmp_path)
+    (box.published / "refs.txt").write_text("a different study.\n" * 5)
+    before = snapshot(box.root, skip=AWAY + ("main/" + DUMP,))
+    done = run_decode(box)
+    lines = lines_of(done)
+    assert done.returncode == 1, done.stdout
+    assert lines[-1] == "ERROR refs differ from the published dump", lines[-3:]
+    (result,) = results_of(lines)
+    assert result["n"] == 5 and result["ended_by_eos"] == 4, "the decode's numbers come first"
+    assert lines.index("ERROR refs differ from the published dump") > lines.index([l for l in lines if l.startswith("RESULT ")][0])
+    assert not [l for l in lines if l.startswith("=== END")]
+    assert_job_log_is_clean(lines)
+    assert (box.dump / "hyps.txt").is_file() and (box.dump / "refs.txt").is_file(), "the dump stays: nothing is deleted"
+    assert snapshot(box.root, skip=AWAY + ("main/" + DUMP,)) == before
+
+
+def test_refs_that_differ_by_one_byte_or_by_a_trailing_line_are_refused_too(tmp_path):
+    for variant in ("one_byte", "extra_line"):
+        box = decode_box(tmp_path / variant)
+        original = (box.published / "refs.txt").read_text()
+        (box.published / "refs.txt").write_text(original.replace("clear", "Clear", 1) if variant == "one_byte" else original + "\n")
+        done = run_decode(box)
+        assert done.returncode == 1 and lines_of(done)[-1] == "ERROR refs differ from the published dump", variant
+
+
+@pytest.mark.parametrize("what", ["dump_missing", "refs_missing"])
+def test_a_published_dump_without_refs_stops_the_job_before_the_decode_spends_any_gpu_time(tmp_path, what):
+    box = decode_box(tmp_path)
+    if what == "dump_missing":
+        shutil.rmtree(str(box.published))
+    else:
+        (box.published / "refs.txt").unlink()
+    before = snapshot(box.root, skip=AWAY)
+    done = run_decode(box)
+    lines = lines_of(done)
+    assert done.returncode == 1 and any(l.startswith("ERROR") and "published dump" in l for l in lines), lines
+    assert_job_log_is_clean(lines)
+    assert box.calls_of("evaluate_report_generation.py") == [] and not box.dump.exists()
+    assert snapshot(box.root, skip=AWAY) == before
+
+
+def test_the_published_dump_is_a_lever_like_the_other_paths(tmp_path):
+    box = decode_box(tmp_path)
+    other = box.main / "results" / "report_gen_other"
+    box.published.rename(other)
+    assert run_decode(box).returncode == 1, "the default published dump is gone"
+    done = run_decode(box, PUBLISHED_DIR="results/report_gen_other")
+    assert done.returncode == 0, done.stdout
 
 
 @pytest.mark.parametrize("missing", ["checkpoint", "parquet", "venv"])
@@ -1174,7 +1351,7 @@ def test_a_clean_comparison_prints_the_stats_the_metrics_and_the_gate_last(tmp_p
     assert found[3] == {"bootstrap": "paired", "name_a": "eos_s42", "name_b": "m3_s42", "n": 2663, "samples": 1000, "seed": 0}
     assert [r["metric"] for r in found[4:4 + len(MAIN_METRICS)]] == MAIN_METRICS
     assert found[4 + len(MAIN_METRICS)]["label"] == "Lung Lesion"
-    assert found[-1] == {"gate": "pass", "worse": []} and [r for r in found if "gate" in r] == [found[-1]]
+    assert found[-1] == {"gate": "pass", "worse": [], "label_worse": ["Lung Lesion"]} and [r for r in found if "gate" in r] == [found[-1]]
     assert (box.dump / "bootstrap_eos_s42_vs_m3_s42.md").is_file() and (box.dump / "bootstrap.log").is_file()
     assert "FAKE REPORT TEXT" in (box.dump / "bootstrap.log").read_text()
     assert snapshot(box.root, skip=AWAY + ("main/" + DUMP,)) == before, "R8: the published dump and everything else are untouched"
@@ -1205,7 +1382,7 @@ def test_a_failing_gate_is_a_finding_not_a_crash(tmp_path):
     assert done.returncode == 0, done.stdout
     assert_job_log_is_clean(lines)
     found = results_of(lines)
-    assert found[-1] == {"gate": "fail", "worse": ["rouge_l", "bleu_4"]}
+    assert found[-1] == {"gate": "fail", "worse": ["rouge_l", "bleu_4"], "label_worse": ["Lung Lesion"]}
 
 
 @pytest.mark.parametrize("what", ["no_published_dump", "no_published_labels", "no_eos_labels", "no_eos_hyps", "refs_differ",

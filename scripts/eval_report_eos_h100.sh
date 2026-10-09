@@ -14,29 +14,33 @@
 #                      best hypothesis, finished or live, is a finished one;
 #   --max-new-tokens 200   a ceiling, so that it is the model that ends a report; the published run is cut at 100.
 # tests/test_willi_parity.py parses both published sources and pins all of it. sbatch exports the submitting shell, so a BEAM_SIZE
-# or MAX_NEW_TOKENS left in it must not be able to change a decode. The levers are the three paths, as the rulings name them:
-# CKPT, PARQUET and DUMP_DIR.
+# or MAX_NEW_TOKENS left in it must not be able to change a decode. The levers are the paths, as the rulings name them (CKPT,
+# PARQUET, DUMP_DIR), and the published dump this one is checked against (PUBLISHED_DIR).
 #
-# TIME. --time=02:00:00 holds the cached decode even at the full 200-token budget. The cached step costs 6.35 ms per token on an
-# H100 (analysis/mamba3_results.md, section 6: batch 1; the beams here ride the batch axis of one cache). Allow the same again for
-# the beam bookkeeping, and about 0.4 s per report for the 32 prefix steps and the image. At 12.7 ms a step the 2,663 reports take
-# 1.4 h at a mean of 120 tokens, and 2.2 h only if nearly every report ran to the budget, which P9-G4's prediction makes
-# unlikely (under 10% are cut at it). A TIMEOUT is not requeued and cancels the chain: for more margin submit with
-# `-- --time=04:00:00`.
+# TIME. --time=02:00:00 is enough for the expected decode and thin at the full budget. The cached step costs 6.35 ms per token on
+# an H100 (analysis/mamba3_results.md, section 6: batch 1; the beams here ride the batch axis of one cache). Allow the same again
+# for the beam bookkeeping, and about 0.4 s per report for the 32 prefix steps and the image. At 12.7 ms a step the 2,663 reports
+# take 1.4 h at a mean of 120 tokens, which is what P9-G4 predicts (under 10% of reports cut at the budget), and 2.2 h, over the
+# limit, if nearly every report ran to the 200-token budget. A TIMEOUT is not requeued and cancels the chain, so the controller
+# submits with `-- --time=04:00:00`: the 2 h here is only the default.
 #
 # It refuses (an `ERROR ...` line, exit 1) when: DUMP_DIR is not a new results/chat_* directory (R8: ./results is a symlink into
 # the thesis checkout, which may only get new chat_* subdirectories); the checkpoint or the parquet is missing; the training run
 # that holds the checkpoint has no DONE marker (P9-G3 writes it only for a run that finished); the dump already holds hyps.txt or
-# refs.txt (a finished dump is never overwritten); or no GPU is visible (the evaluator would fall back to the CPU without a word).
+# refs.txt (a finished dump is never overwritten); the published dump it will be compared with has no refs.txt (job 3 could not pair
+# the two, so no GPU hour is spent first); or no GPU is visible (the evaluator would fall back to the CPU without a word).
 # A requeued, unfinished decode starts again and appends to the eval.log of the attempt it replaces: the dump is written only
 # after the whole decode, so an attempt that was cut short left none.
 #
 # AFTER THE DECODE it reads eval.log, through scripts/report_eos_stats.py decode, and checks that the log vouches for the dump: the
 # EOS stop line has the budget this job asked for, k + m = n, and hyps.txt and refs.txt hold n lines. Otherwise the job FAILS, so
-# that afterok stops the chain: a decode that did not stop at the EOS is not the measurement this job exists for.
+# that afterok stops the chain: a decode that did not stop at the EOS is not the measurement this job exists for. Last, after its
+# RESULT line, it compares this dump's refs.txt byte for byte with the published dump's (PUBLISHED_DIR, default the Mamba-3 s42
+# test-split dump): job 3 refuses two dumps that are not the same studies, and saying so here stops the chain before the CheXbert
+# hour instead of after it. A mismatch prints `ERROR refs differ from the published dump` and exits 1; the dump is left as it is.
 # R7: the evaluator prints MIMIC text and study ids (GENERATED:, REFERENCE:, one block per study), so its stdout and stderr go to
 # ${DUMP_DIR}/eval.log and are never printed. The job log carries only === / RESULT / ERROR lines written by this script or the
-# stats script, with numbers and names and no path. Read it with `bash scripts/chat_remote.sh summary logs/chat_eos_eval_<jobid>.log`.
+# stats script, with numbers and allowlisted names and no path. Read it with `bash scripts/chat_remote.sh summary logs/chat_eos_eval_<jobid>.log`.
 # Output (MIMIC-derived: stays on the cluster, never committed, never copied to the laptop):
 #   results/chat_report_eos_test_split_s42/{hyps.txt, refs.txt, eval.log, result.err}
 # ============================================================================
@@ -77,6 +81,7 @@ VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 CKPT="${CKPT:-${CHAT_HOME:-/sc/home/$USER/chat_sessions}/models/report_gen_m3_eos_s42/checkpoints/last.ckpt}"
 PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/test.parquet}"
 DUMP_DIR="${DUMP_DIR:-results/chat_report_eos_test_split_s42}"
+PUBLISHED_DIR="${PUBLISHED_DIR:-results/report_gen_m3_test_split_s42}"
 
 # --- the decode (see the header): plain assignments, deliberately not ${VAR:-default} -------------------------------------
 MODEL_CONFIG=hybrid_150m_m3_rrg
@@ -108,6 +113,7 @@ RUN_DIR="$(dirname "$(dirname "${CKPT}")")"
 if [ -e "${DUMP_DIR}/hyps.txt" ] || [ -e "${DUMP_DIR}/refs.txt" ]; then
   fail "the dump already holds hyps.txt or refs.txt: a finished dump is never overwritten (R8)"
 fi
+[ -f "${PUBLISHED_DIR}/refs.txt" ] || fail "the published dump has no refs.txt: this dump could not be paired with it"
 [ -f "${VENV_ACTIVATE}" ] || fail "venv not found"
 source "${VENV_ACTIVATE}"
 
@@ -148,4 +154,7 @@ rc=0
 RESULT_OUT="$(python scripts/report_eos_stats.py decode --log "${DUMP_DIR}/eval.log" --dump-dir "${DUMP_DIR}" --budget "${MAX_NEW_TOKENS}" --wall-s "${WALL_S}" 2>> "${DUMP_DIR}/result.err")" || rc=$?
 printf '%s\n' "${RESULT_OUT}" | grep -aE '^(=== |RESULT |ERROR)' || true
 [ "${rc}" -eq 0 ] || fail "result exit=${rc}: the log does not vouch for the dump"
+
+# --- the same studies as the published run: job 3 needs it, and saying so here stops the chain before the CheXbert hour ----
+cmp -s "${DUMP_DIR}/refs.txt" "${PUBLISHED_DIR}/refs.txt" || fail "refs differ from the published dump"
 echo "=== END decode ==="
