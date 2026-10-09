@@ -7247,3 +7247,20 @@ def test_eval_report_eos_stats_script_is_stdlib_only_at_import_so_the_chexbert_v
             elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
                 imported.add(node.module.split(".")[0])
         assert imported <= set(sys.stdlib_module_names) | {"scripts"}, (name, sorted(imported - set(sys.stdlib_module_names)))
+
+
+def test_chexbert_service_imports_nothing_from_hybrid_xmamba():
+    """P5-A. app/labeler.py runs in .venv_chexbert (pins transformers<5 and scikit-learn<1.8 for f1chexbert), an environment apart from
+    the one that runs hybrid_xmamba; like scripts/score_chexbert_standalone.py it must import nothing from the package. That includes
+    every other first-party module (app.engine imports hybrid_xmamba, so any `app` or `scripts` import is a way in), and app.labels in
+    particular: the service reports F1CheXbert's own label names, so the client's CHEXBERT_14 is checked against something independent."""
+    path = REPO_ROOT / "app" / "labeler.py"
+    assert path.is_file(), path
+    roots = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):       # walk reaches the lazy import inside _get() too
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            roots.add("app" if node.level else (node.module or "").split(".")[0])
+    assert "f1chexbert" in roots, roots          # the walker does see function-level imports, so it would see a lazy hybrid_xmamba one
+    assert not roots & {"hybrid_xmamba", "app", "scripts", "tests"}, sorted(roots)
