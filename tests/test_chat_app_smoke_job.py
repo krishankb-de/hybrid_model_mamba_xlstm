@@ -17,7 +17,7 @@ from typing import List, Optional, Tuple
 
 import pytest
 
-from tests.test_chat_remote import STAMP_RE, Sandbox
+from tests.test_chat_remote import STAMP_RE, Sandbox, _summary_of
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SMOKE_SH = REPO_ROOT / "scripts" / "chat_app_smoke_h100.sh"
@@ -27,7 +27,9 @@ JOB_ID = "4242"
 STAMP = "2026-10-10T08:00:00Z 3f2a9c41d7e86b05a1c4e9d3b7f60285ac9e1d47 clean"
 LINE_OK = re.compile(r"^(=== |\[setup\] |ERROR)")      # what `chat_remote.sh summary` shows of a job log, minus RESULT (none here)
 SETUP_LINES = ["[setup] app.server imports; fastapi 9.9.9", "[setup] app.labeler imports; transformers 4.4.4",
-               "[setup] chexbert label order equal: true"]
+               "[setup] chexbert label order equal: true (f1chexbert 0.0.2)"]
+# The one shape the label-order probe may print, for either answer: the version is digits and dots only (R7: numbers only).
+LABELS_LINE = re.compile(r"^\[setup\] chexbert label order equal: (true|false) \(f1chexbert [0-9]+(\.[0-9]+)*\)$")
 
 # Stands in for a venv's python. It records the call, then plays the probe it was handed (told apart by the module names in its code):
 # raw output on both streams that must never reach the job log, then the probe's one [setup] line, or the failure its mode asks for.
@@ -47,8 +49,8 @@ case "$mode" in fail) exit 7;; silent) exit 0;; esac
 case "$probe:$mode" in
   server:ok) echo "[setup] app.server imports; fastapi 9.9.9";;
   labeler:ok) echo "[setup] app.labeler imports; transformers 4.4.4";;
-  labels:ok) echo "[setup] chexbert label order equal: true";;
-  labels:differ) echo "[setup] chexbert label order equal: false"; exit 3;;
+  labels:ok) echo "[setup] chexbert label order equal: true (f1chexbert 0.0.2)";;
+  labels:differ) echo "[setup] chexbert label order equal: false (f1chexbert 0.0.2)"; exit 3;;
 esac
 exit 0
 """
@@ -203,7 +205,7 @@ def test_a_label_order_mismatch_prints_equal_false_and_fails_the_job(tmp_path):
     done = box.run()
     lines = job_lines(done)
     assert done.returncode == 1, done.stdout
-    assert lines[-3:] == ["[setup] chexbert label order equal: false", "ERROR labels exit=3",
+    assert lines[-3:] == ["[setup] chexbert label order equal: false (f1chexbert 0.0.2)", "ERROR labels exit=3",
                           "=== END chat app smoke: 1 of 3 probe(s) failed ==="], lines
     assert "SECRET" not in done.stdout
 
@@ -315,8 +317,9 @@ def test_the_three_probes_run_for_real_over_the_apps_own_imports_and_the_install
     assert len(setup) == 3, lines
     assert re.match(r"^\[setup\] app\.server imports; fastapi \d+\.\d+", setup[0]), setup[0]
     assert re.match(r"^\[setup\] app\.labeler imports; transformers \d+\.\d+", setup[1]), setup[1]
-    assert setup[2] == "[setup] chexbert label order equal: true", "CHEXBERT_14 differs from the names the installed f1chexbert reports"
+    assert LABELS_LINE.match(setup[2]) and "equal: true" in setup[2], "CHEXBERT_14 differs from the names the installed f1chexbert reports: " + setup[2]
     assert not [l for l in lines if not LINE_OK.match(l)], lines
+    assert _summary_of(tmp_path / "summary", setup) == setup, "R7: the real versions pass the summary allowlist and the mask unchanged"
 
 
 def probe_code(name: str) -> str:
@@ -340,16 +343,23 @@ class F1CheXbert:
 '''
 
 
-def run_labels_probe(tmp_path: Path, names: Optional[List[str]], source: Optional[str] = None) -> subprocess.CompletedProcess:
+def run_labels_probe(tmp_path: Path, names: Optional[List[str]], source: Optional[str] = None,
+                     version: Optional[str] = "0.0.2") -> subprocess.CompletedProcess:
     """The label-order probe's own code in a bare interpreter (-S: no site-packages, so the real f1chexbert cannot be found by
-    accident) over a fake f1chexbert package whose __init__ ends the process if it is ever imported."""
+    accident) over a fake f1chexbert package whose __init__ ends the process if it is ever imported. Its dist-info says `version`
+    (None: no dist-info, as if the package had been put there by hand); neither names nor source: no package at all."""
     env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)}
     if names is not None or source is not None:
-        package = tmp_path / "site" / "f1chexbert"
+        site = tmp_path / "site"
+        package = site / "f1chexbert"
         package.mkdir(parents=True)
         (package / "__init__.py").write_text("raise SystemExit(98)\n")
         (package / "f1chexbert.py").write_text(source if source is not None else F1_SOURCE.format(names=names))
-        env["PYTHONPATH"] = str(tmp_path / "site")
+        if version is not None:
+            info = site / "f1chexbert-0.0.2.dist-info"           # the directory name is how importlib.metadata finds it; the header is what it reports
+            info.mkdir()
+            (info / "METADATA").write_text("Metadata-Version: 2.1\nName: f1chexbert\nVersion: {}\n".format(version))
+        env["PYTHONPATH"] = str(site)
     return subprocess.run([sys.executable, "-S", "-c", probe_code("LABELS_PROBE")], cwd=str(REPO_ROOT), env=env,
                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
 
@@ -359,29 +369,34 @@ def chexbert_14() -> List[str]:
     return list(CHEXBERT_14)
 
 
+TRUE_LINE = "[setup] chexbert label order equal: true (f1chexbert 0.0.2)\n"
+FALSE_LINE = "[setup] chexbert label order equal: false (f1chexbert 0.0.2)\n"
+
+
 def test_the_label_order_probe_says_true_for_the_order_f1chexbert_assigns(tmp_path):
     done = run_labels_probe(tmp_path, chexbert_14())
     assert done.returncode == 0, done.stderr
-    assert done.stdout == "[setup] chexbert label order equal: true\n"
+    assert done.stdout == TRUE_LINE
 
 
 def test_the_label_order_probe_says_false_and_exits_3_for_any_other_order(tmp_path):
     names = chexbert_14()
     names[0], names[1] = names[1], names[0]
     done = run_labels_probe(tmp_path, names)
-    assert (done.returncode, done.stdout) == (3, "[setup] chexbert label order equal: false\n"), done.stderr
+    assert (done.returncode, done.stdout) == (3, FALSE_LINE), done.stderr
 
 
 def test_the_label_order_probe_says_false_for_a_list_of_another_length(tmp_path):
     done = run_labels_probe(tmp_path, chexbert_14()[:-1])
-    assert (done.returncode, done.stdout) == (3, "[setup] chexbert label order equal: false\n")
+    assert (done.returncode, done.stdout) == (3, FALSE_LINE)
 
 
 def test_the_label_order_probe_parses_f1chexbert_and_never_imports_it_or_loads_weights(tmp_path):
     """Importing the fake package ends the process with 98, executing its module raises, and building an F1CheXbert would fail at
-    load_the_weights: a clean `true` proves the source was only parsed (no import, so no weights and no network)."""
+    load_the_weights: a clean `true` proves the source was only parsed and the version only read from the metadata (no import,
+    so no weights and no network)."""
     done = run_labels_probe(tmp_path, chexbert_14())
-    assert (done.returncode, done.stdout, done.stderr) == (0, "[setup] chexbert label order equal: true\n", "")
+    assert (done.returncode, done.stdout, done.stderr) == (0, TRUE_LINE, "")
 
 
 def test_the_label_order_probe_exits_4_without_a_setup_line_when_the_source_holds_no_names_list(tmp_path):
@@ -392,3 +407,82 @@ def test_the_label_order_probe_exits_4_without_a_setup_line_when_the_source_hold
 def test_the_label_order_probe_fails_with_no_setup_line_when_f1chexbert_is_not_installed(tmp_path):
     done = run_labels_probe(tmp_path, None)
     assert done.returncode == 1 and "[setup]" not in done.stdout
+
+
+# Fix 1. Every source here assigns the RIGHT list somewhere, so a probe that took the first assignment it found would say `true`
+# for all of them: only a probe that insists on exactly one plain assignment ends with exit 4. {names!r} is filled with CHEXBERT_14.
+NOT_EXACTLY_ONE = {
+    "twice in __init__": "class F1CheXbert:\n    def __init__(self):\n        self.target_names = {names!r}\n        self.target_names = {names!r}\n",
+    "in __init__ and in another method": ("class F1CheXbert:\n    def __init__(self):\n        self.target_names = {names!r}\n"
+                                          "    def reset(self):\n        self.target_names = []\n"),
+    "in two classes": ("class A:\n    def __init__(self):\n        self.target_names = {names!r}\n"
+                       "class B:\n    def __init__(self):\n        self.target_names = {names!r}\n"),
+    "as a class attribute and in __init__": ("class F1CheXbert:\n    target_names = {names!r}\n    def __init__(self):\n"
+                                             "        self.target_names = {names!r}\n"),
+    "annotated and plain": ("class F1CheXbert:\n    def __init__(self):\n        self.target_names: list = {names!r}\n"
+                            "        self.target_names = {names!r}\n"),
+    "plain and augmented": ("class F1CheXbert:\n    def __init__(self):\n        self.target_names = {names!r}\n"
+                            "        self.target_names += ['No Finding']\n"),
+    "two targets in one statement": "class F1CheXbert:\n    def __init__(self):\n        self.target_names = other.target_names = {names!r}\n",
+    "an augmented assignment alone": "class F1CheXbert:\n    def __init__(self):\n        self.target_names += {names!r}\n",
+}
+# One assignment, in whatever form, with look-alikes and keyword arguments around it: read as before.
+EXACTLY_ONE = {
+    "annotated": "class F1CheXbert:\n    def __init__(self):\n        self.target_names: list = {names!r}\n",
+    "a class attribute": "class F1CheXbert:\n    target_names = {names!r}\n",
+    "among look-alike names and keyword arguments": (
+        "class F1CheXbert:\n    def __init__(self):\n        self.target_names = {names!r}\n        self.target_names_5 = ['Edema']\n"
+        "        self.target_names_5_index = list(range(3))\n    def forward(self):\n"
+        "        return report(target_names=self.target_names, other=self.target_names_5)\n"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(NOT_EXACTLY_ONE))
+def test_the_label_order_probe_needs_exactly_one_plain_target_names_assignment_and_otherwise_exits_4(tmp_path, case):
+    done = run_labels_probe(tmp_path, None, source=NOT_EXACTLY_ONE[case].format(names=chexbert_14()))
+    assert (done.returncode, done.stdout) == (4, ""), (case, done.stderr)
+
+
+@pytest.mark.parametrize("case", sorted(EXACTLY_ONE))
+def test_one_target_names_assignment_is_read_whatever_its_form_and_whatever_surrounds_it(tmp_path, case):
+    done = run_labels_probe(tmp_path, None, source=EXACTLY_ONE[case].format(names=chexbert_14()))
+    assert (done.returncode, done.stdout) == (0, TRUE_LINE), (case, done.stderr)
+
+
+def test_the_probe_prints_the_version_from_the_distribution_metadata_in_digits_and_dots(tmp_path):
+    names = chexbert_14()
+    for answer, version, order in (("true", "10.20.30.40", names), ("false", "0.0.2", names[::-1])):
+        done = run_labels_probe(tmp_path / answer, order, version=version)
+        assert done.stdout == "[setup] chexbert label order equal: {} (f1chexbert {})\n".format(answer, version), done.stderr
+        assert LABELS_LINE.match(done.stdout.strip())
+
+
+@pytest.mark.parametrize("version", ["0.0.2rc1", "0.0.2.post1", "0.0.2.dev1", "0.0.2+cpu", "1!0.0.2", "v0.0.2", "0.0.2 text", "0..2",
+                                     ".0.2", "0.0.2.", "", "unknown", "0.0.2; echo pwned"])
+def test_a_version_that_is_not_digits_and_dots_is_never_printed_and_ends_the_probe_with_exit_4(tmp_path, version):
+    """R7: the line may carry numbers only. Either answer is refused before it is printed, true or false."""
+    for answer, order in (("true", chexbert_14()), ("false", chexbert_14()[::-1])):
+        done = run_labels_probe(tmp_path / answer, order, version=version)
+        assert (done.returncode, done.stdout) == (4, ""), (answer, version, done.stderr)
+
+
+def test_a_package_without_distribution_metadata_ends_the_probe_with_no_setup_line(tmp_path):
+    done = run_labels_probe(tmp_path, chexbert_14(), version=None)
+    assert done.returncode == 1 and done.stdout == "", done.stderr
+
+
+def test_the_probes_line_passes_the_summary_allowlist_and_the_mask_unchanged(tmp_path):
+    """R7, end to end through chat_remote.sh's own grep pattern and mask: nothing of the line is dropped or blanked, for either
+    answer and for a version of several digits."""
+    shown_in = []
+    for answer, version, order in (("true", "0.0.2", chexbert_14()), ("false", "10.20.30.40", chexbert_14()[::-1])):
+        shown_in.append(run_labels_probe(tmp_path / answer, order, version=version).stdout.strip())
+    assert all(LABELS_LINE.match(line) for line in shown_in), shown_in
+    assert _summary_of(tmp_path / "summary", shown_in) == shown_in
+
+
+def test_the_whole_clean_job_log_passes_the_summary_allowlist_and_the_mask_unchanged(tmp_path):
+    lines = job_lines(JobBox(tmp_path / "job").run())
+    comparable = [l for l in lines if not l.startswith("=== P7-A")]          # that one names the node, whose name is the machine's
+    assert len(comparable) == len(lines) - 1 and any(l.startswith("[setup] chexbert") for l in comparable)
+    assert _summary_of(tmp_path / "summary", comparable) == comparable

@@ -7771,8 +7771,13 @@ def test_chat_app_smoke_wrapper_reads_the_label_order_from_the_source_and_never_
     code = "\n".join(_eos_wrapper_code(src))
     assert 'importlib.util.find_spec("f1chexbert")' in code and "ast.parse(" in code and "ast.literal_eval(" in code
     assert "F1CheXbert(" not in code and "import f1chexbert" not in code and "from f1chexbert" not in code
+    # Fix 1: exactly one assignment, and a version that comes from the distribution metadata (never from the package) in digits and dots.
+    assert "len(found) != 1" in code and "raise SystemExit(4)" in code
+    assert 'importlib.metadata.version("f1chexbert")' in code and 're.fullmatch(r"[0-9]+(\\.[0-9]+)*", version)' in code
+    assert "f1chexbert.__version__" not in code
     header = "\n".join(l for l in src.splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))
     assert "target_names" in header and "weights" in header, "the header says why the source is read"
+    assert "digits and dots" in header and "(f1chexbert <version>)" in header, "the header documents the version in the line"
     thesis = (REPO_ROOT / "scripts" / "score_chexbert_standalone.py").read_text()
     assert "labeler.target_names" in thesis, "the thesis scorer reads the same attribute off a live F1CheXbert"
 

@@ -3,7 +3,9 @@
 #   bash scripts/install_hooks.sh
 #
 # The hook goes where git looks for hooks: .git/hooks, or core.hooksPath when that is set (`git rev-parse --git-path hooks` says
-# which). Worktrees of one repository share that directory, so one install covers them. The hook is a few lines that run
+# which). Linked worktrees of one repository share .git/hooks, and an absolute core.hooksPath, so one install covers them. A RELATIVE
+# core.hooksPath is not shared: git resolves it against the root of each worktree, so a linked worktree will not run the hook
+# installed here unless it holds the same file, and the script says so (WARNING). The hook is a few lines that run
 # scripts/check_no_restricted_files.sh of the repository being committed and do nothing where that file is absent (another branch,
 # or another repository under the same core.hooksPath), so it can never block a commit it has no rule for.
 #   R8: an existing pre-commit hook that is not this one is never overwritten (nor is a symlink or a directory in its place): the
@@ -19,6 +21,14 @@ TOP="$(git -C "${REPO_ROOT}" rev-parse --show-toplevel)"
 HOOKS="$(git -C "${TOP}" rev-parse --git-path hooks)"            # .git/hooks, or core.hooksPath; relative to ${TOP} when relative
 case "${HOOKS}" in /*) ;; *) HOOKS="${TOP}/${HOOKS}" ;; esac
 HOOK="${HOOKS}/pre-commit"
+
+# core.hooksPath as written (`git rev-parse --git-path` has already turned it into a path). Only an absolute path, or one under ~, is
+# the same directory for every worktree: say so when it is neither, whatever else happens below.
+CONFIGURED="$(git -C "${TOP}" config --get core.hooksPath || true)"
+case "${CONFIGURED}" in
+  "" | /* | '~'*) ;;
+  *) echo "WARNING: core.hooksPath is relative (${CONFIGURED}), so git looks for hooks in the root of each worktree: linked worktrees will not run the hook installed here unless they hold the same file." ;;
+esac
 
 WANT='#!/bin/bash
 # Installed by scripts/install_hooks.sh (CHAT_UI_PLAN.md P9-A): refuse a commit that stages restricted or binary artefacts.
