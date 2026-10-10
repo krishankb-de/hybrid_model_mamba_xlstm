@@ -212,6 +212,12 @@ def test_the_numbers_the_brief_names_are_the_modules_constants(gates):
     assert (gates.N_SELF, gates.N_RANK, gates.N_LABELLED, gates.LABELER_TIMEOUT_S) == (50, 50, 50, 120)
 
 
+def test_an_own_row_is_looked_for_among_as_many_neighbours_as_the_gallery_gives(gates):
+    """The k of a miss: the most Gallery.image_neighbors answers with (it clamps k to 12)."""
+    from app.gallery import MAX_K_IMAGES
+    assert gates.K_NEIGHBOURS == MAX_K_IMAGES == 12
+
+
 def test_the_label_order_written_out_in_these_tests_is_the_apps(gates):
     """The tests spell the 14 names once more to build reordered and foreign dumps: that copy, the app's and the driver's agree."""
     assert NAMES == CHEXBERT_14 == list(gates.CHEXBERT_14)
@@ -320,7 +326,10 @@ def test_each_train_image_goes_through_preprocess_and_encode_from_its_file_bytes
     assert len(seen["encode"]) == 100
 
 
-def test_a_train_image_that_does_not_find_itself_is_a_miss_with_its_row_what_was_found_and_the_gap(gates, world, capsys):
+def test_a_train_image_that_does_not_find_itself_is_a_miss_with_what_was_found_and_where_its_own_row_stands(gates, world, capsys):
+    """A real miss on the tiny stack: the gallery's vector of the image is the reverse of the image's own, so its own row is nowhere near the
+    first k neighbours. Then own_rank is 0 ("not found within k"), k is named, and own_gap is the gap to the k-th neighbour, which the own row
+    is at least as far behind as."""
     row = world.rows(gates)[10]
     world.negate_img([row])
     ran = run_main(gates, capsys, world)
@@ -328,15 +337,88 @@ def test_a_train_image_that_does_not_find_itself_is_a_miss_with_its_row_what_was
     found = world.gates_json()
     assert found["self_retrieval"] == 49 and found["passed"] is False
     (miss,) = found["misses"]
-    assert set(miss) == {"row", "got", "gap"} and miss["row"] == row and miss["got"] != row
+    assert set(miss) == {"row", "got", "gap", "own_rank", "own_gap", "k"} and miss["row"] == row and miss["got"] != row
     train = pd.read_parquet(world.data / "train.parquet")
-    top = Gallery.open(world.gallery, expect_tower_sha256=None).image_neighbors(embed(build_engine("tiny"), [train["image"].iloc[row]])[0], 2)
+    top = Gallery.open(world.gallery, expect_tower_sha256=None).image_neighbors(embed(build_engine("tiny"), [train["image"].iloc[row]])[0], 12)
+    assert row not in [n["gallery_row"] for n in top], "the premise: the own row is not among the first 12"
     assert miss["got"] == top[0]["gallery_row"] and miss["gap"] == pytest.approx(top[0]["similarity"] - top[1]["similarity"], abs=1e-6)
     assert miss["gap"] >= 0
+    assert (miss["own_rank"], miss["k"]) == (0, 12)
+    assert miss["own_gap"] == pytest.approx(top[0]["similarity"] - top[-1]["similarity"], abs=1e-6) and miss["own_gap"] >= miss["gap"]
     assert "[gates] self_retrieval hits=49 of=50 misses=1" in ran.lines
-    assert [l for l in ran.lines if l.startswith("[gates] miss ")] == ["[gates] miss row={} got={} gap={:.6f}".format(row, miss["got"], miss["gap"])]
+    assert [l for l in ran.lines if l.startswith("[gates] miss ")] == [
+        "[gates] miss row={} got={} gap={:.6f} own_rank=0 own_gap={:.6f} k=12".format(row, miss["got"], miss["gap"], miss["own_gap"])]
     result_at = [i for i, l in enumerate(ran.lines) if l.startswith("RESULT ")][0]
     assert ran.lines.index("ERROR gate self_retrieval=49 expected=50") > result_at, "the verdict follows the numbers"
+
+
+def scripted_neighbours(monkeypatch: Any, call: int, build: Any) -> None:
+    """Gallery.image_neighbors answers as it does, except its call number `call` (0-based; the job asks once per train image, in the order of
+    sample_rows): there the answer is build(what it says, k)."""
+    original, asked = Gallery.image_neighbors, []
+
+    def scripted(self, query, k):
+        out = original(self, query, k)
+        asked.append(k)
+        return build(out, k) if len(asked) - 1 == call else out
+
+    monkeypatch.setattr(Gallery, "image_neighbors", scripted)
+
+
+def test_a_duplicate_image_reads_own_rank_2_and_own_gap_0_in_the_summary_alone(gates, world, monkeypatch, capsys):
+    """The tie, scripted so that its order is certain: the image's twin (another row with the very same vector) is first, its own row second at
+    the same similarity. The line alone says it was a tie, not a wrong embedding: own_rank=2 own_gap=0.000000."""
+    row, twin = world.rows(gates)[10], 3                                       # row 3 is not one of the 50 checked
+
+    def tie(out, k):
+        own = out[0]
+        assert own["gallery_row"] == row, "the premise: it finds itself"
+        return ([dict(own, gallery_row=twin, rank=1), dict(own, rank=2)] + [dict(n, rank=n["rank"] + 1) for n in out[1:]])[:k]
+
+    scripted_neighbours(monkeypatch, 10, tie)
+    ran = run_main(gates, capsys, world)
+    assert ran.rc == 1, ran.out
+    assert world.gates_json()["misses"] == [{"row": row, "got": twin, "gap": 0.0, "own_rank": 2, "own_gap": 0.0, "k": 12}]
+    assert "[gates] miss row={} got={} gap=0.000000 own_rank=2 own_gap=0.000000 k=12".format(row, twin) in ran.lines
+
+
+def test_an_own_row_that_is_third_reads_its_rank_and_its_gap_to_the_first(gates, world, monkeypatch, capsys):
+    row = world.rows(gates)[10]
+
+    def third(out, k):
+        base = out[0]
+        return [dict(base, gallery_row=1, rank=1, similarity=0.99), dict(base, gallery_row=2, rank=2, similarity=0.989),
+                dict(base, gallery_row=row, rank=3, similarity=0.9875)] + [dict(n, rank=n["rank"] + 2, similarity=0.5) for n in out[1:]][:k - 3]
+
+    scripted_neighbours(monkeypatch, 10, third)
+    ran = run_main(gates, capsys, world)
+    (miss,) = world.gates_json()["misses"]
+    assert (miss["got"], miss["own_rank"], miss["k"]) == (1, 3, 12)
+    assert miss["gap"] == pytest.approx(0.001) and miss["own_gap"] == pytest.approx(0.0025)
+    assert "[gates] miss row={} got=1 gap=0.001000 own_rank=3 own_gap=0.002500 k=12".format(row) in ran.lines
+
+
+def test_a_duplicate_train_image_on_the_real_stack_reads_own_rank_2_and_own_gap_0(gates, tmp_path, template, capsys):
+    """The same tie with no script: a second gallery row with the vector of the image's own row (an image that is in the train split twice).
+    Which of two tied rows the neighbour search puts first is np.argpartition's business, so twin positions are tried until it puts the twin
+    first; the own row is then second at exactly the same similarity."""
+    rows = World(tmp_path / "rows", template).rows(gates)
+    row = rows[10]
+    candidates = [c for c in (row + 1, row - 1, row + 2, row - 2, row + 5, row - 5, row + 9, row - 9, 1, N_IMAGES - 2) if c not in rows]
+    for twin in candidates:
+        world = World(tmp_path / "twin{}".format(twin), template)
+        img = world.load("img_emb.npy")
+        img[twin] = img[row]
+        world.save("img_emb.npy", img)
+        ran = run_main(gates, capsys, world)
+        if world.gates_json()["misses"]:
+            break
+    else:
+        pytest.fail("no twin position put the twin first among {}: np.argpartition orders ties differently now".format(candidates))
+    assert ran.rc == 1
+    (miss,) = world.gates_json()["misses"]
+    assert (miss["row"], miss["got"], miss["gap"], miss["own_rank"], miss["own_gap"], miss["k"]) == (row, twin, 0.0, 2, 0.0, 12)
+    assert "[gates] miss row={} got={} gap=0.000000 own_rank=2 own_gap=0.000000 k=12".format(row, twin) in ran.lines
 
 
 def test_the_miss_lines_are_at_most_twenty_and_gates_json_has_every_miss(gates, world, capsys):
@@ -496,13 +578,27 @@ def test_published_labels_without_label_names_are_read_in_chexbert_14_order_and_
     assert RESULT_CLEAN in ran.lines
 
 
-def test_published_labels_naming_the_same_labels_in_another_order_are_reordered_by_name_and_a_note_says_so(gates, world, capsys):
-    perm = list(reversed(range(14)))
-    payload = world.published()
-    payload["label_names"] = [NAMES[i] for i in perm]
+# The other order of the same names is a ROTATION, not a reversal: a reversal is its own inverse, so a reorder that applied the inverse
+# permutation (or applied it twice) would still pass a test built on it. A rotation by one place is not its own inverse.
+ROTATION = list(range(1, 14)) + [0]
+
+
+def rotated(payload: dict) -> dict:
+    """The published dump with its labels in another order, named: label_names, and the columns of y_true and y_pred, rotated by one place."""
+    out = dict(payload, label_names=[NAMES[i] for i in ROTATION])
     for key in ("y_true", "y_pred"):
-        payload[key] = [[row[i] for i in perm] for row in payload[key]]
-    world.set_published(payload)
+        out[key] = [[row[i] for i in ROTATION] for row in payload[key]]
+    return out
+
+
+def test_the_permutation_of_the_reorder_tests_is_not_its_own_inverse():
+    assert sorted(ROTATION) == list(range(14)) and ROTATION != list(range(14))
+    assert [ROTATION[i] for i in ROTATION] != list(range(14)), "applied twice it is not the identity: a reorder by the inverse would show"
+    assert rotated({"y_true": [list(range(14))], "y_pred": [list(range(14))]})["y_true"] == [ROTATION]
+
+
+def test_published_labels_naming_the_same_labels_in_another_order_are_reordered_by_name_and_a_note_says_so(gates, world, capsys):
+    world.set_published(rotated(world.published()))
     ran = run_main(gates, capsys, world)
     assert ran.rc == 0, ran.out
     assert "=== note: chexbert_labels.json label_names reordered to the CHEXBERT_14 order ===" in ran.lines
@@ -769,13 +865,14 @@ GATES_SHAPE_LIST = [
     r"\[gates\] gallery images=[0-9]{1,7} report_rows=[0-9]{1,7} report_groups=[0-9]{1,7} towers_identical=(true|false) img_proj_present=false "
     r"labels_status=(done|pending)",
     r"\[gates\] self_retrieval hits=[0-9]{1,3} of=[0-9]{1,3} misses=[0-9]{1,3}",
-    r"\[gates\] miss row=[0-9]{1,7} got=[0-9]{1,7} gap=[0-9]\.[0-9]{6}",
+    r"\[gates\] miss row=[0-9]{1,7} got=[0-9]{1,7} gap=[0-9]\.[0-9]{6} own_rank=[0-9]{1,2} own_gap=[0-9]\.[0-9]{6} k=[0-9]{1,2}",
     r"\[gates\] own_rank equal=[0-9]{1,3} dedup_equal=[0-9]{1,3} of=[0-9]{1,3} max_diff=[0-9]{1,7}",
     r"\[gates\] labeller pred_equal=[0-9]{1,3} true_equal=[0-9]{1,3} of=[0-9]{1,3}",
     r'RESULT \{"self_retrieval":[0-9]{1,3},"own_rank_equal":[0-9]{1,3},"own_rank_dedup_equal":[0-9]{1,3},"labeller_equal":[0-9]{1,3},'
     r'"label_names_ok":(true|false)\}',
     r"ERROR (gallery tower mismatch|gallery refused|published unreadable|labeller order mismatch|labeller unavailable)",
-    r"ERROR (data rows disagree|published shape)( [a-z_]{1,20}=[0-9]{1,7}){1,4}",
+    r"ERROR data rows disagree train=[0-9]{1,7} gallery_train=[0-9]{1,7} test=[0-9]{1,7} gallery_test=[0-9]{1,7}",
+    r"ERROR published shape hyps=[0-9]{1,7} y_pred=[0-9]{1,7} refs=[0-9]{1,7} y_true=[0-9]{1,7}",
     r"ERROR gate (self_retrieval|labeller_equal)=[0-9]{1,3} expected=[0-9]{1,3}",
     r"ERROR gate label_names_ok=false",
     r"ERROR failed [A-Za-z_][A-Za-z0-9_]{0,59}",
@@ -804,13 +901,14 @@ GATES_PASS = [
     "[gates] gallery images=191462 report_rows=194125 report_groups=163021 towers_identical=true img_proj_present=false labels_status=done",
     "[gates] gallery images=1 report_rows=2 report_groups=1 towers_identical=false img_proj_present=false labels_status=pending",
     "[gates] self_retrieval hits=50 of=50 misses=0", "[gates] self_retrieval hits=0 of=50 misses=50",
-    "[gates] miss row=0 got=191461 gap=0.000012", "[gates] miss row=123456 got=7 gap=1.999999",
+    "[gates] miss row=0 got=191461 gap=0.000012 own_rank=3 own_gap=0.000021 k=12", "[gates] miss row=123456 got=7 gap=1.999999 own_rank=0 own_gap=1.999999 k=12",
+    "[gates] miss row=5 got=6 gap=0.000000 own_rank=2 own_gap=0.000000 k=12", "[gates] miss row=5 got=6 gap=0.000000 own_rank=12 own_gap=0.500000 k=12",
     "[gates] own_rank equal=48 dedup_equal=50 of=50 max_diff=2", "[gates] own_rank equal=0 dedup_equal=0 of=50 max_diff=2662",
     "[gates] labeller pred_equal=50 true_equal=50 of=50",
     RESULT_CLEAN, 'RESULT {"self_retrieval":48,"own_rank_equal":0,"own_rank_dedup_equal":7,"labeller_equal":97,"label_names_ok":false}',
     "ERROR gallery tower mismatch", "ERROR gallery refused", "ERROR published unreadable", "ERROR labeller order mismatch", "ERROR labeller unavailable",
     "ERROR data rows disagree train=191461 gallery_train=191462 test=2663 gallery_test=2663", "ERROR published shape hyps=62 y_pred=60 refs=60 y_true=60",
-    "ERROR published shape y_pred=3", "ERROR gate self_retrieval=49 expected=50", "ERROR gate labeller_equal=98 expected=100",
+    "ERROR gate self_retrieval=49 expected=50", "ERROR gate labeller_equal=98 expected=100",
     "ERROR gate label_names_ok=false", "ERROR failed FileNotFoundError", "ERROR failed OutOfMemoryError",
     "=== note: chexbert_labels.json has no label_names key: CHEXBERT_14 order assumed ===",
     "=== note: chexbert_labels.json label_names reordered to the CHEXBERT_14 order ===",
@@ -825,8 +923,15 @@ GATES_WITHHELD = [
     "[gates] gallery images=1 report_rows=2 report_groups=1 towers_identical=true img_proj_present=false labels_status=partial",
     "[gates] gallery build_id=g13d_m3_v1 images=1 report_rows=2 report_groups=1 towers_identical=true img_proj_present=false labels_status=done",
     "[gates] self_retrieval hits=50 of=50", "[gates] self_retrieval hits=50 of=50 misses=0 row=1", "[gates] self_retrieval hits=-1 of=50 misses=0",
-    "[gates] miss row=0 got=1 gap=12.000000", "[gates] miss row=0 got=1 gap=0.5", "[gates] miss row=0 got=1 gap=nan", "[gates] miss row=0 got=1",
-    "[gates] miss row=12345678 got=1 gap=0.000001", "[gates] miss row=0 got=1 gap=0.000001 study_id=1",
+    "[gates] miss row=0 got=1 gap=0.000001", "[gates] miss row=0 got=1 gap=0.000001 own_rank=2 own_gap=0.000001",       # the shapes before the fix: no k, no own_*
+    "[gates] miss row=0 got=1 gap=12.000000 own_rank=2 own_gap=0.000001 k=12", "[gates] miss row=0 got=1 gap=0.5 own_rank=2 own_gap=0.000001 k=12",
+    "[gates] miss row=0 got=1 gap=nan own_rank=2 own_gap=0.000001 k=12", "[gates] miss row=0 got=1 own_rank=2 own_gap=0.000001 k=12",
+    "[gates] miss row=12345678 got=1 gap=0.000001 own_rank=2 own_gap=0.000001 k=12", "[gates] miss row=0 got=1 gap=0.000001 own_rank=2 own_gap=0.000001 k=12 study_id=1",
+    "[gates] miss row=0 got=1 gap=0.000001 own_rank=123 own_gap=0.000001 k=12", "[gates] miss row=0 got=1 gap=0.000001 own_rank=-1 own_gap=0.000001 k=12",
+    "[gates] miss row=0 got=1 gap=0.000001 own_rank=2 own_gap=12.000000 k=12", "[gates] miss row=0 got=1 gap=0.000001 own_rank=2 own_gap=0.5 k=12",
+    "[gates] miss row=0 got=1 gap=0.000001 own_rank=2 own_gap=nan k=12", "[gates] miss row=0 got=1 gap=0.000001 own_rank=2 own_gap=0.000001 k=123",
+    "[gates] miss row=0 got=1 gap=0.000001 own_rank=2 own_gap=0.000001 k=", "[gates] miss row=0 got=1 gap=0.000001 own_gap=0.000001 own_rank=2 k=12",
+    "[gates] miss row=0 got=1 gap=0.000001 own_rank=2 own_gap=0.000001 k=12 ", "[gates] miss row=0 got=1 gap=0.000001 own_rank=2 own_gap=0.000001 effusion=12",
     "[gates] own_rank equal=48 dedup_equal=50 of=50", "[gates] own_rank equal=48 dedup_equal=50 of=50 max_diff=-1",
     "[gates] labeller pred_equal=50 true_equal=50", "[gates] labeller pred_equal=50 true_equal=50 of=50 extra",
     "[gates]  self_retrieval hits=50 of=50 misses=0", " [gates] self_retrieval hits=50 of=50 misses=0", "[gates] self_retrieval hits=50 of=50 misses=0 ",
@@ -836,7 +941,11 @@ GATES_WITHHELD = [
     'RESULT {"self_retrieval":50,"own_rank_equal":50,"own_rank_dedup_equal":50,"labeller_equal":1000,"label_names_ok":true}',
     "ERROR the heart is mildly enlarged", "ERROR gallery tower mismatch /sc/home/someone", "ERROR gallery tower mismatch study=12345678",
     "ERROR gallery refused: manifest.json is missing", "ERROR data rows disagree", "ERROR data rows disagree train=12345678",
-    "ERROR data rows disagree train=1 a=1 b=2 c=3 d=4 e=5", "ERROR published shape effusion=x", "ERROR gate self_retrieval=49",
+    "ERROR data rows disagree train=1 a=1 b=2 c=3 d=4 e=5", "ERROR published shape effusion=x", "ERROR published shape effusion=1",
+    "ERROR published shape y_pred=3",                                                  # the key sets are exact: the old generic form let a line with any keys through
+    "ERROR published shape hyps=1 y_pred=1 refs=1 effusion=1", "ERROR data rows disagree train=1 gallery_train=1 test=1 effusion=1",
+    "ERROR published shape hyps=1 y_pred=1 refs=1", "ERROR data rows disagree train=1 gallery_train=1 test=1",
+    "ERROR gate self_retrieval=49",
     "ERROR gate self_retrieval=49 expected=50 effusion", "ERROR gate studies=49 expected=50", "ERROR gate label_names_ok=true",
     "ERROR failed", "ERROR failed the heart", "ERROR failed " + "A" * 61, "ERROR", "ERROR ", "ERROR labeller unavailable reason=http",
     "=== note: chexbert_labels.json has no label_names key: CHEXBERT_14 order assumed === extra",
@@ -873,11 +982,36 @@ def test_the_error_codes_of_the_script_the_tests_and_the_wrapper_are_the_same_se
     literals = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
     for code in ERROR_CODES:
         assert literals.count(code) >= 2, "{} is in ERROR_CODES and never raised: a code the wrapper allows and nothing prints".format(code)
-    lines = [p for p in wrapper_patterns() if re.match(r"\^ERROR \([a-z |]+\)", p)]
     named = set()
-    for line in lines:
-        named |= set(re.match(r"\^ERROR \(([a-z |]+)\)", line).group(1).split("|"))
+    for pattern in wrapper_patterns():
+        if not pattern.startswith("^ERROR ") or pattern.startswith(("^ERROR gate ", "^ERROR failed ")):
+            continue                                           # a failed gate and a failed step are not refusals with a code
+        body = pattern[len("^ERROR "):]
+        if body.startswith("("):
+            named |= set(body[1:body.index(")")].split("|"))
+        else:
+            named.add(re.split(r" [a-z_]+=", body)[0])         # the phrase before its first key
     assert named == set(ERROR_CODES), "the wrapper allows exactly the codes the script has"
+
+
+NUMERIC_ERRORS = {"ERROR published shape": ["hyps", "y_pred", "refs", "y_true"],
+                  "ERROR data rows disagree": ["train", "gallery_train", "test", "gallery_test"]}
+
+
+def test_the_two_numeric_error_lines_pin_their_exact_keys():
+    """The key sets of `ERROR published shape` and `ERROR data rows disagree` are the driver's and nobody else's: a line with a key short, a
+    key too many, a foreign key, the keys in another order, a key twice or the other line's keys is no known shape, so it is withheld."""
+    for head, keys in NUMERIC_ERRORS.items():
+        good = head + "".join(" {}={}".format(k, i + 1) for i, k in enumerate(keys))
+        assert grep_passes([good]) == [good] and GATES_SHAPES.match(good), good
+        other = [k for h, ks in NUMERIC_ERRORS.items() if h != head for k in ks]
+        bad = [head + "".join(" {}={}".format(k, j + 1) for j, k in enumerate(keys) if j != i) for i in range(len(keys))]                  # a key short
+        bad += [head + "".join(" {}={}".format("effusion" if j == i else k, j + 1) for j, k in enumerate(keys)) for i in range(len(keys))]  # a foreign key
+        bad += [head + "".join(" {}={}".format(k, j + 1) for j, k in enumerate(reversed(keys))),                                          # another order
+                good + " effusion=1", good + " " + keys[0] + "=1",                                                                         # one too many, a key twice
+                head + "".join(" {}={}".format(k, j + 1) for j, k in enumerate(other))]                                                    # the other line's keys
+        assert len(set(bad)) == len(bad) == 2 * len(keys) + 4
+        assert grep_passes(bad) == [] and not [l for l in bad if GATES_SHAPES.match(l)], grep_passes(bad)
 
 
 def run_scenarios(gates: Any, capsys: Any, tmp_path: Path, template: Path) -> List[str]:
@@ -904,12 +1038,7 @@ def run_scenarios(gates: Any, capsys: Any, tmp_path: Path, template: Path) -> Li
     nameless.set_published(payload)
     go(nameless)
     permuted = fresh("permuted")
-    perm = list(reversed(range(14)))
-    payload = permuted.published()
-    payload["label_names"] = [NAMES[i] for i in perm]
-    for key in ("y_true", "y_pred"):
-        payload[key] = [[row[i] for i in perm] for row in payload[key]]
-    permuted.set_published(payload)
+    permuted.set_published(rotated(permuted.published()))
     go(permuted)
     foreign = fresh("foreign")
     payload = foreign.published()
@@ -971,7 +1100,7 @@ def test_gates_json_holds_only_numbers_booleans_lists_and_a_few_fixed_words(gate
     known = {"self_retrieval", "self_retrieval_of", "misses", "own_rank_equal", "own_rank_dedup_equal", "own_rank_of", "own_rank_max_diff",
              "own_rank_differs", "labeller_equal", "labeller_of", "label_mismatch_rows", "label_names_ok", "label_names_source", "gallery",
              "engine", "seconds", "passed", "error",
-             "row", "got", "gap",                                   # a miss
+             "row", "got", "gap", "own_gap", "k",                   # a miss (own_rank is also a key of seconds, above)
              "test_row", "rank", "rank_dedup",                      # a rank that differs
              "hyps", "refs",                                        # label_mismatch_rows
              "images", "report_rows", "report_groups", "towers_identical", "labels_status",     # gallery
@@ -1083,9 +1212,17 @@ class F1CheXbert(object):
 
 # The venv's python, as the driver's step sees it: a note of the environment the DRIVER runs with, the tiny engine in place of the
 # checkpoint (the one argument the job never passes), and, when asked, what a chattering library prints (text, an id and a path on lines
-# that look like ours) or a progress bar. Everything else (the free port, the health probe) is the real python.
+# that look like ours) or a progress bar. The health probe (a -c call that opens /healthz) notes its pid, and with FAKE_PROBE_HANG is a
+# process that only a signal can end (a real probe also ends when the labeller's socket closes). Everything else (the free port, the
+# probe without the knob) is the real python.
 GATES_PYTHON_STUB = """#!/bin/bash
 """ + wr.RECORD_CALL + """case "$1" in
+  -c)
+    case "$2" in
+      *urlopen*)
+        echo "$$" >> "$STUB_DIR/probe.pids"
+        [ -z "${FAKE_PROBE_HANG:-}" ] || exec sleep 120;;
+    esac;;
   scripts/chat_retrieval_gates.py)
     { echo "@@"; echo "PYTHONPATH=${PYTHONPATH-unset}"; echo "HF_HOME=${HF_HOME-unset}"; echo "HF_HUB_OFFLINE=${HF_HUB_OFFLINE-unset}"
       echo "OMP_NUM_THREADS=${OMP_NUM_THREADS-unset}"; echo "NO_PROXY=${NO_PROXY-unset}"; echo "no_proxy=${no_proxy-unset}"
@@ -1188,6 +1325,11 @@ class GatesBox(wr.JobBox):
 
     def labeller_pids(self) -> List[int]:
         return [int(start[0][len("pid="):]) for start in self.labeller_starts()]
+
+    def probe_pids(self) -> List[int]:
+        """The pid of every health probe the job started (the stub python notes it)."""
+        log = self.stubs / "probe.pids"
+        return [int(line) for line in log.read_text().split()] if log.exists() else []
 
     def marks(self) -> List[str]:
         mark = self.stubs / "fake.mark"
@@ -1420,6 +1562,34 @@ def test_a_sigterm_to_the_job_while_it_waits_stops_the_labeller_too(box):
             proc.communicate()
     assert proc.returncode == 143, out
     assert gone(pid, 15), "the labeller outlived the job that started it"
+    assert box.probe_pids() and all(gone(probe, 5) for probe in box.probe_pids()), "a health probe outlived the job that started it"
+
+
+def test_a_sigterm_while_a_health_probe_is_in_flight_kills_the_probe_too(box):
+    """FAKE_PROBE_HANG makes the probe a process that ends only on a signal, not when the labeller's socket closes, so that what ends it is
+    the trap's own kill of the probe and nothing else. Whatever the assertions find, the processes the test started are ended."""
+    proc = subprocess.Popen([wr.BASH, str(box.repo / "scripts" / SH)], cwd=str(box.root), env=dict(box.base_env(), FAKE_PROBE_HANG="1"),
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    probes, survivors = [], None
+    try:
+        deadline = time.monotonic() + 30
+        while not (box.probe_pids() and box.labeller_pids()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        probes = box.probe_pids()
+        assert probes and alive(probes[0]), "the probe is in flight"
+        time.sleep(0.3)
+        proc.send_signal(signal.SIGTERM)
+        out, _ = proc.communicate(timeout=60)
+        survivors = [probe for probe in probes if not gone(probe, 5)]
+    finally:
+        for stray in [p for p in probes + box.labeller_pids() if alive(p)]:
+            os.kill(stray, signal.SIGKILL)
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    assert proc.returncode == 143, out
+    assert survivors == [], "a health probe outlived the job that started it"
+    assert not any(alive(pid) for pid in box.labeller_pids())
 
 
 # ── the guards: every refusal is one ERROR line, before the labeller exists ───────────────────────────────────────────────────────────
@@ -1436,13 +1606,15 @@ def refuse(box: GatesBox, **env: Optional[str]) -> List[str]:
 
 
 PLAIN = "must be one plain name: letters, digits, dot, dash, underscore"
-WHOLE = "ERROR LABELER_WAIT_S must be a whole number of seconds, at most 5 digits"
+WHOLE = "ERROR LABELER_WAIT_S must be a whole number of seconds without a leading zero, at most 5 digits"
 
 
 @pytest.mark.parametrize("env, message", [
     ({"BUILD_ID": "../x"}, "ERROR BUILD_ID " + PLAIN), ({"BUILD_ID": "a b"}, "ERROR BUILD_ID " + PLAIN),
     ({"MODEL_CONFIG": "x/y"}, "ERROR MODEL_CONFIG " + PLAIN), ({"MODEL_CONFIG": "x y"}, "ERROR MODEL_CONFIG " + PLAIN),
     ({"LABELER_WAIT_S": "soon"}, WHOLE), ({"LABELER_WAIT_S": "123456"}, WHOLE), ({"LABELER_WAIT_S": "-1"}, WHOLE),
+    # bash reads a leading zero as octal in $(( )): 010 would be 8 seconds, and 08 an arithmetic error after the labeller had started
+    ({"LABELER_WAIT_S": "010"}, WHOLE), ({"LABELER_WAIT_S": "08"}, WHOLE), ({"LABELER_WAIT_S": "00"}, WHOLE), ({"LABELER_WAIT_S": "0600"}, WHOLE),
     ({"BUILD_ID": "g13d_m3_v2"}, "ERROR the gallery has no manifest.json: build it first (build_retrieval_gallery_h100.sh)"),
 ])
 def test_a_bad_lever_or_a_missing_gallery_is_one_error_line_and_nothing_starts(box, env, message):
@@ -1452,6 +1624,51 @@ def test_a_bad_lever_or_a_missing_gallery_is_one_error_line_and_nothing_starts(b
 def test_a_bad_lever_is_never_echoed(box):
     lines = refuse(box, BUILD_ID="a b FAKE_TEXT", MODEL_CONFIG="x")
     assert not [l for l in lines if "FAKE_TEXT" in l]
+
+
+def wait_guard(value: str) -> str:
+    """The wrapper's own LABELER_WAIT_S guard line, run alone under the oldest bash with the wrapper's fail(): `ok`, or the ERROR line."""
+    guard = [l for l in (REPO_ROOT / "scripts" / SH).read_text().splitlines() if l.startswith('[[ "${LABELER_WAIT_S}" =~ ')]
+    assert len(guard) == 1
+    script = 'fail() { echo "ERROR $*"; exit 1; }\nLABELER_WAIT_S="$1"\n' + guard[0] + "\necho ok\n"
+    return subprocess.run([wr.BASH, "-c", script, "guard", value], capture_output=True, text=True, timeout=30).stdout.strip()
+
+
+@pytest.mark.parametrize("value", ["0", "1", "9", "10", "60", "600", "99999"])
+def test_the_wait_guard_takes_a_whole_number_of_seconds_with_no_leading_zero(value):
+    assert wait_guard(value) == "ok"
+
+
+@pytest.mark.parametrize("value", ["00", "01", "08", "010", "0600", "099999", "100000", "123456", "-1", "+5", "1.5", "5s", " 5", "5 ", "", "soon"])
+def test_the_wait_guard_refuses_everything_else_and_a_leading_zero_in_particular(value):
+    assert wait_guard(value) == WHOLE
+
+
+def labellers_left_in(repo: Path) -> List[int]:
+    """The processes started as `app.labeler:app` whose working directory is `repo`: what a job leaves of its labeller, whether or not the labeller
+    got as far as writing its start record (one that is stopped the moment it is started may be killed before the stub's first line)."""
+    left = []
+    for line in subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True).stdout.splitlines():
+        if "app.labeler:app" not in line:
+            continue
+        pid = int(line.split(None, 1)[0])
+        if Path("/proc/{}/cwd".format(pid)).exists():
+            cwds = [os.path.realpath("/proc/{}/cwd".format(pid))]
+        else:
+            listed = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True).stdout
+            cwds = [os.path.realpath(l[1:]) for l in listed.splitlines() if l.startswith("n")]
+        if os.path.realpath(str(repo)) in cwds:
+            left.append(pid)
+    return left
+
+
+def test_a_wait_of_zero_is_a_whole_number_and_gets_as_far_as_the_labeller(box):
+    """Zero passes the guard: the labeller is started, the wait has no time in it, and the job says so and stops the labeller at once. Checked
+    for what is left of it, recorded or not (under load the stub can be stopped before it has written anything)."""
+    done = box.run(LABELER_WAIT_S="0")
+    assert done.returncode == 1, done.stdout
+    assert "ERROR labeller not ready after 0 s" in job_lines(done) and box.driver_calls() == []
+    assert labellers_left_in(box.repo) == [] and not any(alive(pid) for pid in box.labeller_pids())
 
 
 def test_a_missing_chat_home_is_refused(box):

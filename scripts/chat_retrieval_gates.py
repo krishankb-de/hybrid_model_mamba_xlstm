@@ -8,7 +8,9 @@ Three checks, each through the code a turn runs (app.engine, app.gallery, app.la
 
   1. Self-retrieval. 50 train images, spread evenly over the split, go through Engine.preprocess and Engine.encode from their file BYTES
      (the path of an upload), and Gallery.image_neighbors must put each of them first. A miss is recorded with its row, the row found
-     instead and the gap between the first two similarities. Gated: all 50.
+     instead, the gap between the first two similarities, and where the image's own row stands among the k=12 nearest (own_rank, 0 when
+     it is not among them) and how far behind the first it is (own_gap), so that a duplicate image (a tie: own_rank=2 own_gap=0.000000)
+     reads differently from a wrong embedding (own_rank=0). Gated: all 50.
   2. Live own-rank. For the first 50 test studies, Gallery.own_report_rank is asked with the live vector and with the build's own
      embedding of the same image (test_img_emb.npy, the H100's): one formula on both sides, so the two ranks are comparable, for `rank`
      and for `rank_dedup`. Counted and recorded, not gated: the live vector is the CPU's, and a CPU and a GPU can swap two reports whose
@@ -49,13 +51,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))      # app comes from this tree, however the venv's install points
 
 from app.engine import build_engine  # noqa: E402
-from app.gallery import Gallery, GalleryMismatch  # noqa: E402
+from app.gallery import MAX_K_IMAGES, Gallery, GalleryMismatch  # noqa: E402
 from app.labels import CHEXBERT_14, LabelerClient, LabelerUnavailable  # noqa: E402
 
 N_SELF = 50                 # train images that must find themselves
 N_RANK = 50                 # test studies whose live own-rank is compared with the build's
 N_LABELLED = 50             # hyps, and refs, the labeller is checked on: one call each (LabelerClient's limit is 64 texts)
 LABELER_TIMEOUT_S = 120
+K_NEIGHBOURS = MAX_K_IMAGES  # how far down the neighbours an image's own row is looked for when it is not first: all the gallery gives (12)
 MAX_MISS_LINES = 20         # miss lines in the job log; gates.json has every miss
 N_LABELS = len(CHEXBERT_14)
 DEFAULT_MODEL_CONFIG = "hybrid_150m_m3_rrg"
@@ -171,6 +174,17 @@ def open_gallery(root: Path, engine: Any) -> Gallery:
         raise Refused("gallery refused") from None
 
 
+def miss_record(row: int, top: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """A self-retrieval miss, in numbers only. `got` is the row found first and `gap` its similarity lead over the second. `own_rank` is where the
+    image's own row stands among the k neighbours asked for (1 is first; 0: it is not among them) and `own_gap` how far its similarity is behind the
+    first one's; with own_rank 0 that is the gap to the k-th neighbour, which the own row is at least as far behind as. A duplicate image reads
+    own_rank=2 own_gap=0.000000: a tie that the search broke the other way, not a wrong embedding. k is named, so that 0 can be read."""
+    own = next((n for n in top if n["gallery_row"] == row), None)
+    behind = top[-1] if own is None else own
+    return {"row": row, "got": int(top[0]["gallery_row"]), "gap": float(top[0]["similarity"] - top[1]["similarity"]),
+            "own_rank": 0 if own is None else int(own["rank"]), "own_gap": float(top[0]["similarity"] - behind["similarity"]), "k": len(top)}
+
+
 def live_vector(engine: Any, image_path: Any) -> np.ndarray:
     """The vector an upload of this file gets: Engine.preprocess from the file's bytes, then Engine.encode. Encoded.pooled is the query (D4)."""
     _, prepared = engine.preprocess(Path(image_path).read_bytes())
@@ -247,15 +261,15 @@ def run(args: argparse.Namespace, labeller: Any = None, result: Optional[Dict[st
     misses: List[Dict[str, Any]] = []
     for row in sample_rows(len(train), N_SELF):
         row = int(row)
-        top = gallery.image_neighbors(live_vector(engine, train["image"].iloc[row]), 2)
+        top = gallery.image_neighbors(live_vector(engine, train["image"].iloc[row]), K_NEIGHBOURS)
         if top[0]["gallery_row"] == row:
             hits += 1
         else:
-            misses.append({"row": row, "got": int(top[0]["gallery_row"]), "gap": float(top[0]["similarity"] - top[1]["similarity"])})
+            misses.append(miss_record(row, top))
     seconds["self_retrieval"] = round(time.perf_counter() - started, 2)
     say("self_retrieval hits={} of={} misses={}".format(hits, N_SELF, len(misses)))
     for miss in misses[:MAX_MISS_LINES]:
-        say("miss row={row} got={got} gap={gap:.6f}".format(**miss))
+        say("miss row={row} got={got} gap={gap:.6f} own_rank={own_rank} own_gap={own_gap:.6f} k={k}".format(**miss))
     result.update(self_retrieval=hits, self_retrieval_of=N_SELF, misses=misses)
 
     # 2. the live own-rank against the build's, one formula on both sides

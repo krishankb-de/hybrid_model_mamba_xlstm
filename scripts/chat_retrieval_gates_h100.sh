@@ -5,7 +5,8 @@
 #   bash scripts/chat_remote.sh summary logs/chat_gates_<jobid>.log
 #   (the gallery build, the report model and its config, the dataset and the published dump can be set as NAME=value arguments of
 #   `chat_remote.sh submit`: BUILD_ID=..., CHECKPOINT=..., MODEL_CONFIG=..., DATA=..., REFERENCE_DIR=...; how long to wait for the labeller to
-#   load, default 600 s, by LABELER_WAIT_S; CHEXBERT_HF_HUB_OFFLINE=1 sends the labeller offline, default 0 as in score_chexbert_h100.sh)
+#   load, default 600 s, by LABELER_WAIT_S (a whole number of seconds, no leading zero: bash would read 010 as octal);
+#   CHEXBERT_HF_HUB_OFFLINE=1 sends the labeller offline, default 0 as in score_chexbert_h100.sh)
 #
 # Three checks, one job, one driver (scripts/chat_retrieval_gates.py, which says what each is in its docstring):
 #   1. self-retrieval: 50 train images, through the live upload path (Engine.preprocess and encode from the file bytes), must each be
@@ -22,12 +23,13 @@
 # (CHAT_UI_PLAN.md D24: the weights live in the default Hugging Face cache), on a free port of the loopback interface only. The first load
 # can take minutes, so /healthz is waited for, one request at a time, for at most LABELER_WAIT_S seconds, and a labeller that dies meanwhile
 # is reported with its exit status. It is stopped by a trap on every way out of this job (a refusal, a failure, a signal, the normal end):
-# asked to leave, given three seconds, then killed. The driver runs in .venv with its overlay .chat_deps, offline, from the scratch Hugging
-# Face cache (the engine needs no network, the labeller its own cache), one thread per CPU.
+# asked to leave, given three seconds, then killed, and a health probe that is in flight is ended with it. The driver runs in .venv with
+# its overlay .chat_deps, offline, from the scratch Hugging Face cache (the engine needs no network, the labeller its own cache), one
+# thread per CPU.
 #
 # Output (DUA-covered, Class R: stays on the cluster, never committed, never copied to the laptop), a new directory under results/:
-#   results/chat_retrieval_gates_<job>/gates.json   numbers and indices only: the three counts, every miss (gallery row, row found, gap),
-#                                                   the rows whose rank differs, the rows the labeller got wrong, seconds
+#   results/chat_retrieval_gates_<job>/gates.json   numbers and indices only: the three counts, every miss (gallery row, row found, gap, where
+#                                                   its own row stands), the rows whose rank differs, the rows the labeller got wrong, seconds
 #   results/chat_retrieval_gates_<job>/gates.log    the driver's raw stdout and stderr (a traceback can show a path or report text)
 #   results/chat_retrieval_gates_<job>/labeler.log  the labeller's raw stdout and stderr (its access log: no text)
 # R7: the job log carries only === lines, [gates] lines, RESULT and ERROR lines of the shapes in GATES_SHAPES below (an allowlist: an id,
@@ -41,7 +43,13 @@
 #   === gates: the driver's own output goes to gates.log in the results directory and is never printed ===
 #   [gates] engine device=cpu threads=8
 #   [gates] gallery images=<n> report_rows=<n> report_groups=<n> towers_identical=true img_proj_present=false labels_status=done
-#   [gates] self_retrieval hits=50 of=50 misses=0                  (a miss: [gates] miss row=<n> got=<n> gap=<similarity gap>, at most 20)
+#   [gates] self_retrieval hits=50 of=50 misses=0
+#   (a miss adds one line, at most 20 of them:)
+#   [gates] miss row=<n> got=<n> gap=<x.xxxxxx> own_rank=<n> own_gap=<x.xxxxxx> k=12
+#       got is the row found first and gap its lead over the second; own_rank is where the image's OWN row stands among the k=12 nearest (1 is
+#       first; 0: it is not among them) and own_gap how far behind the first it is (with own_rank=0 the gap to the 12th: it is at least that far
+#       behind). A duplicate train image, a tie that the search broke the other way, reads own_rank=2 own_gap=0.000000; a wrong embedding
+#       reads own_rank=0.
 #   [gates] own_rank equal=<n> dedup_equal=<n> of=50 max_diff=<n>
 #   [gates] labeller pred_equal=50 true_equal=50 of=50
 #   RESULT {"self_retrieval":50,"own_rank_equal":<n>,"own_rank_dedup_equal":<n>,"labeller_equal":100,"label_names_ok":true}
@@ -93,7 +101,8 @@ LABELER_WAIT_S="${LABELER_WAIT_S:-600}"
 # Derived, never levers (sbatch exports the submitting shell, and OUT is a likely name): one name for the build, one directory per job.
 [[ "${BUILD_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "BUILD_ID must be one plain name: letters, digits, dot, dash, underscore"
 [[ "${MODEL_CONFIG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "MODEL_CONFIG must be one plain name: letters, digits, dot, dash, underscore"
-[[ "${LABELER_WAIT_S}" =~ ^[0-9]{1,5}$ ]] || fail "LABELER_WAIT_S must be a whole number of seconds, at most 5 digits"
+# No leading zero: bash reads one as octal inside $(( )), so 010 would be 8 seconds and 08 an arithmetic error after the labeller had started.
+[[ "${LABELER_WAIT_S}" =~ ^(0|[1-9][0-9]{0,4})$ ]] || fail "LABELER_WAIT_S must be a whole number of seconds without a leading zero, at most 5 digits"
 GALLERY="${CHAT_HOME}/gallery/${BUILD_ID}"
 OUT="results/chat_retrieval_gates_${SLURM_JOB_ID:-local}"
 THREADS="${SLURM_CPUS_PER_TASK:-8}"
@@ -105,12 +114,13 @@ THREADS="${SLURM_CPUS_PER_TASK:-8}"
 GATES_SHAPES='^\[gates\] engine device=(cpu|cuda|cuda:[0-9]{1,2}) threads=[0-9]{1,3}$
 ^\[gates\] gallery images=[0-9]{1,7} report_rows=[0-9]{1,7} report_groups=[0-9]{1,7} towers_identical=(true|false) img_proj_present=false labels_status=(done|pending)$
 ^\[gates\] self_retrieval hits=[0-9]{1,3} of=[0-9]{1,3} misses=[0-9]{1,3}$
-^\[gates\] miss row=[0-9]{1,7} got=[0-9]{1,7} gap=[0-9]\.[0-9]{6}$
+^\[gates\] miss row=[0-9]{1,7} got=[0-9]{1,7} gap=[0-9]\.[0-9]{6} own_rank=[0-9]{1,2} own_gap=[0-9]\.[0-9]{6} k=[0-9]{1,2}$
 ^\[gates\] own_rank equal=[0-9]{1,3} dedup_equal=[0-9]{1,3} of=[0-9]{1,3} max_diff=[0-9]{1,7}$
 ^\[gates\] labeller pred_equal=[0-9]{1,3} true_equal=[0-9]{1,3} of=[0-9]{1,3}$
 ^RESULT \{"self_retrieval":[0-9]{1,3},"own_rank_equal":[0-9]{1,3},"own_rank_dedup_equal":[0-9]{1,3},"labeller_equal":[0-9]{1,3},"label_names_ok":(true|false)\}$
 ^ERROR (gallery tower mismatch|gallery refused|published unreadable|labeller order mismatch|labeller unavailable)$
-^ERROR (data rows disagree|published shape)( [a-z_]{1,20}=[0-9]{1,7}){1,4}$
+^ERROR data rows disagree train=[0-9]{1,7} gallery_train=[0-9]{1,7} test=[0-9]{1,7} gallery_test=[0-9]{1,7}$
+^ERROR published shape hyps=[0-9]{1,7} y_pred=[0-9]{1,7} refs=[0-9]{1,7} y_true=[0-9]{1,7}$
 ^ERROR gate (self_retrieval|labeller_equal)=[0-9]{1,3} expected=[0-9]{1,3}$
 ^ERROR gate label_names_ok=false$
 ^ERROR failed [A-Za-z_][A-Za-z0-9_]{0,59}$
@@ -151,9 +161,11 @@ mkdir -p "${OUT}" 2>/dev/null || fail "the results directory cannot be made"
 
 # --- the labeller --------------------------------------------------------------------------------------------------------
 # Stopped on every way out: asked to leave, given three seconds, then killed (a uvicorn that is waiting for a model to load does not leave
-# on SIGTERM). Safe to call twice.
+# on SIGTERM). A health probe that is in flight is ended first, so that nothing is left behind. Safe to call twice.
 LABELER_PID=""
+PROBE_PID=""
 stop_labeller() {
+  if [ -n "${PROBE_PID}" ]; then kill "${PROBE_PID}" 2>/dev/null || true; PROBE_PID=""; fi
   [ -n "${LABELER_PID}" ] || return 0
   kill "${LABELER_PID}" 2>/dev/null || true
   for _ in 1 2 3; do
@@ -188,7 +200,10 @@ while [ "${SECONDS}" -lt "${DEADLINE}" ]; do
   [ "${LEFT}" -le 60 ] || LEFT=60
   python -c "${HEALTH_PROBE}" "${LABELER_URL}" "${LEFT}" > /dev/null 2>&1 &
   PROBE_PID=$!
-  if wait "${PROBE_PID}"; then READY=1; break; fi
+  PROBE_RC=0
+  wait "${PROBE_PID}" || PROBE_RC=$?
+  PROBE_PID=""
+  if [ "${PROBE_RC}" -eq 0 ]; then READY=1; break; fi
   sleep 1
 done
 if [ "${READY}" -ne 1 ]; then

@@ -7919,20 +7919,31 @@ def test_chat_gates_wrapper_waits_for_healthz_with_a_bound_and_stops_the_labelle
     """P5-F. The first model load can take minutes, so the wait is one request at a time (a probe the shell can be interrupted in: it runs in
     the background and is waited for), bounded by LABELER_WAIT_S, and it notices a labeller that died. The labeller is stopped by a trap on
     EXIT (every `fail`, every `exit`, a failed command under set -e, the normal end) and on TERM and INT; the stop asks, waits a few
-    seconds, and then insists (a uvicorn waiting for a model to load does not leave on SIGTERM)."""
+    seconds, and then insists (a uvicorn waiting for a model to load does not leave on SIGTERM). The same trap ends a health probe that is
+    in flight (it kills PROBE_PID), so that nothing is left behind, and the probe's pid is cleared as soon as it has been waited for, so
+    that a later stop never signals a pid that something else has since been given."""
     code = "\n".join(_logical_lines(_gates_text()))              # continuations joined: the two long commands are one line each
     assert "trap stop_labeller EXIT" in code
     assert "trap 'stop_labeller; exit 143' TERM" in code and "trap 'stop_labeller; exit 130' INT" in code
     stop = code[code.index("stop_labeller() {"):code.index("trap stop_labeller EXIT")]
     assert stop.index('kill "${LABELER_PID}"') < stop.index("kill -0") < stop.index("kill -KILL") < stop.index('wait "${LABELER_PID}"')
     assert 'LABELER_PID=""' in stop and "for _ in 1 2 3; do" in stop, "bounded: three seconds of grace"
+    assert 'kill "${PROBE_PID}" 2>/dev/null || true' in stop and stop.index('kill "${PROBE_PID}"') < stop.index('kill "${LABELER_PID}"'), "the probe first"
+    assert code.index('PROBE_PID=""') < code.index("stop_labeller() {"), "empty before any trap can run"
     assert code.index("trap stop_labeller EXIT") < code.index(_GATES_LABELLER)
     assert 'DEADLINE=$((SECONDS + LABELER_WAIT_S))' in code and 'while [ "${SECONDS}" -lt "${DEADLINE}" ]; do' in code
     assert 'kill -0 "${LABELER_PID}" 2>/dev/null || break' in code, "a labeller that died is not waited for"
     assert "/healthz" in code and 'python -c "${HEALTH_PROBE}" "${LABELER_URL}" "${LEFT}" > /dev/null 2>&1 &' in code
-    assert 'if wait "${PROBE_PID}"; then READY=1; break; fi' in code
+    loop = code[code.index('while [ "${SECONDS}" -lt "${DEADLINE}" ]; do'):code.index('if [ "${READY}" -ne 1 ]; then')]
+    assert loop.index("PROBE_PID=$!") < loop.index('wait "${PROBE_PID}" || PROBE_RC=$?') < loop.index('PROBE_PID=""') < loop.index(
+        'if [ "${PROBE_RC}" -eq 0 ]; then READY=1; break; fi'), "waited for, then forgotten, then judged"
     assert 'fail "labeller not ready after ${LABELER_WAIT_S} s"' in code and 'fail "labeller exit=${LABELER_RC}"' in code
-    assert code.index("stop_labeller\n", code.index(_GATES_DRIVER)) > code.index(_GATES_DRIVER), "stopped as soon as the driver is done, before the report"
+    # Stopped as soon as the driver is done and BEFORE the filtered log is reported: the bare call after the driver comes ahead of the line
+    # that reads the log back (a test that only asked for a stop somewhere after the driver passed a stop moved to the end).
+    driver_at = code.index(_GATES_DRIVER)
+    stop_at = code.index("\nstop_labeller\n", driver_at)
+    report_at = code.index("tr '\\r' '\\n' < \"${OUT}/gates.log\" | grep -aE \"${GATES_SHAPES}\" | tail -n 60 || true")
+    assert driver_at < stop_at < report_at, "the labeller is stopped before the log of the driver is reported"
 
 
 def test_chat_gates_wrapper_runs_the_driver_in_the_main_venv_with_its_own_overlay_and_the_published_defaults():
@@ -8047,7 +8058,7 @@ def test_chat_gates_wrapper_checks_everything_before_a_process_starts_and_never_
     code = "\n".join(code_lines)
     guards = ['[[ "${BUILD_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "BUILD_ID must be one plain name: letters, digits, dot, dash, underscore"',
               '[[ "${MODEL_CONFIG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "MODEL_CONFIG must be one plain name: letters, digits, dot, dash, underscore"',
-              '[[ "${LABELER_WAIT_S}" =~ ^[0-9]{1,5}$ ]] || fail "LABELER_WAIT_S must be a whole number of seconds, at most 5 digits"',
+              '[[ "${LABELER_WAIT_S}" =~ ^(0|[1-9][0-9]{0,4})$ ]] || fail "LABELER_WAIT_S must be a whole number of seconds without a leading zero, at most 5 digits"',
               '[ -d "${CHAT_HOME}" ] || fail "CHAT_HOME does not exist: run chat_cluster_setup_h100.sh first"',
               '[ -f "${GALLERY}/manifest.json" ] || fail "the gallery has no manifest.json: build it first (build_retrieval_gallery_h100.sh)"',
               """grep -Eq '"equal":[[:space:]]*true' "${GALLERY}/manifest.json" || fail "the gallery's R@k gate is not decided equal: it cannot be used" """.strip(),
@@ -8080,7 +8091,8 @@ def test_chat_gates_header_documents_the_submit_and_summary_lines_and_the_expect
     header = "\n".join(l for l in _gates_text().splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))
     assert "bash scripts/chat_remote.sh sync && bash scripts/chat_remote.sh submit scripts/chat_retrieval_gates_h100.sh" in header
     assert "bash scripts/chat_remote.sh summary logs/chat_gates_<jobid>.log" in header
-    for needle in ("self-retrieval", "own-rank", "labeller", "RESULT", "[gates]", "gates.json", "gates.log", "labeler.log", "exit 1"):
+    for needle in ("self-retrieval", "own-rank", "labeller", "RESULT", "[gates]", "gates.json", "gates.log", "labeler.log", "exit 1",
+                   "own_rank=", "own_gap=", "k=", "own_rank=2 own_gap=0.000000"):
         assert needle in header, needle
 
 
