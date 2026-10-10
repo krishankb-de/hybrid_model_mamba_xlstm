@@ -6,7 +6,7 @@
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P5",
   "status": "P0-P3 complete; P4 7/8 (P4-H Playwright e2e added 2026-10-09). P9-G1/G2 done; P9-G3 job 2632173 submitted (EOS training). Parallel worktrees off a8e7efe: P9-G4 laptop part, P5-A, P5-B, P4-H.",
-  "next_action": "Parallel (user, 2026-10-09), worktrees off a8e7efe: P9-G4 laptop part, P5-A, P5-B, P4-H (Playwright e2e + fixes) -> review each, merge into chat_ui, restart the dev server. P9-G3 job 2632173 (check: bash scripts/chat_remote.sh state 2632173; summary logs/chat_report_eos_2632173.log). When G3 prints DONE + RESULT: tick P9-G3, record the G4 prediction (R4), submit the G4 chain. After P5-B review: submit the gallery job. Then P5-C (needs A+B), P5-D, P5-E, P5-F. The agent cannot push (permission classifier): the user pushes chat_ui.",
+  "next_action": "STOPPED by the user 2026-10-10 (no new subagents/tasks; commit + push). Resume here: (1) Scoped re-reviews still pending (fix rounds done, not re-reviewed): P6-B/C/D fix 1 = 37f7a53 (package .superpowers/sdd/CHAT_UI_PLAN/review-1dc963c..37f7a53.diff; findings in task-P6-BCD-fix1.md) and P7-B fix 1 (chat_ui fcbf101 = worktree d4bc136; diff cdebd60..fcbf101; findings in task-P7-B-fix1.md). Tick P6-B/C/D after a clean re-review. (2) P7-C review APPROVED with one open plan-mandated Important: tunnel.sh never notices a dead target while a forward is up (server restarts on a new --port 0 port) -> add a periodic endpoint re-read (~60 s) that kills the forward on change/absence + a fake-ssh test; minors in carried_items['P7-C']. (3) Cluster: 2632173 (P9-G3 EOS training) and 2632531 (P5-B gallery g13d_m3_v1) PENDING (Priority). When G3 prints DONE+RESULT: R4 check, tick P9-G3, submit the G4 chain (DEC -- --time=04:00:00 -> CHX -> CMP; lines in the scripts/eval_report_eos_compare_h100.sh header). When 2632531 ends: check towers_identical, gate_rk_equal, withheld 0; tick P5-B; submit P5-C CPU array (bash scripts/chat_remote.sh submit scripts/label_gallery_reports_cpu_h100.sh BUILD_ID=g13d_m3_v1 -- --array=0-7; then MERGE=1 -- --dependency=afterok:<A>); then P5-F gates (bash scripts/chat_remote.sh sync && bash scripts/chat_remote.sh submit scripts/chat_retrieval_gates_h100.sh; R4: 50/50, own-rank >=48/50, labeller 100/100); then the P7-B serve job for P7-D (bash scripts/chat_remote.sh submit scripts/serve_chat_h100.sh; laptop: bash app/tunnel/tunnel.sh with LOCAL_PORT != 8000 while the dev server runs). (4) Next laptop work after the re-reviews: P6-A + P6-E (main checkout; app/static), P8-A + P8-B (server.py), P7-F, P8-E, carried_items, final review. Dev server: create_app(home='/tmp/cxrchat_dev', tiny_step_delay_s=0.05, tiny_gallery=True) on port 8000, restarted by the controller after merges.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -436,7 +436,11 @@
         "p5d_review": "fix round 1 clean; 120/120 mutants",
         "p5e_commits": "2317dba,6e156ae,d8293a2",
         "p5e_tests": "tests/test_app_retrieval_stages.py + test_app_redact P5E_FIELDS; e2e 16/16; browser 10/10",
-        "p5e_review": "opus review → fix round 1 clean"
+        "p5e_review": "opus review → fix round 1 clean",
+        "p5f_commits": "f39857f,7117cab",
+        "p5f_tests": "tests/test_chat_retrieval_gates.py (158) + 12 pins",
+        "p5f_review": "opus approve -> fix round 1 (6 minors) -> sonnet re-review clean",
+        "p5f_job": "not submitted (needs 2632531 + P5-C labels)"
       },
       "verdict": null
     },
@@ -469,7 +473,11 @@
           "desc": "End-to-end check of the five features on the tiny stack, with screenshots; the cluster re-check is part of P7-D."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "p6bcd_commits": "d1aa5ad,1db1f0b,70bcce6,37f7a53",
+        "p6bcd_tests": "tests/test_app_images.py; node 366; e2e 21/21; browser 10/10; layout 226/0",
+        "p6bcd_review": "opus: P6-B ok, P6-C ok, P6-D 2 Important (picker Escape, stale Enter) -> fix 1 37f7a53; re-review PENDING"
+      },
       "verdict": null
     },
     "P7": {
@@ -506,7 +514,13 @@
         "p7a_log": "logs/chat_app_smoke_2632776.log",
         "p7a_versions": "fastapi 0.142.2; transformers 4.57.6; f1chexbert 0.0.2",
         "p7a_order": "true",
-        "p7a_commits": "6bf9585,4e4bcd0"
+        "p7a_commits": "6bf9585,4e4bcd0",
+        "p7b_commits": "chat_ui cdebd60 + fcbf101 (cherry-picks of worktree 3aca111 + d4bc136)",
+        "p7b_tests": "tests/test_chat_server_cli.py (104), tests/test_chat_server_job.py (105, both wrappers), 14 pins",
+        "p7b_review": "opus approve (10 minors) -> fix 1 (7 items) done; re-review PENDING",
+        "p7c_commit": "chat_ui 86af48d (cherry-pick of worktree b44755a)",
+        "p7c_tests": "tests/test_chat_tunnel.py (120) + 8 pins",
+        "p7c_review": "sonnet approve; open Important: dead-target forward never re-reads endpoint"
       },
       "verdict": null
     },
@@ -655,9 +669,10 @@
     "2026-10-10: P9-A restricted-file pre-commit check merged; hook install offered to the user",
     "2026-10-10: 2026-10-10: P7-A smoke job submitted 2632776 (chat_app_smoke, CPU, sync c516e4e clean); read via chat_remote.sh state/summary logs/chat_app_smoke_2632776.log",
     "2026-10-10: P5-E retrieve/label/score stages + endpoints + R1 redaction, merged",
-    "P7-A smoke 2632776 COMPLETED 50 s gx14 (sync c516e4e clean): app.server imports (fastapi 0.142.2), app.labeler imports (transformers 4.57.6), chexbert label order equal true (f1chexbert 0.0.2); matches the R4 prediction"
+    "P7-A smoke 2632776 COMPLETED 50 s gx14 (sync c516e4e clean): app.server imports (fastapi 0.142.2), app.labeler imports (transformers 4.57.6), chexbert label order equal true (f1chexbert 0.0.2); matches the R4 prediction",
+    "2026-10-10: P6-B/C/D (d1aa5ad, 1db1f0b, 70bcce6) + fix 1 37f7a53 on chat_ui (review: 2 Important picker keyboard defects + 7 minors, all fixed; re-review pending). P5-F merged (f39857f, 7117cab; review -> fix 1 clean). P7-B merged (CLI app/cli.py + serve_chat_h100.sh/gpu twin; review approved -> fix 1 done, re-review pending). P7-C merged (tunnel.sh/public_demo.sh; review approved, 1 open Important). User stop: no new subagents; committed + pushed."
   ],
-  "last_updated": "2026-10-10T06:48:49+02:00",
+  "last_updated": "2026-10-10T07:56:15+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -681,13 +696,17 @@
     ],
     "P6-F": [
       "as its own first commit 'P4-E follow-up': try/finally in Browser.close; _arm() at the top of WebSocket.send; widen the trap-order test margin; one-shot SIGTERM handler; straggler sweep of the Chrome session after a graceful exit; test that the autouse fixture calls _kill_the_fakes()",
-      "browser check reload step races under load (mid-turn 150-token turn can finish before the reload): harden"
+      "browser check reload step races under load (mid-turn 150-token turn can finish before the reload): harden",
+      "browser check a11y item assumes the no-gallery app's three stage buttons -> fails on a --url run against a tiny_gallery server (pre-existing)"
     ],
     "P7-B": [
       "pass RealEngine cache_dir so the 2.4 GB checkpoint is not re-hashed at every start",
       "uvicorn timeout_graceful_shutdown",
       "serve: refuse to start if --gallery fails to open unless explicitly allowed; pin GALLERY to the real build id",
-      "labeller: python -m uvicorn app.labeler:app in .venv_chexbert + .chat_deps_chexbert (D24 env)"
+      "labeller: python -m uvicorn app.labeler:app in .venv_chexbert + .chat_deps_chexbert (D24 env)",
+      "parked: --host localhost may open two sockets, only sockets[0] recorded (wrapper binds 127.0.0.1)",
+      "parked: PUBLISHED_MODEL defaults to the m3 dump whatever MODELS says (server shows model_report only for m3)",
+      "track: transient InterruptedError at interpreter start in tests/test_report_eos_job.py under load (seen once in a P7-B gate run)"
     ],
     "P7-D": [
       "the live-equals-golden check runs with stop_on_repeat off; a second pass measures the stop on real decoders (see the plan's P7-D note)"
@@ -713,7 +732,9 @@
       "pytest.ini uses a [tool:pytest] header, so pytest ignores it (markers live in tests/conftest.py)",
       "P5-A polish: reorder-only mismatch message, _count wording, overlapping client tests, no load back-off",
       "P9-G3: summary mask() blanks 8+ digit runs inside the sync sha (cosmetic)",
-      "P4-H: poll res.json() transport marking untested (api.js:134); stale test title app.test.mjs:3274; request() body-read TypeError logged"
+      "P4-H: poll res.json() transport marking untested (api.js:134); stale test title app.test.mjs:3274; request() body-read TypeError logged",
+      "P5-F nits: module docstring lacks the own_rank=0 floor caveat for own_gap; the real-tie test depends on np.argpartition tie order",
+      "P5-F parked: labeller starts after .venv activation (D24 explicit on the env line); suite cost ~110 s for test_chat_retrieval_gates.py"
     ],
     "P9-G5": [
       "UI copy for eos_trained models: render.js \"full budget\" chip and app.js:1360 stop-switch hint (\"always decodes the whole token budget\") are wrong for an EOS model",
@@ -731,6 +752,15 @@
       "drawer retrieval note per-model (app.js:1426)",
       "state.js labelsPending shows 'labelling…' while features.labels is false",
       "decide whether public mode shows 'agreement pending'"
+    ],
+    "P7-C": [
+      "OPEN Important (plan-mandated): a forward that is up but points at a dead target is never noticed (requeue -> new --port 0 port; ExitOnForwardFailure covers only the local bind) -> periodic re-read of chat_sessions/endpoint every ~60 s while forwarding; kill the forward when host/port changed or the file is gone; fake-ssh test where the second read differs",
+      "bind test sees only a 127.0.0.1 listener: a 0.0.0.0/:: or ::1 dev server reads free -> add a ::1 bind test, document the wildcard limit, test an SO_REUSEADDR listener",
+      "public_demo.sh checks the mode once at start (P9-D: /healthz watchdog or REQUIRE_MODE=public in tunnel.sh)",
+      "missing-cloudflared test relies on /usr/bin:/bin lacking cloudflared -> assert/skip or build PATH from symlinks",
+      "test_chat_tunnel.py wall-clock bound 1.5 <= elapsed < 2.9 may flake under load -> loosen",
+      "endpoint read lacks </dev/null (SIGTTIN when backgrounded from an interactive shell)",
+      "UserKnownHostsFile=${HOME}/... breaks on a HOME with whitespace"
     ]
   }
 }
