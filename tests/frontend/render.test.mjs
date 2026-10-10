@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ShimEvent, installDom, serialize } from './dom_shim.mjs';
-import { initialView, replay } from '../../app/static/state.js';
+import { initialView, labelsPending, replay } from '../../app/static/state.js';
 import * as render from '../../app/static/render.js';
 import {
   STAGES, detailTable, el, optionChips, provenanceText, renderAssistantCard, renderLabels, renderNotes, renderProvenance,
@@ -23,6 +23,7 @@ const builder = (name) => (...args) => {
   return render[name](...args);
 };
 const renderImages = builder('renderImages');
+const renderNeighbors = builder('renderNeighbors');
 
 installDom();   // this file's process only: the other test files never see a document
 
@@ -620,15 +621,18 @@ test('the label states follow the stage (P5-E): labelling while it runs, then la
   }
 });
 
-test('while the gallery is still being labelled the chips come with an "agreement pending" note (P5-E fix 1), in either mode', () => {
+test('while the gallery is still being labelled the chips come with an "agreement pending" note (P5-E fix 1), in private mode only (P6-C ruling)', () => {
   const live = [START, stageStart('generate', 3), snapshot('Findings: so far'), stageEnd('generate', 9, GENERATE), stageStart('label', 4)];
   const detail = { chexbert_14: labelled(['Edema']), positives: ['Edema'], neighbor_agreement: [], neighbor_agreement_pending: true };
-  for (const start of [START, step('message_start', { ...START.data, mode: 'public' })]) {
-    const labels = renderLabels(viewOf([start, ...live.slice(1), stageEnd('label', 3, detail), stopOf('done')]), { labelNames: LABEL_NAMES });
-    assert.equal(qa(labels, '.chip').length, 14);                         // the report is labelled all the same
-    assert.deepEqual(texts(qa(labels, '.note')), ['agreement pending: the gallery is still being labelled']);
-    assert.equal(labels.children.at(-1).textContent, 'agreement pending: the gallery is still being labelled');   // after the chips
-  }
+  const labels = renderLabels(viewOf([...live, stageEnd('label', 3, detail), stopOf('done')]), { labelNames: LABEL_NAMES });
+  assert.equal(qa(labels, '.chip').length, 14);                         // the report is labelled all the same
+  assert.deepEqual(texts(qa(labels, '.note')), ['agreement pending: the gallery is still being labelled']);
+  assert.equal(labels.children.at(-1).textContent, 'agreement pending: the gallery is still being labelled');   // after the chips
+  // The agreement with the similar X-rays is private (R1): public mode never shows it, so it does not say it is pending either.
+  const pub = renderLabels(viewOf([step('message_start', { ...START.data, mode: 'public' }), ...live.slice(1), stageEnd('label', 3, detail),
+                                   stopOf('done')]), { labelNames: LABEL_NAMES });
+  assert.equal(qa(pub, '.chip').length, 14);
+  assert.equal(q(pub, '.note'), null);
   const plain = renderLabels(viewOf([...live, stageEnd('label', 3, { ...detail, neighbor_agreement_pending: undefined }), stopOf('done')]),
                              { labelNames: LABEL_NAMES });
   assert.equal(q(plain, '.note'), null);                                   // no marker, no note
@@ -890,7 +894,7 @@ function everyBuilder(view, ctx) {
   for (const name of SECTION_BUILDERS) if (typeof render[name] === 'function') built[name] = render[name](view, ctx);   // P6-B..D
   return built;
 }
-const SECTION_BUILDERS = ['renderImages'];
+const SECTION_BUILDERS = ['renderImages', 'renderNeighbors'];
 // What a missing field must never print, in the text of a card or in any attribute of it.
 function assertClean(node, name) {
   assert.doesNotMatch(node.textContent, /undefined|NaN|\bnull\b|\[object|\bfalse\b/, `${name}: text`);
@@ -1362,6 +1366,156 @@ test('focusKey and restoreFocus find a viewer button again in the rebuilt card',
   assert.equal(document.activeElement, qa(card, 'button[data-action="view"]')[1]);
   assert.equal(restoreFocus(card, 'view:7'), false);   // no such button: false, quietly
   document.body.replaceChildren();
+});
+
+// ---- similar X-rays: the neighbour grid (P6-C) ----------------------------------------------------------------------------
+
+const neighbour = (rank, more = {}) => ({ rank, similarity: Number((0.95 - 0.05 * rank).toFixed(3)), gallery_row: 100 + rank,
+                                          study_id: 50000000 + rank, txt_row: 200 + rank, image_url: `/v1/gallery/images/${100 + rank}`,
+                                          labels: labelled(rank === 1 ? ['Edema'] : []), ...more });
+const agreementOf = (rank, more = {}) => ({ rank, agree: 13, of: 14, both_positive: [], neighbor_only: [], generated_only: [], ...more });
+const retrieved = (neighbours, more = {}) => stageEnd('retrieve', 3, { image_neighbors: neighbours, report_matches: [], gallery: { images: 200 }, ...more });
+const gridSteps = (neighbours = [neighbour(1), neighbour(2)]) => [imageStart(), PREPROCESSED, stageStart('retrieve', 2), retrieved(neighbours),
+                                                                  stageStart('generate', 3), snapshot('Findings: so far'), stageEnd('generate', 9, GENERATE)];
+const gridView = (...more) => viewOf([...gridSteps(), ...more]);
+const items = (section) => qa(section, 'li.neighbor');
+const agreements = (section) => items(section).map((li) => q(li, '.agreement')?.textContent ?? null);
+
+test('the similar X-rays are a grid: each neighbour\'s picture, "#rank · similarity" and a bar as long as the similarity (P6-C)', async () => {
+  const { asked, loadImage } = loader();
+  const section = renderNeighbors(gridView(), { loadImage, turn: 2 });
+  assert.equal(section.localName, 'section');
+  assert.ok(section.classList.contains('neighbors'));
+  assert.equal(section.hasAttribute('hidden'), false);
+  assert.equal(section.getAttribute('aria-label'), 'Similar X-rays, turn 2');
+  assert.equal(q(section, 'h3').textContent, 'Similar X-rays (13D tower)');
+  assert.equal(q(section, 'ol').getAttribute('role'), 'list');   // a list to a screen reader where the style drops the numbers
+  assert.deepEqual(items(section).map((li) => li.getAttribute('data-rank')), ['1', '2']);
+  assert.deepEqual(items(section).map((li) => q(li, '.neighbor-score').textContent), ['#1 · 0.900', '#2 · 0.850']);
+  assert.deepEqual(items(section).map((li) => q(li, '.sim-fill').getAttribute('style')), ['width: 90%', 'width: 85%']);
+  assert.ok(items(section).every((li) => q(li, '.sim-bar').getAttribute('aria-hidden') === 'true'));   // the number is said; the bar draws it
+  const imgs = qa(section, 'img');
+  assert.deepEqual(imgs.map((i) => [i.getAttribute('data-src'), i.getAttribute('alt')]),
+                   [['/v1/gallery/images/101', 'Similar X-ray #1'], ['/v1/gallery/images/102', 'Similar X-ray #2']]);
+  await tick();
+  assert.deepEqual(asked, ['/v1/gallery/images/101', '/v1/gallery/images/102']);   // through the loader, with the page's auth
+  assert.equal(qa(section, '.neighbor-placeholder').length, 0);
+  assert.equal(q(section, '.section-note'), null);   // nothing to explain in private mode
+});
+
+test('a similarity outside 0..1 keeps its bar inside the box, and a neighbour that lacks fields still renders cleanly', () => {
+  const { loadImage } = loader();
+  const odd = renderNeighbors(viewOf([...gridSteps([neighbour(1, { similarity: 1.4 }), neighbour(2, { similarity: -0.2 }),
+                                                    { similarity: 'x', rank: 'y' }, null, 7])]), { loadImage });
+  assert.deepEqual(items(odd).map((li) => q(li, '.sim-fill')?.getAttribute('style') ?? null), ['width: 100%', 'width: 0%', null]);
+  assert.equal(items(odd)[2].hasAttribute('data-rank'), false);
+  assertClean(odd, 'odd neighbours');
+});
+
+test('n/14 labels agree once the label stage has ended, with chips for the positives that differ; "labels…" before it', () => {
+  const { loadImage } = loader();
+  assert.deepEqual(agreements(renderNeighbors(gridView(), { loadImage })), ['labels…', 'labels…']);   // generate has ended, label is next
+  assert.deepEqual(agreements(renderNeighbors(gridView(stageStart('label', 4)), { loadImage })), ['labels…', 'labels…']);
+  const detail = { chexbert_14: labelled(['Cardiomegaly']), positives: ['Cardiomegaly'],
+                   neighbor_agreement: [agreementOf(1, { agree: 12, neighbor_only: ['Edema'], generated_only: ['Cardiomegaly'] }), agreementOf(2)] };
+  const section = renderNeighbors(gridView(stageStart('label', 4), stageEnd('label', 3, detail)), { loadImage });
+  assert.deepEqual(agreements(section), ['12/14 labels agree', '13/14 labels agree']);
+  assert.deepEqual(texts(qa(items(section)[0], 'li.chip.diff')), ['neighbour: Edema', 'report: Cardiomegaly']);
+  assert.equal(q(items(section)[0], 'ul').getAttribute('aria-label'), 'Labels that differ, similar X-ray #1');
+  assert.equal(qa(items(section)[1], '.chip').length, 0);   // every label agrees: nothing to name
+  assert.equal(qa(section, 'li.chip.label').length, 0);     // not the report's own label chips (the card has exactly 14 of those)
+});
+
+test('the agreement line says why there is none: labels off, the labeller unavailable or stopped, the gallery still being labelled', () => {
+  const { loadImage } = loader();
+  const line = (...more) => agreements(renderNeighbors(gridView(...more), { loadImage }));
+  assert.deepEqual(line(skipped('label', 'labeler_unavailable')), ['labels unavailable', 'labels unavailable']);
+  assert.deepEqual(line(skipped('label', 'label_off')), ['labels off', 'labels off']);   // the user's own setting, said as that
+  assert.deepEqual(line(stopOf('aborted')), ['labels unavailable', 'labels unavailable']);   // stopped before the label stage
+  assert.deepEqual(line(stageStart('label', 4), stopOf('error')), ['labels unavailable', 'labels unavailable']);
+  const pending = viewOf([...gridSteps([neighbour(1, { labels: null }), neighbour(2, { labels: null })])]);   // the gallery's labels are not built
+  assert.deepEqual(agreements(renderNeighbors(pending, { loadImage })), ['labels pending', 'labels pending']);
+  const off = viewOf([step('message_start', { ...imageStart().data, options: { ...START.data.options, label: false } }), ...gridSteps().slice(1)]);
+  assert.deepEqual(agreements(renderNeighbors(off, { loadImage })), ['labels off', 'labels off']);   // said from the start, as the chips say it
+});
+
+test('a server with no labeller (features.labels false) never says "labelling…" or "labels…": no labels are coming (P6-C ruling)', () => {
+  const { loadImage } = loader();
+  const running = labelling();   // the label stage runs
+  assert.equal(renderLabels(running, { labelNames: LABEL_NAMES }).textContent, 'labelling…');
+  const none = renderLabels(running, { labelNames: LABEL_NAMES, labels: false });
+  assert.equal(none.textContent.includes('labelling'), false);
+  assert.deepEqual(agreements(renderNeighbors(gridView(), { loadImage, labels: false })), ['labels unavailable', 'labels unavailable']);
+  const ended = viewOf([START, stageStart('generate', 3), stageEnd('generate', 9, GENERATE), skipped('label', 'labeler_unavailable'), stopOf('done')]);
+  assert.equal(renderLabels(ended, { labelNames: LABEL_NAMES, labels: false }).textContent, 'labels unavailable (labeler_unavailable)');   // its end is said as before
+  const off = viewOf([step('message_start', { ...START.data, options: { ...START.data.options, label: false } }), stageStart('generate', 3)]);
+  assert.equal(renderLabels(off, { labelNames: LABEL_NAMES, labels: false }).textContent, 'labels off');   // the user's own setting still shows
+  assert.equal(labelsPending(running), true);
+  assert.equal(labelsPending(running, false), false);   // state.js: nothing pending from a server that runs no labeller
+  assert.equal(labelsPending(running, true), true);
+});
+
+test('public mode: rank and similarity only, a neutral placeholder for each picture, and not one request for a gallery image (R1)', async () => {
+  const { asked, loadImage } = loader();
+  const pubStart = imageStart({ urls: { thumb: URLS.thumb, model_input: URLS.model_input } }, { mode: 'public' });
+  const pub = viewOf([pubStart, PREPROCESSED, stageStart('retrieve', 2),
+                      retrieved([{ rank: 1, similarity: 0.9 }, { rank: 2, similarity: 0.85 }, { rank: 3, similarity: 0.8 }]),
+                      stageStart('generate', 3), snapshot('Findings: ok'), stageEnd('generate', 9, GENERATE),
+                      stageStart('label', 4), stageEnd('label', 3, { chexbert_14: labelled(['Edema']), positives: ['Edema'] }),
+                      stopOf('done', { report: 'Findings: ok', display_report: 'Findings: ok' })]);
+  const section = renderNeighbors(pub, { loadImage, openViewer() {} });
+  assert.equal(section.hasAttribute('hidden'), false);
+  assert.equal(q(section, '.section-note').textContent, 'Public mode shows rank and similarity only.');
+  assert.deepEqual(items(section).map((li) => q(li, '.neighbor-score').textContent), ['#1 · 0.900', '#2 · 0.850', '#3 · 0.800']);
+  assert.equal(qa(section, '.neighbor-placeholder').length, 3);
+  assert.ok(qa(section, '.neighbor-placeholder').every((p) => p.getAttribute('aria-hidden') === 'true'));
+  assert.deepEqual([qa(section, 'img').length, qa(section, 'button').length, qa(section, '.agreement').length, qa(section, '.chip').length], [0, 0, 0, 0]);
+  const card = renderAssistantCard(pub, { loadImage, labelNames: LABEL_NAMES });   // the whole card: its images row asks for the user's own upload
+  await tick();
+  assert.deepEqual(asked.filter((path) => path.startsWith('/v1/gallery/')), []);
+  assert.ok(asked.every((path) => path.startsWith('/v1/messages/u_test/image?')), asked.join(', '));
+  assertClean(card, 'public card');
+  // Defence in depth: a public turn whose neighbour somehow kept an image path still shows a placeholder and asks for nothing.
+  const leaked = viewOf([pubStart, stageStart('retrieve', 2), retrieved([{ rank: 1, similarity: 0.9, image_url: '/v1/gallery/images/5' }])]);
+  asked.length = 0;
+  const kept = renderNeighbors(leaked, { loadImage });
+  await tick();
+  assert.deepEqual([asked, qa(kept, '.neighbor-placeholder').length, qa(kept, 'img').length], [[], 1, 0]);
+});
+
+test('a neighbour that is the upload itself, byte for byte, says so', () => {
+  const { loadImage } = loader();
+  const identical = (to) => viewOf([imageStart(), stageEnd('preprocess', 1, { input_px: [320, 320], identical_to: to }), stageStart('retrieve', 2),
+                                    retrieved([neighbour(1), neighbour(2)])]);
+  const badges = (view) => items(renderNeighbors(view, { loadImage })).map((li) => q(li, '.badge')?.textContent ?? null);
+  assert.deepEqual(badges(identical({ split: 'train', row: 102 })), [null, 'identical to your upload']);
+  assert.deepEqual(badges(identical({ split: 'test', row: 102 })), [null, null]);   // a test image is in no neighbour list
+  assert.deepEqual(badges(identical(null)), [null, null]);
+  assert.deepEqual(badges(gridView()), [null, null]);
+});
+
+test('with ctx.openViewer a similar X-ray opens beside your X-ray, the neighbour labelled with the stored gallery size (the P6-E hook)', () => {
+  const { loadImage } = loader();
+  const opened = [];
+  const section = renderNeighbors(gridView(), { loadImage, openViewer: (spec) => opened.push(spec), turn: 3 });
+  const buttons = qa(section, 'button[data-action="view"]');
+  assert.deepEqual(buttons.map((b) => b.getAttribute('aria-label')),
+                   ['Open similar X-ray #1 beside your X-ray in the viewer, turn 3', 'Open similar X-ray #2 beside your X-ray in the viewer, turn 3']);
+  buttons[0].click();
+  assert.deepEqual(opened, [{ images: [{ url: URLS.original, label: 'Your X-ray · 2544×3056 px' },
+                                       { url: '/v1/gallery/images/101', label: 'Similar X-ray #1 · 320×320 px (stored gallery size)' }] }]);
+  assert.equal(qa(section, 'li > button').length, 0);   // the button is inside the figure, not a child of the list item
+});
+
+test('the card puts the similar X-rays after the images row; a skipped retrieve or k 0 leaves the section out', () => {
+  const { loadImage } = loader();
+  const card = renderAssistantCard(gridView(stopOf('done', { report: 'Findings: so far', display_report: 'Findings: so far' })), { loadImage });
+  assert.deepEqual(card.children.map((c) => c.getAttribute('class')), ['timeline', 'notes', 'report', 'labels', 'images', 'neighbors', 'provenance']);
+  const skip = viewOf([imageStart(), PREPROCESSED, skipped('retrieve', 'gallery_unavailable')]);
+  assert.equal(renderNeighbors(skip, { loadImage }).hasAttribute('hidden'), true);
+  assert.equal(q(renderAssistantCard(skip, { loadImage }), 'section.neighbors'), null);
+  assert.equal(renderNeighbors(viewOf([imageStart(), stageStart('retrieve', 2), retrieved([])]), { loadImage }).hasAttribute('hidden'), true);
+  assert.equal(renderNeighbors(viewOf([imageStart(), stageStart('retrieve', 2)]), { loadImage }).hasAttribute('hidden'), true);   // still running
 });
 
 // ---- UI state that outlives a re-render (ctx.ui) ----------------------------------------------------------------------

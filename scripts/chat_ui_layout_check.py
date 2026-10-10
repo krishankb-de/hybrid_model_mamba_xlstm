@@ -62,7 +62,7 @@ CHIPS = ["beam 3", "100 tok", "cached", "k 4/3", "label on", "repair off"]
 LONG_WORD = "x" * 140
 REPORT_TEXT = ("The lungs are clear. There is no focal consolidation, pleural effusion or pneumothorax. The "
                "cardiomediastinal silhouette is within normal limits. No acute osseous abnormality is seen. ") * 3
-SECTIONS = ["section.images"]   # the card's own sections (check i): P6-B's images row; P6-C and P6-D add theirs
+SECTIONS = ["section.images", "section.neighbors"]   # the card's own sections (check i): P6-B's images row, P6-C's similar X-rays; P6-D adds its
 
 
 def section_events() -> List[Dict[str, Any]]:
@@ -271,7 +271,7 @@ def check_sections(m: Dict[str, Any], width: int, sections: List[str]) -> List[s
     return failures
 
 
-PICTURED = {"section.images"}   # the sections that must show pictures in the synthetic turn
+PICTURED = {"section.images", "section.neighbors"}   # the sections that must show pictures in the synthetic turn
 
 
 def check_save(m: Dict[str, Any], width: int, height: int, scroll: bool, drawer_open: bool) -> List[str]:

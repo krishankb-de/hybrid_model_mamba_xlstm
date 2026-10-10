@@ -12,6 +12,7 @@ import {
   nearBottom, nextHealthDelay, optionsFromSettings, parseRoute, saveSettings, serverHas, sessionDate, sessionMeta, sessionTitle,
   userTurnMessage,
 } from '../../app/static/app.js';
+import * as appModule from '../../app/static/app.js';   // P6-C, P6-D: a missing export fails its own tests only
 import { applyEvent, initialView } from '../../app/static/state.js';
 import { el, renderAssistantCard } from '../../app/static/render.js';
 import { transportFailure } from '../../app/static/api.js';
@@ -4286,6 +4287,63 @@ test('the drawer and the chips follow the chosen model\'s features: k is off, an
   change(model);
   assert.deepEqual([control(SIMILAR).disabled, $('retrieval-note').hidden], [false, true]);
   assert.equal(chipsText().includes('k 4/3'), true);
+});
+
+const OTHER_TOWER_NOTE = 'The gallery was built with another image tower, so this model skips similar X-rays and matching reports.';
+const NO_GALLERY_NOTE = 'This server has no retrieval gallery, so similar X-rays and matching reports are skipped.';
+
+test('the drawer\'s retrieval note says why the chosen model skips retrieval: no gallery at all, or a gallery of another tower (P6-C ruling)', async () => {
+  assert.equal(typeof appModule.retrievalNote, 'function', 'app.js exports retrievalNote');
+  const { retrievalNote } = appModule;
+  assert.equal(retrievalNote(PER_MODEL, CARD_PLAIN.name), OTHER_TOWER_NOTE);   // the server has a gallery, of the other model's tower
+  assert.equal(retrievalNote(PER_MODEL, CARD_CACHED.name), null);
+  assert.equal(retrievalNote(PER_MODEL), null);                                 // the default model's
+  assert.equal(retrievalNote(NO_STAGES), NO_GALLERY_NOTE);
+  assert.equal(retrievalNote(NO_STAGES, CARD_PLAIN.name), NO_GALLERY_NOTE);
+  for (const unsaid of [MODELS, null, undefined, {}, []]) assert.equal(retrievalNote(unsaid), null, JSON.stringify(unsaid));   // not said: taken to run
+  const h = harness({ models: PER_MODEL });
+  await h.app.start();
+  await flush();
+  $('settings').click();
+  const model = control('Model');
+  model.value = CARD_PLAIN.name;
+  change(model);
+  assert.deepEqual([$('retrieval-note').hidden, $('retrieval-note').textContent], [false, OTHER_TOWER_NOTE]);
+  model.value = CARD_CACHED.name;
+  change(model);
+  assert.equal($('retrieval-note').hidden, true);
+  const none = harness({ models: NO_STAGES });
+  await none.app.start();
+  await flush();
+  assert.deepEqual([$('retrieval-note').hidden, $('retrieval-note').textContent], [false, NO_GALLERY_NOTE]);
+});
+
+test('a running turn on a server with no labeller never says "labelling…": the card is told the server\'s labels feature (P6-C ruling)', async () => {
+  const h = await ready({ options: { models: NO_STAGES } });
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  const events = fullTurn();
+  for (const e of events.slice(0, 11)) run.channel.push(e);   // up to the end of generate: label is next
+  await flush();
+  nextFrame();
+  assert.equal(cardOf().getAttribute('data-status'), 'running');
+  assert.equal(q(cardOf(), '.labels').textContent.includes('labelling'), false);
+  for (const e of events.slice(11)) run.channel.push(e);
+  run.channel.end();
+  await turn;
+  assert.equal(q(cardOf(), '.labels').textContent, 'labels unavailable (labeler_unavailable)');   // its end is said as before
+  const told = await ready({ options: { models: { ...MODELS, features: { retrieval: true, labels: true } } } });   // a server that labels
+  told.app.send();
+  await flush();
+  told.api.streams[0].accept('m_b');
+  await flush();
+  for (const e of fullTurn('m_b').slice(0, 11)) told.api.streams[0].channel.push(e);
+  await flush();
+  nextFrame();
+  assert.equal(q(cardOf(), '.labels').textContent, 'labelling…');
 });
 
 test('a replayed user turn shows k only if the model it ran on runs retrieval', async () => {

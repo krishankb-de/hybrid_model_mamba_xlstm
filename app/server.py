@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 from fastapi import Depends, FastAPI, File, Form, Header, Query, UploadFile
+from fastapi import Path as PathParam
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
@@ -76,6 +77,9 @@ BOTH_IMAGES_MSG = "Send an image or a test row, not both."
 RETRIEVE_FAILED_MSG = "The retrieval could not be run."
 NO_TURN_IMAGE_MSG = "This turn has no image."
 IMAGE_GONE_MSG = "This turn's image is no longer stored."
+PUBLIC_GALLERY_MSG = "Gallery images are not available in public mode."
+NO_GALLERY_ROW_MSG = "No such gallery image."
+GALLERY_IMAGE_MSG = "Could not read the gallery image."
 UPLOAD_CACHE = {"Cache-Control": "private, max-age=3600"}   # a user's own upload, back to that user: a reload need not fetch it again
 NO_STORE = {"Cache-Control": "no-store"}                     # an image of the dataset (MIMIC): never kept by a browser or a proxy (R1)
 IMAGE_TYPES = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}   # sniff_format's names
@@ -151,13 +155,13 @@ OPTIONS_DOC = ("The turn's options as a JSON object with the keys " + ", ".join(
 REFUSALS = {   # what a status means in the reference; a route that can answer it declares it with _refusals()
     400: "The request is malformed: `options` is not a JSON object, or in public mode `X-Client-Id` is missing or "
          "invalid.",
-    403: "A test-split study was asked for in public mode.",
-    404: "The session, message or image does not exist or was deleted, or in public mode it belongs to another client.",
+    403: "A test-split study or a gallery image was asked for in public mode.",
+    404: "The session, message, image or gallery row does not exist or was deleted, or in public mode it belongs to another client.",
     413: "The image is over the {} MB upload limit.".format(UPLOAD_MB),
     422: "The request failed validation: a parameter, an option, the model or the image cannot be used, or there is "
          "no image to run.",
     429: "The server is busy: its queue of accepted turns is full.",
-    500: "The server could not store the image, read a test-split one, or run the retrieval.",
+    500: "The server could not store the image, read a test-split or gallery image, or run the retrieval.",
     503: "What the route needs is not on this server or does not answer: the retrieval gallery or the CheXbert labeller.",
 }
 STREAM_RESPONSE = {200: {   # the turn is Server-Sent Events, not JSON
@@ -948,6 +952,39 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         except LabelerUnavailable:
             raise HTTPException(503, LABELER_DOWN_MSG) from None
         return {"chexbert_14": named_labels(row)}
+
+    # ---- P6-C: a similar X-ray's image, by its gallery row ---------------------------------------------------------------------
+
+    def private_gallery() -> None:
+        """Gallery images are MIMIC data (R1): 403 in public mode, before anything else about the request, the row included."""
+        if mode == "public":
+            raise HTTPException(403, PUBLIC_GALLERY_MSG)
+
+    @app.get("/v1/gallery/images/{row}", summary="Get a similar X-ray's image", response_class=Response,
+             dependencies=[Depends(private_gallery)],
+             responses={**IMAGE_RESPONSE, **_refusals({
+                 403: PUBLIC_GALLERY_MSG, 404: NO_GALLERY_ROW_MSG,
+                 422: "Invalid request: row: Input should be greater than or equal to 0",
+                 500: GALLERY_IMAGE_MSG, 503: NO_RETRIEVAL_MSG}, client_id=False)},
+             description="The stored image of a gallery row (the integer `gallery_row` of a similar X-ray in a retrieve stage, never a "
+                         "path), a 320 px JPEG sent with `Cache-Control: no-store`, in private mode only. Answers 403 in public mode, 404 "
+                         "for a row outside the gallery, 422 for a row that is not a whole number from 0, 500 when the file cannot be read "
+                         "and 503 when the server has no retrieval gallery.")
+    def gallery_image(row: int = PathParam(..., ge=0, description="A similar X-ray's `gallery_row`.")) -> Response:
+        gallery = worker.pipeline.gallery
+        if gallery is None:
+            raise HTTPException(503, NO_RETRIEVAL_MSG)
+        try:
+            path = gallery.image_path(row)
+        except IndexError:
+            raise HTTPException(404, NO_GALLERY_ROW_MSG) from None
+        try:
+            data = path.read_bytes()
+            kind = sniff_format(data)
+        except (OSError, UploadError):   # its path holds subject and study ids: it stays out of the message and the log
+            log.warning("a gallery image could not be read")
+            raise HTTPException(500, GALLERY_IMAGE_MSG) from None
+        return Response(data, media_type=IMAGE_TYPES[kind], headers=NO_STORE)
 
     @app.get("/v1/test-studies", summary="List test-split studies", dependencies=[Depends(private_only)],
              description="The studies of the official test split whose study id starts with `q`, in test-row order, `limit` at a "

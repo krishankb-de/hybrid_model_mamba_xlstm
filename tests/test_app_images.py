@@ -228,3 +228,79 @@ def test_a_test_split_image_that_cannot_be_read_is_a_500_and_no_path_is_logged(g
         for variant in URL_VARIANTS:
             _error(_image(gclient, frames[0]["data"]["user_message_id"], variant), 500, "internal_error", TEST_IMAGE_MSG)
     assert caplog.records and str(path) not in caplog.text and path.name not in caplog.text
+
+
+# ---- P6-C: a similar X-ray's image (GET /v1/gallery/images/{row}), private mode only ------------------------------------------------
+
+PUBLIC_GALLERY_MSG = "Gallery images are not available in public mode."
+NO_GALLERY_ROW_MSG = "No such gallery image."
+GALLERY_IMAGE_MSG = "Could not read the gallery image."
+
+
+def _retrieved(frames):
+    return next(f["data"]["detail"] for f in frames if f["event"] == "stage_end" and f["data"]["stage"] == "retrieve")
+
+
+def test_a_gallery_image_is_its_stored_file_sent_with_no_store(gclient, gallery):
+    for row in (0, 7, gallery.facts()["images"] - 1):
+        r = gclient.get("/v1/gallery/images/{}".format(row))
+        assert r.status_code == 200, (row, r.text)
+        assert r.headers["content-type"] == "image/jpeg" and r.headers["cache-control"] == NO_STORE, row
+        assert r.content == gallery.image_path(row).read_bytes(), row
+        assert Image.open(io.BytesIO(r.content)).size == (320, 320)   # the stored gallery size
+
+
+def test_each_similar_xray_of_a_turn_names_its_image_by_its_row_and_that_resolves(gclient, gallery):
+    frames, _ = _turn(gclient, None, {"max_new_tokens": 16, "k_images": 5})
+    neighbours = _retrieved(frames)["image_neighbors"]
+    assert len(neighbours) == 5
+    for n in neighbours:
+        assert n["image_url"] == "/v1/gallery/images/{}".format(n["gallery_row"])   # an integer row, never a path
+        r = gclient.get(n["image_url"])
+        assert r.status_code == 200 and r.content == gallery.image_path(n["gallery_row"]).read_bytes()
+
+
+def test_a_row_outside_the_gallery_is_a_404_and_one_that_is_no_whole_number_a_422(gclient, gallery):
+    n = gallery.facts()["images"]
+    for row in (n, n + 1, 10 ** 12):
+        _error(gclient.get("/v1/gallery/images/{}".format(row)), 404, "not_found_error", NO_GALLERY_ROW_MSG)
+    for row in ("-1", "abc", "1.5", "1e3", "0x10", "%2E%2E"):
+        r = gclient.get("/v1/gallery/images/{}".format(row))
+        _error(r, 422, "validation_error")
+        assert r.json()["error"]["message"].startswith("Invalid request: row: "), row
+    # Never a path: routing or validation turns each away. (A literal "0/../1" never reaches the server: the client folds it into "1".)
+    for path in ("..%2F..%2Fmanifest.json", "%2Fetc%2Fpasswd", "%2E%2E%2Fmanifest.json", "0%2F..%2F1"):
+        r = gclient.get("/v1/gallery/images/" + path)
+        assert r.status_code in (404, 422) and r.headers["content-type"].startswith("application/json"), (path, r.status_code)
+
+
+def test_gallery_images_are_refused_in_public_mode_before_the_row_is_even_read(tmp_path, gallery):
+    with TestClient(create_app(engine="tiny", home=str(tmp_path), mode="public", token="t", gallery=gallery)) as c:
+        for row in ("0", "7", "abc", "-1", str(10 ** 6)):
+            _error(c.get("/v1/gallery/images/{}".format(row), headers=PUBLIC), 403, "permission_error", PUBLIC_GALLERY_MSG)
+        _error(c.get("/v1/gallery/images/0", headers={"Authorization": "Bearer t"}), 403, "permission_error", PUBLIC_GALLERY_MSG)
+
+
+def test_without_a_gallery_a_gallery_image_is_a_503(client):
+    from app.server import NO_RETRIEVAL_MSG
+    _error(client.get("/v1/gallery/images/0"), 503, "unavailable_error", NO_RETRIEVAL_MSG)
+
+
+def test_a_gallery_image_that_cannot_be_read_is_a_500_and_no_path_is_logged(gclient, gallery, caplog):
+    path = gallery.image_path(3)
+    path.unlink()
+    with caplog.at_level(logging.DEBUG):
+        _error(gclient.get("/v1/gallery/images/3"), 500, "internal_error", GALLERY_IMAGE_MSG)
+    assert caplog.records and str(path) not in caplog.text and path.name not in caplog.text
+
+
+def test_a_public_turns_retrieve_detail_names_no_gallery_image_so_the_page_has_none_to_ask_for(tmp_path, gallery):
+    with TestClient(create_app(engine="tiny", home=str(tmp_path), mode="public", token="t", gallery=gallery, labeler=RuleLabeler())) as c:
+        frames, sid = _turn(c, None, {"max_new_tokens": 16, "k_images": 6}, headers=PUBLIC)
+        neighbours = _retrieved(frames)["image_neighbors"]
+        assert len(neighbours) == 6 and all(set(n) == {"rank", "similarity"} for n in neighbours)   # U2: rank and similarity only
+        stored = c.get("/v1/messages/{}".format(frames[0]["data"]["message_id"]), headers=PUBLIC).json()
+        session = c.get("/v1/sessions/{}".format(sid), headers=PUBLIC).json()
+        for payload in (frames, stored, session):
+            text = json.dumps(payload)
+            assert "/v1/gallery/images/" not in text and '"image_url"' not in text and '"gallery_row"' not in text

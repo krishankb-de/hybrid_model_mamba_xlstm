@@ -3,7 +3,8 @@
 Each test gets a tiny server of its own and pages of its own in one headless Google Chrome:
   * The server is app.server.create_app(engine="tiny") (random weights, a toy vocabulary: no checkpoint and no data) on a free
     loopback port with a temporary CHAT_HOME; a test that parametrizes `ui` with {"tiny_gallery": True} gets one with the synthetic
-    gallery and the keyword labeller too (P5-E), so every stage runs. It runs from this checkout with PYTHONPATH set to it, because the venv's editable
+    gallery and the keyword labeller too (P5-E), so every stage runs, and one that adds "public_token": "t" gets a public-mode server
+    with that token (P6-C), whose pages load PUBLIC_SETUP_JS first (TinyServer.setup_script). It runs from this checkout with PYTHONPATH set to it, because the venv's editable
     install maps `scripts` and `hybrid_xmamba` to wherever it was installed from, and in a process group of its own, so that
     stopping it reaches everything it started. A test can kill it (SIGKILL: a crash) and start it again on the same port and home.
   * The browser is Playwright's chromium with channel="chrome": the Google Chrome installed on the machine, nothing downloaded. One
@@ -44,11 +45,17 @@ MAX_SHOT_BYTES = 400 * 1024
 STEP_DELAY_S = 0.05      # between two decoding steps of the tiny engine, as the dev server runs it: a stream that can be watched
 FAULT_TOKENS = 17        # a turn with this token budget fails inside the engine (LAUNCH): the page's internal-error card
 DESKTOP = (1280, 900)
+PUBLIC_CLIENT = "e2e-public"   # the X-Client-Id a public-mode test's pages and its API calls share (PUBLIC_SETUP_JS)
+# Run before a page's own scripts on every load of a public-mode test's context: the access token as Settings would hold it, and the
+# client id the API calls below send too, so that both see the same sessions.
+PUBLIC_SETUP_JS = ("try { localStorage.setItem('cxrchat.settings', JSON.stringify({ token: %s }));"
+                   " localStorage.setItem('cxrchat.client', %s); } catch (e) { /* no storage: the page has no token */ }")
 
 # The app as these tests run it: create_app's arguments (the step delay among them) cannot pass through the uvicorn CLI. One fault is
 # planted, and only here: a turn whose budget is FAULT_TOKENS raises ImportError inside the engine, the class the stale dev server of
 # 2026-10-09 raised at every turn, so that the card for an internal error is seen end to end. The server must send the class name and
-# never the exception's text, which goes to its log. argv: home, step delay in seconds, port, and "tiny_gallery" for the P5-E stages.
+# never the exception's text, which goes to its log. argv: home, step delay in seconds, port, then the flags: "tiny_gallery" for the P5-E
+# stages, and "public:<token>" for a public-mode server with that token (P6-C: what public mode shows, and never asks for).
 LAUNCH = """\
 import sys
 import uvicorn
@@ -66,8 +73,11 @@ def generate(self, enc, opts, on_snapshot, cancel):
 
 
 engine.Engine.generate = generate
+flags = sys.argv[4:]
+public = [flag.split(":", 1)[1] for flag in flags if flag.startswith("public:")]
 uvicorn.run(server.create_app(engine="tiny", home=sys.argv[1], tiny_step_delay_s=float(sys.argv[2]),
-                              tiny_gallery=sys.argv[4:] == ["tiny_gallery"]),
+                              tiny_gallery="tiny_gallery" in flags, mode="public" if public else "private",
+                              token=public[0] if public else None),
             host="127.0.0.1", port=int(sys.argv[3]), log_level="warning")
 """ % FAULT_TOKENS
 
@@ -196,8 +206,10 @@ class TinyServer:
     """The tiny app in a process group of its own on a free loopback port: started, killed and started again on the same port and
     home, and stopped (SIGTERM, then SIGKILL for what is left)."""
 
-    def __init__(self, home: str, step_delay_s: float = STEP_DELAY_S, tiny_gallery: bool = False) -> None:
+    def __init__(self, home: str, step_delay_s: float = STEP_DELAY_S, tiny_gallery: bool = False,
+                 public_token: Optional[str] = None) -> None:
         self.home, self.step_delay_s, self.tiny_gallery = home, float(step_delay_s), bool(tiny_gallery)
+        self.public_token = public_token   # a public-mode server with this token (P6-C); None: private, no token
         self.port = free_port()
         self.url = "http://127.0.0.1:{}/".format(self.port)
         self.log_path = os.path.join(home, "server.log")
@@ -208,7 +220,8 @@ class TinyServer:
         with open(self.log_path, "a") as log:
             self.proc = subprocess.Popen(
                 [sys.executable, "-c", LAUNCH, self.home, repr(self.step_delay_s), str(self.port)]
-                + (["tiny_gallery"] if self.tiny_gallery else []), cwd=REPO_ROOT,
+                + (["tiny_gallery"] if self.tiny_gallery else []) + (["public:" + self.public_token] if self.public_token else []),
+                cwd=REPO_ROOT,
                 env=dict(os.environ, PYTHONPATH=REPO_ROOT), stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         deadline = time.time() + timeout
         while time.time() < deadline and self.proc.poll() is None:
@@ -234,14 +247,23 @@ class TinyServer:
         except OSError:
             return ""
 
+    def _request(self, path: str, **kwargs: Any) -> urllib.request.Request:
+        """A request to the server: a public-mode one carries the token and the client id its pages use (PUBLIC_CLIENT)."""
+        headers = {"Authorization": "Bearer " + self.public_token, "X-Client-Id": PUBLIC_CLIENT} if self.public_token else {}
+        return urllib.request.Request(self.url + path.lstrip("/"), headers=headers, **kwargs)
+
+    def setup_script(self) -> str:
+        """PUBLIC_SETUP_JS for this server's token: add it to a context before its first page loads."""
+        return PUBLIC_SETUP_JS % (json.dumps(self.public_token or ""), json.dumps(PUBLIC_CLIENT))
+
     def get(self, path: str) -> Any:
         """A JSON route, read as an API client reads it: what the server stored."""
-        with urllib.request.urlopen(self.url + path.lstrip("/"), timeout=15) as response:
+        with urllib.request.urlopen(self._request(path), timeout=15) as response:
             return json.load(response)
 
     def status(self, path: str) -> int:
         try:
-            with urllib.request.urlopen(self.url + path.lstrip("/"), timeout=15) as response:
+            with urllib.request.urlopen(self._request(path), timeout=15) as response:
                 return response.status
         except urllib.error.HTTPError as exc:
             return exc.code

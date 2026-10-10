@@ -7,6 +7,7 @@ and the synthetic images are in conftest.py.
     venv/bin/python -m pytest tests/e2e -m e2e -q
 """
 import json
+import math
 import os
 import re
 import subprocess
@@ -816,6 +817,85 @@ def test_your_xray_and_what_the_model_saw_are_in_the_card_and_still_there_after_
     asked = [path for method, path in ui.requests if method == "GET" and path == "/v1/messages/{}/image".format(user["id"])]
     assert len(asked) >= 3   # the card's two before the reload, the bubble's and the card's after it; assert_clean fails any refusal
     ui.shot("images_row_1280x900_light.png")
+    ui.assert_clean()
+
+
+# ---- 17, 18 (P6-C) ----------------------------------------------------------------------------------------------------------------
+
+# The newest card's grid of similar X-rays: its title and note, and for each neighbour its rank, "#rank · similarity", the bar's width, its
+# picture (the server path it shows, whether it has loaded, its natural size) or a placeholder, the agreement line and the chips beside it.
+NEIGHBOURS_JS = """() => {
+  const c = [...document.querySelectorAll('#conversation article.card')].pop();
+  const s = c && c.querySelector('section.neighbors');
+  if (!s) return null;
+  const note = s.querySelector('.section-note');
+  return { title: s.querySelector('h3').textContent, note: note ? note.textContent : null,
+           items: [...s.querySelectorAll('li.neighbor')].map((li) => {
+             const img = li.querySelector('img'), fill = li.querySelector('.sim-fill'), agree = li.querySelector('.agreement');
+             return { rank: li.getAttribute('data-rank'), score: li.querySelector('.neighbor-score').textContent,
+                      bar: fill ? fill.style.width : null, placeholder: !!li.querySelector('.neighbor-placeholder'),
+                      img: img ? { path: img.getAttribute('data-src'), loaded: img.complete && img.naturalWidth > 0,
+                                   natural: [img.naturalWidth, img.naturalHeight] } : null,
+                      agreement: agree ? agree.textContent : null, chips: [...li.querySelectorAll('.chip.diff')].map((x) => x.textContent) };
+           }) };
+}"""
+NEIGHBOURS_LOADED = ("() => { const g = (%s)(); return !!g && g.items.length > 0 && g.items.every((i) => !!i.img && i.img.loaded); }"
+                     % NEIGHBOURS_JS)
+
+
+def _bar(similarity: float) -> str:
+    """The bar's width as the page sets it: Math.round of the similarity, held to 0..1, in per cent."""
+    return "{}%".format(math.floor(min(1.0, max(0.0, similarity)) * 100 + 0.5))
+
+
+@pytest.mark.parametrize("ui", [{"tiny_gallery": True}], indirect=True, ids=["tiny_gallery"])
+def test_similar_xrays_show_their_pictures_their_similarity_and_how_many_labels_agree(ui, images):
+    """P6-C on a tiny_gallery server: the card's "Similar X-rays (13D tower)" grid shows each neighbour's stored 320 px image (fetched with
+    the page's auth from GET /v1/gallery/images/{row}), "#rank · similarity" with a bar, and, once the label stage has ended, "n/14 labels
+    agree" with a chip for each positive that differs. A reload shows the same grid."""
+    page = ui.open()
+    card = ui.turn(images["xray_a.png"])
+    assert card["status"] == "done"
+    page.wait_for_function(NEIGHBOURS_LOADED)
+    grid = page.evaluate(NEIGHBOURS_JS)
+    [message] = assistants(ui, ui.session_id())
+    retrieve, label = stage_detail(message, "retrieve"), stage_detail(message, "label")
+    assert grid["title"] == "Similar X-rays (13D tower)" and grid["note"] is None
+    assert [i["rank"] for i in grid["items"]] == [str(n["rank"]) for n in retrieve["image_neighbors"]] == ["1", "2", "3", "4"]
+    for item, n, a in zip(grid["items"], retrieve["image_neighbors"], label["neighbor_agreement"]):
+        assert item["score"] == "#{} · {:.3f}".format(n["rank"], n["similarity"]) and item["bar"] == _bar(n["similarity"])
+        assert item["img"]["path"] == n["image_url"] == "/v1/gallery/images/{}".format(n["gallery_row"])
+        assert item["img"]["natural"] == [320, 320] and not item["placeholder"]   # the stored gallery size
+        assert item["agreement"] == "{}/14 labels agree".format(a["agree"])
+        assert item["chips"] == ["neighbour: " + x for x in a["neighbor_only"]] + ["report: " + x for x in a["generated_only"]]
+    asked = {path for method, path in ui.requests if method == "GET" and path.startswith("/v1/gallery/images/")}
+    assert asked == {n["image_url"] for n in retrieve["image_neighbors"]}   # and each was answered 200: assert_clean fails any refusal
+    ui.shot("similar_xrays_1280x900_light.png")
+    ui.reload()
+    page.wait_for_function(NEIGHBOURS_LOADED)
+    assert page.evaluate(NEIGHBOURS_JS) == grid   # replayed from the stored log
+    ui.assert_clean()
+
+
+@pytest.mark.parametrize("ui", [{"tiny_gallery": True, "public_token": "t"}], indirect=True, ids=["tiny_gallery_public"])
+def test_in_public_mode_similar_xrays_are_placeholders_and_the_page_asks_for_no_gallery_image(ui, images):
+    """P6-C and R1 on a public tiny_gallery server: the grid shows rank and similarity only, with a neutral placeholder for each picture and
+    no label agreement, and the page never asks for a gallery image. The images row still shows the user's own upload, as in private mode."""
+    ui.page.context.add_init_script(ui.server.setup_script())   # the token, as Settings holds it, and the shared client id
+    page = ui.open()
+    assert page.text_content("#mode-badge") == "public"
+    card = ui.turn(images["xray_a.png"])
+    assert card["status"] == "done" and card["stages"]["retrieve"] == "done" and card["stages"]["score"] == "skipped"
+    grid = page.evaluate(NEIGHBOURS_JS)
+    assert grid["note"] == "Public mode shows rank and similarity only." and len(grid["items"]) == 4
+    for item in grid["items"]:
+        assert item["placeholder"] and item["img"] is None and item["agreement"] is None and item["chips"] == [], item
+        assert re.fullmatch(r"#\d+ · -?\d\.\d{3}", item["score"]) and re.fullmatch(r"\d+%", item["bar"]), item
+    page.wait_for_function(PICTURES_LOADED)   # the user's own pictures: its upload is shown back to it in both modes
+    assert not [path for _, path in ui.requests if path.startswith("/v1/gallery/")]   # not one request for a gallery image
+    stored = ui.server.message(card["id"])
+    assert all(set(n) == {"rank", "similarity"} for n in stage_detail(stored, "retrieve")["image_neighbors"])   # U2, as stored and sent
+    ui.shot("similar_xrays_public_1280x900_light.png")
     ui.assert_clean()
 
 

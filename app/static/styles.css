@@ -374,6 +374,35 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .picture:not([src]) { color: transparent; }   /* still loading: the box, not its alt text */
 .picture[data-failed] { color: #ece9e1; font-size: 0.75rem; overflow: hidden; }   /* failed: the alt text says what belongs here */
 #conversation .picture-button { display: block; width: 100%; min-height: 0; padding: 0; border: 0; border-radius: 8px; background: none; line-height: 0; }
+.section-note { margin: 0 0 8px; }   /* public mode: what the section leaves out, and why */
+
+/* similar X-rays: a grid that takes as many columns as fit, never one narrower than a readable figure */
+.neighbors .neighbor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  gap: 14px 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.neighbor { min-width: 0; }
+.neighbor figure { margin: 0; }
+.neighbor figcaption { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; font-size: 0.75rem; overflow-wrap: anywhere; }
+.neighbor-score { font-variant-numeric: tabular-nums; font-weight: 600; }
+.neighbor-placeholder {   /* public mode: a neutral box where the picture would be; no gallery image is ever asked for */
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border: 1px dashed var(--control);
+  border-radius: 8px;
+  background: var(--soft);
+}
+.sim-bar { display: block; height: 4px; overflow: hidden; border-radius: 2px; background: var(--soft); }   /* drawn, not said: the number is */
+.sim-fill { display: block; height: 100%; background: var(--accent); }
+.badge.identical { align-self: flex-start; padding: 0 6px; border: 1px solid var(--accent); border-radius: 999px; color: var(--accent); font-weight: 600; }
+.agreement { margin: 0; }
+.agreement:not(.note) { font-weight: 600; }   /* "12/14 labels agree"; a muted note says why there is no count */
+.diff-chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.chip.diff { max-width: 100%; }
 
 /* ---- composer: pinned under the conversation column ----------------------------------------------------------- */
 

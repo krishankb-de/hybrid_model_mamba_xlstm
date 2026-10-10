@@ -23,6 +23,8 @@
 //   labelNames: [14 names]                   CHEXBERT_14 order, from /v1/models; else the order of view.labels
 //   retrieval: false                         the server runs no retrieval stage (/v1/models features): a user turn shows no k chip,
 //                                            since k was never used; left out, it is taken to run one
+//   labels: false                            the server runs no labeller (/v1/models features): nothing says "labelling…" while the
+//                                            turn runs, since no labels are coming; left out, it is taken to run one
 //   ui: Map                                  keeps the open stage details and Show raw, per message id, across the
 //                                            whole-card replace; without it a re-rendered card starts closed
 //   turn: 3                                  the turn's number in the session: it names the card and tells the same
@@ -342,7 +344,8 @@ function skippedLabels(why, off) {
 }
 
 // Said under the chips while the gallery's own labels are still being built (the label detail's neighbor_agreement_pending): the
-// report is labelled, but no similar X-ray has labels to agree with yet. Server state, so public mode says it too.
+// report is labelled, but no similar X-ray has labels to agree with yet. The agreement itself is private (R1): public mode shows none,
+// so it does not say that one is pending either (P6-C ruling).
 const AGREEMENT_PENDING = 'agreement pending: the gallery is still being labelled';
 
 export function renderLabels(view, ctx) {
@@ -355,9 +358,11 @@ export function renderLabels(view, ctx) {
   let marked = false;
   if (isObject(v.labels)) {
     ({ node: body, marked } = chipList(v, cx));
-    if (isObject(v.stages.label?.detail) && v.stages.label.detail.neighbor_agreement_pending === true) pending = note(AGREEMENT_PENDING);
-  } else if (labelsPending(v)) {
-    body = note(off ? 'labels off' : 'labelling…');   // off: say so now, not at the end
+    if (v.mode !== 'public' && isObject(v.stages.label?.detail) && v.stages.label.detail.neighbor_agreement_pending === true) {
+      pending = note(AGREEMENT_PENDING);
+    }
+  } else if (labelsPending(v) && (off || cx.labels !== false)) {
+    body = note(off ? 'labels off' : 'labelling…');   // off: say so now, not at the end; a server with no labeller has nothing coming
   } else {
     const st = stageState(v, 'label');   // a stop or an error settles it; a settled turn that never got here shows nothing
     const why = str(st.skipped);
@@ -526,6 +531,17 @@ function cardPicture(path, alt, open, spec, cx) {
 
 const MODEL_SAW = 'What the model saw (224×224)';
 
+// The turn's own X-ray: its image URLs, whether it is a test study's, its name, its label ("Your X-ray · 2544×3056 px") and the path the
+// viewer is given, its original where the mode sends one (public mode sends none, app/redact.py), else its thumbnail.
+function ownXray(v, cx) {
+  const image = isObject(v.image) ? v.image : {};
+  const urls = isObject(image.urls) ? image.urls : {};
+  const study = image.source === 'test_split';
+  const name = study ? 'Test-split X-ray' : 'Your X-ray';
+  const size = pixelSize(v);
+  return { urls, study, name, label: size ? `${name} · ${size}` : name, full: fetchable(urls.original, cx) ? urls.original : urls.thumb };
+}
+
 // "2544×3056 px", the size preprocess read (after the EXIF orientation), from its detail; '' when it has none to read.
 function pixelSize(v) {
   const px = isObject(v.stages.preprocess?.detail) ? v.stages.preprocess.detail.input_px : null;
@@ -541,21 +557,91 @@ const tile = (shown, caption) => (shown ? el('figure', { class: 'image-tile' }, 
 export function renderImages(view, ctx) {
   const v = whole(view);
   const cx = ctx ?? {};
-  const image = isObject(v.image) ? v.image : {};
-  const urls = isObject(image.urls) ? image.urls : {};
-  const study = image.source === 'test_split';
-  const own = study ? 'Test-split X-ray' : 'Your X-ray';
-  const size = pixelSize(v);
-  const ownLabel = size ? `${own} · ${size}` : own;
-  const full = fetchable(urls.original, cx) ? urls.original : urls.thumb;
+  const own = ownXray(v, cx);
   const tiles = [
-    tile(cardPicture(urls.thumb, own, study ? 'Open the test-split X-ray in the viewer' : 'Open your X-ray in the viewer',
-                     { images: [{ url: full, label: ownLabel }] }, cx), ownLabel),
-    tile(cardPicture(urls.model_input, 'What the model saw', 'Open what the model saw in the viewer',
-                     { images: [{ url: urls.model_input, label: MODEL_SAW }] }, cx), MODEL_SAW),
+    tile(cardPicture(own.urls.thumb, own.name, own.study ? 'Open the test-split X-ray in the viewer' : 'Open your X-ray in the viewer',
+                     { images: [{ url: own.full, label: own.label }] }, cx), own.label),
+    tile(cardPicture(own.urls.model_input, 'What the model saw', 'Open what the model saw in the viewer',
+                     { images: [{ url: own.urls.model_input, label: MODEL_SAW }] }, cx), MODEL_SAW),
   ].filter(Boolean);
   return el('section', { class: 'images', 'aria-label': named('Images', cx), hidden: !tiles.length },
     el('h3', { class: 'section-title' }, 'Images'), el('div', { class: 'image-row' }, ...tiles));
+}
+
+// ---- similar X-rays: the gallery's nearest training images, and how many labels each shares with the report (P6-C) --------
+
+const GALLERY_SIZE = '320×320 px (stored gallery size)';
+
+// "#3 · 0.913": a retrieval list's rank and similarity, what public mode keeps of them (U2). A part it lacks is left out.
+const scoreText = (rank, similarity) => [Number.isInteger(rank) ? `#${rank}` : null, isNum(similarity) ? similarity.toFixed(3) : null]
+  .filter(Boolean).join(' · ');
+
+// A bar as long as a similarity, held to 0..1. The number beside it is what is said; the bar only draws it.
+function simBar(similarity) {
+  const pct = Math.round(Math.min(1, Math.max(0, similarity)) * 100);
+  return el('span', { class: 'sim-bar', 'aria-hidden': 'true' }, el('span', { class: 'sim-fill', style: `width: ${pct}%` }));
+}
+
+// The gallery row the turn's own upload is, byte for byte (preprocess's identical_to, private mode), or null.
+function identicalRow(v) {
+  const to = isObject(v.stages.preprocess?.detail) ? v.stages.preprocess.detail.identical_to : null;
+  return isObject(to) && to.split === 'train' && Number.isInteger(to.row) ? to.row : null;
+}
+
+// What a similar X-ray's labels say against the report's, where the neighbour carries labels (private mode): "n/14 labels agree" once the
+// label stage has ended, with a chip for each positive only one side has ("neighbour: Edema", "report: Cardiomegaly"); "labels…" while
+// they are on their way; else why there are none. A neighbour without labels (public mode) says nothing about them. -> nodes, maybe none.
+function agreementOf(n, v, cx) {
+  if (!Object.hasOwn(n, 'labels')) return [];
+  const line = (text) => [el('p', { class: 'agreement note' }, text)];
+  if (n.labels === null) return line('labels pending');   // the gallery's own labels are still being built
+  const found = Array.isArray(v.agreement) ? v.agreement.find((a) => isObject(a) && a.rank === n.rank) : null;
+  if (found && Number.isInteger(found.agree) && Number.isInteger(found.of)) {
+    const names = (list) => (Array.isArray(list) ? list.filter((x) => typeof x === 'string') : []);
+    const chips = [...names(found.neighbor_only).map((x) => `neighbour: ${x}`), ...names(found.generated_only).map((x) => `report: ${x}`)];
+    const of = Number.isInteger(n.rank) ? `, similar X-ray #${n.rank}` : '';
+    return [el('p', { class: 'agreement' }, `${found.agree}/${found.of} labels agree`),
+      chips.length ? el('ul', { class: 'diff-chips', role: 'list', 'aria-label': `Labels that differ${of}` },
+        ...chips.map((chip) => el('li', { class: 'chip diff' }, chip))) : null];
+  }
+  const off = (isObject(v.options) && v.options.label === false) || stageState(v, 'label').skipped === 'label_off';
+  if (off) return line('labels off');   // the user's own setting, as the chips say it
+  return line(labelsPending(v, cx.labels) ? 'labels…' : 'labels unavailable');
+}
+
+function neighbourItem(n, v, cx, { pub, own, left, identical }) {
+  const rank = Number.isInteger(n.rank) ? n.rank : null;
+  const name = rank === null ? 'Similar X-ray' : `Similar X-ray #${rank}`;
+  const path = pub ? '' : str(n.image_url);   // public mode: never a gallery image, whatever the detail holds (R1)
+  const spoken = `${name.charAt(0).toLowerCase()}${name.slice(1)}`;
+  const open = left ? `Open ${spoken} beside ${own.study ? 'the test-split X-ray' : 'your X-ray'} in the viewer` : `Open ${spoken} in the viewer`;
+  const spec = { images: [...(left ? [left] : []), { url: path, label: `${name} · ${GALLERY_SIZE}` }] };
+  const picture = (path && cardPicture(path, name, open, spec, cx)) || el('div', { class: 'neighbor-placeholder', 'aria-hidden': 'true' });
+  return el('li', { class: 'neighbor', 'data-rank': rank },
+    el('figure', {}, picture, el('figcaption', {},
+      el('span', { class: 'neighbor-score' }, scoreText(n.rank, n.similarity)),
+      isNum(n.similarity) ? simBar(n.similarity) : null,
+      !pub && identical !== null && n.gallery_row === identical ? el('span', { class: 'badge identical' }, 'identical to your upload') : null,
+      ...(pub ? [] : agreementOf(n, v, cx)))));
+}
+
+// The k_images training X-rays the tower finds most like this one (image to image, the 13D tower): each with its stored picture, fetched
+// through ctx.loadImage, "#rank · similarity" and a bar, and how many labels it shares with the report. Public mode keeps rank and
+// similarity only (U2): a neutral box stands where the picture would be, and no gallery image is ever asked for. With ctx.openViewer a
+// picture opens beside the turn's own X-ray. Hidden until the retrieve stage has ended with neighbours.
+export function renderNeighbors(view, ctx) {
+  const v = whole(view);
+  const cx = ctx ?? {};
+  const done = stageState(v, 'retrieve').state === 'done';
+  const neighbours = done && Array.isArray(v.neighbors) ? v.neighbors.filter(isObject) : [];
+  const pub = v.mode === 'public';
+  const own = ownXray(v, cx);
+  const left = fetchable(own.full, cx) ? { url: own.full, label: own.label } : null;
+  const items = neighbours.map((n) => neighbourItem(n, v, cx, { pub, own, left, identical: identicalRow(v) }));
+  return el('section', { class: 'neighbors', 'aria-label': named('Similar X-rays', cx), hidden: !items.length },
+    el('h3', { class: 'section-title' }, 'Similar X-rays (13D tower)'),
+    pub ? el('p', { class: 'note section-note' }, 'Public mode shows rank and similarity only.') : null,
+    el('ol', { class: 'neighbor-grid', role: 'list' }, ...items));
 }
 
 // ---- the assistant card and the throttle ---------------------------------------------------------------------------------
@@ -573,7 +659,7 @@ export function renderAssistantCard(view, ctx) {
   }
   // The sections the P6 tasks add, under the labels: one that has nothing to show is left out of the card, so the card of a turn that
   // has none of them is the card it always was.
-  const sections = [renderImages(v, cx)].filter((section) => !section.hasAttribute('hidden'));
+  const sections = [renderImages(v, cx), renderNeighbors(v, cx)].filter((section) => !section.hasAttribute('hidden'));
   return el('article', { class: 'card', 'aria-label': named('Assistant report', cx), 'data-message-id': str(v.id) || null, 'data-status': str(v.status) || null },
     timeline, renderNotes(v), renderReport(v, cx), renderLabels(v, cx), ...sections, provenance);
 }

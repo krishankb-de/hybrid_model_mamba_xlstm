@@ -19,6 +19,7 @@ from tests.app_helpers import decide_gate, iter_sse, png_bytes
 
 MESSAGES = "/v1/sessions/{session_id}/messages"   # the streaming turn
 IMAGE = "/v1/messages/{message_id}/image"          # a turn's image (P6-B)
+GALLERY_IMAGE = "/v1/gallery/images/{row}"         # a similar X-ray's image (P6-C)
 STREAM_EVENTS = ["message_start", "stage_start", "stage_end", "content_block_start", "content_block_delta",
                  "content_block_stop", "warning", "error", "message_stop"]   # every event name of the stream
 # The Options dict test_curl_walkthrough_options_validate pins: what the README's curl walkthrough sends (P8-E).
@@ -55,7 +56,8 @@ def test_openapi_documents_every_v1_route(client):
     for want in [("POST", "/v1/sessions"), ("GET", "/v1/sessions"), ("POST", "/v1/sessions/{session_id}/messages"),
                  ("GET", "/v1/messages/{message_id}"), ("POST", "/v1/messages/{message_id}/cancel"),
                  ("POST", "/v1/retrieve"), ("POST", "/v1/label"), ("GET", "/v1/test-studies"),   # P5-E
-                 ("GET", "/v1/messages/{message_id}/image")]:   # P6-B
+                 ("GET", "/v1/messages/{message_id}/image"),   # P6-B
+                 ("GET", "/v1/gallery/images/{row}")]:         # P6-C
         assert want in routes
     for path, ops in spec["paths"].items():
         for op in ops.values():
@@ -214,6 +216,7 @@ REFUSED_BY_THE_ROUTE = {   # what each route declares by itself; 401, 403 and th
     ("POST", "/v1/retrieve"): {413, 422, 429, 500, 503}, ("POST", "/v1/label"): {422, 503},   # P5-E
     ("GET", "/v1/test-studies"): {403, 422, 503},
     ("GET", "/v1/messages/{message_id}/image"): {403, 404, 422, 500, 503},   # P6-B
+    ("GET", "/v1/gallery/images/{row}"): {403, 404, 422, 500, 503},          # P6-C
 }
 
 
@@ -269,6 +272,9 @@ def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, m
         # P6-B: a turn's image
         ("GET", IMAGE, "/v1/messages/m_missing/image?variant=thumb", {}, 404),
         ("GET", IMAGE, "/v1/messages/m_missing/image?variant=huge", {}, 422),
+        # P6-C: a similar X-ray's image, on a server with no gallery
+        ("GET", GALLERY_IMAGE, "/v1/gallery/images/0", {}, 503),
+        ("GET", GALLERY_IMAGE, "/v1/gallery/images/-1", {}, 422),
     ]:
         check(client.request(method, url, **kwargs), method, path, status)
     planted, _ = client.app.state.store.start_turn(sid, "", "private", {}, "ab" * 32, None, 0)   # a test study, on a server with no gallery
@@ -280,6 +286,9 @@ def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, m
         assert studied.status_code == 200
         g.app.state.gallery.test_study(1)["image"].unlink()   # gone since the turn ran
         check(g.get("/v1/messages/{}/image?variant=original".format(studied.headers["x-message-id"])), "GET", IMAGE, 500)
+        check(g.get("/v1/gallery/images/{}".format(10 ** 6)), "GET", GALLERY_IMAGE, 404)   # P6-C: outside the gallery
+        g.app.state.gallery.image_path(2).unlink()
+        check(g.get("/v1/gallery/images/2"), "GET", GALLERY_IMAGE, 500)                    # and a file that cannot be read
         check(g.post("/v1/retrieve", files={"image": ("x.png", bytes(MAX_UPLOAD_BYTES + 1), "image/png")}),
               "POST", "/v1/retrieve", 413)
         with monkeypatch.context() as m:
@@ -311,6 +320,7 @@ def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, m
         planted, _ = c.app.state.store.start_turn(psid, "", "public", {}, "ab" * 32, None)
         c.app.state.store._con.execute("UPDATE messages SET test_row = 0 WHERE id = ?", (planted,))   # never stored in public: planted
         check(c.get("/v1/messages/{}/image?variant=thumb".format(planted), headers=public), "GET", IMAGE, 403)   # and its image
+        check(c.get("/v1/gallery/images/0", headers=public), "GET", GALLERY_IMAGE, 403)   # P6-C: a gallery image in public mode
 
 
 ROUTE_BODIES = {("POST", "/v1/sessions"): {"json": {}}, ("POST", MESSAGES): {"data": {"options": "{}"}}}   # to parse
@@ -320,7 +330,7 @@ def test_each_routes_default_names_exactly_the_guard_refusals_it_really_gets(tmp
     # Which of 401 (token), 400 (client id) and 403 (loopback) a route can answer differs: /v1/models takes no client id
     # and /healthz no token. So every route is asked in each of the three settings that refuse before a route runs.
     def ask_all(c, base="", headers=None):
-        urls = {key: base + key[1].replace("{session_id}", "s_x").replace("{message_id}", "m_x")
+        urls = {key: base + key[1].replace("{session_id}", "s_x").replace("{message_id}", "m_x").replace("{row}", "0")
                 for key in REFUSED_BY_THE_ROUTE}
         return {key: c.request(key[0], url, headers=headers, **ROUTE_BODIES.get(key, {})) for key, url in urls.items()}
 

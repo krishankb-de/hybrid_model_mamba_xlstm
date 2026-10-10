@@ -148,6 +148,20 @@ export function serverHas(models, feature, model = '') {
 
 const cardsOf = (models) => (Array.isArray(models) ? models : Array.isArray(models?.models) ? models.models : []).filter(isObject);
 
+// What the drawer says under the k fields when the chosen model runs no retrieval (P6-C ruling): a server with no gallery at all, or one
+// whose gallery another model's image tower made (a query of this model's tower would land in another space). null when it runs one.
+export const RETRIEVAL_NOTES = Object.freeze({
+  none: 'This server has no retrieval gallery, so similar X-rays and matching reports are skipped.',
+  tower: 'The gallery was built with another image tower, so this model skips similar X-rays and matching reports.',
+});
+
+export function retrievalNote(models, model = '') {
+  if (serverHas(models, 'retrieval', model)) return null;
+  const gallery = cardsOf(models).some((c) => isObject(c.features) && c.features.retrieval === true)
+    || (isObject(models) && isObject(models.features) && models.features.retrieval === true);
+  return gallery ? RETRIEVAL_NOTES.tower : RETRIEVAL_NOTES.none;
+}
+
 // The card of the model the settings choose: the named one, else the server's default. null while /v1/models is unknown.
 export function chosenCard(settings, models) {
   const wanted = typeof settings?.model === 'string' ? settings.model : '';
@@ -507,6 +521,7 @@ export function createApp(env) {
     showModels: () => openDrawer({ models: true }),
     labelNames: Array.isArray(state.models?.label_names) ? state.models.label_names : undefined,
     retrieval: serverHas(state.models, 'retrieval', model),   // false: a user turn shows no k, which that model's turns never use
+    labels: serverHas(state.models, 'labels', model),         // false: no labeller, so no card says "labelling…" (P6-C)
     ui: state.session.ui,
     turn: n,
   });
@@ -1430,8 +1445,7 @@ export function createApp(env) {
     fields.compileRow = el('label', { class: 'check' }, fields.compile, 'Compile the model (torch.compile)');
     fields.kImages = number('k_images');
     fields.kReports = number('k_reports');
-    fields.retrievalNote = el('p', { class: 'note', id: 'retrieval-note', hidden: true },
-      'This server has no retrieval gallery, so similar X-rays and matching reports are skipped.');
+    fields.retrievalNote = el('p', { class: 'note', id: 'retrieval-note', hidden: true }, RETRIEVAL_NOTES.none);
     fields.label = toggle('label');
     fields.labelsNote = el('p', { class: 'note', id: 'labels-note', hidden: true }, 'This server has no CheXbert labeller, so labels are skipped.');
     fields.repair = toggle('display_repair');
@@ -1521,7 +1535,9 @@ export function createApp(env) {
     fields.cachedNote.hidden = cachedOk;
     fields.compileRow.hidden = state.models?.allow_compile !== true;
     fields.compile.checked = s.compile && state.models?.allow_compile === true;
-    fields.retrievalNote.hidden = retrieval;
+    const why = retrievalNote(state.models, s.model);   // the chosen model's own reason (P6-C ruling)
+    fields.retrievalNote.hidden = !why;
+    if (why) fields.retrievalNote.textContent = why;
     fields.label.disabled = !labelling;
     fields.label.checked = labelling && s.label;
     describe(fields.label, 'labels-note', !labelling);

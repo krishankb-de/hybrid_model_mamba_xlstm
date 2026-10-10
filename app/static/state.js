@@ -69,5 +69,7 @@ export function stageState(view, name) {
   return recorded;
 }
 
-// True while the labels are still to come: the turn is running and its label stage has not ended (done or skipped).
-export const labelsPending = (view) => view.status === 'running' && !['done', 'skipped'].includes(view.stages.label?.state);
+// True while the labels are still to come: the turn is running and its label stage has not ended (done or skipped). labels is the server's
+// own word (/v1/models features.labels): false means it runs no labeller, so no labels are coming and none are pending (P6-C).
+export const labelsPending = (view, labels = true) => labels !== false && view.status === 'running'
+  && !['done', 'skipped'].includes(view.stages.label?.state);
