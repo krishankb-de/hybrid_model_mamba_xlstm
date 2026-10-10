@@ -2,7 +2,10 @@
 # ============================================================================
 # CHAT_UI_PLAN.md P7-B (GPU, one H100, up to 24 h) — the chat server: the CheXbert labeller and the API in one SLURM job.
 # The GPU twin of scripts/serve_chat_h100.sh: the same job with one GPU asked for (the SBATCH lines below) and DEVICE=cuda, so the API
-# decodes on the GPU and the labeller stays on the CPU. On a GPU the uncached decode reproduces the published dump exactly (R2).
+# decodes on the GPU. The labeller stays on the CPU, hidden from every GPU by CUDA_VISIBLE_DEVICES= on its env line: the P5-F gates job
+# validates it on the CPU against the published labels, so the labels a turn shows must come from that device. A turn decodes with
+# cached_decode on by default; its report is compared with the published dump only when the turn runs under the published protocol, which
+# is what the score stage's live_equals_published reports (P5-E).
 #   bash scripts/chat_remote.sh sync && bash scripts/chat_remote.sh submit scripts/serve_chat_gpu_h100.sh
 #   bash scripts/chat_remote.sh submit scripts/serve_chat_gpu_h100.sh MODE=public # needs app_token in CHAT_HOME, mode 0600 (R6)
 #   bash scripts/chat_remote.sh summary logs/chat_server_gpu_<jobid>.log
@@ -24,9 +27,11 @@
 # A token file that is there is used in private mode too.
 #
 # SIGTERM (a requeue, a cancel, the time limit; SIGKILL follows after KillWait) and SIGINT: the trap forwards SIGTERM to both processes and
-# waits for them. The API stops accepting, ends a running turn as an error with server_restart, removes the endpoint file and exits 0.
-# With --requeue and --open-mode=append the job comes back on another node and appends to the same log; the stored turn that was cut off
-# stays an error, and the new API writes a new endpoint file.
+# waits for them. Once it serves, the API removes the endpoint file first (a tunnel stops finding it at once), stops accepting, ends a
+# running turn as an error with server_restart, and exits 0. A signal during the model load finds no handler yet: the default action ends the
+# process on the spot, which this script, having sent the signal, counts as a stop. With --requeue and --open-mode=append the job comes back
+# on another node and appends to the same log; the stored turn that was cut off stays an error, and the new API writes a new endpoint file.
+# The job's own status is the API's: an API that exits with a status is reported with it (`ERROR the API exited with code N`), however soon.
 #
 # R7: the job log carries only === lines, [server] lines (the CLI's stdout) and ERROR lines, and none names a path, the endpoint, the token
 # or any report text. Everything else goes to files in ${CHAT_HOME}/logs: the API's stderr (uvicorn's log, the loader's prints, a traceback)
@@ -38,8 +43,9 @@
 #   [server] starting: ...  /  [server] ... lines of the app  /  [server] serving: retrieval=on labels=on published=on
 #   === signal received: stopping ===  [server] stopping  [server] stopped  === chat server stopped ===
 #
-# Levers, as NAME=value arguments of `chat_remote.sh submit`: MODE (private|public), BIND, GALLERY (a build directory, or none), MODELS
-# (m3 or m3,13d), DRIFT_NOTE (the P1-D sentence every card carries), CHAT_HOME, LABELER_WAIT_S (default 180), CHEXBERT_HF_HUB_OFFLINE
+# Levers, as NAME=value arguments of `chat_remote.sh submit`: MODE (private|public), DEVICE (cpu|cuda), BIND, GALLERY (a build directory, or
+# none), MODELS (m3 or m3,13d: 1 to 32 characters of a-z, 0-9 and commas, and the CLI knows the names), DRIFT_NOTE (the P1-D sentence every
+# card carries), CHAT_HOME, LABELER_WAIT_S (default 180), CHEXBERT_HF_HUB_OFFLINE
 # (default 0), PUBLISHED_MODEL and PUBLISHED_FLOOR (the published dumps, so that a test study's score shows the published line; both are
 # looked for under results/, and when one is missing the line is skipped, which the log says).
 # ============================================================================
@@ -84,6 +90,7 @@ CHAT_HOME="${CHAT_HOME:-$HOME/chat_sessions}"
 MODE="${MODE:-private}"
 BIND="${BIND:-127.0.0.1}"
 DEVICE="${DEVICE:-cuda}"
+MODELS="${MODELS:-m3}"
 GALLERY="${GALLERY:-${CHAT_HOME}/gallery/g13d_m3_v1}"
 TOKEN_FILE="${CHAT_HOME}/app_token"
 LABELER_WAIT_S="${LABELER_WAIT_S:-180}"
@@ -94,8 +101,11 @@ LABELER_LOG="${CHAT_HOME}/logs/labeler_${SLURM_JOB_ID:-local}.log"
 export HF_HOME="${SCRATCH_ROOT}/.hf" HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}" MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 
-# Every refusal, before anything is started.
+# Every refusal, before anything is started. None of them prints the value it refused (an environment variable of the submitting shell can
+# hold anything), and the banner below shows only a DEVICE and a MODE that passed. The model names themselves are the CLI's to judge.
 case "${MODE}" in private|public) ;; *) fail "MODE must be private or public" ;; esac
+case "${DEVICE}" in cpu|cuda) ;; *) fail "DEVICE must be cpu or cuda" ;; esac
+[[ "${MODELS}" =~ ^[a-z0-9,]{1,32}$ ]] || fail "MODELS must be 1 to 32 characters: a-z, 0-9 and commas"
 [ -f "${VENV_ACTIVATE}" ] || fail "the venv's activate script is missing: run chat_cluster_setup_h100.sh first"
 mkdir -p "${CHAT_HOME}" && chmod 700 "${CHAT_HOME}"
 mkdir -p "${CHAT_HOME}/logs"
@@ -166,7 +176,7 @@ trap finish EXIT
 LABELER_PORT="${LABELER_PORT:-$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')}"
 LABELER_UP=0
 if [ -x .venv_chexbert/bin/python ]; then
-  env -u HF_HOME HF_HUB_OFFLINE="${CHEXBERT_HF_HUB_OFFLINE:-0}" PYTHONPATH=.chat_deps_chexbert \
+  env -u HF_HOME CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE="${CHEXBERT_HF_HUB_OFFLINE:-0}" PYTHONPATH=.chat_deps_chexbert \
     .venv_chexbert/bin/python -m uvicorn app.labeler:app --host 127.0.0.1 --port "${LABELER_PORT}" >> "${LABELER_LOG}" 2>&1 &
   LABELER_PID=$!
   LABELER_DEADLINE=$((SECONDS + LABELER_WAIT_S))
@@ -189,7 +199,7 @@ fi
 
 # The API. Its stdout is the job log (the CLI prints only [server] and ERROR lines there), its stderr is the server log.
 API_ARGS=(--engine real --device "${DEVICE}" --mode "${MODE}" --home "${CHAT_HOME}" --host "${BIND}" --port 0)
-API_ARGS+=(--endpoint-file "${CHAT_HOME}/endpoint" --threads "${SLURM_CPUS_PER_TASK:-8}" --models "${MODELS:-m3}" --drift-note="${DRIFT_NOTE:-}")
+API_ARGS+=(--endpoint-file "${CHAT_HOME}/endpoint" --threads "${SLURM_CPUS_PER_TASK:-8}" --models "${MODELS}" --drift-note="${DRIFT_NOTE:-}")
 [ -z "${GALLERY}" ] || API_ARGS+=(--gallery "${GALLERY}")
 [ "${HAVE_PUBLISHED}" -eq 0 ] || API_ARGS+=(--published-model "${PUBLISHED_MODEL}" --published-floor "${PUBLISHED_FLOOR}")
 [ "${HAVE_TOKEN}" -eq 0 ] || API_ARGS+=(--token-file "${TOKEN_FILE}")
@@ -203,12 +213,15 @@ source "${VENV_ACTIVATE}"
 python -m app.server "${API_ARGS[@]}" &
 API_PID=$!
 
-# Until the API ends. A trapped signal ends a `wait` early, with the API still draining: wait again, until it is really gone. The status
-# kept is that of the last wait, which is the API's own.
-API_RC=0
-while kill -0 "${API_PID}" 2>/dev/null; do
+# Until the API ends. The first wait comes before any look at whether the API is alive: one that is already gone, and reaped, still has its
+# status kept by bash, and a status lost here would read as a clean end (`=== chat server ended ===`, exit 0, for an API that never served).
+# A status below 128 is the API's own. 128 and above is a trapped signal that ended the wait early, with the API still draining (wait again),
+# or the API's death by a signal (it is then not alive, and the loop ends). A status bash cannot give (127) is not 0 either.
+while :; do
   API_RC=0
   { wait "${API_PID}"; } 2>/dev/null || API_RC=$?
+  [ "${API_RC}" -ge 128 ] || break
+  kill -0 "${API_PID}" 2>/dev/null || break
 done
 API_PID=""
 stop_and_wait

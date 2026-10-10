@@ -8171,12 +8171,21 @@ def test_serve_chat_wrappers_follow_the_cluster_invariants():
         assert "--gres" not in _serve_text(name), "an untyped --gpus and a typed --gres do not mix"
 
 
-def test_the_gpu_serve_wrapper_is_the_cpu_wrapper_with_only_the_device_changed():
+def test_the_gpu_serve_wrapper_is_the_cpu_wrapper_with_only_the_device_and_the_labeller_pin_changed():
+    """The allowed differences, each in exactly one place: the device the API defaults to, and the GPU twin's labeller, which is hidden from
+    every GPU (CUDA_VISIBLE_DEVICES= on its env line). The P5-F gates job validates the labeller on the CPU against the published labels, so
+    the labels a turn shows must come from that device; the API is never hidden from the GPU it was given."""
     cpu = _gallery_wrapper_code(_serve_text("serve_chat_h100.sh"))
     gpu = _gallery_wrapper_code(_serve_text("serve_chat_gpu_h100.sh"))
-    assert 'DEVICE="${DEVICE:-cpu}"' in cpu and 'DEVICE="${DEVICE:-cuda}"' in gpu
-    assert [l.replace('DEVICE="${DEVICE:-cpu}"', 'DEVICE="${DEVICE:-cuda}"') for l in cpu] == gpu, "the twins differ in more than the device"
+    allowed = (('DEVICE="${DEVICE:-cpu}"', 'DEVICE="${DEVICE:-cuda}"'),
+               ("env -u HF_HOME HF_HUB_OFFLINE=", "env -u HF_HOME CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE="))
+    mapped = list(cpu)
+    for old, new in allowed:
+        assert sum(l.count(old) for l in cpu) == 1 and sum(l.count(new) for l in gpu) == 1, (old, new)
+        mapped = [l.replace(old, new) for l in mapped]
+    assert mapped == gpu, "the twins differ in more than the device and the labeller pin"
     assert "DEVICE=cuda" in _serve_text("serve_chat_gpu_h100.sh") and "--gpus=1" in _serve_text("serve_chat_gpu_h100.sh")
+    assert "CUDA_VISIBLE_DEVICES" not in "\n".join(cpu), "the CPU wrapper is unchanged: it has no GPU to hide"
 
 
 def test_serve_chat_wrappers_prepare_like_the_other_chat_wrappers():
@@ -8218,11 +8227,12 @@ def test_serve_chat_wrappers_default_to_the_real_gallery_and_name_the_published_
 def test_serve_chat_wrappers_start_the_labeller_on_loopback_in_the_chexbert_environment():
     """D24: CheXbert's weights live in the default HF cache and it runs with HF_HUB_OFFLINE=0 (scripts/score_chexbert_h100.sh), so the
     job's own HF_HOME and offline mode must not reach it; and it listens on loopback only, on a free port (nodes are shared)."""
-    for name in SERVE_WRAPPERS:
+    for name, pin in (("serve_chat_h100.sh", ""), ("serve_chat_gpu_h100.sh", "CUDA_VISIBLE_DEVICES= ")):   # the twin's labeller stays on the CPU
         src, code = _serve_text(name), _serve_code(name)
-        launch = ('env -u HF_HOME HF_HUB_OFFLINE="${CHEXBERT_HF_HUB_OFFLINE:-0}" PYTHONPATH=.chat_deps_chexbert .venv_chexbert/bin/python '
+        launch = ('env -u HF_HOME ' + pin + 'HF_HUB_OFFLINE="${CHEXBERT_HF_HUB_OFFLINE:-0}" PYTHONPATH=.chat_deps_chexbert .venv_chexbert/bin/python '
                   '-m uvicorn app.labeler:app --host 127.0.0.1 --port "${LABELER_PORT}" >> "${LABELER_LOG}" 2>&1 &')
         assert code.count(launch) == 1, name
+        assert code.count("CUDA_VISIBLE_DEVICES") == (1 if pin else 0), name
         assert code.count("-m uvicorn") == 1 and "0.0.0.0" not in code, "the only uvicorn the wrapper starts is the loopback labeller"
         assert ('LABELER_PORT="${LABELER_PORT:-$(python3 -c \'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); '
                 'print(s.getsockname()[1])\')}"') in code
@@ -8251,8 +8261,13 @@ def test_serve_chat_wrappers_refuse_before_they_start_anything():
         text = "\n".join(lines)
         for needle in ('fail "MODE must be private or public"', "needs a token", 'fail "the token file must be a regular file of mode 0600 that you own (R6)"',
                        "needs a token: put one in app_token under CHAT_HOME, mode 0600 (R6)", "the gallery has no manifest.json",
-                       "R@k gate is not equal", 'fail "the venv\'s activate script is missing'):
+                       "R@k gate is not equal", 'fail "the venv\'s activate script is missing',
+                       # the device and the models, each with a message that does not carry the raw value
+                       'case "${DEVICE}" in cpu|cuda) ;; *) fail "DEVICE must be cpu or cuda" ;; esac',
+                       'MODELS="${MODELS:-m3}"', '[[ "${MODELS}" =~ ^[a-z0-9,]{1,32}$ ]] || fail "MODELS must be 1 to 32 characters: a-z, 0-9 and commas"'):
             assert needle in text, (name, needle)
+        banner = text.index('echo "=== chat server: node=')
+        assert text.index('case "${DEVICE}" in') < banner and text.index('[[ "${MODELS}" =~') < banner, "the banner shows a validated device only"
         assert text.index("needs a token") < text.index("LABELER_PORT="), "the token is checked before a port is chosen"
         public = [l for l in lines if "needs a token" in l]
         assert any('"${MODE}" = "public"' in l and '"${BIND}" != "127.0.0.1"' in l for l in lines if "HAVE_TOKEN" in l or "MODE" in l), public
@@ -8296,8 +8311,16 @@ def test_serve_chat_wrappers_trap_term_and_int_and_stop_both_children():
         text = _serve_code(name)
         for needle in ("trap 'STOPPING=1; echo \"=== signal received: stopping ===\"; stop_children' TERM INT", "trap finish EXIT",
                        'kill -TERM "${pid}" 2>/dev/null || true', '{ wait "${pid}"; } 2>/dev/null || true',
-                       '{ wait "${API_PID}"; } 2>/dev/null || API_RC=$?', 'while kill -0 "${API_PID}" 2>/dev/null; do'):
+                       '{ wait "${API_PID}"; } 2>/dev/null || API_RC=$?', '[ "${API_RC}" -ge 128 ] || break',
+                       'kill -0 "${API_PID}" 2>/dev/null || break'):
             assert needle in text, (name, needle)
+        # The first wait comes before any look at whether the API is alive: an API that is already gone, and reaped, has its status kept by
+        # bash, and a status lost there would read as a clean end. A status below 128 is the API's own; 128 and above is a trapped signal that
+        # ended the wait early (the API still drains: wait again) or the API's death by a signal (then it is not alive and the loop ends).
+        loop = text.index("while :; do")
+        assert loop < text.index('{ wait "${API_PID}"; } 2>/dev/null || API_RC=$?') < text.index('[ "${API_RC}" -ge 128 ] || break') \
+            < text.index('kill -0 "${API_PID}" 2>/dev/null || break'), name
+        assert 'while kill -0 "${API_PID}"' not in text, "a loop that tests the API first loses the status of one that is already gone"
         assert text.index("trap 'STOPPING=1") < text.index("LABELER_PORT="), "the trap is in place before the first child starts"
         assert 'echo "=== chat server stopped ==="' in text and 'echo "=== chat server ended ==="' in text
         # a signal is looked for after the labeller wait, after the venv is activated (just before the API starts: no API is started after a
@@ -8318,6 +8341,19 @@ def test_every_flag_the_serve_wrappers_give_the_cli_is_one_of_its_own():
         given = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]*)", "\n".join(l for l in _serve_code(name).splitlines() if "API_ARGS" in l)))
         assert required <= given, (name, required - given)
         assert given <= known, (name, given - known)
+
+
+def test_serve_chat_wrapper_headers_claim_only_what_is_true():
+    """Docs made true (P7-B fix 1). The GPU twin says its labeller stays on the CPU, which its env line makes so; neither header says the
+    uncached decode reproduces the published dump (a turn decodes cached by default, and the score stage compares a report with the published
+    dump only for a turn under the published protocol: live_equals_published, P5-E); and both say what a signal during the model load does."""
+    cpu, gpu = _serve_text("serve_chat_h100.sh"), _serve_text("serve_chat_gpu_h100.sh")
+    for name, text in (("cpu", cpu), ("gpu", gpu)):
+        assert "reproduces the published dump" not in text and "uncached decode" not in text, name
+        assert "default action" in text and "during the model load" in text, name
+        assert "endpoint file as the shutdown begins" in text or "removes the endpoint file first" in text, name
+    assert "CUDA_VISIBLE_DEVICES" in gpu and "CPU" in gpu and "P5-F" in gpu
+    assert "cached_decode on by default" in gpu and "live_equals_published" in gpu and "published protocol" in gpu
 
 
 def test_serve_chat_wrapper_headers_document_the_submit_and_summary_lines():

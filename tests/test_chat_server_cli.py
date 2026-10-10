@@ -28,7 +28,7 @@ import torch
 import uvicorn
 
 from app import cli, server
-from app.engine import build_engine
+from app.engine import TinyEngine, build_engine
 from app.labels import RuleLabeler
 from app.server import create_app
 from app.store import Store
@@ -111,6 +111,36 @@ def test_there_is_no_flag_that_takes_the_token_itself_and_no_abbreviation_reache
     parser = cli.build_parser()
     assert "--token" not in parser._option_string_actions and "--token-file" in parser._option_string_actions
     refused(capsys, BASE + ["--token", "abc"], "unrecognized")
+    # and the refusal does not hand the secret on to a job log: the option's name is what it may show, never what follows it
+    with pytest.raises(SystemExit):
+        cli.parse_args(BASE + ["--token", "SECRET-token-value"])
+    shown = capsys.readouterr()
+    assert "SECRET" not in shown.out and "SECRET" not in shown.err
+    assert shown.out == "ERROR unrecognized arguments: --token\n"
+
+
+@pytest.mark.parametrize("argv", [
+    BASE + ["--token", "SECRET-1"],                                   # an unknown option and its value
+    BASE + ["--token=SECRET-2"],                                      # the same joined by =
+    BASE + ["--token", "SECRET-3", "--bogus", "SECRET-4", "SECRET-5"],  # several, and a bare value after them
+    BASE + ["SECRET-6"],                                              # a value with no option at all
+    ["--engine", "SECRET-7", "--mode", "private", "--home", "H"],     # a value outside a choice list
+    ["--engine", "tiny", "--mode", "SECRET-8", "--home", "H"],
+    BASE + ["--port", "SECRET-9"],                                    # a value that is not a number
+    BASE + ["--threads", "SECRET-10"],
+    BASE + ["--device", "SECRET-11"],
+    BASE + ["--labeler", "SECRET-12"],                                # refusals of this module's own
+    BASE + ["--models", "SECRET-13"],
+])
+def test_no_refusal_ever_echoes_the_value_of_an_argument(capsys, argv):
+    """A value can be a secret that was put where it does not belong (an operator who tries `--token SECRET`), and a refusal goes to the job
+    log: argparse's own messages quote the offending value, so they are cut down to what was wrong, with the option's name at most."""
+    with pytest.raises(SystemExit) as stop:
+        cli.parse_args(argv)
+    assert stop.value.code == 2
+    shown = capsys.readouterr()
+    assert "SECRET" not in shown.out and "SECRET" not in shown.err, shown
+    assert len(shown.out.splitlines()) == 1 and shown.out.startswith("ERROR "), shown.out
 
 
 def test_models_take_the_short_names_or_the_config_names_in_the_order_given():
@@ -343,7 +373,7 @@ def fake_app(gallery=None, labeler=None, published=None):
 @pytest.fixture
 def serving(monkeypatch):
     """main() with no model and no socket: create_app and the server are recorders."""
-    rec = SimpleNamespace(create_app=None, config=None, server_kw=None, ran=0, app=fake_app(), build=None)
+    rec = SimpleNamespace(create_app=None, config=None, server_kw=None, ran=0, app=fake_app(), build=None, serve=None)
 
     def fake_create_app(**kw):
         rec.create_app = kw
@@ -357,6 +387,8 @@ def serving(monkeypatch):
 
         def run(self):
             rec.ran += 1
+            if rec.serve is not None:       # what happens while the server is up
+                rec.serve()
 
     monkeypatch.setattr(cli, "create_app", fake_create_app)
     monkeypatch.setattr(cli, "ServingServer", FakeServer)
@@ -418,6 +450,27 @@ def test_main_returns_zero_and_leaves_stdout_to_server_lines_even_when_the_loade
     assert lines and not [l for l in lines if not JOB_LOG_LINE.match(l)], lines
     assert "[server] sqlite journal_mode=wal" in lines and any(l.startswith("[server] starting:") for l in lines)
     assert "Loaded checkpoint" in captured.err and "prefix_k = 32" in captured.err, "the loader's own lines went to the server log"
+
+
+def test_the_filter_stays_on_stdout_for_the_whole_life_of_the_process_and_stdout_is_restored_after(serving, capsys):
+    """Not only while the app loads: a library that prints while the server is up (a progress line, a stray debug print) must not put a line
+    of no known shape into the job log. The server's own [server] lines still pass."""
+    def while_serving():
+        print("a stray line from a library while serving")
+        print("[server] a line of the server's own")
+        cli.say("stopping")
+        sys.stdout.write("half a line, no newline")
+
+    serving.serve = while_serving
+    real_stdout = sys.stdout
+    assert cli.main(BASE) == 0
+    assert sys.stdout is real_stdout, "main hands stdout back"
+    shown = capsys.readouterr()
+    lines = shown.out.splitlines()
+    assert "[server] a line of the server's own" in lines and "[server] stopping" in lines
+    assert not [l for l in lines if not JOB_LOG_LINE.match(l)], lines
+    assert "a stray line from a library while serving" not in shown.out and "half a line" not in shown.out
+    assert "a stray line from a library while serving" in shown.err and "half a line, no newline" in shown.err, "they went to the server log"
 
 
 def test_main_says_what_it_serves_without_a_path_a_host_or_a_token(serving, capsys, tmp_path):
@@ -563,6 +616,75 @@ def test_a_stop_ends_a_running_turn_as_a_server_restart_at_once_and_clears_the_e
         store.close()
 
 
+def test_the_endpoint_file_goes_as_the_shutdown_begins_not_after_the_running_turn_has_stopped(tmp_path, monkeypatch):
+    """The tunnel re-reads the endpoint file to find a server: it must stop finding this one at once, not once the drain is over. The turn is
+    held inside generate, and only the test frees it (the shutdown's stop is set, but this wait does not look at it), so the drain cannot be
+    over while the file is looked for."""
+    real = TinyEngine.generate
+    entered, release = threading.Event(), threading.Event()
+
+    def held(self, enc, opts, on_snapshot, cancel):
+        entered.set()
+        release.wait(60)
+        return real(self, enc, opts, on_snapshot, cancel)
+
+    monkeypatch.setattr(TinyEngine, "generate", held)
+    app = create_app(engine="tiny", home=str(tmp_path / "home"))
+    endpoint = tmp_path / "endpoint"
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, access_log=False, log_level="warning", timeout_graceful_shutdown=cli.GRACEFUL_S)
+    serving_server = cli.ServingServer(config, app, endpoint_file=str(endpoint), mode="private")
+    runner = threading.Thread(target=serving_server.run, daemon=True)
+    runner.start()
+    frames = []
+    try:
+        wait_until(endpoint.exists, timeout=30)
+        base = "http://127.0.0.1:{}".format(json.loads(endpoint.read_text())["port"])
+        sid = httpx.post(base + "/v1/sessions", json={}).json()["id"]
+
+        def stream():
+            with httpx.stream("POST", base + "/v1/sessions/{}/messages".format(sid), files={"image": ("x.png", png_bytes(), "image/png")},
+                              data={"text": "", "options": json.dumps({"max_new_tokens": 16})}, timeout=60) as response:
+                frames.extend(iter_sse(response.iter_text()))
+
+        reader = threading.Thread(target=stream, daemon=True)
+        reader.start()
+        assert entered.wait(30), "the turn never reached generate"
+        serving_server.should_exit = True
+        wait_until(lambda: not endpoint.exists(), timeout=cli.GRACEFUL_S / 2)
+        assert reader.is_alive() and runner.is_alive(), "the file went, and the turn it belonged to has not finished stopping"
+        release.set()
+        reader.join(cli.GRACEFUL_S)
+        assert not reader.is_alive()
+        runner.join(cli.GRACEFUL_S)
+        assert not runner.is_alive()
+    finally:
+        release.set()
+        serving_server.should_exit = True
+        runner.join(10)
+    assert [f["data"]["error"]["type"] for f in frames if f["event"] == "error"] == ["server_restart"]
+    assert frames[-1]["event"] == "message_stop" and frames[-1]["data"]["status"] == "error"
+
+
+def test_a_signal_while_the_model_loads_takes_the_default_action_and_ends_the_process_at_once(tmp_path):
+    """What app/cli.py's docstring says: until uvicorn serves there is no handler, so SIGTERM ends the process on the spot, which the wrapper (it
+    sent the signal) counts as a stop. A handler that waited for the load to finish would not be heard for minutes, and SLURM's KillWait is 30 s."""
+    script = "import sys, time\nfrom app import cli\ncli.create_app = lambda **kw: time.sleep(120)\nsys.exit(cli.main(sys.argv[1:]))\n"
+    out = tmp_path / "stdout.txt"
+    with open(str(out), "wb") as stdout:
+        proc = subprocess.Popen([sys.executable, "-c", script, "--engine", "tiny", "--mode", "private", "--home", str(tmp_path / "home")],
+                                cwd=str(REPO_ROOT), stdin=subprocess.DEVNULL, stdout=stdout, stderr=subprocess.DEVNULL,
+                                env=dict(os.environ, PYTHONUNBUFFERED="1"), start_new_session=True)
+        try:
+            wait_until(lambda: "[server] starting:" in out.read_text(), timeout=60)
+            began = time.monotonic()
+            proc.send_signal(signal.SIGTERM)
+            assert proc.wait(10) == -signal.SIGTERM and time.monotonic() - began < 5
+        finally:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+
+
 def test_a_stopping_server_accepts_no_new_turn_and_says_so_before_uvicorn_starts_to_wait(monkeypatch, capsys):
     """A request that is inside post_message when the signal lands must be refused (reserve() is False: the busy 429), not queued behind
     the stop, where Worker.submit would find the pool shut down and the turn's row would stay `running` until the next start."""
@@ -670,6 +792,18 @@ def test_a_live_public_server_needs_the_token_and_keeps_it_out_of_its_output_and
     assert not live.endpoint.exists()
     for text in (live.out.read_text(), live.err.read_text()):
         assert "tok-7f3a9c-live" not in text
+
+
+def test_python_dash_m_app_server_leaves_a_secret_given_as_an_argument_in_neither_stream(tmp_path):
+    """The operator's slip: `--token SECRET` (the token is a file, so this is no option). The refusal names the option, and the secret is in
+    neither stdout, which is the job log, nor stderr, which is the server log."""
+    done = subprocess.run([sys.executable, "-m", "app.server", "--engine", "tiny", "--mode", "private", "--home", str(tmp_path / "home"),
+                           "--token", "SECRET-from-the-command-line"],
+                          cwd=str(REPO_ROOT), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+    assert done.returncode == 2
+    assert done.stdout == "ERROR unrecognized arguments: --token\n", done.stdout
+    assert "SECRET" not in done.stdout and "SECRET" not in done.stderr
+    assert not (tmp_path / "home").exists()
 
 
 def test_python_dash_m_app_server_refuses_public_mode_without_a_token_before_loading_anything(tmp_path):

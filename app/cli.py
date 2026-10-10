@@ -9,15 +9,19 @@ This is app.server's create_app behind a command line, plus what a serving proce
 * R6. A bind off loopback and public mode need a token. It is read from a file, which must be mode 0600 and the user's own, and never from
   the command line or the environment, so it stays out of `scontrol show job`, `ps` and shell history.
 * `--port 0` picks a free port, and the endpoint file {host, port, mode, pid, started_at} says which, once uvicorn is serving. It is
-  written atomically (mode 0600) and removed again on a clean exit.
+  written atomically (mode 0600) and removed first when the shutdown begins, so that a tunnel stops finding a server that is going away.
 * A serving process refuses what the factory tolerates: a gallery that will not open (unless --allow-no-gallery), a real engine asked to
   run on CUDA where there is none.
-* SIGTERM and SIGINT end it cleanly: no new connections, a running or queued turn ends as an error with server_restart (the worker's own
-  shutdown, the ending a crash's recovery gives too), the endpoint file goes, the exit status is 0. uvicorn re-raises a signal it handled
-  once it has shut down, which would end the process by that signal, so this module takes the two signals itself.
-* Its stdout is the job log's, and a job log carries only === , [server] , RESULT and ERROR lines (R7). What the thesis loader prints while
-  a model loads (it names the checkpoint) goes to stderr instead, with uvicorn's own log, which the wrapper keeps in a file under
-  CHAT_HOME. Nothing printed here names the endpoint, the token, a path or any report text.
+* Once uvicorn serves, SIGTERM and SIGINT end it cleanly: the endpoint file goes, no new connections, a running or queued turn ends as an
+  error with server_restart (the worker's own shutdown, the ending a crash's recovery gives too), and the exit status is 0. uvicorn re-raises
+  a signal it handled once it has shut down, which would end the process by that signal, so this module takes the two signals itself. While
+  the model loads there is no handler yet, and a signal takes the default action: the process ends on the spot, with the signal as its
+  status. A handler could not do better, since nothing in Python runs while torch reads a checkpoint, and the wrapper, which sent the
+  signal, counts that end as a stop.
+* Its stdout is the job log's for the life of the process, and a job log carries only === , [server] , RESULT and ERROR lines (R7). What
+  the thesis loader prints while a model loads (it names the checkpoint), and anything else that is printed while the server runs, goes to
+  stderr instead, with uvicorn's own log, which the wrapper keeps in a file under CHAT_HOME. Nothing printed here names the endpoint, the
+  token, a path or any report text, and a refusal never quotes a value it was given (it could be a secret put in the wrong place).
 """
 import argparse
 import contextlib
@@ -64,10 +68,23 @@ def say(message: str) -> None:
 
 # ---- the arguments -------------------------------------------------------------------------------------------------------------
 
+# What argparse's own messages quote: the value it refused. That can be a secret in the wrong place (`--token SECRET`), and a refusal is a
+# line of a job log, so a message is cut down to what was wrong, and an unknown option is named without what follows it.
+_QUOTES_A_VALUE = re.compile(r"(invalid (?:choice|\w+ value)):.*$")
+
+
 class _Parser(argparse.ArgumentParser):
+    def parse_args(self, args: Optional[Sequence[str]] = None, namespace: Any = None) -> argparse.Namespace:
+        parsed, extras = self.parse_known_args(args, namespace)
+        if extras:      # argparse would print all of them, values included
+            names = sorted({arg.split("=", 1)[0] for arg in extras if arg.startswith("-")})
+            self.error("unrecognized arguments: " + (", ".join(names) if names else "(no option name to show)"))
+        return parsed
+
     def error(self, message: str) -> None:
-        """A refusal is one ERROR line on stdout, which is what a job log keeps, and exit status 2; the usage goes to stderr."""
-        emit("ERROR " + message)
+        """A refusal is one ERROR line on stdout, which is what a job log keeps, and exit status 2; the usage goes to stderr. Neither shows a
+        value that was given."""
+        emit("ERROR " + _QUOTES_A_VALUE.sub(r"\1", message))
         self.print_usage(sys.stderr)
         raise SystemExit(2)
 
@@ -221,35 +238,43 @@ def remove_endpoint(path: str) -> None:
             target.unlink()
 
 
-# ---- stdout while the app loads --------------------------------------------------------------------------------------------------
+# ---- stdout for the life of the process ------------------------------------------------------------------------------------------
 
 class JobLogFilter(io.TextIOBase):
-    """Stdout for as long as the app loads: a whole line of a shape a job log may carry goes to `out`, every other line to `rest` (stderr,
-    which the wrapper keeps in a file). The thesis loader prints `Loaded checkpoint: <path>` and the like; they are the server log's."""
+    """Stdout for the life of the process, while the app loads, while it serves and while it stops: a whole line of a shape a job log may
+    carry goes to `out`, every other line to `rest` (stderr, which the wrapper keeps in a file). The thesis loader prints `Loaded checkpoint:
+    <path>` and the like, and a library can print while the server is up; they are the server log's. The worker thread and the event loop can
+    both write, so a line is judged under a lock."""
 
     def __init__(self, out: Any, rest: Any):
         super().__init__()
         self._out, self._rest, self._partial = out, rest, ""
+        self._lock = threading.Lock()
 
     def writable(self) -> bool:
         return True
 
     def write(self, text: str) -> int:
-        self._partial += text
-        *lines, self._partial = self._partial.split("\n")
-        for line in lines:
-            (self._out if JOB_LOG_LINE.match(line) else self._rest).write(line + "\n")
+        with self._lock:
+            self._partial += text
+            *lines, self._partial = self._partial.split("\n")
+            for line in lines:
+                (self._out if JOB_LOG_LINE.match(line) else self._rest).write(line + "\n")
         return len(text)
 
     def flush(self) -> None:
-        self._out.flush()
-        self._rest.flush()
+        for stream in (self._out, self._rest):
+            try:
+                stream.flush()
+            except ValueError:      # closed under us: a collected filter is closed (and so flushed) when the streams it wrapped may be gone
+                pass
 
     def finish(self) -> None:
         """What follows the last newline has been judged by no newline: it goes aside, since it cannot be a whole line of any shape."""
-        if self._partial:
-            self._rest.write(self._partial + "\n")
-            self._partial = ""
+        with self._lock:
+            if self._partial:
+                self._rest.write(self._partial + "\n")
+                self._partial = ""
         self.flush()
 
 
@@ -276,16 +301,14 @@ class ServingServer(uvicorn.Server):
 
     async def shutdown(self, sockets: Any = None) -> None:
         say("stopping")
+        if self.endpoint_file:      # first of all: a tunnel that looks for this server stops finding it now, not once the drain is over
+            remove_endpoint(self.endpoint_file)
         worker = self.chat_app.state.worker
         worker.cap = 0      # no turn is accepted from here on: a request that is late gets the busy 429, not a place behind the stop
         # The worker stops every turn at its next step: each ends as an error with server_restart, its stream closes, and uvicorn's wait for
         # open connections ends. The lifespan joins the worker again afterwards; a second shutdown() is harmless.
         threading.Thread(target=worker.shutdown, name="stop-turns", daemon=True).start()
-        try:
-            await super().shutdown(sockets=sockets)
-        finally:
-            if self.endpoint_file:
-                remove_endpoint(self.endpoint_file)
+        await super().shutdown(sockets=sockets)
         say("stopped")
 
     @contextlib.contextmanager
@@ -315,6 +338,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.engine == "real" and args.device == "cuda" and not torch.cuda.is_available():
         emit("ERROR CUDA is not available on this node")
         return 1
+    # From here to the end of the process stdout is the job log's, and only lines of its four shapes reach it: while the app loads (the
+    # thesis loader names a checkpoint), while it serves (a library that prints) and while it stops. Everything else goes to stderr.
+    held = JobLogFilter(sys.stdout, sys.stderr)
+    try:
+        with contextlib.redirect_stdout(held):
+            return _serve(args)
+    finally:
+        held.finish()
+
+
+def _serve(args: argparse.Namespace) -> int:
     say("starting: engine={} device={} mode={} threads={}{}".format(
         args.engine, args.device, args.mode, args.threads, " models=" + ",".join(args.models) if args.engine == "real" else ""))
     labeler, labeler_url = None, None
@@ -323,13 +357,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     elif args.labeler != "none":
         labeler_url = args.labeler
     published = {"model": args.published_model, "floor": args.published_floor} if args.published_model else None
-    held = JobLogFilter(sys.stdout, sys.stderr)
     try:
-        with contextlib.redirect_stdout(held):
-            app = create_app(engine=args.engine, mode=args.mode, home=args.home, host=args.host, token=args.token,
-                             gallery_dir=args.gallery, labeler_url=labeler_url, labeler=labeler, models=args.models,
-                             allow_compile=args.allow_compile, drift_note=args.drift_note, device=args.device, threads=args.threads,
-                             published_dirs=published)
+        app = create_app(engine=args.engine, mode=args.mode, home=args.home, host=args.host, token=args.token,
+                         gallery_dir=args.gallery, labeler_url=labeler_url, labeler=labeler, models=args.models,
+                         allow_compile=args.allow_compile, drift_note=args.drift_note, device=args.device, threads=args.threads,
+                         published_dirs=published)
     except KeyboardInterrupt:
         emit("ERROR interrupted while starting")
         return 130
@@ -337,8 +369,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         emit("ERROR cannot start the server ({})".format(type(exc).__name__))
         traceback.print_exc()
         return 1
-    finally:
-        held.finish()
     if args.gallery and app.state.gallery is None and not args.allow_no_gallery:
         _release(app)       # create_app is lenient about a gallery for tests; a serving process is not
         emit("ERROR the retrieval gallery could not be opened (see the [server] gallery line)")

@@ -15,9 +15,11 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List
 
 import httpx
@@ -86,7 +88,9 @@ def say(text):
     sys.stdout.flush()
 
 
-KEYS = ("PYTHONPATH", "HF_HOME", "HF_HUB_OFFLINE", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "PYTHONUNBUFFERED")
+if mode_of("api.mode", "ok") == "exit_now":
+    sys.exit(3)     # gone, and reaped, before the wrapper can look for it: no pid file, no output
+KEYS = ("PYTHONPATH", "HF_HOME", "HF_HUB_OFFLINE", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "PYTHONUNBUFFERED", "CUDA_VISIBLE_DEVICES")
 note("api.pid", str(os.getpid()))
 note("api.env", json.dumps(dict({k: os.environ.get(k) for k in KEYS}, cwd=os.path.realpath(os.getcwd()))))
 note("api.environ", json.dumps(dict(os.environ)))
@@ -136,7 +140,7 @@ def mode_of(name, default):
 args = sys.argv[1:]
 port = int(args[args.index("--port") + 1])
 mode = mode_of("labeler.mode", "ok")
-KEYS = ("PYTHONPATH", "HF_HOME", "HF_HUB_OFFLINE", "PYTHONUNBUFFERED")
+KEYS = ("PYTHONPATH", "HF_HOME", "HF_HUB_OFFLINE", "PYTHONUNBUFFERED", "CUDA_VISIBLE_DEVICES")
 note("labeler.pid", str(os.getpid()))
 note("labeler.env", json.dumps(dict({k: os.environ.get(k) for k in KEYS}, cwd=os.path.realpath(os.getcwd()))))
 note("labeler.environ", json.dumps(dict(os.environ)))
@@ -211,11 +215,29 @@ class Running:
         return self.proc.wait(timeout)
 
 
+def reap_group(run: Running, timeout: float = 15.0) -> None:
+    """SIGKILL every process of the run's group, the wrapper's own session, and return once there is none. The wrapper is waited for each time
+    round (poll): a dead wrapper nobody has waited for is a zombie, and a zombie leader would keep the group alive for ever. A group whose
+    members are all gone, zombies reaped, is what ProcessLookupError says."""
+    deadline = time.monotonic() + timeout
+    while True:
+        run.proc.poll()
+        try:
+            os.killpg(run.proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            return
+        if time.monotonic() > deadline:
+            raise RuntimeError("a process of the run would not die")
+        time.sleep(0.02)
+
+
 class ServeBox(wr.JobBox):
-    """The CPU wrapper in the rehearsal tree, with the two stub interpreters, an overlay of each kind, the default gallery (its gate equal)
-    and a CHAT_HOME. run() runs a wrapper that ends by itself (a refusal); start() starts one that serves until it is told to stop."""
+    """The CPU wrapper in the rehearsal tree (GpuBox is its twin), with the two stub interpreters, an overlay of each kind, the default
+    gallery (its gate equal) and a CHAT_HOME. run() runs a wrapper that ends by itself (a refusal); start() starts one that serves until it
+    is told to stop. DEVICE is what the wrapper serves on when nobody says otherwise."""
 
     WRAPPER = "serve_chat_h100.sh"
+    DEVICE = "cpu"
     PYTHON_STUB = BIN_PYTHON
 
     def __init__(self, root, stamp=wr.STAMP):
@@ -251,16 +273,28 @@ class ServeBox(wr.JobBox):
     def set_mode(self, name: str, value: str) -> None:
         (self.stubs / name).write_text(value + "\n")
 
-    def start(self, **extra_env) -> Running:
+    def start(self, script: str = "", **extra_env) -> Running:
+        """Start the wrapper (or another script of the tree's scripts directory, for the cleanup's own test) in a session of its own."""
         env = self.base_env()
         env.update(extra_env)
         env = {k: v for k, v in env.items() if v is not None}
         log = open(str(self.root / "job.log"), "ab")
-        proc = subprocess.Popen([wr.BASH, str(self.repo / "scripts" / self.WRAPPER)], cwd=str(self.root), env=env, stdin=subprocess.DEVNULL,
-                                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        proc = subprocess.Popen([wr.BASH, str(self.repo / "scripts" / (script or self.WRAPPER))], cwd=str(self.root), env=env,
+                                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         run = Running(proc, log)
         self.runs.append(run)
         return run
+
+    def run_bounded(self, timeout: float = 15, **extra_env) -> SimpleNamespace:
+        """A wrapper that has to end by itself within `timeout` s. One that is still running then is killed, with its children, and the test
+        fails saying so. -> (returncode, stdout), the shape job_lines() reads."""
+        run = self.start(**extra_env)
+        try:
+            run.proc.wait(timeout)
+        except subprocess.TimeoutExpired:
+            reap_group(run)
+            pytest.fail("the wrapper was still running after {} s: it did not refuse, it started serving\n{}".format(timeout, self.job_text()))
+        return SimpleNamespace(returncode=run.proc.returncode, stdout=self.job_text())
 
     def wait_ready(self, run: Running, marker: str = "api.ready", timeout: float = 60) -> None:
         wait_until(lambda: (self.stubs / marker).exists() or run.proc.poll() is not None, timeout=timeout)
@@ -301,38 +335,25 @@ class ServeBox(wr.JobBox):
                 assert not alive(self.pid(who)), who + " is still running after the wrapper ended"
 
     def cleanup(self) -> None:
+        """Whatever a run left, however it ended. Every process of a run is in the run's own session, so its process group is the wrapper's pid,
+        and the group outlives the wrapper: it lives while any member does. It is killed until it is empty, so that a wrapper that ended while a
+        child was still starting, or never stopped its children (a RED run of a wrapper change), cannot leave one behind. The pids the stubs
+        write down are no help for that: a stub that is still starting has written none."""
         for run in self.runs:
-            if run.proc.poll() is None:
-                try:
-                    os.killpg(run.proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                run.proc.wait()
+            reap_group(run)
             run.log.close()
-        groups = {run.proc.pid for run in self.runs}       # every process of a run is in the run's own session: its group is the wrapper's pid
-        for who in ("api", "labeler"):
-            if (self.stubs / (who + ".pid")).exists():
-                try:
-                    if os.getpgid(self.pid(who)) in groups:     # one of ours, not a process that has since been given the number
-                        os.kill(self.pid(who), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
 
 
 class GpuBox(ServeBox):
     WRAPPER = "serve_chat_gpu_h100.sh"
+    DEVICE = "cuda"
 
 
-@pytest.fixture
-def box(tmp_path):
-    b = ServeBox(tmp_path)
-    yield b
-    b.cleanup()
-
-
-@pytest.fixture
-def gpu_box(tmp_path):
-    b = GpuBox(tmp_path)
+@pytest.fixture(params=[ServeBox, GpuBox], ids=["cpu", "gpu"])
+def box(request, tmp_path):
+    """Every rehearsal below runs against both wrappers: the twin differs from the CPU wrapper in a few pinned lines, and a rehearsal is the
+    only thing that shows the difference is all there is."""
+    b = request.param(tmp_path)
     yield b
     b.cleanup()
 
@@ -345,8 +366,9 @@ def token_file(box: ServeBox, text: str = "tok-3c9e5b-wrapper\n", mode: int = 0o
 
 
 def refused(box: ServeBox, *needles: str, **env) -> List[str]:
-    """The wrapper ends by itself with exit 1 and ONE ERROR line, having started nothing."""
-    done = box.run(**env)
+    """The wrapper ends by itself with exit 1 and ONE ERROR line, having started nothing. A refusal that does not happen starts the job, which
+    would serve until it was told to stop: that is a failure within seconds here, not a hang."""
+    done = box.run_bounded(**env)
     lines = job_lines(done)
     assert done.returncode == 1, done.stdout
     errors = [l for l in lines if l.startswith("ERROR")]
@@ -370,7 +392,8 @@ def test_a_start_and_a_stop_print_only_safe_lines_and_keep_the_raw_output_in_cha
     assert not [l for l in lines if not LINE_OK.match(l)], lines
     node = [l for l in lines if l.startswith("=== chat server: ")]
     assert len(node) == 1 and re.fullmatch(
-        r"=== chat server: node=\S+ mode=private bind=127\.0\.0\.1 device=cpu gallery=g13d_m3_v1 job=" + JOB_ID + r" ===", node[0]), node
+        r"=== chat server: node=\S+ mode=private bind=127\.0\.0\.1 device=" + box.DEVICE + r" gallery=g13d_m3_v1 job=" + JOB_ID + r" ===",
+        node[0]), node
     assert "=== labeller up ===" in lines and "[server] stub api up" in lines
     assert lines.index("=== signal received: stopping ===") < lines.index("[server] stub api: SIGTERM")
     assert lines[-2:] == ["[server] stub api: stopped", "=== chat server stopped ==="]
@@ -387,7 +410,7 @@ def test_the_api_is_started_with_the_plans_arguments_and_the_labeller_url(box):
     box.stopped_cleanly(run)
     (call,) = box.api_calls()
     assert pairs(call[2:]) == {
-        "--engine": "real", "--device": "cpu", "--mode": "private", "--home": str(box.chat), "--host": "127.0.0.1", "--port": "0",
+        "--engine": "real", "--device": box.DEVICE, "--mode": "private", "--home": str(box.chat), "--host": "127.0.0.1", "--port": "0",
         "--endpoint-file": str(box.chat / "endpoint"), "--threads": "16", "--models": "m3", "--drift-note": "",
         "--gallery": str(box.gallery), "--labeler": "http://127.0.0.1:" + box.labeler_port()}
 
@@ -413,9 +436,12 @@ def test_the_api_runs_offline_on_its_overlay_and_the_labeller_in_the_chexbert_en
     repo = os.path.realpath(str(box.repo))
     assert box.read_json("api.env") == {
         "PYTHONPATH": ".chat_deps", "HF_HOME": str(box.scratch / ".hf"), "HF_HUB_OFFLINE": "1", "OMP_NUM_THREADS": "16",
-        "MKL_NUM_THREADS": "16", "PYTHONUNBUFFERED": "1", "cwd": repo}
+        "MKL_NUM_THREADS": "16", "PYTHONUNBUFFERED": "1", "CUDA_VISIBLE_DEVICES": None, "cwd": repo}   # the API is never hidden from a GPU
+    # The GPU twin's labeller is pinned to the CPU (CUDA_VISIBLE_DEVICES= hides every GPU from it): the P5-F gates job validates the labeller
+    # on the CPU against the published labels, so the labels a turn shows must come from the device they were validated on. The CPU
+    # wrapper has no such pin: nothing there to hide.
     assert box.read_json("labeler.env") == {"PYTHONPATH": ".chat_deps_chexbert", "HF_HOME": None, "HF_HUB_OFFLINE": "0",
-                                            "PYTHONUNBUFFERED": "1", "cwd": repo}
+                                            "PYTHONUNBUFFERED": "1", "CUDA_VISIBLE_DEVICES": "" if box.DEVICE == "cuda" else None, "cwd": repo}
     (call,) = box.labeler_calls()
     assert call[:5] == ["-m", "uvicorn", "app.labeler:app", "--host", "127.0.0.1"] and call[5] == "--port" and call[6] == box.labeler_port()
     assert int(box.labeler_port()) > 0 and len(call) == 7
@@ -672,20 +698,103 @@ def test_a_script_error_ends_in_one_error_line_and_leaves_no_child_behind(box):
     assert not alive(box.pid("labeler"))
 
 
-# ---- the GPU twin ----------------------------------------------------------------------------------------------------------------
+# ---- the device and the models are checked before anything starts -----------------------------------------------------------------------
 
-def test_the_gpu_wrapper_runs_the_same_job_on_cuda(gpu_box):
-    run = gpu_box.start()
-    gpu_box.wait_ready(run)
+@pytest.mark.parametrize("value", ["tpu", "CUDA", "cuda:0", "cpu cuda", "cpu;echo SECRET-device", "SECRET-device"])
+def test_a_device_that_is_not_cpu_or_cuda_is_refused_before_anything_starts_and_is_not_echoed(box, value):
+    lines = refused(box, "DEVICE must be cpu or cuda", DEVICE=value)
+    assert "SECRET" not in "\n".join(lines) and value not in "\n".join(lines)
+
+
+@pytest.mark.parametrize("value", ["m3,13D", "m3 13d", "m3;13d", "SECRET-models", "a" * 33, "m3\n13d"])
+def test_models_outside_lowercase_digits_and_commas_are_refused_before_anything_starts_and_are_not_echoed(box, value):
+    lines = refused(box, "MODELS must be", MODELS=value)
+    assert "SECRET" not in "\n".join(lines) and value not in "\n".join(lines)
+
+
+def test_the_edges_of_what_the_device_and_models_checks_allow_are_served(box):
+    """cpu and cuda are both fine on either wrapper (the GPU twin only defaults to cuda); 32 characters of [a-z0-9,] pass the wrapper, and
+    the CLI is what knows the model names."""
+    other = "cpu" if box.DEVICE == "cuda" else "cuda"
+    run = box.start(DEVICE=other, MODELS="a" * 32)
+    box.wait_ready(run)
     run.signal()
-    gpu_box.stopped_cleanly(run)
-    lines = gpu_box.job_lines()
-    assert lines[0] == SYNC_LINE and not [l for l in lines if not LINE_OK.match(l)], lines
-    assert any(re.fullmatch(r"=== chat server: node=\S+ mode=private bind=127\.0\.0\.1 device=cuda gallery=g13d_m3_v1 job=" + JOB_ID + " ===", l)
-               for l in lines), lines
-    opts = pairs(gpu_box.api_calls()[0][2:])
-    assert opts["--device"] == "cuda" and opts["--engine"] == "real" and opts["--labeler"].startswith("http://127.0.0.1:")
-    assert lines[-1] == "=== chat server stopped ==="
+    box.stopped_cleanly(run)
+    opts = pairs(box.api_calls()[0][2:])
+    assert opts["--device"] == other and opts["--models"] == "a" * 32
+    assert "device={} ".format(other) in " ".join(box.job_lines())
+
+
+def test_a_model_name_only_the_cli_knows_is_the_clis_refusal_and_becomes_the_jobs_failure_with_its_status(box):
+    """The wrapper judges the shape of MODELS (a-z, 0-9, commas), the CLI the names: `m4` passes the one and the real CLI refuses it, in one
+    line that does not quote the value, and the job fails with the CLI's own exit status, 2, whatever the labeller was doing."""
+    real_processes(box)
+    done = box.run_bounded(timeout=120, MODELS="m4", GALLERY="none")
+    lines = job_lines(done)
+    assert done.returncode == 2, done.stdout
+    errors = [l for l in lines if l.startswith("ERROR")]
+    assert errors == ["ERROR --models: unknown model (the models are 13d, m3)", "ERROR the API exited with code 2 (see the server log under CHAT_HOME)"], lines
+    assert not [l for l in lines if not LINE_OK.match(l)], lines
+    assert "m4" not in "\n".join(l for l in lines if "unknown model" in l), "the refused value is not quoted"
+
+
+# ---- the rehearsal's own cleanup -----------------------------------------------------------------------------------------------------
+
+def processes_naming(path: Path) -> List[int]:
+    """Pids of the processes whose command line names `path`: a stub that outlived its test. pgrep leaves itself out."""
+    done = subprocess.run(["pgrep", "-f", str(path)], stdout=subprocess.PIPE, universal_newlines=True)
+    return [int(pid) for pid in done.stdout.split()]
+
+
+def test_the_cleanup_reaps_what_a_wrapper_left_behind_even_a_child_that_is_still_starting(tmp_path):
+    """The leak this pins: a RED run of a wrapper change left two labeller stubs, parent 1, holding loopback ports. The wrapper under test had
+    ended while its labeller was still starting and had never stopped it, and the cleanup knew only the pids the stubs write down, which a stub
+    that is still starting has not written, and killed the run's group only while the wrapper itself was alive. The cleanup now kills the run's
+    whole process group, which outlives the wrapper, until it is empty. Here the wrapper ends at once with a `sleep` (that writes no pid file at
+    all) and a labeller stub still starting as its orphans."""
+    box = ServeBox(tmp_path)
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    (box.repo / "scripts" / "leaky.sh").write_text(
+        '#!/bin/bash\nsleep 300 &\necho $! > "$STUB_DIR/orphan.pid"\n'
+        '"$REAL_PYTHON" "$STUB_DIR/labeler_stub.py" -m uvicorn app.labeler:app --host 127.0.0.1 --port "$LEAKY_PORT" &\nexit 1\n')
+    try:
+        run = box.start(script="leaky.sh", LEAKY_PORT=str(port))
+        assert run.wait(10) == 1, "the wrapper ends at once, its children just forked"
+        orphan = int((box.stubs / "orphan.pid").read_text())
+        assert alive(orphan), "the setup: the wrapper left an orphan"
+        box.cleanup()
+        assert not alive(orphan), "a sleep the wrapper left outlived the cleanup"
+        assert processes_naming(box.stubs) == [], "a labeller stub that was still starting outlived the cleanup"
+    finally:                                         # a failing run of this test must not leave what it found
+        for pid in processes_naming(box.stubs):
+            os.kill(pid, signal.SIGKILL)
+        if (box.stubs / "orphan.pid").exists() and alive(int((box.stubs / "orphan.pid").read_text())):
+            os.kill(int((box.stubs / "orphan.pid").read_text()), signal.SIGKILL)
+
+
+# ---- the API's exit status is never lost -----------------------------------------------------------------------------------------------
+
+def test_an_api_that_is_gone_before_the_wrapper_first_looks_for_it_still_gives_its_exit_status(box):
+    """The API exits 3 at once. A DEBUG trap (BASH_ENV) holds the wrapper for a second at the first command after the API is launched, so
+    that the API is gone, and reaped, before the wrapper ever tests whether it is alive. Its status must still be the job's: a status that
+    was lost read as a clean end, `=== chat server ended ===` and exit 0, for an API that never served."""
+    box.set_mode("api.mode", "exit_now")
+    hold = box.root / "hold_after_launch.sh"
+    # An `if`, not an && list: the trap's own status is the status of the command it ran in front of, under set -e, and a list that is
+    # false returns 1. This one returns 0 when it does nothing.
+    hold.write_text('trap \'if [ -n "${API_PID:-}" ] && [ ! -e "${STUB_DIR}/held" ]; then : > "${STUB_DIR}/held"; sleep 1; fi\' DEBUG\n')
+    done = box.run(BASH_ENV=str(hold))
+    lines = job_lines(done)
+    assert (box.stubs / "held").exists(), "the wrapper was never held after the launch: this proves nothing"
+    assert done.returncode == 3, done.stdout
+    errors = [l for l in lines if l.startswith("ERROR")]
+    assert len(errors) == 1 and "ERROR the API exited with code 3" in errors[0], lines
+    assert "=== chat server ended ===" not in lines and "=== chat server stopped ===" not in lines
+    assert not [l for l in lines if not LINE_OK.match(l)], lines
+    assert not alive(box.pid("labeler")), "the labeller does not outlive the API"
 
 
 # ---- the real CLI and the real labeller app behind the real wrapper ------------------------------------------------------------------
