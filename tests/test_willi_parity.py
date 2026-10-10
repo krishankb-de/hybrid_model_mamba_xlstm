@@ -7724,3 +7724,132 @@ def test_the_restricted_file_check_and_its_installer_exist_and_are_executable():
         for shell in set(shells):
             done = subprocess.run([shell, "-n", str(path)], capture_output=True, text=True)
             assert done.returncode == 0, (name, shell, done.stderr)
+
+
+# ── CHAT_UI_PLAN.md P7-A: the chat app import smoke job ───────────────────────
+# Static pins on scripts/chat_app_smoke_h100.sh. Its behaviour (R7 output, the sync line, a failing probe, the probes run for real,
+# the label-order probe against fake f1chexbert packages) is rehearsed in tests/test_chat_app_smoke_job.py.
+
+def _smoke_text() -> str:
+    return (REPO_ROOT / "scripts" / "chat_app_smoke_h100.sh").read_text()
+
+
+def test_chat_app_smoke_wrapper_is_cpu_only_on_the_renamed_partition_and_leaves_the_arm_node_out():
+    """P7-A. The proven CPU-only combination (--qos=aisc, no GPU) on the renamed partition, the three nodes that cannot run it
+    excluded (ga03 is ARM and the venvs are x86), logs where every other wrapper puts them, the standard cd line, and offline
+    Hugging Face on a compute node."""
+    src = _smoke_text()
+    options, flags = _sbatch_options(src)
+    assert options == {"--partition": "pot-hpi-aisc-batch", "--account": "aisc", "--qos": "aisc", "--exclude": "ga03,gx17v1,gx13v1",
+                       "--mem": "8G", "--cpus-per-task": "2", "--time": "00:15:00", "--job-name": "chat_app_smoke",
+                       "--output": "logs/%x_%j.log", "--error": "logs/%x_%j.log"}, options
+    assert flags == [], flags
+    code = _eos_wrapper_code(src)
+    assert not [l for l in code if "--gpus" in l or "--gres" in l], "CPU-only job"
+    assert 'cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"' in code
+    assert "set -euo pipefail" in code
+    assert [l for l in code if l.startswith("export HF_HUB_OFFLINE=1")], "compute nodes are offline"
+
+
+def test_chat_app_smoke_wrapper_probes_each_half_in_its_own_venv_with_its_own_overlay():
+    """P7-A. The web app imports in .venv with the .chat_deps overlay; the labeller and the label order in .venv_chexbert with
+    .chat_deps_chexbert: the two overlays scripts/chat_cluster_setup_h100.sh builds (P0-G), put on PYTHONPATH by this wrapper only."""
+    code = "\n".join(_eos_wrapper_code(_smoke_text()))
+    assert "probe server env PYTHONPATH=.chat_deps .venv/bin/python -c" in code
+    assert code.count("PYTHONPATH=.chat_deps_chexbert .venv_chexbert/bin/python -c") == 2      # the labeller and the label order
+    assert code.count("PYTHONPATH=") == 3 and code.count("/bin/python") == 3
+    assert "import fastapi, app.server" in code and "import app.labeler, transformers" in code
+    assert "from app.labels import CHEXBERT_14" in code
+    setup = (REPO_ROOT / "scripts" / "chat_cluster_setup_h100.sh").read_text()
+    assert ".chat_deps/.setup_ok" in setup and ".chat_deps_chexbert/.setup_ok" in setup
+
+
+def test_chat_app_smoke_wrapper_reads_the_label_order_from_the_source_and_never_builds_an_f1chexbert():
+    """P7-A. f1chexbert 0.0.2 assigns target_names inside F1CheXbert.__init__, after it has loaded the CheXbert weights, so the order
+    cannot be had from an import. The probe must parse the package's source (no weights, no network), never construct the class."""
+    src = _smoke_text()
+    code = "\n".join(_eos_wrapper_code(src))
+    assert 'importlib.util.find_spec("f1chexbert")' in code and "ast.parse(" in code and "ast.literal_eval(" in code
+    assert "F1CheXbert(" not in code and "import f1chexbert" not in code and "from f1chexbert" not in code
+    header = "\n".join(l for l in src.splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))
+    assert "target_names" in header and "weights" in header, "the header says why the source is read"
+    thesis = (REPO_ROOT / "scripts" / "score_chexbert_standalone.py").read_text()
+    assert "labeler.target_names" in thesis, "the thesis scorer reads the same attribute off a live F1CheXbert"
+
+
+def test_chat_app_smoke_wrapper_installs_nothing_and_writes_only_a_new_results_directory():
+    """P7-A, R8. No installer of any kind appears anywhere in the file, comments included; the one directory it makes is
+    results/chat_app_smoke_<jobid>, through the results symlink, and only when results exists (it never makes `results` itself)."""
+    src = _smoke_text()
+    for needle in ("pip install", "pip3 install", "uv pip", "uv add", "-m pip", "conda install", "--target", "easy_install"):
+        assert needle not in src, needle
+    code = _eos_wrapper_code(src)
+    assert [l for l in code if "mkdir" in l] == ['mkdir -p "${OUT}" 2>/dev/null || fail "the results directory cannot be made"']
+    assert 'OUT="results/chat_app_smoke_${SLURM_JOB_ID:-local}"' in code
+    assert '[ -d results ] || fail "results is missing: run chat_cluster_setup_h100.sh first"' in code
+    for line in code:
+        assert not re.match(r"\s*(rm|mv|cp|ln|chmod|touch)\b", line), line
+
+
+def test_chat_app_smoke_wrapper_prints_only_the_line_shapes_summary_shows_and_keeps_raw_output_in_files():
+    """P7-A, R7. Every literal it prints starts with === or ERROR and holds no path; the one dynamic echo is the probe's own [setup]
+    line, picked out of that probe's output file with sed; every python call goes through probe(), which sends all of its output to a
+    file in the results directory. Nothing reads those files back to the log but that one sed."""
+    src = _smoke_text()
+    code = _eos_wrapper_code(src)
+    text = "\n".join(code)
+    echoed, failed = re.findall(r'echo "([^"]*)"', text), re.findall(r'\bfail "([^"]*)"', text)
+    assert len(echoed) >= 6 and failed, (echoed, failed)
+    for line in echoed:
+        assert re.match(r"(=== |ERROR |\$\{line\}$)", line), line
+    for line in echoed + failed:
+        assert "/" not in line, line                                    # a repo-relative path is a path too
+        for var in ("OUT", "SCRATCH_ROOT", "CHAT_HOME", "SLURM_SUBMIT_DIR"):
+            assert "${" + var + "}" not in line, (var, line)
+    assert 'fail() { echo "ERROR $*"; exit 1; }' in src
+    assert 'echo "ERROR ${name} exit=${rc}"' in text
+    assert "sed -n '/^\\[setup\\] /{p;q;}' \"${OUT}/${name}.out\"" in text
+    assert '"$@" > "${OUT}/${name}.out" 2>&1 || rc=$?' in text
+    assert [l for l in code if "python" in l and not l.lstrip().startswith("probe ")
+            and not l.startswith(("SERVER_PROBE=", "LABELER_PROBE=", "LABELS_PROBE="))] == []
+    redirects = []
+    for line in code:
+        if line.lstrip().startswith(("echo", "fail", "SERVER_PROBE", "LABELER_PROBE", "LABELS_PROBE")):
+            continue                                                    # a message or the python code may contain a '>'
+        redirects += re.findall(r'(?<![0-9&])>>?\s*("[^"]+"|\S+)', line)
+    assert redirects, "no redirect found: the pin lost its subject"
+    assert set(redirects) <= {'"${OUT}/${name}.out"', "/dev/null"}, redirects
+    for line in code:
+        assert not re.match(r"\s*(date|nvidia-smi|printenv|cat|tail|head|less)\b", line), line
+    assert "set -x" not in src and "set -o xtrace" not in src
+
+
+def test_chat_app_smoke_wrapper_prints_the_sync_stamp_first_and_with_the_p9_g3_snippet_verbatim():
+    """P7-A provenance: the commit and cleanliness `chat_remote.sh sync` last shipped, read from .sync_stamp, as the very first line,
+    by the snippet scripts/train_report_eos_h100.sh (P9-G3) carries, copied exactly."""
+    train = _eos_wrapper_text()
+    start = train.index('SYNC="unknown"')
+    snippet = train[start:train.index('echo "=== sync ${SYNC} ==="', start) + len('echo "=== sync ${SYNC} ==="')]
+    assert ".sync_stamp" in snippet and snippet.count("\n") >= 6
+    src = _smoke_text()
+    assert snippet in src
+    code = "\n".join(_eos_wrapper_code(src))
+    sync = code.index('echo "=== sync ${SYNC} ==="')
+    assert code.index('echo "') == sync, "something is printed before the sync line"
+    assert code.index("/bin/python") > sync and ".sync_stamp" in code[:sync]
+
+
+def test_chat_app_smoke_header_documents_the_submit_and_summary_lines():
+    header = "\n".join(l for l in _smoke_text().splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))
+    assert "bash scripts/chat_remote.sh sync && bash scripts/chat_remote.sh submit scripts/chat_app_smoke_h100.sh" in header
+    assert "bash scripts/chat_remote.sh summary logs/chat_app_smoke_<jobid>.log" in header
+
+
+def test_chat_app_smoke_wrapper_passes_the_bash_syntax_check():
+    import shutil
+    import subprocess
+    shells = [s for s in ("/bin/bash", shutil.which("bash")) if s and os.path.exists(s)]
+    assert shells
+    for shell in set(shells):
+        done = subprocess.run([shell, "-n", str(REPO_ROOT / "scripts" / "chat_app_smoke_h100.sh")], capture_output=True, text=True)
+        assert done.returncode == 0, (shell, done.stderr)
