@@ -7467,3 +7467,227 @@ def test_chexbert_service_imports_nothing_from_hybrid_xmamba():
             roots.add("app" if node.level else (node.module or "").split(".")[0])
     assert "f1chexbert" in roots, roots          # the walker does see function-level imports, so it would see a lazy hybrid_xmamba one
     assert not roots & {"hybrid_xmamba", "app", "scripts", "tests"}, sorted(roots)
+
+
+# ── CHAT_UI_PLAN.md P5-C: the gallery labelling wrappers ──────────────────────
+# Static pins on scripts/label_gallery_reports_h100.sh (one GPU job with a canary), scripts/label_gallery_reports_cpu_h100.sh (the sharded
+# CPU fallback and its merge) and the scripts/label_gallery_reports.py they run. Their behaviour (guards, R7 output, the canary, shards and
+# merge, the requeue paths, the cross-check) is rehearsed for real in tests/test_label_gallery_reports.py, with the real script and a fake
+# f1chexbert; the rehearsal harness it shares with the gallery build's is tests/wrapper_rehearsal.py.
+
+_LABEL_WRAPPERS = {"gpu": "label_gallery_reports_h100.sh", "cpu": "label_gallery_reports_cpu_h100.sh"}
+_LABEL_COMMON = dict(_EVAL_COMMON, **{"--cpus-per-task": "4", "--mem": "16G", "--time": "02:00:00"})
+_LABEL_SLURM = {
+    "gpu": dict(_LABEL_COMMON, **{"--gpus": "1", "--job-name": "chat_labels"}),
+    "cpu": dict(_LABEL_COMMON, **{"--qos": "aisc", "--job-name": "chat_labels_cpu"}),
+}
+_LABEL_SCRIPT_CALL = "python scripts/label_gallery_reports.py"
+
+
+def _label_text(kind: str) -> str:
+    return (REPO_ROOT / "scripts" / _LABEL_WRAPPERS[kind]).read_text()
+
+
+@pytest.mark.parametrize("kind", sorted(_LABEL_WRAPPERS))
+def test_label_gallery_wrappers_follow_the_slurm_invariants(kind):
+    """P5-C. The GPU job asks for one H100 through --gpus=1 and never a typed --gres; the fallback is the proven CPU-only combination
+    (--qos=aisc, no GPU). Both: the renamed partition, the three nodes that cannot run them excluded (the venv is x86), a requeue that
+    appends to the SLURM log, logs where every other wrapper puts them, the standard cd line. The array is not in the header: it is given at
+    submission, so that the very same wrapper can be the merge."""
+    src = _label_text(kind)
+    options, flags = _sbatch_options(src)
+    assert options == _LABEL_SLURM[kind], options
+    assert flags == ["--requeue"], flags
+    code = _eos_wrapper_code(src)
+    assert not [l for l in code if "--gres" in l], "an untyped --gpus and a typed --gres do not mix"
+    assert 'cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"' in src
+    assert "set -euo pipefail" in src and "mkdir -p logs" in src
+    assert ("--gpus" in options) == (kind == "gpu") and ("--qos" in options) == (kind == "cpu")
+    assert not [l for l in src.splitlines() if l.startswith("#SBATCH") and "--array" in l]
+
+
+def test_label_gallery_wrappers_have_the_chexbert_environment_of_score_chexbert_h100_and_no_hf_home():
+    """D24: the CheXbert weights live in the DEFAULT Hugging Face cache, so HF_HOME is not overridden (and not mentioned: the pin of the other
+    CheXbert wrappers), HF_HUB_OFFLINE defaults to 0 as in score_chexbert_h100.sh, and the venv is .venv_chexbert."""
+    thesis = (REPO_ROOT / "scripts" / "score_chexbert_h100.sh").read_text()
+    assert 'export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"' in thesis and "HF_HOME" not in "\n".join(_eos_wrapper_code(thesis))
+    for kind in sorted(_LABEL_WRAPPERS):
+        code = "\n".join(_eos_wrapper_code(_label_text(kind)))
+        assert 'export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"' in code and "export PYTHONUNBUFFERED=1" in code, kind
+        assert 'VENV_ACTIVATE="${VENV_ACTIVATE:-.venv_chexbert/bin/activate}"' in code and 'source "${VENV_ACTIVATE}"' in code, kind
+        assert "HF_HOME" not in code and "HF_DATASETS" not in code and "HF_HUB_OFFLINE=1" not in code, kind
+        assert code.index('source "${VENV_ACTIVATE}"') < code.index('export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"'), kind
+
+
+def test_label_gallery_wrappers_defaults_are_the_plans_and_only_the_documented_names_are_levers():
+    """The plan's gallery build (g13d_m3_v1), the published Mamba-3 s42 dump as the reference, the canary of the brief. GALLERY is derived
+    from CHAT_HOME and one plain name, never a lever of its own (sbatch exports the submitting shell, and GALLERY is a likely name)."""
+    common = ['VENV_ACTIVATE="${VENV_ACTIVATE:-.venv_chexbert/bin/activate}"', 'CHAT_HOME="${CHAT_HOME:-/sc/home/$USER/chat_sessions}"',
+              'BUILD_ID="${BUILD_ID:-g13d_m3_v1}"', 'REFERENCE_DIR="${REFERENCE_DIR:-results/report_gen_m3_test_split_s42}"',
+              'CANARY="${CANARY:-1000}"', 'GALLERY="${CHAT_HOME}/gallery/${BUILD_ID}"']
+    per_kind = {"gpu": ['BUDGET_S="${BUDGET_S:-5400}"'], "cpu": ['BUDGET_S="${BUDGET_S:-6000}"', 'SHARDS="${SHARDS:-8}"', 'MERGE="${MERGE:-0}"']}
+    levers = {"gpu": {"VENV_ACTIVATE", "CHAT_HOME", "BUILD_ID", "REFERENCE_DIR", "BUDGET_S", "CANARY"},
+              "cpu": {"VENV_ACTIVATE", "CHAT_HOME", "BUILD_ID", "REFERENCE_DIR", "BUDGET_S", "CANARY", "SHARDS", "MERGE"}}
+    for kind in sorted(_LABEL_WRAPPERS):
+        src = _label_text(kind)
+        code = "\n".join(_eos_wrapper_code(src))
+        for line in common + per_kind[kind]:
+            assert line in code, (kind, line)
+        assert set(re.findall(r'(?m)^([A-Z][A-Z0-9_]*)="\$\{\1:-', src)) == levers[kind], kind
+    gallery = (REPO_ROOT / "scripts" / "build_retrieval_gallery_h100.sh").read_text()
+    assert 'CHAT_HOME="${CHAT_HOME:-/sc/home/$USER/chat_sessions}"' in gallery and 'OUT="${CHAT_HOME}/gallery/${BUILD_ID}"' in gallery
+
+
+def test_label_gallery_wrappers_run_the_script_with_one_command_each_and_send_its_raw_output_to_a_file_in_the_gallery():
+    """R7. Every `python scripts/label_gallery_reports.py` is redirected to a log inside ${GALLERY} (stdout and stderr: the library's warnings,
+    a traceback that echoes report text), never printed; the job log gets the script's lines of a known shape, a count of the others, and
+    wrapper-authored lines."""
+    gpu = [l for l in _logical_lines(_label_text("gpu")) if _LABEL_SCRIPT_CALL in l]
+    assert gpu == [_LABEL_SCRIPT_CALL + ' --gallery "${GALLERY}" --reference-dir "${REFERENCE_DIR}" --budget-s "${BUDGET_S}" '
+                   '--canary "${CANARY}" --device auto > "${GALLERY}/labels.log" 2>&1 || rc=$?']
+    cpu = [l for l in _logical_lines(_label_text("cpu")) if _LABEL_SCRIPT_CALL in l]
+    assert cpu == [
+        _LABEL_SCRIPT_CALL + ' --gallery "${GALLERY}" --reference-dir "${REFERENCE_DIR}" --budget-s "${BUDGET_S}" --canary "${CANARY}" '
+        '--device cpu --shard "${SLURM_ARRAY_TASK_ID}" --of "${SHARDS}" > "${LOG}" 2>&1 || rc=$?',
+        _LABEL_SCRIPT_CALL + ' --gallery "${GALLERY}" --reference-dir "${REFERENCE_DIR}" --merge --of "${SHARDS}" > "${LOG}" 2>&1 || rc=$?']
+    cpu_text = "\n".join(_eos_wrapper_code(_label_text("cpu")))
+    assert 'LOG="${GALLERY}/labels_shard_${SLURM_ARRAY_TASK_ID}.log"' in cpu_text and 'LOG="${GALLERY}/labels_merge.log"' in cpu_text
+    for kind, log in (("gpu", '"${GALLERY}/labels.log"'), ("cpu", '"${LOG}"')):
+        text = "\n".join(_eos_wrapper_code(_label_text(kind)))
+        assert "tr '\\r' '\\n' < {} | grep -aE \"${{LABEL_SHAPES}}\" | tail -n 60 || true".format(log) in text, kind
+        assert ("WITHHELD=\"$(tr '\\r' '\\n' < {} | grep -aE '^(\\[labels\\] |RESULT |ERROR|=== )' | grep -avcE \"${{LABEL_SHAPES}}\" || true)\""
+                .format(log)) in text, kind
+        assert "case \"${WITHHELD}\" in ''|*[!0-9]*) WITHHELD=unknown ;; esac" in text, "a count that could not be made is not a zero"
+        assert 'echo "=== label lines withheld: ${WITHHELD} ==="' in text
+        assert 'if [ "${rc}" -ne 0 ]; then echo "ERROR labels exit=${rc}"; exit "${rc}"; fi' in text, kind
+
+
+def test_label_gallery_wrappers_print_only_wrapper_authored_lines_that_name_no_path():
+    """Every line the wrappers print themselves starts with === or ERROR (fail adds its own ERROR), and names no path variable and no path: the
+    one exception is the pair of submit lines the GPU job prints when it hands over to the CPU path, which name the CPU wrapper (repo code)."""
+    path_variables = ("GALLERY", "GALLERY_REAL", "MAIN_REAL", "CHAT_HOME", "REFERENCE_DIR", "VENV_ACTIVATE", "LOG")
+    submit_lines = {'=== 1. bash scripts/chat_remote.sh submit scripts/label_gallery_reports_cpu_h100.sh BUILD_ID=${BUILD_ID} -- --array=0-7 ===',
+                    '=== 2. bash scripts/chat_remote.sh submit scripts/label_gallery_reports_cpu_h100.sh BUILD_ID=${BUILD_ID} MERGE=1 -- '
+                    '--dependency=afterok:<the array job id> ==='}
+    for kind in sorted(_LABEL_WRAPPERS):
+        src = _label_text(kind)
+        code = _eos_wrapper_code(src)
+        text = "\n".join(code)
+        echoed, failed = re.findall(r'echo "([^"]*)"', text), re.findall(r'\bfail "([^"]*)"', text)
+        assert len(echoed) + len(failed) >= 12, (kind, echoed, failed)
+        for line in echoed:
+            assert re.match(r"(=== |ERROR )", line), (kind, line)
+        for line in echoed + failed:
+            if line in submit_lines:
+                continue
+            assert "/" not in line, (kind, line)
+            for var in path_variables:
+                assert "${" + var + "}" not in line, (kind, var, line)
+        assert (kind == "gpu") == (submit_lines <= set(echoed)), "only the GPU job prints the submit lines"
+        assert 'fail() { echo "ERROR $*"; exit 1; }' in src
+        for line in code:
+            assert not re.match(r"\s*(date|hostname|nvidia-smi|env|printenv|cat|tail|head|less)\b", line), (kind, line)
+        assert "set -x" not in src and "set -o xtrace" not in src
+
+
+def test_label_gallery_wrappers_hold_one_allowlist_and_it_is_not_a_blacklist():
+    """The shapes of the lines the script prints, anchored, one per line (tests/test_label_gallery_reports.py runs them through grep over
+    everything printed and over ids, text and paths); both wrappers carry the same list, and no pattern is a wildcard."""
+    lists = []
+    for kind in sorted(_LABEL_WRAPPERS):
+        found = re.search(r"^LABEL_SHAPES='(.*?)'$", _label_text(kind), re.M | re.S)
+        assert found, kind
+        patterns = found.group(1).split("\n")
+        lists.append(patterns)
+        assert "" not in patterns and all(p.startswith("^") and p.endswith("$") for p in patterns), kind
+        assert not [p for p in patterns if re.search(r"(\.\*|\.\+|\\S|\\w|\\d)", p)], "a wildcard in an allowlist"
+        assert "grep -av '/'" not in _label_text(kind), "the blacklist is not the filter"
+    assert lists[0] == lists[1]
+
+
+def test_label_gallery_wrappers_print_their_sync_stamp_first_and_with_the_p9_g3_snippet_verbatim():
+    """Provenance, as the other chat wrappers print it: the commit and cleanliness `chat_remote.sh sync` last shipped, read from .sync_stamp, as
+    the very first line. The snippet is the training wrapper's, copied exactly."""
+    train = _eos_wrapper_text()
+    start = train.index('SYNC="unknown"')
+    snippet = train[start:train.index('echo "=== sync ${SYNC} ==="', start) + len('echo "=== sync ${SYNC} ==="')]
+    assert ".sync_stamp" in snippet and snippet.count("\n") >= 6
+    for kind in sorted(_LABEL_WRAPPERS):
+        src = _label_text(kind)
+        assert snippet in src, kind
+        code = "\n".join(_eos_wrapper_code(src))
+        sync = code.index('echo "=== sync ${SYNC} ==="')
+        assert code.index('echo "') == sync, (kind, "something is printed before the sync line")
+        assert code.index("python ") > sync and code.index("source ") > sync and ".sync_stamp" in code[:sync], kind
+
+
+def test_label_gallery_wrappers_check_everything_before_the_script_runs_and_never_delete():
+    """R8. No raw log is opened and no step started before every guard has passed: one plain build name, whole numbers, CHAT_HOME, the manifest,
+    the venv, the gallery's place (not in an outputs directory, not under the thesis checkout), a finished labelling (never overwritten: refused
+    before its job's raw log is replaced), the reference dump's two files."""
+    guards = ['fail "BUILD_ID must be one plain name: letters, digits, dot, dash, underscore"',
+              'fail "BUDGET_S must be a whole number of seconds, at most 6 digits"', 'fail "CANARY must be a whole number of groups, at most 7 digits"',
+              'fail "CHAT_HOME does not exist: run chat_cluster_setup_h100.sh first"',
+              'fail "the gallery has no manifest.json: build it first (build_retrieval_gallery_h100.sh)"',
+              'fail "the CheXbert venv is missing: run setup_chexbert_venv_h100.sh first"', 'fail "the gallery is inside an outputs directory"',
+              'fail "the gallery resolves into an outputs directory"', 'fail "the gallery is under the thesis checkout (R8)"',
+              'fail "the gallery is already labelled (labels_status done): a finished labelling is never overwritten (R8)"',
+              'fail "the reference dump has no refs.txt"', 'fail "the reference dump has no chexbert_labels.json"',
+              """grep -Eq '"labels_status":[[:space:]]*"done"' "${GALLERY}/manifest.json" """.strip()]
+    for kind in sorted(_LABEL_WRAPPERS):
+        code = "\n".join(_eos_wrapper_code(_label_text(kind)))
+        first_run = code.index(_LABEL_SCRIPT_CALL)
+        for guard in guards:
+            assert 0 <= code.index(guard) < first_run, (kind, guard)
+        assert code.index('"${BUILD_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$') < code.index('GALLERY="${CHAT_HOME}/gallery/')
+        assert not re.search(r"(^|[\s;&|(])rm(\s|$)", code, re.M) and "--delete" not in code and "ln -sf" not in code, "additive only: no deletion"
+    cpu = "\n".join(_eos_wrapper_code(_label_text("cpu")))
+    for guard in ('fail "SHARDS must be a whole number from 1 to 999"', 'fail "MERGE must be 0 or 1"',
+                  'fail "not an array task: submit with --array=0-7 (SHARDS tasks), or with MERGE=1 for the merge"',
+                  'fail "array task ${SLURM_ARRAY_TASK_ID} is outside the ${SHARDS} shards"'):
+        assert 0 <= cpu.index(guard) < cpu.index(_LABEL_SCRIPT_CALL), guard
+
+
+def test_label_gallery_gpu_wrapper_asks_the_venvs_torch_and_hands_over_the_cpu_path_on_exit_2():
+    """CHAT_UI_PLAN.md D24 and P5-C. .venv_chexbert's torch comes from the CPU index (scripts/setup_chexbert_venv_h100.sh), so a GPU job's torch
+    may see no GPU: the count is asked of the venv's own torch, and no GPU means exit 2 and the two submit lines at once. The canary's own exit 2
+    prints the same two lines. The CPU wrapper never asks for a GPU, and asks the labeller for the CPU."""
+    setup = (REPO_ROOT / "scripts" / "setup_chexbert_venv_h100.sh").read_text()
+    assert "pip install torch --index-url https://download.pytorch.org/whl/cpu" in setup, "the reason for the probe moved: re-read this"
+    gpu = "\n".join(_eos_wrapper_code(_label_text("gpu")))
+    assert "python -c 'import torch; n = torch.cuda.device_count(); print(n, torch.cuda.get_device_name(0) if n else \"none\")'" in gpu
+    assert gpu.index("use_the_cpu_path\n  exit 2") > gpu.index("torch.cuda.device_count()"), "the probe's own exit 2"
+    assert gpu.count("use_the_cpu_path\n  exit 2") == 2, "one for no GPU, one for the canary"
+    assert gpu.index('if [ "${rc}" -eq 2 ]; then') > gpu.index(_LABEL_SCRIPT_CALL)
+    assert "--device auto" in gpu and "--device cpu" not in gpu
+    cpu = "\n".join(_eos_wrapper_code(_label_text("cpu")))
+    assert "torch" not in cpu and "--device cpu" in cpu and "--device auto" not in cpu
+
+
+def test_label_gallery_reports_imports_only_the_standard_library_numpy_and_f1chexbert():
+    """P5-C. Like scripts/score_chexbert_standalone.py and app/labeler.py it runs in .venv_chexbert (transformers<5, no hybrid_xmamba): nothing of
+    this repo, which is why the 14 label names are a literal copy (pinned against app.labels in tests/test_label_gallery_reports.py), and no torch
+    of its own (f1chexbert brings it)."""
+    if not hasattr(sys, "stdlib_module_names"):
+        pytest.skip("sys.stdlib_module_names needs Python 3.10")
+    path = REPO_ROOT / "scripts" / "label_gallery_reports.py"
+    roots = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):       # walk reaches the function-level imports too
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            roots.add("." if node.level else (node.module or "").split(".")[0])
+    allowed = set(sys.stdlib_module_names) | {"numpy", "f1chexbert"}
+    assert {"numpy", "f1chexbert"} <= roots, roots
+    assert roots <= allowed, sorted(roots - allowed)
+
+
+def test_label_gallery_wrappers_pass_the_bash_syntax_check():
+    import shutil
+    import subprocess
+    shells = [s for s in ("/bin/bash", shutil.which("bash")) if s and os.path.exists(s)]
+    assert shells
+    for kind in sorted(_LABEL_WRAPPERS):
+        for shell in set(shells):
+            done = subprocess.run([shell, "-n", str(REPO_ROOT / "scripts" / _LABEL_WRAPPERS[kind])], capture_output=True, text=True)
+            assert done.returncode == 0, (kind, shell, done.stderr)
