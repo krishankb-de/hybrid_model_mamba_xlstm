@@ -2947,7 +2947,7 @@ Commits:
   - The settled screenshots are a default (stop-on) turn.
   - Layout: 138 cases (the Save button in every drawer viewport). Node: 299.
 
-- [ ] **P4-H** (laptop) An end-to-end Playwright test of the UI, driven like a real user, with fixes for what it finds. The user's request, 2026-10-09: "do a complete testing through the playwright through the ui testing by opening the complete steps in the ui and checking and also perfomring the operation and users behaviour and checking how its processing and fixing any issues that are arriving".
+- [x] **P4-H** (laptop) An end-to-end Playwright test of the UI, driven like a real user, with fixes for what it finds. The user's request, 2026-10-09: "do a complete testing through the playwright through the ui testing by opening the complete steps in the ui and checking and also perfomring the operation and users behaviour and checking how its processing and fixing any issues that are arriving".
   - **The trigger.** The user also hit "Error: Internal error (ImportError)" with no output on localhost.
     - Root cause, reproduced: a stale dev server. It started at 14:24, before the P9-G2 decoder commits. `Engine.generate` imported the new `scripts/evaluate_report_generation.py` lazily on the first turn, and that file imports `StopDecoding` from the old, already-loaded `hybrid_lm`.
     - Fixed operationally by restarting the server on a8e7efe. A real turn then succeeded.
@@ -2978,6 +2978,34 @@ Commits:
     - the e2e suite passes;
     - the browser check passes 10/10;
     - the layout check stays green.
+
+  *As built (5afbf8b..24fda5a, 2748f40, 8c19b37; reviewed clean after fix round 1):*
+  - **A1.** `app/engine.py` imports `scripts.evaluate_report_generation as erg` when the module loads. A test with `sys.modules[...] = None` proves `generate` imports nothing.
+  - **A2.** `/healthz` gains two fields:
+    - `started_at`;
+    - `code_version`: the short sha from the card's `git_sha`, with a `-dirty` suffix for an uncommitted tree, and `null` in public mode.
+  - **A3.** The restart hint is a separate `.note.error-hint`, shown on private `Internal error (…)` messages only.
+  - **B.** `tests/e2e/test_ui_playwright.py` holds 14 journeys plus a harness meta-test, 15 tests in all. Every test ends in `assert_clean`, and teardown checks again after a 250 ms settle.
+    - Run it with `<venv>/bin/python -m pytest tests/e2e -m e2e -q`. Set `CHAT_UI_E2E_EVIDENCE=docs/chat_ui/evidence/p4h` to regenerate the evidence.
+    - The `e2e` marker lives in `tests/conftest.py`.
+  - **C. Defects fixed:**
+    - F1: the stale-server ImportError;
+    - F2: keyboard focus lost when Send or Stop disables itself. The handoff happens only on `:focus-visible`, so a tap does not open the phone keyboard;
+    - F3/F8: the re-run hint and the user chips describe what really runs. `isCommand` and the server parser share `tests/frontend/fixtures/commands.json`, and the server is ASCII-only, with drift guards on both sides;
+    - F4: a chat is listed when its turn starts;
+    - F5: only transport failures go unlogged, marked by `transportFailure` at the source;
+    - F6: a deleted chat's running turn stops at the next step, through `Store.message_visible`;
+    - F7/F7b: no empty chat is left after a refusal, and a race in that cleanup is fixed.
+  - **Deferred:**
+    - D1, label stage states: P5-E;
+    - D2, the image viewer after a reload: P6.
+  - **D.** 7 PNGs in `docs/chat_ui/evidence/p4h/`.
+  - **Parked for P6-A and the final review:**
+    - `clearNotice()` still focuses the prompt after a tapped Retry or Dismiss, which opens the keyboard on a phone;
+    - the server and the page disagree on some whitespace characters (U+001C–1F, U+0085, U+FEFF);
+    - the poll's `res.json()` transport marking is untested;
+    - a test title is stale (`app.test.mjs:3274`);
+    - `pytest.ini`'s `[tool:pytest]` header means pytest ignores the file.
 
 ### P5 — Labels and retrieval backend
 

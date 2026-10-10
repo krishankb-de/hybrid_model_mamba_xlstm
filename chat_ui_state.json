@@ -340,7 +340,7 @@
     },
     "P4": {
       "title": "Frontend shell (laptop, tiny engine)",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "P4-A": {
           "done": true,
@@ -371,7 +371,7 @@
           "desc": "Stop condition: stop decoding once the report starts repeating; a Settings drawer with Save. Added 2026-10-09 after the user's second test."
         },
         "P4-H": {
-          "done": false,
+          "done": true,
           "desc": "(laptop) An end-to-end Playwright test of the UI, driven like a real user, with fixes for what it finds. The user's request, 2026-10-09: \"do a complete testi..."
         }
       },
@@ -389,7 +389,11 @@
         "p4f_commits": "86e62f8..cbd5ac2",
         "p4g_tests": "tests/test_app_engine.py (repeat_started, stop parity), tests/frontend/app.test.mjs (key-by-key revert)",
         "p4g_check": "scripts/chat_ui_browser_check.py RESULT checks 10 failures 0; layout 138/0",
-        "p4g_commits": "c0b51ce..60e9217"
+        "p4g_commits": "c0b51ce..60e9217",
+        "p4h_commits": "5afbf8b..24fda5a,2748f40,8c19b37",
+        "p4h_e2e": "tests/e2e/test_ui_playwright.py (15/15 x10)",
+        "p4h_checks": "browser 10/10, layout 138/0, validate All gates passed",
+        "p4h_review": "approved (opus); fix round 1 clean (sonnet)"
       },
       "verdict": null
     },
@@ -627,9 +631,12 @@
     "2026-10-09: 2026-10-09: P9-G3 submitted as job 2632173 (chat_report_eos, 4 H100, sync a8e7efe clean); log logs/chat_report_eos_2632173.log; read via chat_remote.sh state/summary only (R7)",
     "2026-10-09: 2026-10-09: P4-H added (user: Playwright e2e UI testing + fixes; stale-server ImportError hardening); P5-A/P5-B rulings added; four tasks dispatched in parallel worktrees (P9-G4, P5-A, P5-B, P4-H)",
     "2026-10-09: P5-A labels client/rule labeller/agreement + CheXbert service; merged into chat_ui (validate All gates passed)",
-    "2026-10-10: 2026-10-10: P5-A merged (6bac709) and ticked; P9-G4 laptop part done (070390d, d8857d7, 8618316) with as-built + R4 prediction in the plan; P5-D/P5-C/P5-E carries recorded"
+    "2026-10-10: 2026-10-10: P5-A merged (6bac709) and ticked; P9-G4 laptop part done (070390d, d8857d7, 8618316) with as-built + R4 prediction in the plan; P5-D/P5-C/P5-E carries recorded",
+    "2026-10-10: 2026-10-10: P5-B merged (c079ac2, 49830a2); gallery job submitted 2632531 (chat_gallery, BUILD_ID=g13d_m3_v1, sync 49830a2 clean); read via chat_remote.sh state/summary logs/chat_gallery_2632531.log",
+    "2026-10-10: 2026-10-10: P4-H merged (5afbf8b..24fda5a, validate All gates passed); dev server restarted on 24fda5a (pid 59835; /healthz code_version 24fda5a)",
+    "2026-10-10: P4-H Playwright e2e + 9 UI fixes + stale-server hardening, merged"
   ],
-  "last_updated": "2026-10-10T00:47:53+02:00",
+  "last_updated": "2026-10-10T02:06:24+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -644,7 +651,9 @@
       "composer layout: inject the re-run hint and #preview into the layout check (801/820/834x568 drawer open, 320x568 long name); Send sits below the composer fold at 801-820 x 568-650 with the drawer open - fix (one-line ellipsis hint under max-height 640px) or accept explicitly",
       "reword or hide the re-run hint while a non-command note (a question) is typed",
       "'Cancel upload' (abort-only Stop before accept) and an 'Uploading...' status between Send and accept",
-      "empty 'New chat' left after a refused first turn; command text becomes the chat title (title from note minus commands, else filename); health strip lags while streaming (refresh /healthz on accept/settle)"
+      "empty 'New chat' left after a refused first turn; command text becomes the chat title (title from note minus commands, else filename); health strip lags while streaming (refresh /healthz on accept/settle)",
+      "clearNotice() focuses the prompt after a tapped Retry/Dismiss (opens the phone keyboard): use the focus-visible handoff",
+      "whitespace drift between server and page command parsing (U+001C-1F, U+0085, U+FEFF)"
     ],
     "P6-B": [
       "tests/test_app_openapi.py pins the full route set: every new route adds an entry plus summary/description/responses"
@@ -679,7 +688,8 @@
       "PhysioNet doc example ids 10000032/50414267 in older chat tests (test_app_redact, test_chat_cpu_probe, test_chat_engine_golden) and CHAT_UI_PLAN.md: replace in a polish pass (thesis files untouched)",
       "pytest.ini uses a [tool:pytest] header, so pytest ignores it (markers live in tests/conftest.py)",
       "P5-A polish: reorder-only mismatch message, _count wording, overlapping client tests, no load back-off",
-      "P9-G3: summary mask() blanks 8+ digit runs inside the sync sha (cosmetic)"
+      "P9-G3: summary mask() blanks 8+ digit runs inside the sync sha (cosmetic)",
+      "P4-H: poll res.json() transport marking untested (api.js:134); stale test title app.test.mjs:3274; request() body-read TypeError logged"
     ],
     "P9-G5": [
       "UI copy for eos_trained models: render.js \"full budget\" chip and app.js:1360 stop-switch hint (\"always decodes the whole token budget\") are wrong for an EOS model",
