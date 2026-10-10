@@ -4,14 +4,14 @@
     "failures": []
   },
   "environment": {
-    "date": "2026-10-09",
+    "date": "2026-10-10",
     "engine": "tiny (random weights, toy vocabulary; no checkpoint, no data)",
     "tiny_step_delay_s": 0.02,
     "image": "synthetic PNG (tests/app_helpers.png_bytes)",
     "browser": "Chrome/146.0.7680.178 (headless)",
     "python": "3.14.3",
     "os": "Darwin",
-    "warm_up_turn_s": 0.94,
+    "warm_up_turn_s": 0.91,
     "viewports": {
       "desktop": [
         1280,
@@ -23,7 +23,7 @@
       ]
     },
     "notes": [
-      "The tiny pipeline skips retrieve, label and score until P5-E, so the a11y check reads its label chips from a second tiny app whose home was seeded with one SYNTHETIC labelled turn (labelled_chips_*.png); the other checks run the live pipeline.",
+      "The tiny app of the checks has no gallery and no labeller, so it skips retrieve, label and score; the a11y check reads its label chips from a live turn on a second tiny app started with tiny_gallery (the synthetic gallery and the keyword labeller), its note a reference command, so that turn is labelled and scored (labelled_chips_*.png).",
       "The settings drawer refuses a token budget outside the server's 16-200 with a line under the field, so the 422 of the error check is reached through the note's command ('tokens 500'), which the server applies on top of the drawer's options.",
       "Display repair and Stop when the report starts repeating are on by default in the page (the server's own defaults stay off). The tiny model never writes an end-of-report token and loops after about 20 tokens, so a default turn ends by itself near 21 tokens (the settings check measures it); the checks that need a long turn (stream, reload, sessions, stop) store the switch off before the page loads, and every check starts from the page's defaults.",
       "The settled pictures (light and dark) are shot from a turn run with the page's own settings, so they show the note that says why it stopped and no 'full budget' chip. Display repair on means the reports in every picture are the repaired display copy; the settings check runs 200 tokens, with the stop switch off, to show that none of its sentences repeats on the card or in any frame of the stream, while Show raw keeps the decoder's whole text (the tiny model repeats one sentence about a dozen times).",
@@ -35,7 +35,7 @@
     {
       "name": "stream",
       "status": "PASS",
-      "detail": "6 stages settled (3 done, 3 skipped); 30 snapshots, report 3 -> 205 chars; status ended on 'Report ready'; done in 1.1 s",
+      "detail": "6 stages settled (3 done, 3 skipped); 30 snapshots, report 3 -> 205 chars; status ended on 'Report ready'; done in 1.2 s",
       "seconds": 2.1,
       "data": {
         "stages": {
@@ -67,12 +67,12 @@
           ],
           [
             false,
-            1139
+            1190
           ]
         ],
-        "card_done_ms": 1127,
+        "card_done_ms": 1177,
         "token_budget": 40,
-        "seconds": 1.15,
+        "seconds": 1.19,
         "settled_pair_from_a_default_turn": {
           "notes": [
             "Stopped when the model began repeating itself."
@@ -80,10 +80,9 @@
           "chips": [
             "beam 3",
             "100 tok",
-            "cached",
-            "k 4/3"
+            "cached"
           ],
-          "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 21 tok · 573 ms · cpu · model detailstiny random-init model"
+          "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 21 tok · 578 ms · cpu · model detailstiny random-init model"
         }
       },
       "console_errors": []
@@ -115,7 +114,7 @@
             "stop": true
           },
           "followed_equals_replayed": true,
-          "markup_chars": 4126
+          "markup_chars": 4125
         }
       },
       "console_errors": []
@@ -123,19 +122,19 @@
     {
       "name": "sessions",
       "status": "PASS",
-      "detail": "2 chats switched 4 times, each with its own card and user turn; leaving a running turn cancelled its stream (request aborted), nothing asked for it (45 samples), and it replays done",
-      "seconds": 7.0,
+      "detail": "2 chats switched 4 times, each with its own card and user turn; leaving a running turn cancelled its stream (request aborted), nothing asked for it (46 samples), and it replays done",
+      "seconds": 7.1,
       "data": {
         "sessions": [
-          "s_01a1208bc20200007974d3",
-          "s_01a1208bc512000097b0f2"
+          "s_01a123b12924000004ef52",
+          "s_01a123b12c74000028c2aa"
         ],
         "messages": {
-          "a": "m_01a1208bc2250001ff0655",
-          "b": "m_01a1208bc5360001227afa",
-          "b2": "m_01a1208bcab20001412411"
+          "a": "m_01a123b129450001ba10f1",
+          "b": "m_01a123b12c9500016fe03d",
+          "b2": "m_01a123b13224000144bd60"
         },
-        "samples_while_away": 45,
+        "samples_while_away": 46,
         "stream_request_cancelled": true,
         "report_chars_of_turn_finished_while_away": 171
       },
@@ -144,12 +143,12 @@
     {
       "name": "exports",
       "status": "PASS",
-      "detail": "JSON parses (34839 bytes, 4 messages, logs end in message_stop done); Markdown (1529 bytes) has '## Turn 1' and '## Turn 2'",
-      "seconds": 2.1,
+      "detail": "JSON parses (34972 bytes, 4 messages, logs end in message_stop done); Markdown (1571 bytes) has '## Turn 1' and '## Turn 2'",
+      "seconds": 2.2,
       "data": {
         "json": {
-          "file": "session-s_01a1208bdd5b00002da187.json",
-          "bytes": 34839,
+          "file": "session-s_01a123b14501000007ba2c.json",
+          "bytes": 34972,
           "messages": 4,
           "events_per_turn": [
             34,
@@ -157,11 +156,11 @@
           ]
         },
         "markdown": {
-          "file": "session-s_01a1208bdd5b00002da187.md",
-          "bytes": 1529,
+          "file": "session-s_01a123b14501000007ba2c.md",
+          "bytes": 1571,
           "headings": [
-            "## Turn 1 — 2026-10-09 12:03:19 UTC",
-            "## Turn 2 — 2026-10-09 12:03:20 UTC"
+            "## Turn 1 — 2026-10-10 02:43:02 UTC",
+            "## Turn 2 — 2026-10-10 02:43:03 UTC"
           ]
         }
       },
@@ -170,13 +169,13 @@
     {
       "name": "stop",
       "status": "PASS",
-      "detail": "stopped after 2 of 150 snapshots (0 more by the time the card said aborted, 0.05 s after the press); no more afterwards; note 'Turn stopped'",
+      "detail": "stopped after 2 of 150 snapshots (1 more by the time the card said aborted, 0.06 s after the press); no more afterwards; note 'Turn stopped'",
       "seconds": 0.8,
       "data": {
         "budget": 150,
-        "snapshots_when_pressed": 2,
+        "snapshots_when_pressed": 1,
         "snapshots_total": 2,
-        "seconds_to_aborted": 0.05,
+        "seconds_to_aborted": 0.06,
         "note": "Turn stopped",
         "server_status": "aborted",
         "stages": {
@@ -200,7 +199,7 @@
       "name": "keyboard",
       "status": "PASS",
       "detail": "Tab visits 29 controls in DOM order, each with a focus ring; Enter sends; Enter and Space toggle a stage; Enter opens the drawer and Esc closes it to Settings",
-      "seconds": 1.0,
+      "seconds": 1.1,
       "data": {
         "tab_stops": [
           "#new-session",
@@ -374,8 +373,8 @@
     {
       "name": "a11y",
       "status": "PASS",
-      "detail": "stage buttons: their text, then state, with expanded, no glyph first; status region live=polite reads 'Report ready'; 14 chips read '<name>: positive|negative'; every control named; no text under AA contrast in 4 states",
-      "seconds": 2.6,
+      "detail": "stage buttons: their text, then state, with expanded, no glyph first; status region live=polite reads 'Report ready'; 14 chips of a live labelled turn read '<name>: positive|negative' and whether each agrees with the reference; every control named; no text under AA contrast in 4 states",
+      "seconds": 3.4,
       "data": {
         "contrast_issues_under_aa": {
           "settled card, light": [],
@@ -387,21 +386,21 @@
         "stage_buttons": [
           {
             "stage": "preprocess",
-            "visible": "preprocess · 2 ms",
-            "name": "preprocess · 2 ms, done, turn 1",
+            "visible": "preprocess · 3 ms",
+            "name": "preprocess · 3 ms, done, turn 1",
             "expanded": false
           },
           {
             "stage": "encode",
-            "visible": "encode · 0 ms",
-            "name": "encode · 0 ms, done, turn 1",
+            "visible": "encode · 1 ms",
+            "name": "encode · 1 ms, done, turn 1",
             "expanded": false,
             "expanded_after_click": true
           },
           {
             "stage": "generate",
-            "visible": "generate · 573 ms",
-            "name": "generate · 573 ms, done, turn 1",
+            "visible": "generate · 590 ms",
+            "name": "generate · 590 ms, done, turn 1",
             "expanded": false
           }
         ],
@@ -411,10 +410,10 @@
           "score · skipped: no_reference"
         ],
         "stage_items_as_read": {
-          "preprocess": "preprocess · 2 ms",
-          "encode": "encode · 0 mspatch_grid197, 32pooled_dim16prefix_tokens4devicecpuone_passtrue",
+          "preprocess": "preprocess · 3 ms",
+          "encode": "encode · 1 mspatch_grid197, 32pooled_dim16prefix_tokens4devicecpuone_passtrue",
           "retrieve": "retrieve · skipped: gallery_unavailable",
-          "generate": "generate · 573 ms",
+          "generate": "generate · 590 ms",
           "label": "label · skipped: labeler_unavailable",
           "score": "score · skipped: no_reference"
         },
@@ -427,12 +426,12 @@
             "Report ready"
           ]
         },
-        "chips_on_seeded_synthetic_turn": [
+        "chips_on_live_labelled_turn": [
           "Enlarged Cardiomediastinum: negative, matches reference",
-          "Cardiomegaly: positive, matches reference",
+          "Cardiomegaly: negative, differs from reference",
           "Lung Opacity: negative, matches reference",
           "Lung Lesion: negative, matches reference",
-          "Edema: positive, differs from reference",
+          "Edema: negative, matches reference",
           "Consolidation: negative, matches reference",
           "Pneumonia: negative, matches reference",
           "Atelectasis: negative, matches reference",
@@ -450,7 +449,7 @@
       "name": "error",
       "status": "PASS",
       "detail": "a server 422 showed the alert 'Invalid options: max_new_tokens: Input should be less than …', kept the note and the image, dismissed to the note field; the same composer then sent",
-      "seconds": 0.8,
+      "seconds": 0.9,
       "data": {
         "http_status": 422,
         "notice": "Invalid options: max_new_tokens: Input should be less than or equal to 200",
@@ -468,7 +467,7 @@
       "name": "settings",
       "status": "PASS",
       "detail": "a click into the budget selected it and 1-2-0 typed over it read 120 (not 100120); Enter saved it, closed the drawer to Settings and the page said 'Settings saved.' for 4.0 s; 300 and 8 were refused with the line under the field (300 passed through the valid 30 and went back to the 120 it started from, 8 changed nothing, Enter changed nothing and left the text selected); a Tab then a click placed…",
-      "seconds": 10.7,
+      "seconds": 10.9,
       "data": {
         "drawer_before": {
           "server_features": {
@@ -804,8 +803,7 @@
           "chips_of_turn": [
             "beam 3",
             "150 tok",
-            "cached",
-            "k 4/3"
+            "cached"
           ],
           "rerun_hint": "No new image: Send re-runs xray_a.png with these settings.",
           "repeat_stop": {
@@ -816,7 +814,7 @@
             "card_notes": [
               "Stopped when the model began repeating itself."
             ],
-            "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 21 tok · 563 ms · cpu · model detailstiny random-init model",
+            "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 21 tok · 594 ms · cpu · model detailstiny random-init model",
             "truncated_mid_sentence": false,
             "raw_report_repeats": 1,
             "card_repeats": 0
@@ -893,18 +891,17 @@
             "beam 3",
             "200 tok",
             "cached",
-            "k 4/3",
             "full budget"
           ],
-          "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 200 tok · 5424 ms · cpu · model detailstiny random-init model",
+          "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 200 tok · 5597 ms · cpu · model detailstiny random-init model",
           "image": {
             "sha256": "6984124968a6154a82ee0a32057c2e8029e176ee959abd3784e63351d8f5fa24",
             "filename": "xray_a.png",
             "source": "previous",
             "urls": {
-              "original": "/v1/messages/m_01a1208c112e0000044a8c/image?variant=original",
-              "thumb": "/v1/messages/m_01a1208c112e0000044a8c/image?variant=thumb",
-              "model_input": "/v1/messages/m_01a1208c112e0000044a8c/image?variant=model_input"
+              "original": "/v1/messages/m_01a123b17d960000e5f3e0/image?variant=original",
+              "thumb": "/v1/messages/m_01a123b17d960000e5f3e0/image?variant=thumb",
+              "model_input": "/v1/messages/m_01a123b17d960000e5f3e0/image?variant=model_input"
             }
           },
           "options": {
@@ -966,7 +963,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 108009,
+      "bytes": 107067,
       "page_confirmed": true
     },
     {
@@ -977,7 +974,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 119814,
+      "bytes": 119665,
       "page_confirmed": true
     },
     {
@@ -988,7 +985,7 @@
         900
       ],
       "scheme": "dark",
-      "bytes": 121841,
+      "bytes": 121612,
       "page_confirmed": true
     },
     {
@@ -999,7 +996,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 135930,
+      "bytes": 136332,
       "page_confirmed": true
     },
     {
@@ -1010,7 +1007,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 178152,
+      "bytes": 177812,
       "page_confirmed": true
     },
     {
@@ -1021,18 +1018,18 @@
         812
       ],
       "scheme": "light",
-      "bytes": 80487,
+      "bytes": 80072,
       "page_confirmed": true
     },
     {
       "file": "labelled_chips_1280x900_light.png",
-      "shows": "the 14 label chips of a SYNTHETIC labelled turn, filled for positive, with agreement marks",
+      "shows": "the 14 label chips of a live labelled turn, with agreement marks",
       "viewport": [
         1280,
         900
       ],
       "scheme": "light",
-      "bytes": 133015,
+      "bytes": 157347,
       "page_confirmed": true
     },
     {
@@ -1043,7 +1040,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 100725,
+      "bytes": 92951,
       "page_confirmed": true
     },
     {
@@ -1054,7 +1051,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 146744,
+      "bytes": 147176,
       "page_confirmed": true
     },
     {
@@ -1065,7 +1062,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 204012,
+      "bytes": 203935,
       "page_confirmed": true
     }
   ]
