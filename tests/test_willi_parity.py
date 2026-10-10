@@ -7703,3 +7703,24 @@ def test_label_gallery_wrappers_pass_the_bash_syntax_check():
         for shell in set(shells):
             done = subprocess.run([shell, "-n", str(REPO_ROOT / "scripts" / _LABEL_WRAPPERS[kind])], capture_output=True, text=True)
             assert done.returncode == 0, (kind, shell, done.stderr)
+
+
+# ── CHAT_UI_PLAN.md P9-A: the restricted-file pre-commit check ────────────────
+# Static pins on scripts/check_no_restricted_files.sh and scripts/install_hooks.sh. Their behaviour (every refused pattern, the
+# allow-list, the installer's three rules) is rehearsed in temporary repositories in tests/test_restricted_files_hook.py;
+# nothing in the suite installs the hook on this repository.
+
+def test_the_restricted_file_check_and_its_installer_exist_and_are_executable():
+    """P9-A. A hook that cannot run protects nothing: both scripts exist, carry the executable bit, and pass the syntax check of the
+    oldest shell they have to work in (the Mac's /bin/bash is 3.2)."""
+    import shutil
+    import subprocess
+    shells = [s for s in ("/bin/bash", shutil.which("bash")) if s and os.path.exists(s)]
+    assert shells
+    for name in ("check_no_restricted_files.sh", "install_hooks.sh"):
+        path = REPO_ROOT / "scripts" / name
+        assert path.is_file(), name
+        assert os.access(str(path), os.X_OK), "{} is not executable".format(name)
+        for shell in set(shells):
+            done = subprocess.run([shell, "-n", str(path)], capture_output=True, text=True)
+            assert done.returncode == 0, (name, shell, done.stderr)
