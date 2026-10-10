@@ -4,6 +4,7 @@ import json
 import math
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, Iterator, Optional
 from unittest import mock
@@ -161,3 +162,20 @@ def scripted_decoder(model, script: Callable[[int, Optional[int]], torch.Tensor]
     with mock.patch.object(model, "forward", forward), mock.patch.object(model, "prefill", prefill), \
             mock.patch.object(model, "step_logits", step_logits):
         yield model
+
+
+# ---- the retrieval gallery (P5-D) ---------------------------------------------------------------------------------------------
+
+def decide_gate(root: Path) -> Path:
+    """Decide the R@k gate of a --tiny gallery, as the cluster does once the reference evaluation has run: write a reference result equal to the
+    gallery's own gate_rk.json["app"] and run scripts/build_retrieval_gallery.compare_rk on it, which writes the verdict `equal: true` into
+    gate_rk.json and manifest.json. A --tiny build has no reference run and so no verdict, and Gallery.open refuses a gallery without one: a test
+    that wants an open gallery decides it first, Gallery.open(decide_gate(tiny_gallery), None). The tiny gallery's tower_sha256 is a fixed text hash
+    that is no engine's, so open it with expect_tower_sha256=None, or write the engine's hash into manifest.json first. -> root."""
+    from scripts import build_retrieval_gallery as bg
+    gate = json.loads((root / "gate_rk.json").read_text())
+    (root / "reference_rk").mkdir(exist_ok=True)
+    (root / "reference_rk" / "phase6_mimic_20260101T000000Z.json").write_text(json.dumps({"metrics": gate["app"]}))
+    assert bg.compare_rk(root) == 0
+    assert json.loads((root / "manifest.json").read_text())["gate_rk"]["equal"] is True
+    return root

@@ -2,7 +2,8 @@
 
 CPU only, offline, synthetic data only (R7). Every gallery here is written by `scripts/build_retrieval_gallery.py --tiny`, as the `tiny_gallery`
 fixture of tests/conftest.py does (one per test); a module-scoped twin built the same way serves the read-only tests and copy_of() hands a test its
-own copy to doctor. The tiny gallery has 200 train images, 40 test studies and 240 report rows, but every size below is read from
+own copy to doctor. A --tiny build has no R@k verdict, which open() requires, so each is decided first with decide_gate (tests/app_helpers.py,
+shared with P5-E and P5-F). The tiny gallery has 200 train images, 40 test studies and 240 report rows, but every size below is read from
 manifest.json["counts"], as the real gallery's will be.
 
 The tiny gallery's duplicate reports are exact ties in a query's similarities on purpose (they are what the dedup-aware rank is for). The chapter's
@@ -25,6 +26,7 @@ import pytest
 from app.gallery import Gallery, GalleryMismatch, _topk
 from app.labels import CHEXBERT_14
 from scripts import build_retrieval_gallery as bg
+from tests.app_helpers import decide_gate
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SECRET = "secret_dir_7f3a9c"        # stands for a path under CHAT_HOME: it must never come back out in an error message
@@ -42,17 +44,6 @@ def read_manifest(root: Path) -> dict:
 
 def write_manifest(root: Path, manifest: dict) -> None:
     (root / "manifest.json").write_text(json.dumps(manifest))
-
-
-def decide_gate(root: Path) -> Path:
-    """What compare_rk does on the cluster once the reference evaluation has run, through its own code: the verdict `equal` goes into gate_rk.json and
-    manifest.json. A --tiny build has none, because it has no reference run, so a tiny gallery is undecided until this."""
-    gate = json.loads((root / "gate_rk.json").read_text())
-    (root / "reference_rk").mkdir(exist_ok=True)
-    (root / "reference_rk" / "phase6_mimic_20260101T000000Z.json").write_text(json.dumps({"metrics": gate["app"]}))
-    assert bg.compare_rk(root) == 0
-    assert read_manifest(root)["gate_rk"]["equal"] is True
-    return root
 
 
 def edit_npy(root: Path, name: str, edit) -> None:
@@ -154,7 +145,7 @@ def test_open_reads_every_size_from_the_manifests_counts(gallery, base, counts):
     assert gallery.img_emb.shape[0] == counts["images"] and gallery.txt_emb.shape[0] == counts["report_rows"]
     assert gallery.txt_emb_test.shape[0] == counts["test"] and len(gallery.report_texts) == counts["report_rows"]
     assert len(gallery.group_starts) == counts["report_groups"]
-    assert gallery.build_id == manifest["build_id"] and gallery.manifest == manifest
+    assert gallery.build_id == manifest["build_id"]
     assert gallery.img_emb.shape[1] == gallery.txt_emb.shape[1] == gallery.txt_emb_test.shape[1] == gallery.dim
 
 
@@ -192,10 +183,78 @@ def test_open_accepts_a_path_given_as_text_and_no_tower_to_check(base):
     assert Gallery.open(base, None).build_id == read_manifest(base)["build_id"]
 
 
+def test_decide_gate_is_the_shared_helper_that_decides_a_tiny_gallery_and_may_be_run_twice(tiny_gallery):
+    """tests/app_helpers.decide_gate is what P5-E and P5-F use to open a tiny gallery: it returns the directory and writes the verdict into both files."""
+    assert "equal" not in read_manifest(tiny_gallery)["gate_rk"] and "equal" not in json.loads((tiny_gallery / "gate_rk.json").read_text())
+    assert decide_gate(tiny_gallery) == tiny_gallery
+    assert decide_gate(tiny_gallery) == tiny_gallery, "a second decision is the same decision"
+    assert read_manifest(tiny_gallery)["gate_rk"]["equal"] is True
+    assert json.loads((tiny_gallery / "gate_rk.json").read_text())["equal"] is True
+    assert decide_gate.__module__ == "tests.app_helpers"
+
+
 def test_the_tiny_gallery_fixture_opens_once_its_gate_is_decided(tiny_gallery):
     decide_gate(tiny_gallery)
     manifest = read_manifest(tiny_gallery)
     assert Gallery.open(tiny_gallery, manifest["tower_sha256"]).img_emb.shape[0] == manifest["counts"]["images"]
+
+
+# ── facts(): what may travel of the manifest (R1) ────────────────────────────────────────────────────────────────────────────────────
+
+FACT_KEYS = {"build_id", "images", "report_rows", "report_groups", "towers_identical"}
+
+
+def test_facts_holds_exactly_the_gallery_keys_of_the_retrieve_stage(gallery, base, counts):
+    manifest = read_manifest(base)
+    facts = gallery.facts()
+    assert set(facts) == FACT_KEYS
+    assert facts == {"build_id": manifest["build_id"], "images": counts["images"], "report_rows": counts["report_rows"],
+                     "report_groups": counts["report_groups"], "towers_identical": manifest["towers_identical"]}
+    assert type(facts["images"]) is int and type(facts["report_rows"]) is int and type(facts["report_groups"]) is int
+    assert type(facts["build_id"]) is str and facts["towers_identical"] is True
+    assert json.loads(json.dumps(facts)) == facts
+
+
+def test_facts_leaves_out_what_the_manifest_holds_that_must_not_travel(copy_of):
+    """Checkpoint paths carry the username; the commit and the job say where and when. P5-E sends facts(), never the manifest."""
+    root = copy_of()
+    manifest = read_manifest(root)
+    manifest.update(checkpoint_13d="/sc/home/someone/outputs/retrieval.ckpt", decoder_checkpoint="/sc/home/someone/outputs/report.ckpt",
+                    git_sha="0123abcdeadbeef", job_id="2632531", created="2026-10-10T00:00:00Z")
+    write_manifest(root, manifest)
+    g = Gallery.open(root, None)
+    assert set(g.facts()) == FACT_KEYS
+    text = json.dumps(g.facts())
+    for secret in ("someone", ".ckpt", "0123abcdeadbeef", "2632531", "2026-10-10"):
+        assert secret not in text, secret
+
+
+def test_the_manifest_is_not_a_public_attribute(gallery):
+    assert not hasattr(gallery, "manifest")
+
+
+def test_facts_is_a_fresh_dict_each_time(gallery):
+    first = gallery.facts()
+    first["images"] = -1
+    first["injected"] = True
+    assert gallery.facts()["images"] > 0 and set(gallery.facts()) == FACT_KEYS
+
+
+@pytest.mark.parametrize("value", [False, None, "yes", 1, "true"], ids=["false", "null", "text", "one", "text-true"])
+def test_towers_identical_is_a_fact_that_is_true_only_when_the_manifest_says_true(copy_of, value):
+    root = copy_of()
+    manifest = read_manifest(root)
+    manifest["towers_identical"] = value
+    write_manifest(root, manifest)
+    assert Gallery.open(root, None).facts()["towers_identical"] is False
+
+
+def test_a_manifest_with_no_towers_identical_gives_false(copy_of):
+    root = copy_of()
+    manifest = read_manifest(root)
+    del manifest["towers_identical"]
+    write_manifest(root, manifest)
+    assert Gallery.open(root, None).facts()["towers_identical"] is False
 
 
 # ── open: the refusals ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -246,6 +305,34 @@ def test_open_refuses_a_manifest_with_no_gate_at_all(copy_of):
 
 def test_the_right_tower_does_not_excuse_an_undecided_gate(tiny_gallery):
     assert "gate_rk" in refused(tiny_gallery, read_manifest(tiny_gallery)["tower_sha256"])
+
+
+@pytest.mark.parametrize("value", [True, None, 0, 1, "false", "", [], {}], ids=["true", "null", "zero", "one", "text", "empty-text", "list", "dict"])
+def test_open_refuses_a_gallery_with_an_image_projection_or_no_clear_word_on_it(copy_of, value):
+    """Matching tower hashes do not rule out a projection after the tower, and the failure would be silent: retrieval in the wrong space."""
+    root = copy_of()
+    manifest = read_manifest(root)
+    assert manifest["img_proj_present"] is False
+    manifest["img_proj_present"] = value
+    write_manifest(root, manifest)
+    assert "img_proj_present" in refused(root)
+    assert "img_proj_present" in refused(root, manifest["tower_sha256"]), "the right tower does not excuse it"
+
+
+def test_open_refuses_a_manifest_that_does_not_say_whether_there_is_a_projection(copy_of):
+    root = copy_of()
+    manifest = read_manifest(root)
+    del manifest["img_proj_present"]
+    write_manifest(root, manifest)
+    assert "img_proj_present" in refused(root)
+
+
+def test_open_does_not_enforce_towers_identical_which_describes_the_decoder_checkpoint(copy_of):
+    root = copy_of()
+    manifest = read_manifest(root)
+    manifest["towers_identical"] = False
+    write_manifest(root, manifest)
+    assert Gallery.open(root, manifest["tower_sha256"]).facts()["towers_identical"] is False
 
 
 REQUIRED = ["manifest.json", "img_emb.npy", "txt_emb.npy", "txt_emb_test.npy", "txt_groups.npy", "group_order.npy", "group_starts.npy",
@@ -374,6 +461,25 @@ def test_open_refuses_a_text_file_with_the_wrong_number_of_reports_and_gives_the
     assert "report_texts.txt" in refused(root)
 
 
+def test_the_texts_are_read_without_holding_the_file_whole_beside_its_list_of_strings(tmp_path):
+    """At full size the file is some 150 MB. Read whole, decoded and split, three copies of it are alive at the peak; read line by line only the list
+    of strings is (about 1.5 times the file for texts of this length, mostly the per-string overhead)."""
+    import tracemalloc
+    from app.gallery import _read_texts
+    lines = ["Findings: " + "x" * 80 + " Impression: " + str(i) for i in range(150000)]
+    path = tmp_path / "report_texts.txt"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    size = path.stat().st_size
+    tracemalloc.start()
+    try:
+        texts = _read_texts(tmp_path, len(lines))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert texts == lines
+    assert peak < 2.2 * size, "peak {:.2f} x the file".format(peak / size)
+
+
 def test_open_refuses_meta_with_a_row_fewer_than_the_counts_say(copy_of, counts):
     for name, rows in (("img_meta.parquet", counts["images"]), ("test_meta.parquet", counts["test"])):
         root = copy_of(name)
@@ -433,6 +539,18 @@ def test_open_refuses_group_starts_that_do_not_cut_the_order_into_ordered_segmen
     assert "group_starts.npy" in refused(root)
 
 
+def test_open_refuses_group_starts_that_end_in_an_empty_group_even_when_the_counts_agree(copy_of, counts):
+    """starts[-1] == n is a group with no rows. With one more start and one more group in the counts the shapes agree and the ids still line up,
+    so only the boundary itself stands between this gallery and an IndexError from np.maximum.reduceat at the first query."""
+    root = copy_of()
+    edit_npy(root, "group_starts.npy", lambda s: np.r_[s, counts["report_rows"]])
+    manifest = read_manifest(root)
+    manifest["counts"]["report_groups"] += 1
+    write_manifest(root, manifest)
+    message = refused(root)
+    assert "group_starts.npy" in message and "ordered groups" in message, "refused by the boundary check, not by whatever comes after it"
+
+
 INT_FILES = ["txt_groups.npy", "group_order.npy", "group_starts.npy", "txt_test_groups.npy", "txt_split.npy", "txt_split_row.npy", "img_txt_row.npy"]
 
 
@@ -487,6 +605,15 @@ def test_open_refuses_an_image_whose_report_row_is_outside_the_gallery(copy_of, 
     root = copy_of()
     edit_npy(root, "img_txt_row.npy", edit)
     assert "img_txt_row.npy" in refused(root)
+
+
+def test_open_refuses_an_image_whose_report_row_is_one_past_the_last(copy_of, counts):
+    root = copy_of()
+    edit_npy(root, "img_txt_row.npy", lambda a: np.r_[a[:-1], counts["report_rows"]])
+    assert "img_txt_row.npy" in refused(root)
+    last = copy_of("last")                                                  # the last report row is still a row
+    edit_npy(last, "img_txt_row.npy", lambda a: np.r_[a[:-1], counts["report_rows"] - 1])
+    assert Gallery.open(last, None).img_txt_row[-1] == counts["report_rows"] - 1
 
 
 def test_open_refuses_report_rows_written_as_negative_numbers_that_numpy_would_wrap(copy_of, counts):
@@ -831,23 +958,48 @@ def test_the_dedup_rank_reproduces_the_chapters_dedup_aware_recall_ties_and_all(
         assert recall(ranks, k) == chapter["i2t_R@{}".format(k)], k
 
 
-def test_on_tied_reports_the_strict_rank_is_the_optimistic_end_of_what_the_chapters_recall_can_be(gallery, base, counts):
-    """Exact ties (a report several test studies share) are decided in the strict rank's favour: it counts only what is strictly greater. The chapter's
-    argpartition recall decides them by position, so its recall lies between the all-ties-lost and all-ties-won ranks, which are the same only without
-    ties. The band is a millionth wide, so that float rounding on a duplicate cannot move a row out of it."""
+def test_on_tied_reports_the_rank_is_the_all_ties_won_end_and_the_chapters_recall_lies_between_the_ends(gallery, base, counts):
+    """Exact ties (a report several test studies share) are decided in the report's favour: rank counts only what is strictly greater, so it IS the
+    all-ties-won rank, exactly. The chapter's argpartition recall decides them by array position, so its recall lies between the all-ties-lost and
+    all-ties-won ranks, which are the same only without ties. The band is a millionth wide, so that float rounding on a duplicate cannot move a row."""
     test_img = np.load(str(base / "test_img_emb.npy"))
     sims = test_img.astype(np.float64) @ gallery.txt_emb_test.astype(np.float64).T
     own = np.diag(sims)[:, None]
     tol = 1e-6
     won = 1 + (sims > own + tol).sum(axis=1)                  # every tie decided in the report's favour
     lost = (sims >= own - tol).sum(axis=1)                    # every tie decided against it: itself and all that tie or beat it
-    got = [gallery.own_report_rank(test_img[row], row)["rank"] for row in range(counts["test"])]
-    assert (won <= got).all() and (got <= lost).all()
+    got = np.array([gallery.own_report_rank(test_img[row], row)["rank"] for row in range(counts["test"])])
+    assert (got == won).all(), "the strict rank is the all-ties-won end, not somewhere between the ends"
     assert (won < lost).any(), "the tiny test split has ties, or this test shows nothing"
     chapter = bg._recall_metrics(test_img, gallery.txt_emb_test)
     for k in (1, 5, 10):
         assert recall(lost, k) <= chapter["i2t_R@{}".format(k)] <= recall(won, k), k
     assert recall(won, 1) > recall(lost, 1)
+
+
+def test_own_report_rank_leaves_a_tied_copy_out_of_the_count_and_n_tied_counts_the_copies(gallery, base, counts):
+    """Pinned in the arithmetic of the query itself (the same unit float32 vector and the same matrix product), so that rounding cannot matter:
+    rank counts what is strictly greater, n_tied what is exactly equal besides the report itself, and the two together are the all-ties-lost end."""
+    test_img = np.load(str(base / "test_img_emb.npy"))
+    _, inverse, copies = np.unique(np.load(str(base / "txt_emb_test.npy")), axis=0, return_inverse=True, return_counts=True)
+    inverse = inverse.reshape(-1)
+    tied = 0
+    for row in range(counts["test"]):
+        sims = gallery.txt_emb_test @ gallery._query(test_img[row])
+        own = sims[row]
+        got = gallery.own_report_rank(test_img[row], row)
+        assert got["rank"] == 1 + int((sims > own).sum()), row
+        assert got["n_tied"] == int((sims == own).sum()) - 1, row
+        assert got["n_tied"] == copies[inverse[row]] - 1, "the copies of a report, and only they, tie with it"
+        assert got["rank"] + got["n_tied"] == int((sims >= own).sum()), "the all-ties-lost end is n_tied places further down"
+        tied += got["n_tied"] > 0
+    assert tied >= 10, "the tiny test split repeats reports, or this test shows nothing"
+
+
+def test_n_tied_is_zero_where_no_two_reports_tie(distinct, counts):
+    g = Gallery.open(distinct, None)
+    test_img = np.load(str(distinct / "test_img_emb.npy"))
+    assert [g.own_report_rank(test_img[row], row)["n_tied"] for row in range(counts["test"])] == [0] * counts["test"]
 
 
 def test_the_dedup_rank_is_never_worse_than_the_rank_and_equal_for_a_report_nobody_repeats(gallery, base, counts):
@@ -875,12 +1027,27 @@ def test_the_dedup_rank_is_strictly_better_where_another_copy_of_the_report_scor
     assert better > 0
 
 
+PROTOCOL_TEXT = ("i2t, official test split, strict pairing: a tied copy counts in this report's favour, "
+                 "while compute_retrieval_metrics(groups=None) breaks such ties by array position")
+
+
 def test_own_report_rank_has_the_fields_the_retrieve_stage_documents_in_plain_types(gallery, base, counts):
     got = gallery.own_report_rank(np.load(str(base / "test_img_emb.npy"))[4], 4)
-    assert set(got) == {"rank", "of", "rank_dedup", "hit_at_10", "protocol"}
-    assert type(got["rank"]) is int and type(got["of"]) is int and type(got["rank_dedup"]) is int and type(got["hit_at_10"]) is bool
+    assert set(got) == {"rank", "of", "rank_dedup", "n_tied", "hit_at_10", "protocol"}
+    assert type(got["rank"]) is int and type(got["of"]) is int and type(got["rank_dedup"]) is int and type(got["n_tied"]) is int
+    assert type(got["hit_at_10"]) is bool
     assert got["of"] == counts["test"] and got["hit_at_10"] == (got["rank"] <= 10)
-    assert got["protocol"] == "i2t, official test split, strict pairing (compute_retrieval_metrics, groups=None)"
+    assert got["protocol"] == PROTOCOL_TEXT
+
+
+def test_the_protocol_text_is_truthful_about_ties(gallery, base):
+    """P5-E stores this string with every own-rank, so it must say what the number is: strict pairing, a tied copy in the report's favour, and that
+    the chapter's function breaks such ties by array position, which is why the rank and the chapter's recall differ under ties."""
+    protocol = gallery.own_report_rank(np.load(str(base / "test_img_emb.npy"))[0], 0)["protocol"]
+    for claim in ("strict pairing", "tied copy", "favour", "compute_retrieval_metrics(groups=None)", "array position", "official test split"):
+        assert claim in protocol, claim
+    assert protocol.startswith("i2t") and "breaks such ties" in protocol
+    assert "(compute_retrieval_metrics, groups=None)" not in protocol, "the old claim of equivalence"
 
 
 def test_hit_at_10_is_true_at_rank_10_and_false_at_rank_11(distinct):
@@ -1047,6 +1214,34 @@ def test_list_test_studies_filters_on_the_study_id_prefix(gallery, base):
     assert gallery.list_test_studies(None) == gallery.list_test_studies("") and len(gallery.list_test_studies(None)) == len(ids), "no query: all"
 
 
+def test_a_missing_view_or_study_id_comes_back_as_none_and_what_is_returned_is_strict_json(copy_of):
+    """MIMIC leaves some views blank, and NaN is not JSON: the browser's JSON.parse refuses it in an SSE data line, so one such row would break
+    the picker. A missing value is None wherever a parquet value is returned as it is (the view, the study id)."""
+    root = copy_of()
+    test, train = pd.read_parquet(root / "test_meta.parquet"), pd.read_parquet(root / "img_meta.parquet")
+    test.loc[3, "view"] = None
+    test.loc[5, "view"] = np.nan
+    test["study_id"] = test["study_id"].astype(float)                 # a missing id turns an integer column into floats
+    test.loc[2, "study_id"] = np.nan
+    train["study_id"] = train["study_id"].astype(float)
+    train.loc[7, "study_id"] = np.nan
+    train.loc[7, "view"] = np.nan
+    test.to_parquet(root / "test_meta.parquet", index=False)
+    train.to_parquet(root / "img_meta.parquet", index=False)
+    g = Gallery.open(root, None)
+    listed = g.list_test_studies()
+    assert listed[3]["view"] is None and listed[5]["view"] is None and listed[2]["study_id"] is None
+    assert listed[4]["view"] is not None and listed[4]["study_id"] is not None
+    assert g.test_study(2)["study_id"] is None
+    found = g.image_neighbors(g.img_emb[7], 12)
+    assert found[0]["gallery_row"] == 7 and found[0]["study_id"] is None
+    json.dumps(listed, allow_nan=False)
+    json.dumps(found, allow_nan=False)
+    assert 2 not in [s["test_row"] for s in g.list_test_studies("5")], "a missing id starts with nothing"
+    assert g.list_test_studies("None") == [] and g.list_test_studies("N") == [] and g.list_test_studies("nan") == [], "and is not the text None or nan"
+    assert 2 in [s["test_row"] for s in g.list_test_studies("")]
+
+
 def test_list_test_studies_stops_at_the_limit_and_a_limit_of_nothing_lists_nothing(gallery, counts):
     assert [s["test_row"] for s in gallery.list_test_studies("", 5)] == [0, 1, 2, 3, 4]
     assert [s["test_row"] for s in gallery.list_test_studies(limit=1)] == [0]
@@ -1088,15 +1283,16 @@ def test_a_public_event_built_from_the_galleries_output_keeps_rank_and_similarit
     """R1 end to end on the real shapes: study ids, urls, report text, rows and groups are what app/redact.py has to cut."""
     from app.redact import redact_event
     detail = {"image_neighbors": gallery.image_neighbors(queries[2], 4), "report_matches": gallery.report_matches(queries[2], 3),
-              "true_report_rank": gallery.own_report_rank(queries[2], 2), "gallery": {"build_id": gallery.build_id}}
+              "true_report_rank": gallery.own_report_rank(queries[2], 2), "gallery": gallery.facts()}
     private = json.dumps(detail)
     public = redact_event("stage_end", {"stage": "retrieve", "ms": 1.0, "detail": detail}, "public")
     assert set(public["detail"]) >= {"image_neighbors", "report_matches"} and "true_report_rank" not in public["detail"]
     for item in public["detail"]["image_neighbors"] + public["detail"]["report_matches"]:
         assert set(item) == {"rank", "similarity"}
+    assert public["detail"]["gallery"] == {k: v for k, v in gallery.facts().items() if k != "build_id"}, "the build id is cut, the four numbers stay"
     text = json.dumps(public)
     for secret in [str(n["study_id"]) for n in detail["image_neighbors"]] + [m["report"] for m in detail["report_matches"]] + \
-            [n["image_url"] for n in detail["image_neighbors"]]:
+            [n["image_url"] for n in detail["image_neighbors"]] + [gallery.build_id]:
         assert secret in private and secret not in text
 
 
