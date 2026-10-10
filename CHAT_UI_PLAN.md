@@ -3719,7 +3719,7 @@ Run `venv/bin/python -m app.server --engine tiny --gallery <tiny gallery dir> --
 
 Gate: from the laptop, a real test study chosen in the picker decodes through the tunnel; its report equals the P2-E CPU golden line for that study (same node type; otherwise within the P1-C drift, which the card states); the five image features work on real data in private mode; the preemption drill passes.
 
-- [ ] **P7-A** `scripts/chat_app_smoke_h100.sh`: on the cluster, `app.server` imports with the `.chat_deps` overlay and `app.labeler` with `.chat_deps_chexbert` (both installed by P0-G, so the shared venvs stay untouched).
+- [x] **P7-A** `scripts/chat_app_smoke_h100.sh`: on the cluster, `app.server` imports with the `.chat_deps` overlay and `app.labeler` with `.chat_deps_chexbert` (both installed by P0-G, so the shared venvs stay untouched).
 
 ```bash
 #!/bin/bash
@@ -3758,6 +3758,8 @@ Parity test: CPU directives, ga03 exclusion, both `PYTHONPATH=` overlays, and no
 - **Safety.** A `results` guard. `HF_HUB_OFFLINE=1`. No installer string anywhere in the wrapper.
 
 **Prediction (R4), recorded before submission:** all three probes pass in about 1 minute (85%). Expected versions: fastapi ≥ 0.115 from the overlay, transformers 4.x below 5 in `.venv_chexbert`. The label order is true with f1chexbert 0.0.2 (92%).
+
+**Result (2026-10-10), as predicted:** job 2632776 COMPLETED in 50 s on gx14 (sync c516e4e clean). `app.server` imports with fastapi 0.142.2; `app.labeler` imports with transformers 4.57.6; the chexbert label order is equal (true) with f1chexbert 0.0.2.
 
 - [ ] **P7-B** `scripts/serve_chat_h100.sh` and the `python -m app.server` CLI: labeller and API, free port, endpoint file, token file, SIGTERM handling, requeue.
 

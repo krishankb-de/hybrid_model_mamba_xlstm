@@ -474,10 +474,10 @@
     },
     "P7": {
       "title": "Cluster serving",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "P7-A": {
-          "done": false,
+          "done": true,
           "desc": "scripts/chat_app_smoke_h100.sh: on the cluster, app.server imports with the .chat_deps overlay and app.labeler with .chat_deps_chexbert (both installed by P0..."
         },
         "P7-B": {
@@ -501,7 +501,13 @@
           "desc": "Parity tests for the new wrappers: partition, account and qos, ga03 exclusion, no --gres, requeue and append, HF offline, loopback labeller, token required f..."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "p7a_job": "2632776",
+        "p7a_log": "logs/chat_app_smoke_2632776.log",
+        "p7a_versions": "fastapi 0.142.2; transformers 4.57.6; f1chexbert 0.0.2",
+        "p7a_order": "true",
+        "p7a_commits": "6bf9585,4e4bcd0"
+      },
       "verdict": null
     },
     "P8": {
@@ -648,9 +654,10 @@
     "2026-10-10: P5-D gallery queries merged (truthful tie protocol, img_proj refusal, facts())",
     "2026-10-10: P9-A restricted-file pre-commit check merged; hook install offered to the user",
     "2026-10-10: 2026-10-10: P7-A smoke job submitted 2632776 (chat_app_smoke, CPU, sync c516e4e clean); read via chat_remote.sh state/summary logs/chat_app_smoke_2632776.log",
-    "2026-10-10: P5-E retrieve/label/score stages + endpoints + R1 redaction, merged"
+    "2026-10-10: P5-E retrieve/label/score stages + endpoints + R1 redaction, merged",
+    "P7-A smoke 2632776 COMPLETED 50 s gx14 (sync c516e4e clean): app.server imports (fastapi 0.142.2), app.labeler imports (transformers 4.57.6), chexbert label order equal true (f1chexbert 0.0.2); matches the R4 prediction"
   ],
-  "last_updated": "2026-10-10T05:09:22+02:00",
+  "last_updated": "2026-10-10T06:48:49+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
