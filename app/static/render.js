@@ -519,12 +519,13 @@ function thumbnail(image, cx) {
 // ---- pictures of the card ------------------------------------------------------------------------------------------------
 
 // A picture of the card, fetched through ctx.loadImage: with ctx.openViewer, a button named `open` that hands the viewer `spec`; without
-// it, the picture alone. null when the path cannot be fetched (no loader, or not a path on this origin), so nothing is drawn for it.
-function cardPicture(path, alt, open, spec, cx) {
+// it, the picture alone. key names the button for focusKey whatever comes before it in the card. null when the path cannot be fetched (no
+// loader, or not a path on this origin), so nothing is drawn for it.
+function cardPicture(path, alt, open, spec, cx, key) {
   if (!fetchable(path, cx)) return null;
   const img = loadedImage(path, cx, { class: 'picture', alt });
   if (typeof cx.openViewer !== 'function') return img;
-  return el('button', { type: 'button', class: 'picture-button', 'data-action': 'view', 'aria-label': named(open, cx),
+  return el('button', { type: 'button', class: 'picture-button', 'data-action': 'view', 'data-key': key, 'aria-label': named(open, cx),
                         onclick: () => cx.openViewer(spec) }, img);
 }
 
@@ -561,9 +562,9 @@ export function renderImages(view, ctx) {
   const own = ownXray(v, cx);
   const tiles = [
     tile(cardPicture(own.urls.thumb, own.name, own.study ? 'Open the test-split X-ray in the viewer' : 'Open your X-ray in the viewer',
-                     { images: [{ url: own.full, label: own.label }] }, cx), own.label),
+                     { images: [{ url: own.full, label: own.label }] }, cx, 'image:thumb'), own.label),
     tile(cardPicture(own.urls.model_input, 'What the model saw', 'Open what the model saw in the viewer',
-                     { images: [{ url: own.urls.model_input, label: MODEL_SAW }] }, cx), MODEL_SAW),
+                     { images: [{ url: own.urls.model_input, label: MODEL_SAW }] }, cx, 'image:model_input'), MODEL_SAW),
   ].filter(Boolean);
   return el('section', { class: 'images', 'aria-label': named('Images', cx), hidden: !tiles.length },
     el('h3', { class: 'section-title' }, 'Images'), el('div', { class: 'image-row' }, ...tiles));
@@ -610,14 +611,15 @@ function agreementOf(n, v, cx) {
   return line(labelsPending(v, cx.labels) ? 'labels…' : 'labels unavailable');
 }
 
-function neighbourItem(n, v, cx, { pub, own, left, identical }) {
+function neighbourItem(n, i, v, cx, { pub, own, left, identical }) {
   const rank = Number.isInteger(n.rank) ? n.rank : null;
   const name = rank === null ? 'Similar X-ray' : `Similar X-ray #${rank}`;
   const path = pub ? '' : str(n.image_url);   // public mode: never a gallery image, whatever the detail holds (R1)
   const spoken = `${name.charAt(0).toLowerCase()}${name.slice(1)}`;
   const open = left ? `Open ${spoken} beside ${own.study ? 'the test-split X-ray' : 'your X-ray'} in the viewer` : `Open ${spoken} in the viewer`;
   const spec = { images: [...(left ? [left] : []), { url: path, label: `${name} · ${GALLERY_SIZE}` }] };
-  const picture = (path && cardPicture(path, name, open, spec, cx)) || el('div', { class: 'neighbor-placeholder', 'aria-hidden': 'true' });
+  const picture = (path && cardPicture(path, name, open, spec, cx, `neighbor:${rank ?? i}`))
+    || el('div', { class: 'neighbor-placeholder', 'aria-hidden': 'true' });
   return el('li', { class: 'neighbor', 'data-rank': rank },
     el('figure', {}, picture, el('figcaption', {},
       el('span', { class: 'neighbor-score' }, scoreText(n.rank, n.similarity)),
@@ -638,7 +640,7 @@ export function renderNeighbors(view, ctx) {
   const pub = v.mode === 'public';
   const own = ownXray(v, cx);
   const left = fetchable(own.full, cx) ? { url: own.full, label: own.label } : null;
-  const items = neighbours.map((n) => neighbourItem(n, v, cx, { pub, own, left, identical: identicalRow(v) }));
+  const items = neighbours.map((n, i) => neighbourItem(n, i, v, cx, { pub, own, left, identical: identicalRow(v) }));
   return el('section', { class: 'neighbors', 'aria-label': named('Similar X-rays', cx), hidden: !items.length },
     el('h3', { class: 'section-title' }, 'Similar X-rays (13D tower)'),
     pub ? el('p', { class: 'note section-note' }, 'Public mode shows rank and similarity only.') : null,
@@ -647,20 +649,19 @@ export function renderNeighbors(view, ctx) {
 
 // ---- clamped texts: a matching report, a published line (P6-D) ------------------------------------------------------------
 
-const CLAMP_CHARS = 180;   // a longer text is clamped to three lines (styles.css) until Show all; a shorter one fits them on most screens
-
-// A report as a paragraph clamped to three lines, with a Show all that opens it and a Show less that closes it again. ui.reports keeps the
-// open ones by key, so the next frame builds them open. A text short enough to fit has no clamp and no button. -> nodes.
+// A report as a paragraph clamped to three lines (styles.css), with a Show all that opens it and a Show less that closes it again. Whether
+// the three lines hide anything depends on the width the text is drawn at, so the button's row starts hidden and the page shows it once the
+// card is in it and the text is measured (settleClamps, P6 fix 1). ui.reports keeps the open ones by key, so the next frame builds them open,
+// and an open report keeps its Show less. key also names the button for focusKey. -> nodes.
 function clampedText(text, key, name, v, cx) {
   const ui = uiOf(v, cx);
   if (!(ui.reports instanceof Set)) ui.reports = new Set();   // a record made before the field existed
-  if (text.length <= CLAMP_CHARS) return [el('p', { class: 'clamp-text' }, text)];
   let open = ui.reports.has(key);
   const id = `clamp-${str(v.id).replace(/[^\w-]/g, '_') || 'turn'}-${key.replace(/[^\w-]/g, '_')}`;
   const body = el('p', { class: open ? 'clamp-text clamped open' : 'clamp-text clamped', id }, text);
   const verb = () => (open ? 'Show less' : 'Show all');
-  const toggle = el('button', { type: 'button', class: 'show-all', 'data-action': 'show', 'aria-expanded': String(open), 'aria-controls': id,
-                                'aria-label': named(`${verb()} of ${name}`, cx) }, verb());
+  const toggle = el('button', { type: 'button', class: 'show-all', 'data-action': 'show', 'data-key': key, 'aria-expanded': String(open),
+                                'aria-controls': id, 'aria-label': named(`${verb()} of ${name}`, cx) }, verb());
   toggle.addEventListener('click', () => {
     open = !open;
     body.classList.toggle('open', open);
@@ -669,7 +670,26 @@ function clampedText(text, key, name, v, cx) {
     toggle.setAttribute('aria-label', named(`${verb()} of ${name}`, cx));
     if (open) ui.reports.add(key); else ui.reports.delete(key);
   });
-  return [body, el('div', { class: 'clamp-actions' }, toggle)];
+  return [body, el('div', { class: 'clamp-actions', hidden: !open }, toggle)];
+}
+
+// Does a clamped report hide anything? Its text is taller than the three lines it is given. Read off the layout: a text that has none to read
+// (a card not in the page yet, or in no layout at all) is not taken to overflow.
+const overflowing = (text) => isNum(text.scrollHeight) && isNum(text.clientHeight) && text.scrollHeight > text.clientHeight + 1;
+
+// Shows the Show all of each clamped report under root that overflows its three lines, and hides the one of each that fits them, so no
+// button is offered that would reveal nothing; an open report keeps its Show less. The page calls this once a card is in it, and again when
+// the conversation's width changes (P6 fix 1). measure stands in for the layout in a test. Where the layout cannot be read the fallback is
+// the same rule: nothing is shown to overflow, so no button is offered, and the text keeps its three lines.
+export function settleClamps(root, measure = overflowing) {
+  if (typeof root?.querySelectorAll !== 'function') return;
+  const texts = new Map(Array.from(root.querySelectorAll('.clamp-text[id]'), (text) => [text.getAttribute('id'), text]));
+  for (const toggle of root.querySelectorAll('[data-action="show"]')) {
+    const text = texts.get(toggle.getAttribute('aria-controls'));
+    const row = toggle.parentNode;
+    if (!text || !row) continue;
+    row.hidden = !(text.classList.contains('open') || measure(text));
+  }
 }
 
 const textOf = (value) => (typeof value === 'string' ? value : '');   // a report text is a string, or there is none
@@ -786,21 +806,21 @@ export function renderAssistantCard(view, ctx) {
 
 // ---- keeping focus through the whole-card replace -------------------------------------------------------------------------
 
-// Controls a card has several of outside its stages (a picture's viewer button, a report's Show all): told apart by their order in the card.
-const INDEXED_ACTIONS = ['view', 'show'];
+// Controls a card has several of outside its stages (a picture's viewer button, a report's Show all): each names what it is for in its
+// data-key ("match:2", "published:model", "image:thumb", "neighbor:3"), which no section that appears before it can shift (P6 fix 1).
+const KEYED_ACTIONS = ['view', 'show'];
+const DATA_KEY = /^[\w:-]{1,64}$/;
 
-// The control a node is in (or is), as a key that survives the rebuild: copy, raw, models, stage:<stage>,
-// more:<stage>:<n>, the nth show-more button of that stage's table, or view:<n> and show:<n>, the nth such control of the card.
-// null when the node is not in one of those.
+// The control a node is in (or is), as a key that survives the rebuild: copy, raw, models, stage:<stage>, more:<stage>:<n>,
+// the nth show-more button of that stage's table, or view:<data-key> and show:<data-key>. null when the node is not in one of those.
 export function focusKey(node) {
   const control = node?.closest?.('[data-action]');
   if (!control) return null;
   const action = control.getAttribute('data-action');
   if (action === 'copy' || action === 'raw' || action === 'models') return action;
-  if (INDEXED_ACTIONS.includes(action)) {
-    const card = control.closest('.card');
-    const index = card ? Array.from(card.querySelectorAll(`[data-action="${action}"]`)).indexOf(control) : -1;
-    return index < 0 ? null : `${action}:${index}`;
+  if (KEYED_ACTIONS.includes(action)) {
+    const key = control.getAttribute('data-key');
+    return typeof key === 'string' && DATA_KEY.test(key) ? `${action}:${key}` : null;
   }
   const item = control.closest('li[data-stage]');
   const stage = item?.getAttribute('data-stage');
@@ -811,7 +831,7 @@ export function focusKey(node) {
   return index < 0 ? null : `more:${stage}:${index}`;
 }
 
-const FOCUS_KEY = /^(?:(copy|raw|models)|stage:([a-z]+)|more:([a-z]+):(\d+)|(view|show):(\d+))$/;
+const FOCUS_KEY = /^(?:(copy|raw|models)|stage:([a-z]+)|more:([a-z]+):(\d+)|(view|show):([\w:-]{1,64}))$/;
 
 // Puts focus on the control of the rebuilt card that key names: after card.replaceWith(next), restoreFocus(next, key),
 // with key taken by focusKey before it. true when the control took focus; false when there is no such control (a Copy
@@ -823,7 +843,7 @@ export function restoreFocus(card, key) {
   let target = null;
   if (m[1]) target = card.querySelector(`[data-action="${m[1]}"]`);
   else if (m[2]) target = STAGES.includes(m[2]) ? card.querySelector(`li[data-stage="${m[2]}"] > [data-action="stage"]`) : null;
-  else if (m[5]) target = Array.from(card.querySelectorAll(`[data-action="${m[5]}"]`))[Number(m[6])];
+  else if (m[5]) target = Array.from(card.querySelectorAll(`[data-action="${m[5]}"]`)).find((c) => c.getAttribute('data-key') === m[6]) ?? null;
   else if (STAGES.includes(m[3])) target = Array.from(card.querySelectorAll(`li[data-stage="${m[3]}"] [data-action="more"]`))[Number(m[4])];
   if (!target) return false;
   target.focus({ preventScroll: true });

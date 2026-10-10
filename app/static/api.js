@@ -168,7 +168,11 @@ const SAME_ORIGIN_PATH = /^\/(?![/\\])[^\x00-\x1f\x7f]*$/;
 // for a thumbnail, so what one refuses the other never sees.
 export const isSameOriginPath = (url) => typeof url === 'string' && SAME_ORIGIN_PATH.test(url);
 
-// An image behind the token, as an object URL for <img src>: auth = {token, clientId}. A failed fetch is not cached.
+// An image behind the token, as an object URL for <img src>: auth = {token, clientId}. A refusal (the server answered with an error: the
+// image is gone, unreadable, not this client's) is kept too, until clearImageCache (P6 fix 1): a card is drawn again at every frame of a
+// streamed turn, and a picture that cannot load must not be asked for at each of them. Another chat, or a new token, clears the cache and the
+// picture is asked for again. A failure of the transport itself (fetch rejected, the body cut off) is not kept: it is no answer about the
+// image, and the next call asks again, so a passing blip does not leave a picture broken for the rest of the chat.
 // Only a same-origin path is fetched: anything else rejects before a request is made, so the token never leaves.
 export function loadImage(url, auth = {}) {
   if (!isSameOriginPath(url)) {
@@ -178,20 +182,21 @@ export function loadImage(url, auth = {}) {
     const loading = (async () => {
       const res = await fetched(url, { headers: authHeaders(auth.token, auth.clientId) });
       if (!res.ok) throw await refused(res, 'image refused');
-      const objectUrl = URL.createObjectURL(await res.blob());
+      const blob = await res.blob().catch((err) => { throw transportFailure(err); });
+      const objectUrl = URL.createObjectURL(blob);
       objectUrls.add(objectUrl);
       return objectUrl;
-    })().catch((err) => {
-      if (images.get(url) === loading) images.delete(url);   // not the entry a clear and a newer call put in its place
-      throw err;
+    })();
+    loading.catch((err) => {   // handled here as well, so a kept refusal is never an unhandled rejection
+      if (err?.transport === true && images.get(url) === loading) images.delete(url);
     });
     images.set(url, loading);
   }
   return images.get(url);
 }
 
-// Forgets every image and revokes its object URL. A fetch still running when this is called finishes into the next
-// cache's set, so the next clear revokes it.
+// Forgets every image, and every failure, and revokes each object URL. A fetch still running when this is called finishes into
+// the next cache's set, so the next clear revokes it.
 export function clearImageCache() {
   for (const objectUrl of objectUrls) URL.revokeObjectURL(objectUrl);
   objectUrls.clear();

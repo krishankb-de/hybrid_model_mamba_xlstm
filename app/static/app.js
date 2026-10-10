@@ -23,7 +23,7 @@
 import * as realApi from './api.js';
 import { applyEvent, initialView } from './state.js';
 import {
-  detailTable, el, focusKey, optionChips, renderAssistantCard, renderUserTurn, restoreFocus, scheduleRender, statusText,
+  detailTable, el, focusKey, optionChips, renderAssistantCard, renderUserTurn, restoreFocus, scheduleRender, settleClamps, statusText,
 } from './render.js';
 
 const { authHeaders } = realApi;
@@ -423,7 +423,7 @@ function focusVisible(node) {
 // ---- the page -----------------------------------------------------------------------------------------------------------------
 
 // env: document, window (location, history, addEventListener, matchMedia, navigator, confirm), storage, fetch, api (the
-// api.js functions), now, setTimeout / setInterval / clearInterval, URL, confirm. All optional but document.
+// api.js functions), now, setTimeout / setInterval / clearInterval, URL, confirm, ResizeObserver. All optional but document.
 export function createApp(env) {
   const doc = env.document;
   const win = env.window ?? {};
@@ -476,7 +476,10 @@ export function createApp(env) {
     noticeOwner: null,       // the turn whose failed Stop the notice says, if it is that: the end of the turn takes it down
     savedTimer: null,        // the timer that takes "Settings saved." down again
     pickTimer: null,         // the picker's pause in typing (P6-D)
-    pickGen: 0,              // bumped by every list request and by closing the picker, so a late list can tell it is stale
+    pickGen: 0,              // bumped by every list request, by a change of the query and by closing the picker: a late list is stale
+    pickShown: null,         // the query whose studies the list shows now; null while it shows none (P6 fix 1)
+    pickLoading: null,       // { gen, query, done }: the list request on its way, which Enter waits for rather than asking again
+    settling: false,         // a measure of the clamped reports is waiting for the next frame (P6 fix 1)
     route: null,             // the route handleRoute showed last ('new' or 's/<id>'): a notice belongs to the route it was raised on
     missing: null,           // a session the server said it does not have: home never picks it
   };
@@ -584,6 +587,7 @@ export function createApp(env) {
     const next = renderAssistantCard(turn.view, cardCtx(turn.n));
     if (old.parentNode) old.replaceWith(next); else ui.conversation.append(next);
     turn.card = next;
+    settleClamps(next);   // in the page now: which reports overflow their three lines can be measured (P6 fix 1)
     if (key) restoreFocus(next, key);
     announce(statusText(turn.view));
     if (near) scroller.toEnd(next);
@@ -847,6 +851,7 @@ export function createApp(env) {
     attempt(() => {   // a card that is made but not yet in the page is put there by its first paint
       turn.card = renderAssistantCard(turn.view, cardCtx(turn.n));
       ui.conversation.append(turn.card);
+      settleClamps(turn.card);
       scroller.toEnd(turn.card);
       announce(statusText(turn.view));
     });
@@ -1027,6 +1032,7 @@ export function createApp(env) {
     const hadFocus = doc.activeElement && turn.card.contains(doc.activeElement);
     turn.card.replaceWith(next);
     turn.card = next;
+    settleClamps(next);
     if (hadFocus) qa(next, 'button')[0]?.focus();   // the Retry that had focus is gone: the first control of what replaced it
     if (!loaded.error && view.turns[view.turns.length - 1] === turn && turn.view.status === 'running' && loaded.log.status === 'running') resume(turn);
   }
@@ -1075,6 +1081,7 @@ export function createApp(env) {
     markBusy(true);   // a screen reader does not read the whole history as it goes in
     try {
       ui.conversation.replaceChildren(...nodes);
+      settleClamps(ui.conversation);
     } finally {
       markBusy(false);
     }
@@ -1282,6 +1289,7 @@ export function createApp(env) {
   // ---- the shell: sidebar and drawer ---------------------------------------------------------------------------------------------
 
   function openSidebar() {
+    closePicker({ restore: false });   // the study list starts a turn from the composer, which the sidebar now covers (P6 fix 1)
     doc.body.classList.add('sidebar-open');
     ui.toggle.setAttribute('aria-expanded', 'true');
   }
@@ -1297,7 +1305,8 @@ export function createApp(env) {
   function openDrawer({ models = false } = {}) {
     if (ui.drawer.hidden) {
       const from = doc.activeElement;
-      state.drawerOpener = from && from !== doc.body ? from : ui.settings;
+      state.drawerOpener = from && from !== doc.body && !ui.picker.contains(from) ? from : ui.settings;
+      closePicker({ restore: false });   // and the study list closes: Escape then closes the drawer, back to Settings (P6 fix 1)
       clearSaved();   // "Settings saved." that is still on the page is about a Save that is behind the user now
       ui.drawer.hidden = false;
       ui.settings.setAttribute('aria-expanded', 'true');
@@ -1321,7 +1330,11 @@ export function createApp(env) {
 
   function onKeydown(event) {
     if (event.key !== 'Escape') return;
-    if (closePicker()) { event.preventDefault(); return; }   // the innermost first: the study list, back to its button
+    if (!ui.picker.hidden && ui.picker.contains(doc.activeElement)) {   // the study list is Escape's only when the focus is in it (P6 fix 1)
+      closePicker();
+      event.preventDefault();
+      return;
+    }
     const drawer = closeDrawer();
     const sidebar = closeSidebar({ restore: !drawer });
     if (drawer || sidebar) event.preventDefault();
@@ -1552,10 +1565,23 @@ export function createApp(env) {
   // that sends a turn with that test row and no upload. Private mode only, so the study ids it shows never reach a public page (R1).
   function openPicker() {
     if (!ui.picker.hidden || ui.pick.hidden || ui.pick.disabled) return;
+    clearStudies('Loading…');   // whatever it showed last is not shown again until the fresh list comes (P6 fix 1)
     ui.picker.hidden = false;
     ui.pick.setAttribute('aria-expanded', 'true');
     ui.pickSearch.focus();
     detach(loadStudies());
+  }
+
+  const pickQuery = () => (ui.pickSearch.value ?? '').trim();
+
+  // The list goes as soon as it no longer answers the query: when the query changes and when the picker opens again. A focus that was on
+  // one of its studies goes back to the search, never to the page body (P6 fix 1).
+  function clearStudies(status) {
+    const held = doc.activeElement && ui.pickList.contains(doc.activeElement);
+    ui.pickList.replaceChildren();
+    state.pickShown = null;
+    ui.pickStatus.textContent = status;
+    if (held) ui.pickSearch.focus();
   }
 
   // -> whether it was open. restore gives the focus back to the button that opened it.
@@ -1571,28 +1597,54 @@ export function createApp(env) {
     return true;
   }
 
-  async function loadStudies() {
+  // Asks for the studies whose id starts with the query, and shows them; -> a promise that ends once they are shown (true), or once the list
+  // is no longer wanted (false: a newer query, or the picker closed). state.pickLoading is it while it is on its way.
+  function loadStudies() {
     const gen = ++state.pickGen;
-    const query = (ui.pickSearch.value ?? '').trim();
+    const query = pickQuery();
     ui.pickStatus.textContent = 'Loading…';
+    const done = fetchStudies(gen, query).finally(() => { if (state.pickLoading?.gen === gen) state.pickLoading = null; });
+    state.pickLoading = { gen, query, done };
+    return done;
+  }
+
+  async function fetchStudies(gen, query) {
     let body;
     try {
       body = await request(`/v1/test-studies?limit=${PICK_LIMIT}${query ? `&q=${encodeURIComponent(query)}` : ''}`);
     } catch (err) {
-      if (gen !== state.pickGen) return;
-      ui.pickList.replaceChildren();
-      ui.pickStatus.textContent = errorMessage(err);
+      if (gen !== state.pickGen) return false;
+      clearStudies(errorMessage(err));
       if (!expected(err)) report(err);
-      return;
+      return false;
     }
-    if (gen !== state.pickGen) return;   // a newer search, or the picker closed
+    if (gen !== state.pickGen) return false;   // a newer query, or the picker closed
     const studies = (Array.isArray(body?.studies) ? body.studies : []).filter((s) => isObject(s) && Number.isInteger(s.test_row));
+    const held = doc.activeElement && ui.pickList.contains(doc.activeElement);
     ui.pickList.replaceChildren(...studies.map((s) => el('li', {}, el('button', {
-      type: 'button', class: 'study', 'data-test-row': String(s.test_row), onclick: () => chooseStudy(s.test_row),
+      type: 'button', class: 'study', 'data-test-row': String(s.test_row),
+      // a button of a list that is gone is no choice: a press that still reaches one (a script, a click on its way) does nothing
+      onclick: (event) => { if (ui.pickList.contains(event.currentTarget)) chooseStudy(s.test_row); },
     }, studyText(s)))));
+    state.pickShown = query;
+    if (held) ui.pickSearch.focus();   // the study that had the focus is gone with its list
     const more = studies.length === PICK_LIMIT ? ' (the first; type more of an id to narrow them)' : '';
     ui.pickStatus.textContent = studies.length ? `${studies.length} ${studies.length === 1 ? 'study' : 'studies'}${more}`
       : query ? `No study id starts with ${query}.` : 'No test-split studies.';
+    return true;
+  }
+
+  // Enter in the search: the first study of the list for what is typed now, which Enter then chooses (P6 fix 1). The typing pause is cut
+  // short, and a list already on its way for this query is waited for rather than asked for again. Never a study of another query's list.
+  async function firstStudy() {
+    const query = pickQuery();
+    if (state.pickTimer !== null) cancelLater(state.pickTimer);
+    state.pickTimer = null;
+    if (state.pickShown !== query) {
+      const coming = state.pickLoading;
+      await (coming && coming.gen === state.pickGen && coming.query === query ? coming.done : loadStudies());
+    }
+    if (!ui.picker.hidden && state.pickShown === query && pickQuery() === query) ui.pickList.querySelector('button')?.focus();
   }
 
   function chooseStudy(row) {
@@ -1736,13 +1788,15 @@ export function createApp(env) {
     });
     ui.stop.addEventListener('click', () => detach(stopTurn()));
     ui.pickSearch.addEventListener('input', () => {   // one request for a pause in typing, not one per key
+      clearStudies('Searching…');   // the list answers the old query: it goes at once, and so does a list still on its way for it
+      state.pickGen += 1;
       if (state.pickTimer !== null) cancelLater(state.pickTimer);
       state.pickTimer = later(() => { state.pickTimer = null; detach(loadStudies()); }, PICK_DEBOUNCE_MS);
     });
     ui.pickSearch.addEventListener('keydown', (event) => {   // the search sits in the composer's form: Enter must not send the turn
       if (event.key !== 'Enter') return;
       event.preventDefault();
-      ui.pickList.querySelector('button')?.focus();          // it goes to the first study instead, which Enter then chooses
+      detach(firstStudy());                                  // it goes to the first study of the fresh list, which Enter then chooses
     });
   }
 
@@ -1795,7 +1849,21 @@ export function createApp(env) {
     doc.body.addEventListener('keydown', onKeydown);
     ui.newChat.addEventListener('click', () => { closeSidebar(); detach(navigate('#/new')); });
     win.addEventListener?.('hashchange', () => detach(handleRoute()));
+    // A wider or narrower conversation (the window, the drawer, the sidebar) changes which reports overflow their three lines (P6 fix 1).
+    const Observer = env.ResizeObserver ?? globalThis.ResizeObserver;
+    if (typeof Observer === 'function') new Observer(settleSoon).observe(ui.conversation);
+    else win.addEventListener?.('resize', settleSoon);
     wireComposer();
+  }
+
+  // Measures the clamped reports of the whole conversation on the next frame, however often it is asked before then.
+  function settleSoon() {
+    if (state.settling) return;
+    state.settling = true;
+    frame(() => {
+      state.settling = false;
+      settleClamps(ui.conversation);
+    });
   }
 
   async function start() {

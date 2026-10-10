@@ -809,15 +809,30 @@ test('loadImage takes a same-origin path only, so the bearer token never reaches
   assert.equal(calls[0].init.headers.Authorization, 'Bearer tok');
 });
 
-test('a failed image fetch rejects with its status and is not cached', async (t) => {
+test('a refused image fetch rejects with its status, and is remembered until clearImageCache: one fetch per refused path (P6 fix 1)', async (t) => {
   stubObjectUrls(t);
   const gone = envelope('not_found_error', 'Message not found.');
   const calls = stubFetch(t, (n) => {
     if (n === 2) throw new TypeError('network down');
     return n === 1 ? json(gone, 404) : new Response(new Blob(['png']));
   });
-  await assert.rejects(loadImage('/img/x', {}), refusedWith(404, gone));
-  await assert.rejects(loadImage('/img/x', {}), TypeError);
-  assert.equal(await loadImage('/img/x', {}), 'blob:test/0');   // the third try fetched again: neither failure was kept
+  for (let i = 0; i < 10; i++) await assert.rejects(loadImage('/img/x', {}), refusedWith(404, gone));   // a card drawn ten times
+  assert.equal(calls.length, 1);   // asked once: the server's answer is kept for this view, as a picture is
+  clearImageCache();               // another chat, or a new token: asked again
+  await assert.rejects(loadImage('/img/x', {}), (err) => err instanceof TypeError && err.transport === true);
+  assert.equal(await loadImage('/img/x', {}), 'blob:test/0');   // the network failed, the server did not refuse: asked again at once, and it loads
   assert.equal(calls.length, 3);
+});
+
+test('an image whose body is cut off is a failure of the transport: not kept, and marked as the network\'s (P6 fix 1)', async (t) => {
+  stubObjectUrls(t);
+  let n = 0;
+  const calls = stubFetch(t, () => {
+    n += 1;
+    return n === 1 ? { ok: true, status: 200, headers: new Headers(), blob: async () => { throw new TypeError('body stream lost'); } }
+      : new Response(new Blob(['png']));
+  });
+  await assert.rejects(loadImage('/img/cut', {}), (err) => err instanceof TypeError && err.transport === true);
+  assert.equal(await loadImage('/img/cut', {}), 'blob:test/0');
+  assert.equal(calls.length, 2);
 });

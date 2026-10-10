@@ -903,7 +903,8 @@ def test_in_public_mode_similar_xrays_are_placeholders_and_the_page_asks_for_no_
 # ---- 19 (P6-D) --------------------------------------------------------------------------------------------------------------------
 
 # The newest card's matching reports: the title, the own-report badge (its visible text and its tooltip), and per report its rank, score,
-# group size, text (and whether it is clamped), its Show all button and its label chips.
+# group size, text, whether it is clamped and whether it overflows its three lines (measured here, in the page), its Show all button when
+# that is shown (P6 fix 1: exactly when the text overflows), and its label chips.
 MATCHES_JS = """() => {
   const c = [...document.querySelectorAll('#conversation article.card')].pop();
   const s = c && c.querySelector('section.matches');
@@ -913,8 +914,10 @@ MATCHES_JS = """() => {
            badge: badge ? { text: badge.childNodes[0].textContent, title: badge.getAttribute('title') } : null,
            items: [...s.querySelectorAll('li.match')].map((li) => {
              const text = li.querySelector('.clamp-text'), more = li.querySelector('button[data-action="show"]'), size = li.querySelector('.group-size');
+             const shown = !!more && !more.closest('[hidden]') && more.getClientRects().length > 0;
              return { rank: li.getAttribute('data-rank'), score: li.querySelector('.match-score').textContent, size: size ? size.textContent : null,
-                      text: text ? text.textContent : null, more: more ? more.textContent : null,
+                      text: text ? text.textContent : null, clamped: !!text && text.classList.contains('clamped'),
+                      overflows: !!text && text.scrollHeight > text.clientHeight + 1, more: shown ? more.textContent : null,
                       chips: [...li.querySelectorAll('.chip.finding')].map((x) => x.textContent) };
            }) };
 }"""
@@ -946,8 +949,8 @@ def test_the_picker_runs_a_test_study_whose_card_ranks_its_own_report_and_lists_
     study = listed[3]
     prefix = str(study["study_id"])
     page.fill("#picker-search", prefix)
-    page.wait_for_function("(row) => [...document.querySelectorAll('#picker-list button')].every((b) => b.getAttribute('data-test-row') === row)",
-                           arg=str(study["test_row"]))
+    page.wait_for_function("(row) => { const b = [...document.querySelectorAll('#picker-list button')];"
+                           " return b.length > 0 && b.every((x) => x.getAttribute('data-test-row') === row); }", arg=str(study["test_row"]))
     page.click('#picker-list button[data-test-row="{}"]'.format(study["test_row"]))
     card = ui.wait_settled(0)
     assert card["status"] == "done" and not page.evaluate(PICKER_JS)["open"]
@@ -966,7 +969,7 @@ def test_the_picker_runs_a_test_study_whose_card_ranks_its_own_report_and_lists_
         assert item["score"] == "#{} · {:.3f}".format(m["rank"], m["similarity"]) and item["text"] == m["report"]
         assert item["size"] == ("×{} identical reports".format(m["group_size"]) if m["group_size"] > 1 else None)
         assert item["chips"] == [name for name in CHEXBERT_14 if m["labels"][name]]
-        assert item["more"] == ("Show all" if len(m["report"]) > 180 else None)   # a report that fits three lines is not clamped
+        assert item["clamped"] and item["more"] == ("Show all" if item["overflows"] else None)   # three lines, and Show all only to reveal more
     you = bubble(ui)
     assert you["image"] == "Test-split X-ray" and "test row {}".format(study["test_row"]) in you["chips"]
     page.wait_for_function(PICTURES_LOADED)   # the study's picture in the user turn and the images row: served from the dataset, private
@@ -978,6 +981,36 @@ def test_the_picker_runs_a_test_study_whose_card_ranks_its_own_report_and_lists_
     assert follow["events"][0]["data"]["image"]["source"] == "test_split" and follow["options"]["test_row"] == study["test_row"]
     assert stage_detail(follow, "retrieve")["true_report_rank"] == rank
     assert page.evaluate(MATCHES_JS)["badge"] == shown["badge"]
+    ui.assert_clean()
+
+
+@pytest.mark.parametrize("ui", [{"tiny_gallery": True}], indirect=True, ids=["tiny_gallery"])
+def test_the_picker_by_keyboard_runs_the_study_typed_and_escape_closes_the_drawer_over_it(ui, images):
+    """P6 fix 1: the two keyboard defects the review's probes found, replayed in a real Chrome. A study id typed and Enter pressed at once,
+    within the 250 ms pause, focuses the first study of the new list, and a second Enter runs that study, not one of the list shown before.
+    With the list and the drawer both open, Escape closes the drawer and gives the focus back to Settings."""
+    page = ui.open()
+    target = ui.server.get("v1/test-studies?limit=50")["studies"][7]
+    query = str(target["study_id"])
+    first = ui.server.get("v1/test-studies?limit=50&q=" + query)["studies"][0]   # what the list for that query starts with
+    page.click("#pick-study")
+    page.wait_for_function("document.querySelectorAll('#picker-list button').length > 0")
+    assert page.evaluate("document.activeElement.id") == "picker-search"
+    page.keyboard.type(query)
+    page.keyboard.press("Enter")   # within the pause
+    page.wait_for_function("(row) => document.activeElement && document.activeElement.getAttribute('data-test-row') === row",
+                           arg=str(first["test_row"]))
+    page.keyboard.press("Enter")   # the focused study
+    card = ui.wait_settled(0)
+    assert card["status"] == "done"
+    [message] = assistants(ui, ui.session_id())
+    assert message["options"]["test_row"] == first["test_row"] and first["test_row"] != 0   # never the old list's first study
+    page.click("#pick-study")
+    page.wait_for_function("!document.querySelector('#picker').hidden")
+    page.click("#settings")        # the drawer opens over the open list, which closes
+    assert page.evaluate("[document.querySelector('#picker').hidden, document.querySelector('#drawer').hidden]") == [True, False]
+    page.keyboard.press("Escape")
+    assert page.evaluate("[document.querySelector('#drawer').hidden, document.activeElement.id]") == [True, "settings"]
     ui.assert_clean()
 
 

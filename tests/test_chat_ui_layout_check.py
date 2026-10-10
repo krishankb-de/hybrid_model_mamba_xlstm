@@ -628,11 +628,15 @@ def _sections(width: int = 1280, sections: Optional[List[str]] = None) -> Dict[s
     inside than it is, its pictures loaded, with a size, inside the card; nothing overflows the page."""
     card = [24.0, 60.0, width - 24.0, 2400.0]
     picture = {"box": [card[0] + 16.0, 320.0, card[0] + 176.0, 480.0], "loaded": True}
-    clamp = {"h": 63, "sh": 210, "line": 21.0}   # three lines of 21 px, and more below them
+    long_ = {"h": 63, "sh": 210, "line": 21.0, "chars": 590, "toggle": True}   # three lines of 21 px, more below them, and Show all
+    narrow = width <= 600   # P6 fix 1: a ~170-character report overflows three lines at phone width and fits them on a wide page
+    mid = {"h": 63, "sh": 84 if narrow else 42, "line": 21.0, "chars": 170, "toggle": narrow}
+    short = {"h": 21, "sh": 21, "line": 21.0, "chars": 40, "toggle": False}
 
     def one(name: str) -> Dict[str, Any]:
+        clamped = [dict(long_)] + ([dict(mid), dict(short)] if name == "section.matches" else []) if name in layout.CLAMPED else []
         return {"box": [card[0] + 16.0, 300.0, card[2] - 16.0, 520.0], "sw": 300, "cw": 300,
-                "pictures": [dict(picture)] if name in layout.PICTURED else [], "clamped": [dict(clamp)] if name in layout.CLAMPED else []}
+                "pictures": [dict(picture)] if name in layout.PICTURED else [], "clamped": clamped}
 
     return {"doc": [width, width], "conversation": [width, width], "card": card,
             "sections": {name: one(name) for name in (layout.SECTIONS if sections is None else sections)}}
@@ -649,11 +653,77 @@ def test_a_clamp_that_shows_more_than_three_lines_or_hides_nothing_fails():   # 
     tall["sections"]["section.matches"]["clamped"][0]["h"] = 84   # four lines: the clamp rule is gone
     assert any("clamped report 1 is 84 px tall, over three lines of 21 px" in f for f in layout.check_sections(tall, 1280, layout.SECTIONS))
     open_ = _sections()
-    open_["sections"]["section.published"]["clamped"][0].update(h=210, sh=210)   # nothing hidden
-    assert any("hides nothing" in f for f in layout.check_sections(open_, 1280, layout.SECTIONS))
+    open_["sections"]["section.published"]["clamped"][0].update(h=210, sh=210)   # nothing hidden, so its Show all reveals nothing
+    assert any("Show all that reveals nothing" in f for f in layout.check_sections(open_, 1280, layout.SECTIONS))
     none = _sections()
-    none["sections"]["section.matches"]["clamped"] = []
-    assert "section.matches clamps no report" in layout.check_sections(none, 1280, layout.SECTIONS)
+    none["sections"]["section.matches"]["clamped"] = [r for r in none["sections"]["section.matches"]["clamped"] if r["sh"] <= r["h"]]
+    assert "section.matches clamps no report that overflows its three lines" in layout.check_sections(none, 1280, layout.SECTIONS)
+
+
+def test_show_all_is_there_exactly_when_a_clamped_report_overflows():   # P6 fix 1
+    for width in (375, 1280):
+        assert layout.check_sections(_sections(width=width), width, layout.SECTIONS) == [], width
+    lost = _sections()
+    lost["sections"]["section.matches"]["clamped"][0]["toggle"] = False   # it overflows, and there is no way to read the rest
+    assert any("overflows its three lines with no Show all" in f for f in layout.check_sections(lost, 1280, layout.SECTIONS))
+    empty = _sections()
+    empty["sections"]["section.matches"]["clamped"][2]["toggle"] = True   # a short report that fits: its button would reveal nothing
+    assert any("Show all that reveals nothing" in f for f in layout.check_sections(empty, 1280, layout.SECTIONS))
+
+
+def test_the_clamp_is_proven_at_phone_width_on_a_170_character_report_and_at_wide_width_on_a_short_one():   # P6 fix 1
+    phone = _sections(width=375)
+    phone["sections"]["section.matches"]["clamped"][1].update(sh=63, toggle=False)   # the 170-character report fit three lines at 375 px
+    assert any("~170-character report has no Show all at 375 px" in f for f in layout.check_sections(phone, 375, layout.SECTIONS))
+    gone = _sections(width=375)
+    gone["sections"]["section.matches"]["clamped"] = gone["sections"]["section.matches"]["clamped"][:1]
+    assert any("no ~170-character report" in f for f in layout.check_sections(gone, 375, layout.SECTIONS))
+    wide = _sections()
+    wide["sections"]["section.matches"]["clamped"][2].update(sh=42, toggle=True)   # a 40-character report overflowed at 1280 px
+    assert any("short report has Show all at 1280 px" in f for f in layout.check_sections(wide, 1280, layout.SECTIONS))
+    # with the drawer open the page is narrower: the proof at those two widths is for a closed drawer
+    assert layout.check_sections(_sections(width=1024), 1024, layout.SECTIONS, drawer_open=True) == []
+
+
+def _picker(width: int = 1280, height: int = 900) -> Dict[str, Any]:
+    """What MEASURE_PICKER_JS reports for a page whose picker is open and in order (check j): the button and the list are rendered inside
+    the viewport, nothing overflows horizontally, and the last card's header, scrolled into view, is hit at its centre (not the composer)."""
+    return {"doc": [width, width], "conversation": [width, width], "composer": [width - 40, width - 40],
+            "picker": [16.0, height - 420.0, width - 16.0, height - 200.0], "pick": [20.0, height - 80.0, 170.0, height - 40.0],
+            "head": [40.0, 300.0, width - 40.0, 330.0], "hit": {"ok": True, "got": "li"}, "pickHit": {"ok": True, "got": "#pick-study"}}
+
+
+def test_a_page_with_the_picker_open_in_order_has_no_failures():   # P6 fix 1
+    for width, height, scroll in ((1280, 900, False), (375, 568, False), (320, 256, True)):   # a short viewport scrolls the page
+        assert layout.check_picker(_picker(width, height), width, height, scroll) == [], (width, height)
+
+
+def test_the_picker_case_fails_on_overflow_a_covered_header_or_a_picker_that_is_not_rendered():   # P6 fix 1
+    wide = _picker(375, 568)
+    wide["doc"] = [430, 375]
+    assert any("documentElement overflows horizontally" in f for f in layout.check_picker(wide, 375, 568))
+    spill = _picker(375, 568)
+    spill["picker"][2] = 400.0
+    assert any("#picker leaves the viewport's width" in f for f in layout.check_picker(spill, 375, 568))
+    covered = _picker()
+    covered["hit"] = {"ok": False, "got": "#picker"}
+    assert any("the last card's header is covered by #picker" in f for f in layout.check_picker(covered, 1280, 900))
+    for part in ("picker", "pick"):
+        hidden = _picker()
+        hidden[part] = None
+        assert any("is not rendered" in f for f in layout.check_picker(hidden, 1280, 900)), part
+    headless = _picker()
+    headless["head"] = None
+    assert layout.check_picker(headless, 1280, 900) == ["no card was drawn"]
+    above = _picker()
+    above["picker"] = [16.0, -300.0, 1264.0, -20.0]   # thrown out of sight above the page
+    assert any("#picker is not inside the 1280x900 viewport" in f for f in layout.check_picker(above, 1280, 900))
+    assert layout.check_picker(dict(above, picker=[16.0, 300.0, 304.0, 700.0]), 320, 256, scroll=True) == []   # where the page scrolls it may run on
+    low = _picker(375, 568)
+    low["pick"] = [20.0, 700.0, 170.0, 740.0]   # below the fold of a composer that scrolls inside: fine, as long as it can be scrolled to
+    assert layout.check_picker(low, 375, 568) == []
+    low["pickHit"] = {"ok": False, "got": "#composer"}
+    assert any("#pick-study cannot be reached by scrolling: its centre hits #composer" in f for f in layout.check_picker(low, 375, 568))
 
 
 def test_a_card_section_that_is_missing_wide_or_holds_a_bad_picture_fails():
@@ -712,7 +782,7 @@ class FakePage:
         self.width, self.height = 0, 0
         self.drawer, self.stop = False, False
         self.opened = 0
-        self.sections_drawn, self.sections_measured = 0, 0
+        self.sections_drawn, self.sections_measured, self.picker_measured = 0, 0, 0
 
     def open(self, url: str, width: int, height: int, scheme: str) -> None:
         self.width, self.height, self.drawer, self.stop = width, height, False, False
@@ -746,6 +816,9 @@ class FakePage:
         if function == layout.MEASURE_SECTIONS_JS:
             self.sections_measured += 1
             return _sections(self.width, argument["sections"])
+        if function == layout.MEASURE_PICKER_JS:
+            self.picker_measured += 1
+            return _picker(self.width, self.height)
         if function == layout.INJECT_SECTIONS_JS:
             self.sections_drawn += 1
         return True
@@ -758,24 +831,26 @@ def test_the_loop_runs_every_case_and_passes_on_a_page_in_order():
     expected = (len(layout.WIDTHS) * len(layout.HEIGHTS) * len(layout.SCHEMES) * 2
                 + len(layout.SHORT_VIEWPORTS) * len(layout.SCHEMES) * 2 + len(layout.TALL_WIDTHS) * len(layout.SCHEMES)
                 + viewports * len(layout.SCHEMES)    # P4-G: one more case for each viewport in each scheme, for the Save button
-                + viewports * len(layout.SCHEMES))   # P6-B: and one for the card's own sections
-    assert cases == expected == 182
+                + viewports * len(layout.SCHEMES)    # P6-B: and one for the card's own sections
+                + viewports * len(layout.SCHEMES))   # P6 fix 1: and one with the test-split picker open
+    assert cases == expected == 226
     assert failures == []
     assert page.opened == ((len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)) * len(layout.SCHEMES)
                            + len(layout.TALL_WIDTHS) * len(layout.SCHEMES))   # one load per viewport and scheme, the drawer and Stop are toggled in it
     assert page.sections_drawn == viewports * len(layout.SCHEMES)                  # the card drawn once per viewport and scheme,
     assert page.sections_measured == viewports * len(layout.SCHEMES) * 2           # and measured with the drawer closed and open
+    assert page.picker_measured == viewports * len(layout.SCHEMES)
 
 
 def test_the_loop_reports_a_stop_button_that_never_renders_in_the_cases_that_show_it():
     cases, failures = layout.run_checks(FakePage(stop_renders=False), "http://x/")
     assert failures and all("#stop is not rendered, but the case shows it" in f and "stop=shown" in f for f in failures)
-    assert cases == 182
+    assert cases == 226
 
 
 def test_the_loop_reports_a_save_button_that_never_renders_in_the_save_cases_only():
     cases, failures = layout.run_checks(FakePage(save_renders=False), "http://x/")
-    assert cases == 182 and len(failures) == len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)   # once per viewport: both schemes fail alike
+    assert cases == 226 and len(failures) == len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)   # once per viewport: both schemes fail alike
     assert all("light+dark" in f and "save" in f and "#drawer-save is not rendered" in f for f in failures), failures
 
 

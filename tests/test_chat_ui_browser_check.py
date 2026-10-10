@@ -211,3 +211,31 @@ def test_evidence_file_names_are_the_ones_the_plan_asks_for():
     assert any(f.startswith("streaming_") for f in check.EVIDENCE_FILES)
     assert {"settled_1280x900_light.png", "settled_1280x900_dark.png", "drawer_1280x900_light.png", "settled_375x812_light.png",
             "stopped_1280x900_light.png", "error_notice_1280x900_light.png", "drawer_error_1280x900_light.png", "checklist.json"} <= set(check.EVIDENCE_FILES)
+
+
+# ---- P6 fix 1: which pictures belong to the chat on the page (the sessions check's stray-image test) -----------------------------------
+
+def test_a_chats_own_pictures_and_its_similar_xrays_are_not_strays_and_anything_else_is():
+    ids = ["m_u1", "m_a1"]
+    shown = ["/v1/messages/m_u1/image?variant=thumb", "/v1/messages/m_u1/image?variant=model_input", "/v1/gallery/images/101",
+             "/v1/gallery/images/7", "/v1/gallery/images/1011", "/v1/messages/m_u1x/image?variant=thumb",
+             "/v1/messages/m_other/image?variant=thumb", "src blob:http://127.0.0.1:1/abc", "src "]
+    assert check.strays(shown, ids, [101, 102]) == [
+        "/v1/gallery/images/7",                        # a gallery picture this chat never retrieved
+        "/v1/gallery/images/1011",                     # not row 101 by prefix
+        "/v1/messages/m_u1x/image?variant=thumb",      # not message m_u1 by prefix
+        "/v1/messages/m_other/image?variant=thumb",    # another chat's
+        "src blob:http://127.0.0.1:1/abc", "src "]     # the page's own preview of a file, or no source at all
+    assert check.strays(shown[:2], ids, []) == []
+    assert check.strays(["/v1/gallery/images/101"], ids, []) == ["/v1/gallery/images/101"]   # a chat with no retrieval owns no gallery row
+
+
+def test_the_gallery_rows_a_chat_may_show_are_those_its_retrieve_stages_named():
+    def message(*details):
+        return {"events": [{"event": "message_start", "data": {"seq": 1}}]
+                + [{"event": "stage_end", "data": {"stage": "retrieve", "detail": d, "seq": i + 2}} for i, d in enumerate(details)]}
+    private = message({"image_neighbors": [{"rank": 1, "gallery_row": 101}, {"rank": 2, "gallery_row": 7}], "report_matches": []})
+    public = message({"image_neighbors": [{"rank": 1, "similarity": 0.9}]})                # rank and similarity only: no row
+    skipped = {"events": [{"event": "stage_end", "data": {"stage": "retrieve", "skipped": "gallery_unavailable", "seq": 2}}]}
+    odd = message({"image_neighbors": [{"gallery_row": "5"}, {"gallery_row": True}, None, "x"]}, None)
+    assert check.retrieved_rows([private, public, skipped, odd, {}, None, {"events": [None, "x", 3]}]) == {101, 7}

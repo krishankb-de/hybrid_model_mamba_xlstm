@@ -172,6 +172,28 @@ def test_public_mode_serves_a_clients_own_upload_and_hides_everyone_elses(tmp_pa
         assert user["image_urls"] == start["image"]["urls"]   # the reload's URLs go through the same public policy
 
 
+PUBLIC_ORIGINAL_MSG = "Public mode serves an upload's thumbnail and model input, not its original."
+
+
+def test_public_mode_refuses_the_original_and_serves_the_thumbnail_and_the_model_input(tmp_path):   # P6 fix 1
+    # app/redact.py never sends a public turn the original's URL; the route holds to the same rule when someone asks for it all the same.
+    home = str(tmp_path / "shared")
+    with TestClient(create_app(engine="tiny", home=home, mode="public", token="t")) as c:
+        frames, sid = _turn(c, headers=PUBLIC)
+        start = frames[0]["data"]
+        for message_id in (start["user_message_id"], start["message_id"]):
+            _error(_image(c, message_id, "original", PUBLIC), 403, "permission_error", PUBLIC_ORIGINAL_MSG)
+            for variant in ("thumb", "model_input"):
+                r = _image(c, message_id, variant, PUBLIC)
+                assert r.status_code == 200 and r.headers["cache-control"] == UPLOAD_CACHE, variant
+        _error(_image(c, start["user_message_id"], "original", OTHER), 404, "not_found_error", "Message not found.")   # not yours: unknown
+    with TestClient(create_app(engine="tiny", home=home)) as c:   # a private server that lists that public session: its rule stands
+        _error(_image(c, start["user_message_id"], "original"), 403, "permission_error", PUBLIC_ORIGINAL_MSG)
+        assert _image(c, start["user_message_id"], "thumb").status_code == 200
+        private, _ = _turn(c)   # and a private turn's original is served as before
+        assert _image(c, private[0]["data"]["user_message_id"], "original").status_code == 200
+
+
 # ---- a test-split study (private mode only) ------------------------------------------------------------------------------------------
 
 def test_a_test_split_turns_image_is_read_from_the_dataset_and_sent_with_no_store(gclient, gallery):

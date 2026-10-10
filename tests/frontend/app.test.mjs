@@ -748,7 +748,7 @@ test('start with no hash opens the newest session and replays it: its user turn,
   const [user, card] = $('conversation').children;
   assert.deepEqual([user.localName, user.getAttribute('class'), card.localName, card.getAttribute('data-message-id')], ['article', 'turn user', 'article', botId]);
   assert.equal(q(user, '.user-text').textContent, 'beam 5\nplease');
-  assert.equal(q(user, '.chip').textContent, 'chest.png');                                // a replayed upload: its file name, until P6-B
+  assert.equal(q(user, '.chip').textContent, 'chest.png');                                // this stored message lists no image_urls: its file name
   assert.equal(qa(user, 'img').length, 0);
   assert.deepEqual(texts(qa(user, '.options .chip')), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text', 'full budget']);   // the options the assistant row carries (this turn ran with Display repair and the stop switch off)
   assert.equal(user.getAttribute('aria-label'), 'Your message, turn 1');
@@ -4507,6 +4507,121 @@ test('a turn that starts closes the study list: it is for starting one', async (
   h.app.send();   // the attached file, sent from the composer while the list was open
   await flush();
   assert.deepEqual([$('picker').hidden, pickButton().getAttribute('aria-expanded'), pickButton().disabled], [true, 'false', true]);
+});
+
+// ---- P6 fix 1: the picker's keyboard, and Show all by real overflow ---------------------------------------------------------------
+
+test('with the study list and the drawer both open, Escape closes the drawer and gives the focus back to Settings (P6 fix 1)', async () => {
+  await ready({ options: { models: GALLERY_MODELS }, routes: studyRoutes() });
+  pickButton().click();
+  await flush();
+  assert.equal($('picker').hidden, false);
+  $('settings').click();   // the drawer opens: the study list, which starts a turn from the composer, closes
+  assert.deepEqual([$('drawer').hidden, $('picker').hidden, pickButton().getAttribute('aria-expanded'), document.activeElement.id],
+                   [false, true, 'false', 'drawer-close']);
+  const escape = press(document.activeElement, 'Escape');
+  assert.deepEqual([escape.defaultPrevented, $('drawer').hidden, document.activeElement.id], [true, true, 'settings']);
+});
+
+test('Escape closes the study list only from inside it, and the sidebar opening closes it too (P6 fix 1)', async () => {
+  await ready({ options: { models: GALLERY_MODELS }, routes: studyRoutes() });
+  pickButton().click();
+  await flush();
+  $('prompt').focus();
+  assert.equal(press($('prompt'), 'Escape').defaultPrevented, false);   // the focus is not in the list: Escape is not the list's
+  assert.equal($('picker').hidden, false);
+  $('picker-search').focus();
+  const escape = press($('picker-search'), 'Escape');
+  assert.deepEqual([escape.defaultPrevented, $('picker').hidden, document.activeElement.id], [true, true, 'pick-study']);
+  pickButton().click();
+  await flush();
+  $('sidebar-toggle').click();
+  assert.deepEqual([document.body.classList.contains('sidebar-open'), $('picker').hidden], [true, true]);
+  assert.notEqual(document.activeElement, document.body);   // the focus that was in the list went somewhere, not to nothing
+});
+
+test('Enter during the typing pause waits for the new list and focuses its first study; the old list is gone at once (P6 fix 1)', async () => {
+  const asked = [];
+  const h = await ready({ options: { models: GALLERY_MODELS }, routes: studyRoutes(asked) });
+  pickButton().click();
+  await flush();
+  const old = studyButtons()[0];
+  assert.equal(old.getAttribute('data-test-row'), '0');
+  $('picker-search').value = '50000049';
+  $('picker-search').dispatchEvent(new ShimEvent('input', { bubbles: true }));
+  assert.equal(studyButtons().length, 0);   // the query changed: the old list goes at once, and no stale study can be chosen
+  old.click();                              // a press that reaches an old button all the same chooses nothing
+  await flush();
+  assert.equal(h.api.streams.length, 0);
+  press($('picker-search'), 'Enter');       // within the 250 ms pause
+  await flush();
+  assert.deepEqual(asked.map((a) => a.q), [null, '50000049']);   // the pause is cancelled: one request, for the new query
+  assert.equal(document.activeElement.getAttribute('data-test-row'), '7');
+  document.activeElement.click();
+  await flush();
+  assert.equal(JSON.parse(h.api.streams.at(-1).opts.form.get('options')).test_row, 7);
+  h.timers.advance(1000);
+  await flush();
+  assert.equal(asked.length, 2);            // the cancelled pause asks nothing later
+});
+
+test('Enter while a list is on its way waits for it, and a list replaced under the focus hands it back to the search (P6 fix 1)', async () => {
+  const pending = [];
+  const answer = studyRoutes()['GET /v1/test-studies'];
+  const routes = { 'GET /v1/test-studies': (url) => new Promise((resolve) => pending.push(() => resolve(answer(url)))) };
+  await ready({ options: { models: GALLERY_MODELS }, routes });
+  pickButton().click();
+  await flush();
+  assert.deepEqual([studyButtons().length, $('picker-status').textContent], [0, 'Loading…']);   // nothing to choose before the list
+  press($('picker-search'), 'Enter');       // the first list is still on its way
+  await flush();
+  assert.equal(pending.length, 1);          // Enter waits for that one rather than asking again
+  assert.equal(document.activeElement.id, 'picker-search');
+  pending.shift()();
+  await flush();
+  assert.equal(document.activeElement.getAttribute('data-test-row'), '0');   // its first study, once it is there
+  // The focus is on a study and the list is replaced (the query changed under it): the focus goes back to the search, not to the body.
+  $('picker-search').value = '5000004';
+  $('picker-search').dispatchEvent(new ShimEvent('input', { bubbles: true }));
+  assert.equal(document.activeElement.id, 'picker-search');
+  pending.splice(0);                        // (the list that query asked for never comes)
+  press($('picker-search'), 'Escape');
+  pickButton().click();                     // reopened: whatever list it showed last is cleared until the fresh one comes
+  await flush();
+  assert.equal(studyButtons().length, 0);
+});
+
+test('the page shows a report\'s Show all only when its three lines really overflow: once the card is in the page, and again on resize (P6 fix 1)', async () => {
+  const proto = Object.getPrototypeOf(document.createElement('p'));
+  let lines = 5;   // how many lines the report would take; three are shown
+  Object.defineProperty(proto, 'scrollHeight', { configurable: true, get() { return this.classList.contains('clamp-text') ? 21 * lines : 0; } });
+  Object.defineProperty(proto, 'clientHeight', { configurable: true, get() { return this.classList.contains('clamp-text') ? 21 * Math.min(3, lines) : 0; } });
+  const observers = [];
+  globalThis.ResizeObserver = class { constructor(cb) { this.cb = cb; observers.push(this); } observe(node) { this.node = node; } disconnect() {} };
+  try {
+    resetEvents();
+    const retrieve = { image_neighbors: [], report_matches: [{ rank: 1, similarity: 0.5, group: 1, group_size: 1, txt_row: 1,
+                                                               report: 'Findings: a report long enough to need more room.', labels: null }] };
+    const events = [startEv({ message_id: 'm_1' }), stageStartEv('retrieve', 2), stageEndEv('retrieve', 3, retrieve), stopEv('done', { message_id: 'm_1' })];
+    const h = harness({ models: GALLERY_MODELS, sessions: [sess('s_a', 'a', 1)], routes: {
+      'GET /v1/sessions/s_a': { ...sess('s_a', 'a', 1), messages: [userMsg('u_1', '', 'chest.png'), botMsg('m_1', 'done', START_DATA.options)] },
+      'GET /v1/messages/m_1': { ...botMsg('m_1'), events: rows(events) } } });
+    await h.app.start();
+    await flush();
+    const row = () => q($('conversation'), 'section.matches .clamp-actions');
+    assert.ok(q($('conversation'), 'section.matches .clamp-text.clamped'), 'every matching report is clamped to three lines');
+    assert.equal(row().hidden, false);   // it overflows them: Show all
+    assert.equal(observers.length, 1);
+    assert.equal(observers[0].node, $('conversation'));   // a narrower or wider conversation measures again
+    lines = 2;                          // wider now: the report fits its three lines
+    observers[0].cb([]);
+    nextFrame();
+    assert.equal(row().hidden, true);   // nothing to reveal: no button
+  } finally {
+    delete proto.scrollHeight;
+    delete proto.clientHeight;
+    delete globalThis.ResizeObserver;
+  }
 });
 
 test('a replayed user turn shows k only if the model it ran on runs retrieval', async () => {

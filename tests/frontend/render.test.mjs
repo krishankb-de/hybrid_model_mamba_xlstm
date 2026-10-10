@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ShimEvent, installDom, serialize } from './dom_shim.mjs';
 import { initialView, labelsPending, replay } from '../../app/static/state.js';
+import { clearImageCache, loadImage as apiLoadImage } from '../../app/static/api.js';
 import * as render from '../../app/static/render.js';
 import {
   STAGES, detailTable, el, optionChips, provenanceText, renderAssistantCard, renderLabels, renderNotes, renderProvenance,
@@ -26,6 +27,7 @@ const renderImages = builder('renderImages');
 const renderNeighbors = builder('renderNeighbors');
 const renderMatches = builder('renderMatches');
 const renderPublished = builder('renderPublished');
+const settleClamps = builder('settleClamps');   // P6 fix 1: the page measures, once a card is in it, which clamped report overflows
 
 installDom();   // this file's process only: the other test files never see a document
 
@@ -1360,13 +1362,13 @@ test('focusKey and restoreFocus find a viewer button again in the rebuilt card',
   document.body.replaceChildren(card);
   const second = qa(card, 'button[data-action="view"]')[1];
   second.focus();
-  assert.equal(focusKey(document.activeElement), 'view:1');
+  assert.equal(focusKey(document.activeElement), 'view:image:model_input');   // by what it shows, not its place in the card (P6 fix 1)
   const next = renderAssistantCard(view, ctx);
   card.replaceWith(next);
   card = next;
-  assert.equal(restoreFocus(card, 'view:1'), true);
+  assert.equal(restoreFocus(card, 'view:image:model_input'), true);
   assert.equal(document.activeElement, qa(card, 'button[data-action="view"]')[1]);
-  assert.equal(restoreFocus(card, 'view:7'), false);   // no such button: false, quietly
+  assert.equal(restoreFocus(card, 'view:image:nope'), false);   // no such button: false, quietly
   document.body.replaceChildren();
 });
 
@@ -1544,12 +1546,13 @@ test('the matching reports are a ranked list: "#rank · similarity", how many id
   assert.deepEqual(matchItems(section).map((li) => q(li, '.group-size')?.textContent ?? null), ['×37 identical reports', null]);   // a group of one says nothing
   assert.deepEqual(matchItems(section).map((li) => q(li, '.clamp-text').textContent), [LONG_REPORT, 'Findings: short report 2.']);
   const [long, short] = matchItems(section).map((li) => q(li, '.clamp-text'));
-  assert.ok(long.classList.contains('clamped') && !long.classList.contains('open'));   // three lines until Show all
-  assert.ok(!short.classList.contains('clamped'));                                     // short enough to fit them: no clamp, no button
+  assert.ok([long, short].every((t) => t.classList.contains('clamped') && !t.classList.contains('open')));   // every report: three lines (P6 fix 1)
   const toggle = q(matchItems(section)[0], 'button[data-action="show"]');
-  assert.deepEqual([toggle.textContent, toggle.getAttribute('aria-expanded'), toggle.getAttribute('aria-label'), toggle.getAttribute('aria-controls')],
-                   ['Show all', 'false', 'Show all of matching report 1, turn 2', long.getAttribute('id')]);
-  assert.equal(q(matchItems(section)[1], 'button'), null);
+  assert.deepEqual([toggle.textContent, toggle.getAttribute('aria-expanded'), toggle.getAttribute('aria-label'), toggle.getAttribute('aria-controls'),
+                    toggle.getAttribute('data-key')],
+                   ['Show all', 'false', 'Show all of matching report 1, turn 2', long.getAttribute('id'), 'match:1']);
+  assert.equal(q(matchItems(section)[1], 'button[data-action="show"]').getAttribute('data-key'), 'match:2');
+  assert.deepEqual(matchItems(section).map((li) => q(li, '.clamp-actions').hidden), [true, true]);   // until the page has measured them
   assert.deepEqual(texts(qa(matchItems(section)[0], 'li.chip.finding')), ['Cardiomegaly', 'Edema']);   // the positives, in the labeller's order
   assert.equal(q(matchItems(section)[0], 'ul').getAttribute('aria-label'), 'Labels of matching report 1');
   assert.equal(qa(matchItems(section)[1], '.chip').length, 0);
@@ -1564,6 +1567,7 @@ test('Show all opens a clamped report and Show less closes it; ctx.ui keeps it o
   const ctx = { labelNames: LABEL_NAMES, ui, turn: 1 };
   let card = renderAssistantCard(view, ctx);
   document.body.replaceChildren(card);
+  settleClamps(card, () => true);   // as the page does once the card is in it: here every report overflows its three lines
   const toggle = q(card, 'section.matches button[data-action="show"]');
   toggle.click();
   const text = () => q(card, 'section.matches li.match .clamp-text');
@@ -1571,12 +1575,13 @@ test('Show all opens a clamped report and Show less closes it; ctx.ui keeps it o
   assert.deepEqual([toggle.textContent, toggle.getAttribute('aria-expanded'), toggle.getAttribute('aria-label')],
                    ['Show less', 'true', 'Show less of matching report 1, turn 1']);
   toggle.focus();
-  assert.equal(focusKey(document.activeElement), 'show:0');
+  assert.equal(focusKey(document.activeElement), 'show:match:1');
   const next = renderAssistantCard(view, ctx);   // the next frame
   card.replaceWith(next);
   card = next;
-  assert.ok(text().classList.contains('open'));   // still open
-  assert.equal(restoreFocus(card, 'show:0'), true);
+  assert.ok(text().classList.contains('open'));   // still open, and its Show less with it: an open report is not measured away
+  assert.equal(q(card, 'section.matches .clamp-actions').hidden, false);
+  assert.equal(restoreFocus(card, 'show:match:1'), true);
   assert.equal(document.activeElement, q(card, 'section.matches button[data-action="show"]'));
   document.activeElement.click();                 // closed again, and the next frame keeps it closed
   card.replaceWith(renderAssistantCard(view, ctx));
@@ -1584,6 +1589,72 @@ test('Show all opens a clamped report and Show less closes it; ctx.ui keeps it o
   const fresh = renderAssistantCard(view, { labelNames: LABEL_NAMES });   // without a store a card starts closed
   assert.ok(!q(fresh, 'section.matches li.match .clamp-text').classList.contains('open'));
   document.body.replaceChildren();
+});
+
+test('every clamped report shows Show all only when it really overflows its three lines: measured in the page, never counted (P6 fix 1)', () => {
+  const section = renderMatches(matchesView({ report_matches: [match(1), match(2), match(3, { report: 'x'.repeat(170) })] }), { turn: 2 });
+  const rows = () => matchItems(section).map((li) => q(li, '.clamp-actions').hidden);
+  const measured = [];
+  settleClamps(section, (text) => { measured.push(text.getAttribute('id')); return text.textContent.length > 100; });
+  assert.deepEqual(rows(), [false, true, false]);   // the long one and the 170-character one overflow here; the short one fits
+  assert.equal(measured.length, 3);
+  settleClamps(section, () => false);               // wider now: nothing overflows, and no button reveals nothing
+  assert.deepEqual(rows(), [true, true, true]);
+  settleClamps(section);                            // the page's own measure; with no layout to read (here) it shows no button
+  assert.deepEqual(rows(), [true, true, true]);
+  q(matchItems(section)[0], 'button[data-action="show"]').click();   // an open report keeps its Show less, whatever is measured
+  settleClamps(section, () => false);
+  assert.deepEqual(rows(), [false, true, true]);
+  for (const odd of [null, undefined, {}, 'x']) settleClamps(odd);   // nothing to settle: no throw
+});
+
+test('Show all keeps the focus on the same report when the score stage puts the published lines above it (P6 fix 1)', () => {
+  const steps = [imageStart(), PREPROCESSED, stageStart('retrieve', 2),
+                 stageEnd('retrieve', 3, { image_neighbors: [], report_matches: [match(1), match(2, { report: LONG_REPORT })], gallery: {} }),
+                 stageStart('generate', 3), snapshot('Findings: live.'), stageEnd('generate', 9, GENERATE), stageStart('score', 5)];
+  const ctx = { ui: new Map() };
+  let card = renderAssistantCard(viewOf(steps), ctx);
+  document.body.replaceChildren(card);
+  settleClamps(card, () => true);
+  q(card, 'section.matches button[data-key="match:2"]').focus();
+  const key = focusKey(document.activeElement);
+  assert.equal(key, 'show:match:2');
+  const scored = [...steps, stageEnd('score', 1, { ...SCORE, published: { model_report: LONG_REPORT, floor_report: LONG_REPORT, live_equals_published: false } })];
+  const next = renderAssistantCard(viewOf(scored), ctx);
+  card.replaceWith(next);
+  card = next;
+  settleClamps(card, () => true);
+  assert.equal(qa(card, 'section.published button[data-action="show"]').length, 2);   // two more Show all buttons, before the reports' own
+  assert.equal(restoreFocus(card, key), true);
+  assert.equal(document.activeElement.getAttribute('data-key'), 'match:2');            // the same report's, not the second of the card
+  assert.equal(focusKey(document.activeElement), 'show:match:2');
+  for (const bad of ['show:', 'show:match:2"]', 'show:../x', 'view:' + 'a'.repeat(300)]) assert.equal(restoreFocus(card, bad), false, bad);
+  document.body.replaceChildren();
+});
+
+test('a picture that failed to load is fetched once however often its card is drawn again (P6 fix 1)', async (t) => {
+  clearImageCache();
+  t.after(clearImageCache);
+  const fetched = [];
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    fetched.push(String(url));
+    return new Response(JSON.stringify({ type: 'error', error: { type: 'not_found_error', message: 'gone' } }), { status: 404 });
+  });
+  const view = gridView();   // the turn's two pictures and two similar X-rays
+  const ctx = { loadImage: (path) => apiLoadImage(path, {}), ui: new Map() };
+  let card = null;
+  for (let paint = 0; paint < 10; paint++) {   // a streamed turn draws its card again at every frame
+    card = renderAssistantCard(view, ctx);
+    await tick();
+    await tick();
+  }
+  assert.deepEqual([...fetched].sort(), [URLS.model_input, URLS.thumb, '/v1/gallery/images/101', '/v1/gallery/images/102'].sort());
+  assert.ok(qa(card, 'img').every((img) => img.hasAttribute('data-failed') && !img.hasAttribute('src')));   // each shows it failed, at once
+  clearImageCache();                           // another chat, or a new token: asked again, once
+  renderAssistantCard(view, ctx);
+  await tick();
+  await tick();
+  assert.equal(fetched.length, 8);
 });
 
 test('a test study\'s card ranks its own report: "Own report: rank 3 of 2,663 test reports · R@10 hit", the dedup rank and protocol in the tooltip', () => {

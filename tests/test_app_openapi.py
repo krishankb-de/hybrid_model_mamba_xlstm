@@ -198,6 +198,12 @@ def test_the_text_and_image_docs_match_what_a_text_only_turn_really_does(client)
         assert "generate" in [f["data"]["stage"] for f in rerun if f["event"] == "stage_end"], text
 
 
+def test_the_image_route_documents_that_public_mode_refuses_the_original(client):   # P6 fix 1
+    op = client.get("/openapi.json").json()["paths"][IMAGE]["get"]
+    assert "`variant=original` in public mode" in op["description"] and "403" in op["description"]
+    assert "original" in op["responses"]["403"]["description"]
+
+
 def test_the_api_description_names_the_access_rules_and_every_error_kind(client):
     description = client.get("/openapi.json").json()["info"].get("description", "")
     for needle in ("Authorization: Bearer", "X-Client-Id", "401", "loopback"):

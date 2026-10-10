@@ -20,7 +20,12 @@ page); six chips and a 140-character unbroken word are injected, and Stop is sho
   i  (P6-B..D, one more case for every viewport in every scheme) the card's own sections (SECTIONS), drawn by render.js in the page from a
      synthetic finished turn with every picture a generated PNG (nothing is fetched): each section is there, lies inside the card's width
      and does not overflow it, every picture has loaded with a size and lies inside the card, every clamped report shows at most three
-     lines and hides the rest, and nothing overflows the page horizontally, with the drawer closed and open
+     lines and offers Show all exactly when it overflows them (render.js settleClamps, measured as the page measures it: P6 fix 1), and
+     nothing overflows the page horizontally, with the drawer closed and open. The clamp is proven at both ends with the drawer closed: at
+     375 px and narrower a ~170-character report has Show all, and at 1024 px and wider no report that short has one
+  j  (P6 fix 1, one more case for every viewport in every scheme) the test-split picker open, its list full: the page does not overflow
+     horizontally, the button and the list are rendered inside the viewport's width, and the transcript's last card header, scrolled
+     into view, is not covered (a point just inside its top hits the card, not the composer, the picker or the banner)
 
 On the short viewports, where the page scrolls instead (667x375, 320x256), c and d give way to: the report keeps its
 natural height (no scroller of its own, at least 120 px), the composer is not capped, the banner stays at the top of
@@ -64,6 +69,12 @@ REPORT_TEXT = ("The lungs are clear. There is no focal consolidation, pleural ef
                "cardiomediastinal silhouette is within normal limits. No acute osseous abnormality is seen. ") * 3
 # The card's own sections (check i): P6-B's images row, P6-C's similar X-rays, P6-D's published lines and matching reports.
 SECTIONS = ["section.images", "section.neighbors", "section.published", "section.matches"]
+# P6 fix 1: the clamp's proof. Three lines of a matching report hold about 130 characters at 375 px and about 280 on a wide page.
+MID_REPORT = ("Findings: The heart is normal in size. The lungs are clear, with no focal consolidation, pleural effusion or pneumothorax. "
+              "Impression: No acute cardiopulmonary process.")   # 168 characters: over three lines at phone width, two lines on a wide page
+SHORT_REPORT = "Findings: No acute process."
+PROOF_CHARS = (150, 190)   # what check i takes for the ~170-character report
+PICKER_STUDIES = 60        # check j's list: more studies than the list shows, so that it scrolls inside its own box
 
 
 def section_events() -> List[Dict[str, Any]]:
@@ -78,8 +89,9 @@ def section_events() -> List[Dict[str, Any]]:
     neighbours = [{"rank": r, "similarity": round(0.95 - 0.03 * r, 3), "gallery_row": 100 + r, "study_id": 50000000 + r, "txt_row": 200 + r,
                    "image_url": "/v1/gallery/images/{}".format(100 + r), "labels": labels("Edema" if r % 2 else "Cardiomegaly")}
                   for r in range(1, 13)]
+    texts = {2: LONG_WORD + " " + REPORT_TEXT, 3: MID_REPORT, 4: SHORT_REPORT}   # the rest are REPORT_TEXT, over three lines at any width
     matches = [{"rank": r, "similarity": round(0.6 - 0.02 * r, 3), "group": 300 + r, "group_size": 37 if r == 1 else 1, "txt_row": 400 + r,
-                "report": (LONG_WORD + " " if r == 2 else "") + REPORT_TEXT, "labels": labels("Pleural Effusion")} for r in range(1, 11)]
+                "report": texts.get(r, REPORT_TEXT), "labels": labels("Pleural Effusion")} for r in range(1, 11)]
     agreement = [{"rank": n["rank"], "agree": 12, "of": 14, "both_positive": [], "neighbor_only": ["Edema"], "generated_only": ["Cardiomegaly"]}
                  for n in neighbours]
     steps = [
@@ -217,6 +229,8 @@ INJECT_SECTIONS_JS = """async (args) => {
   document.querySelector('#conversation').replaceChildren(card);
   for (let i = 0; i < 20 && [...card.querySelectorAll('img')].some((img) => !img.hasAttribute('src')); i++) await new Promise((r) => setTimeout(r, 10));
   await Promise.all([...card.querySelectorAll('img')].map((img) => img.decode().catch(() => null)));
+  window.__layoutRender = render;   // MEASURE_SECTIONS_JS measures the clamps again for the drawer's state, as the page does on a resize
+  render.settleClamps(card);
   return true;
 }"""
 
@@ -225,6 +239,7 @@ MEASURE_SECTIONS_JS = """(args) => {
   const doc = document.documentElement;
   const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
   const card = q('#conversation article.card');
+  if (card && window.__layoutRender) window.__layoutRender.settleClamps(card);
   window.scrollTo(0, 0);
   const out = { doc: [doc.scrollWidth, doc.clientWidth], conversation: [q('#conversation').scrollWidth, q('#conversation').clientWidth],
                 card: card ? box(card) : null, sections: {} };
@@ -232,16 +247,21 @@ MEASURE_SECTIONS_JS = """(args) => {
     const el = card ? card.querySelector(s) : null;
     out.sections[s] = !el ? null : { box: box(el), sw: el.scrollWidth, cw: el.clientWidth,
       pictures: [...el.querySelectorAll('img')].map((i) => ({ box: box(i), loaded: i.complete && i.naturalWidth > 0 })),
-      clamped: [...el.querySelectorAll('.clamp-text.clamped:not(.open)')].map((t) => ({ h: t.clientHeight, sh: t.scrollHeight,
-                                                                                      line: parseFloat(getComputedStyle(t).lineHeight) || 0 })) };
+      clamped: [...el.querySelectorAll('.clamp-text.clamped:not(.open)')].map((t) => {
+        const row = t.nextElementSibling, toggle = row && row.classList.contains('clamp-actions') ? row : null;
+        return { h: t.clientHeight, sh: t.scrollHeight, line: parseFloat(getComputedStyle(t).lineHeight) || 0, chars: t.textContent.length,
+                 toggle: !!toggle && !toggle.hidden && toggle.getClientRects().length > 0 };
+      }) };
   }
   return out;
 }"""
 
 
-def check_sections(m: Dict[str, Any], width: int, sections: List[str]) -> List[str]:
+def check_sections(m: Dict[str, Any], width: int, sections: List[str], drawer_open: bool = False) -> List[str]:
     """The failures in one measurement of the card's own sections (check i): each is there, inside the card's width and not wider inside
-    than it is; each picture has loaded, has a size and lies inside the card; neither the page nor the conversation overflows horizontally."""
+    than it is; each picture has loaded, has a size and lies inside the card; each clamped report shows at most three lines and offers
+    Show all exactly when it overflows them; neither the page nor the conversation overflows horizontally. With the drawer closed, the
+    clamp's proof: at 375 px and narrower a ~170-character report has Show all, at 1024 px and wider no report that short has one."""
     failures = []
     for name, (sw, cw) in (("documentElement", m["doc"]), ("#conversation", m["conversation"])):
         if sw > cw:
@@ -263,13 +283,27 @@ def check_sections(m: Dict[str, Any], width: int, sections: List[str]) -> List[s
             failures.append("{} overflows inside: scrollWidth {} > clientWidth {}".format(selector, section["sw"], section["cw"]))
         if not section["pictures"] and selector in PICTURED:
             failures.append("{} shows no picture".format(selector))
-        if not section.get("clamped") and selector in CLAMPED:
-            failures.append("{} clamps no report".format(selector))
-        for n, text in enumerate(section.get("clamped", []), start=1):   # the synthetic reports are all longer than three lines
+        clamped = section.get("clamped", [])
+        if selector in CLAMPED and not any(text["sh"] > text["h"] + 1 for text in clamped):
+            failures.append("{} clamps no report that overflows its three lines".format(selector))
+        for n, text in enumerate(clamped, start=1):
+            over = text["sh"] > text["h"] + 1
             if text["line"] > 0 and text["h"] > 3 * text["line"] + 2:
                 failures.append("{} clamped report {} is {} px tall, over three lines of {:g} px".format(selector, n, text["h"], text["line"]))
-            if text["sh"] <= text["h"]:
-                failures.append("{} clamped report {} hides nothing: scrollHeight {} <= clientHeight {}".format(selector, n, text["sh"], text["h"]))
+            if text.get("toggle") and not over:
+                failures.append("{} clamped report {} has a Show all that reveals nothing: scrollHeight {} <= clientHeight {}".format(
+                    selector, n, text["sh"], text["h"]))
+            if over and not text.get("toggle"):
+                failures.append("{} clamped report {} overflows its three lines with no Show all".format(selector, n))
+        if selector == "section.matches" and not drawer_open:
+            mid = [text for text in clamped if PROOF_CHARS[0] <= text.get("chars", 0) <= PROOF_CHARS[1]]
+            if width <= 375:
+                if not mid:
+                    failures.append("section.matches has no ~170-character report to prove the clamp with")
+                if any(not text.get("toggle") for text in mid):
+                    failures.append("section.matches: a ~170-character report has no Show all at {} px".format(width))
+            if width >= 1024 and any(text.get("toggle") for text in clamped if text.get("chars", 0) <= PROOF_CHARS[1]):
+                failures.append("section.matches: a short report has Show all at {} px".format(width))
         for n, picture in enumerate(section["pictures"], start=1):
             p_left, p_top, p_right, p_bottom = picture["box"]
             if not picture["loaded"]:
@@ -282,7 +316,89 @@ def check_sections(m: Dict[str, Any], width: int, sections: List[str]) -> List[s
 
 
 PICTURED = {"section.images", "section.neighbors"}   # the sections that must show pictures in the synthetic turn
-CLAMPED = {"section.published", "section.matches"}   # and those that must clamp a report to three lines
+CLAMPED = {"section.published", "section.matches"}   # and those whose long reports must overflow their three lines, with Show all
+
+
+# Check j (P6 fix 1): the test-split picker open with a full list, as app.js builds it: its button shown, its panel shown, PICKER_STUDIES study
+# buttons in its list. The tiny app this check starts runs no gallery, so the page itself never offers the picker: the case opens it.
+INJECT_PICKER_JS = """(args) => {
+  const q = (s) => document.querySelector(s);
+  const pick = q('#pick-study'), picker = q('#picker'), list = q('#picker-list'), status = q('#picker-status');
+  if (!pick || !picker || !list) return false;
+  pick.hidden = false;
+  pick.setAttribute('aria-expanded', 'true');
+  list.replaceChildren(...Array.from({ length: args.studies }, (_, row) => {
+    const li = document.createElement('li'), b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'study';
+    b.textContent = 'study ' + (50000000 + row * 7) + ' · PA · test row ' + row;
+    li.append(b);
+    return li;
+  }));
+  if (status) status.textContent = args.studies + ' studies';
+  picker.hidden = false;
+  return true;
+}"""
+
+# The last card's header (its first part) scrolled to the top of the pane that scrolls it, and, where the page scrolls instead (short
+# viewports), to just under the sticky banner; then what a point just inside its top hits. (A header can be taller than the pane, which keeps
+# its 120 px floor while the picker fills the composer: centring it would put its top under the banner.) And the page, the conversation and the
+# composer for horizontal overflow, and the picker's button and panel.
+MEASURE_PICKER_JS = """() => {
+  const q = (s) => document.querySelector(s);
+  const doc = document.documentElement;
+  const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+  const drawn = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+  const name = (e) => !e ? null : (e.id ? '#' + e.id : e.tagName.toLowerCase());
+  const cards = document.querySelectorAll('#conversation article.card');
+  const card = cards[cards.length - 1];
+  const head = card ? (card.firstElementChild || card) : null;
+  const out = { doc: [doc.scrollWidth, doc.clientWidth], conversation: [q('#conversation').scrollWidth, q('#conversation').clientWidth],
+                composer: [q('#composer').scrollWidth, q('#composer').clientWidth],
+                picker: drawn(q('#picker')) ? box(q('#picker')) : null, pick: drawn(q('#pick-study')) ? box(q('#pick-study')) : null,
+                head: null, hit: null };
+  if (!head) return out;
+  head.scrollIntoView({ block: 'start', inline: 'nearest' });
+  const under = q('.banner').getBoundingClientRect().bottom;
+  if (head.getBoundingClientRect().top < under) window.scrollBy(0, head.getBoundingClientRect().top - under - 8);
+  const b = box(head), x = (b[0] + b[2]) / 2, y = b[1] + Math.min(10, (b[3] - b[1]) / 2), top = document.elementFromPoint(x, y);
+  out.head = b;
+  out.hit = { ok: !!top && card.contains(top), got: name(top) };
+  const pick = q('#pick-study');   // the button sits in the composer's last row: with the list open the composer may scroll to it
+  if (drawn(pick)) {
+    pick.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const pb = box(pick), at = document.elementFromPoint((pb[0] + pb[2]) / 2, (pb[1] + pb[3]) / 2);
+    out.pickHit = { ok: !!at && (at === pick || pick.contains(at)), got: name(at) };
+  }
+  return out;
+}"""
+
+
+def check_picker(m: Dict[str, Any], width: int, height: int, scroll: bool = False) -> List[str]:
+    """The failures in a page whose test-split picker is open (check j): no horizontal overflow; the button and the list rendered inside the
+    viewport's width, the list inside its height too where the composer is pinned rather than scrolled with the page, and the button reachable
+    by scrolling (the composer, or the page); and the last card's header, scrolled into view, not covered by the composer, the picker or
+    anything else."""
+    failures = []
+    for name, (sw, cw) in (("documentElement", m["doc"]), ("#conversation", m["conversation"]), ("#composer", m["composer"])):
+        if sw > cw:
+            failures.append("{} overflows horizontally: scrollWidth {} > clientWidth {}".format(name, sw, cw))
+    for name, key in (("#picker", "picker"), ("#pick-study", "pick")):
+        b = m[key]
+        if b is None:
+            failures.append("{} is not rendered, but the case opens the picker".format(name))
+        elif b[0] < -0.5 or b[2] > width + 0.5:
+            failures.append("{} leaves the viewport's width: left {:.0f}, right {:.0f}, viewport {}".format(name, b[0], b[2], width))
+        elif key == "picker" and not scroll and (b[1] < -0.5 or b[3] > height + 0.5):
+            failures.append("{} is not inside the {}x{} viewport: top {:.0f}, bottom {:.0f}".format(name, width, height, b[1], b[3]))
+    reach = m.get("pickHit")
+    if m["pick"] is not None and not (reach and reach["ok"]):
+        failures.append("#pick-study cannot be reached by scrolling: its centre hits {}".format((reach or {}).get("got") or "nothing"))
+    if m["head"] is None:
+        return failures + ["no card was drawn"]
+    if not m["hit"]["ok"]:
+        failures.append("the last card's header is covered by {}".format(m["hit"]["got"] or "nothing (it is outside the viewport)"))
+    return failures
 
 
 def check_save(m: Dict[str, Any], width: int, height: int, scroll: bool, drawer_open: bool) -> List[str]:
@@ -399,7 +515,7 @@ def check_tall(m: Dict[str, Any], height: int) -> List[str]:
 
 def run_checks(browser: Browser, url: str) -> Tuple[int, List[str]]:
     """Every viewport in every scheme, drawer closed and open, Stop hidden and shown. A case is a viewport in a scheme
-    with the drawer closed or open, or (one case each) its Save button and its card sections in both drawer states.
+    with the drawer closed or open, or (one case each) its Save button and its card sections in both drawer states, and its picker open.
     -> (cases, failures); a failure seen in both schemes is reported once."""
     cases = 0
     seen = {}   # type: Dict[Tuple[str, str, str], List[str]]   # (viewport, state, failure) -> schemes
@@ -432,8 +548,13 @@ def run_checks(browser: Browser, url: str) -> Tuple[int, List[str]]:
             browser.run(INJECT_SECTIONS_JS, {"events": section_events(), "names": CHEXBERT_14})
             for drawer in ("closed", "open"):
                 browser.evaluate("document.querySelector('#drawer').hidden = {}".format("false" if drawer == "open" else "true"))
-                for failure in check_sections(browser.run(MEASURE_SECTIONS_JS, {"sections": SECTIONS}), width, SECTIONS):
+                for failure in check_sections(browser.run(MEASURE_SECTIONS_JS, {"sections": SECTIONS}), width, SECTIONS, drawer == "open"):
                     seen.setdefault(("{}x{}".format(width, height), "drawer={} card sections".format(drawer), failure), []).append(scheme)
+            cases += 1   # the test-split picker open, with the drawer closed (P6 fix 1)
+            browser.evaluate("document.querySelector('#drawer').hidden = true")
+            browser.run(INJECT_PICKER_JS, {"studies": PICKER_STUDIES})
+            for failure in check_picker(browser.run(MEASURE_PICKER_JS, None), width, height, scroll):
+                seen.setdefault(("{}x{}".format(width, height), "picker open", failure), []).append(scheme)
     for width in TALL_WIDTHS:   # a composer taller than the viewport: the report's floor
         for scheme in SCHEMES:
             serial += 1

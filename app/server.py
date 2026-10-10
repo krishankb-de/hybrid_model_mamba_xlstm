@@ -77,6 +77,7 @@ BOTH_IMAGES_MSG = "Send an image or a test row, not both."
 RETRIEVE_FAILED_MSG = "The retrieval could not be run."
 NO_TURN_IMAGE_MSG = "This turn has no image."
 IMAGE_GONE_MSG = "This turn's image is no longer stored."
+PUBLIC_ORIGINAL_MSG = "Public mode serves an upload's thumbnail and model input, not its original."
 PUBLIC_GALLERY_MSG = "Gallery images are not available in public mode."
 NO_GALLERY_ROW_MSG = "No such gallery image."
 GALLERY_IMAGE_MSG = "Could not read the gallery image."
@@ -155,7 +156,7 @@ OPTIONS_DOC = ("The turn's options as a JSON object with the keys " + ", ".join(
 REFUSALS = {   # what a status means in the reference; a route that can answer it declares it with _refusals()
     400: "The request is malformed: `options` is not a JSON object, or in public mode `X-Client-Id` is missing or "
          "invalid.",
-    403: "A test-split study or a gallery image was asked for in public mode.",
+    403: "A test-split study, a gallery image or an upload's original was asked for in public mode.",
     404: "The session, message, image or gallery row does not exist or was deleted, or in public mode it belongs to another client.",
     413: "The image is over the {} MB upload limit.".format(UPLOAD_MB),
     422: "The request failed validation: a parameter, an option, the model or the image cannot be used, or there is "
@@ -854,16 +855,20 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
                  500: TEST_IMAGE_MSG, 503: NO_GALLERY_MSG})},
              description="One picture of a turn's image, given the user or the assistant message of the turn: an upload is sent "
                          "with `Cache-Control: private, max-age=3600`, and a test-split study, read from the dataset in private "
-                         "mode only, with `no-store`. Answers 403 for a test-split image in public mode, 404 for an unknown or hidden "
-                         "message, a turn with no image or an image no longer stored, 422 for any other `variant`, 500 when a "
-                         "test-split image cannot be read and 503 when the server has no gallery for a test-split turn.")
+                         "mode only, with `no-store`. Answers 403 for a test-split image in public mode and for `variant=original` in "
+                         "public mode (a public turn is never sent its original), 404 for an unknown or hidden message, a turn with no "
+                         "image or an image no longer stored, 422 for any other `variant`, 500 when a test-split image cannot be read "
+                         "and 503 when the server has no gallery for a test-split turn.")
     def message_image(message_id: str, variant: Literal["original", "thumb", "model_input"] = Query(..., description=VARIANT_DOC),
                       client_id: Optional[str] = Depends(client_scope)) -> Response:
         user = turn_image_message(message_id, client_id)
+        public = "public" in (mode, user["mode"])
         if user.get("test_row") is not None:   # R1: a test study's image is private-mode data, whoever's session it is in
-            if "public" in (mode, user["mode"]):
+            if public:
                 raise HTTPException(403, PUBLIC_TEST_SPLIT_MSG)
             return test_split_image(int(user["test_row"]), variant)
+        if public and variant == "original":   # app/redact.py never sends a public turn its original: the route holds to that too
+            raise HTTPException(403, PUBLIC_ORIGINAL_MSG)
         path = store.upload_path(user["session_id"], user["image_sha256"], variant)
         try:
             if path is None:

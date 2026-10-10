@@ -57,7 +57,7 @@ import tempfile
 import time
 import urllib.request
 import uuid
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -623,14 +623,41 @@ def server_status(base: str, message: str) -> str:
         return json.load(response)["status"]
 
 
+def strays(shown: List[str], message_ids: Sequence[str], gallery_rows: Iterable[int]) -> List[str]:
+    """Of the pictures shown (each its data-src, or "src <src>" for one with none), those that are not the chat's own: a picture of the chat
+    names one of its messages (/v1/messages/<id>/image?...) or a gallery row one of its retrieve stages named (/v1/gallery/images/<row>,
+    P6 fix 1). One with no data-src is a preview the page made of a file, a stale one once the chat is replayed."""
+    own = tuple("/v1/messages/{}/image?".format(i) for i in message_ids)
+    rows = {"/v1/gallery/images/{}".format(row) for row in gallery_rows}
+    return [s for s in shown if not ((own and s.startswith(own)) or s in rows)]
+
+
+def retrieved_rows(messages: Iterable[Any]) -> Set[int]:
+    """The gallery rows the retrieve stages of these stored messages named (private mode: a neighbour's gallery_row). Public mode names none."""
+    rows = set()  # type: Set[int]
+    for message in messages:
+        for row in (message.get("events") if isinstance(message, dict) else None) or []:
+            data = row.get("data") if isinstance(row, dict) else None
+            if not (isinstance(data, dict) and row.get("event") == "stage_end" and data.get("stage") == "retrieve"):
+                continue
+            detail = data.get("detail") if isinstance(data.get("detail"), dict) else {}
+            for neighbour in detail.get("image_neighbors") or []:
+                if isinstance(neighbour, dict) and type(neighbour.get("gallery_row")) is int:
+                    rows.add(neighbour["gallery_row"])
+    return rows
+
+
 def stray_images(b: Browser, base: str, session: str) -> List[str]:
-    """The pictures in the conversation that are not this chat's own (P6-B): a picture of a chat is fetched from the server, and its data-src
-    names a message of that chat. One with no data-src is a preview the page made of a file (a stale one, once the chat is replayed), and one
-    whose data-src names another chat's message was left behind by it. The chat's messages are asked of the server from here."""
-    with urllib.request.urlopen("{}v1/sessions/{}".format(base, session), timeout=10) as response:
-        ids = [m["id"] for m in json.load(response)["messages"]]
+    """The pictures in the conversation that are not this chat's own (P6-B, strays): its messages, and the gallery rows its turns retrieved,
+    are asked of the server from here, so that the page under watch is not the one that asks."""
+    def get(path: str) -> Any:
+        with urllib.request.urlopen("{}v1/{}".format(base, path), timeout=10) as response:
+            return json.load(response)
+
+    messages = get("sessions/{}".format(session))["messages"]
+    rows = retrieved_rows(get("messages/{}?after=0".format(m["id"])) for m in messages if m["role"] == "assistant")
     shown = b.evaluate("[...document.querySelectorAll('#conversation img')].map((i) => i.getAttribute('data-src') || ('src ' + (i.getAttribute('src') || '')))")
-    return [s for s in shown if not any(s.startswith("/v1/messages/{}/image?".format(i)) for i in ids)]
+    return strays(shown, [m["id"] for m in messages], rows)
 
 
 def check_sessions(ctx: Context) -> Tuple[str, Dict[str, Any]]:
