@@ -14,8 +14,10 @@
 //
 // ctx = { loadImage, openViewer, copy, showModels, labelNames, retrieval, ui, turn }. Every member is optional and a missing
 // callback hides its control.
-//   loadImage(path) -> Promise<object URL>   api.js loadImage with the page's auth: a user turn's thumbnail
-//   openViewer(image)                        a click on the thumbnail; image is what renderUserTurn was given
+//   loadImage(path) -> Promise<object URL>   api.js loadImage with the page's auth: a user turn's thumbnail, the card's pictures
+//   openViewer(image)                        a click on the thumbnail; image is what renderUserTurn was given. A click on a picture of
+//                                            the card passes { images: [{ url, label }, ...] } instead: one picture, or the query and a
+//                                            match side by side (the viewer is P6-E's; without openViewer a picture is not a control)
 //   copy(text)                               the report's Copy button; a throw or a rejected promise shows "Copy failed"
 //   showModels()                             the provenance link, which opens /v1/models in the drawer
 //   labelNames: [14 names]                   CHEXBERT_14 order, from /v1/models; else the order of view.labels
@@ -25,7 +27,7 @@
 //                                            whole-card replace; without it a re-rendered card starts closed
 //   turn: 3                                  the turn's number in the session: it names the card and tells the same
 //                                            control of two cards apart ("Copy report, turn 3")
-// Every control a card rebuilds each frame has a data-action (copy, raw, models, more, stage), so the page can give
+// Every control a card rebuilds each frame has a data-action (copy, raw, models, more, stage, view, show), so the page can give
 // focus back to the same control after the replace: focusKey before it, restoreFocus after.
 import { isSameOriginPath } from './api.js';
 import { STAGES, initialView, labelsPending, stageState } from './state.js';
@@ -470,8 +472,23 @@ export function optionChips(options) {
   ].filter(Boolean);
 }
 
-// msg = { text, image: { url, filename }, options }. image.url is either a URL the page can show as it is (the local
-// preview: a blob: or data: image) or a path on the server ("/v1/..."), which ctx.loadImage fetches with the token.
+// Can this path be fetched with the token? A path on this page's own origin (api.js's filter: the token goes nowhere else), and a loader.
+const fetchable = (path, cx) => isSameOriginPath(path) && typeof cx.loadImage === 'function';
+
+// An <img> whose picture comes through ctx.loadImage, because an <img src> cannot carry the bearer token (D23). It has no source until the
+// load resolves, then its object URL, or data-failed when the load fails. data-src keeps the server path it shows, so that the page (and a
+// check of it) can tell whose picture it is.
+function loadedImage(path, cx, attrs) {
+  const img = el('img', { ...attrs, 'data-src': path });
+  Promise.resolve().then(() => cx.loadImage(path)).then(
+    (url) => { if (usable(url)) img.setAttribute('src', url); },
+    () => img.setAttribute('data-failed', ''));
+  return img;
+}
+
+// msg = { text, image: { url, filename, source? }, options }. image.url is either a URL the page can show as it is (the local
+// preview: a blob: or data: image) or a path on the server ("/v1/..."), which ctx.loadImage fetches with the token. source
+// 'test_split' marks a test study's picture (P6-D), which no one uploaded.
 export function renderUserTurn(msg, ctx) {
   const m = isObject(msg) ? msg : {};
   const cx = ctx ?? {};
@@ -486,18 +503,59 @@ export function renderUserTurn(msg, ctx) {
 function thumbnail(image, cx) {
   const name = str(image.filename);
   const shown = usable(image.url);
-  const fetched = !shown && isSameOriginPath(image.url) && typeof cx.loadImage === 'function';   // api.js's filter: the token goes nowhere else
-  if (!shown && !fetched) return name ? el('span', { class: 'chip' }, name) : null;
-  const img = el('img', { class: 'thumb', alt: name ? `Uploaded X-ray: ${name}` : 'Uploaded X-ray' });
-  if (shown) {
-    img.setAttribute('src', image.url);
-  } else {
-    Promise.resolve().then(() => cx.loadImage(image.url)).then(
-      (url) => { if (usable(url)) img.setAttribute('src', url); },
-      () => img.setAttribute('data-failed', ''));
-  }
+  if (!shown && !fetchable(image.url, cx)) return name ? el('span', { class: 'chip' }, name) : null;
+  const alt = image.source === 'test_split' ? 'Test-split X-ray' : name ? `Uploaded X-ray: ${name}` : 'Uploaded X-ray';
+  const img = shown ? el('img', { class: 'thumb', alt, src: image.url }) : loadedImage(image.url, cx, { class: 'thumb', alt });
   if (typeof cx.openViewer !== 'function') return img;
   return el('button', { type: 'button', class: 'thumb-button', 'aria-label': named('Open X-ray in the viewer', cx), onclick: () => cx.openViewer(image) }, img);
+}
+
+// ---- pictures of the card ------------------------------------------------------------------------------------------------
+
+// A picture of the card, fetched through ctx.loadImage: with ctx.openViewer, a button named `open` that hands the viewer `spec`; without
+// it, the picture alone. null when the path cannot be fetched (no loader, or not a path on this origin), so nothing is drawn for it.
+function cardPicture(path, alt, open, spec, cx) {
+  if (!fetchable(path, cx)) return null;
+  const img = loadedImage(path, cx, { class: 'picture', alt });
+  if (typeof cx.openViewer !== 'function') return img;
+  return el('button', { type: 'button', class: 'picture-button', 'data-action': 'view', 'aria-label': named(open, cx),
+                        onclick: () => cx.openViewer(spec) }, img);
+}
+
+// ---- the images row: the turn's own X-ray and what the model saw (P6-B) ---------------------------------------------------
+
+const MODEL_SAW = 'What the model saw (224×224)';
+
+// "2544×3056 px", the size preprocess read (after the EXIF orientation), from its detail; '' when it has none to read.
+function pixelSize(v) {
+  const px = isObject(v.stages.preprocess?.detail) ? v.stages.preprocess.detail.input_px : null;
+  return Array.isArray(px) && px.length === 2 && px.every((n) => Number.isInteger(n) && n > 0) ? `${px[0]}×${px[1]} px` : '';
+}
+
+const tile = (shown, caption) => (shown ? el('figure', { class: 'image-tile' }, shown, el('figcaption', {}, caption)) : null);
+
+// The X-ray of the turn (its thumbnail, labelled with the size preprocess read) and the 224×224 image the tower saw, side by side: a crop
+// or an aspect the resize changed is visible there. Both come from message_start.image.urls, served by GET /v1/messages/{id}/image. Public
+// mode sends no original (app/redact.py), so the viewer is then given the thumbnail. Hidden when there is nothing to fetch: no loader, a turn
+// with no image (a question), or no path on this origin.
+export function renderImages(view, ctx) {
+  const v = whole(view);
+  const cx = ctx ?? {};
+  const image = isObject(v.image) ? v.image : {};
+  const urls = isObject(image.urls) ? image.urls : {};
+  const study = image.source === 'test_split';
+  const own = study ? 'Test-split X-ray' : 'Your X-ray';
+  const size = pixelSize(v);
+  const ownLabel = size ? `${own} · ${size}` : own;
+  const full = fetchable(urls.original, cx) ? urls.original : urls.thumb;
+  const tiles = [
+    tile(cardPicture(urls.thumb, own, study ? 'Open the test-split X-ray in the viewer' : 'Open your X-ray in the viewer',
+                     { images: [{ url: full, label: ownLabel }] }, cx), ownLabel),
+    tile(cardPicture(urls.model_input, 'What the model saw', 'Open what the model saw in the viewer',
+                     { images: [{ url: urls.model_input, label: MODEL_SAW }] }, cx), MODEL_SAW),
+  ].filter(Boolean);
+  return el('section', { class: 'images', 'aria-label': named('Images', cx), hidden: !tiles.length },
+    el('h3', { class: 'section-title' }, 'Images'), el('div', { class: 'image-row' }, ...tiles));
 }
 
 // ---- the assistant card and the throttle ---------------------------------------------------------------------------------
@@ -513,19 +571,31 @@ export function renderAssistantCard(view, ctx) {
     timeline.setAttribute('hidden', '');
     provenance.setAttribute('hidden', '');
   }
+  // The sections the P6 tasks add, under the labels: one that has nothing to show is left out of the card, so the card of a turn that
+  // has none of them is the card it always was.
+  const sections = [renderImages(v, cx)].filter((section) => !section.hasAttribute('hidden'));
   return el('article', { class: 'card', 'aria-label': named('Assistant report', cx), 'data-message-id': str(v.id) || null, 'data-status': str(v.status) || null },
-    timeline, renderNotes(v), renderReport(v, cx), renderLabels(v, cx), provenance);
+    timeline, renderNotes(v), renderReport(v, cx), renderLabels(v, cx), ...sections, provenance);
 }
 
 // ---- keeping focus through the whole-card replace -------------------------------------------------------------------------
 
-// The control a node is in (or is), as a key that survives the rebuild: copy, raw, models, stage:<stage> or
-// more:<stage>:<n>, the nth show-more button of that stage's table. null when the node is not in one of those.
+// Controls a card has several of outside its stages (a picture's viewer button, a report's Show all): told apart by their order in the card.
+const INDEXED_ACTIONS = ['view', 'show'];
+
+// The control a node is in (or is), as a key that survives the rebuild: copy, raw, models, stage:<stage>,
+// more:<stage>:<n>, the nth show-more button of that stage's table, or view:<n> and show:<n>, the nth such control of the card.
+// null when the node is not in one of those.
 export function focusKey(node) {
   const control = node?.closest?.('[data-action]');
   if (!control) return null;
   const action = control.getAttribute('data-action');
   if (action === 'copy' || action === 'raw' || action === 'models') return action;
+  if (INDEXED_ACTIONS.includes(action)) {
+    const card = control.closest('.card');
+    const index = card ? Array.from(card.querySelectorAll(`[data-action="${action}"]`)).indexOf(control) : -1;
+    return index < 0 ? null : `${action}:${index}`;
+  }
   const item = control.closest('li[data-stage]');
   const stage = item?.getAttribute('data-stage');
   if (!stage) return null;
@@ -535,7 +605,7 @@ export function focusKey(node) {
   return index < 0 ? null : `more:${stage}:${index}`;
 }
 
-const FOCUS_KEY = /^(?:(copy|raw|models)|stage:([a-z]+)|more:([a-z]+):(\d+))$/;
+const FOCUS_KEY = /^(?:(copy|raw|models)|stage:([a-z]+)|more:([a-z]+):(\d+)|(view|show):(\d+))$/;
 
 // Puts focus on the control of the rebuilt card that key names: after card.replaceWith(next), restoreFocus(next, key),
 // with key taken by focusKey before it. true when the control took focus; false when there is no such control (a Copy
@@ -547,6 +617,7 @@ export function restoreFocus(card, key) {
   let target = null;
   if (m[1]) target = card.querySelector(`[data-action="${m[1]}"]`);
   else if (m[2]) target = STAGES.includes(m[2]) ? card.querySelector(`li[data-stage="${m[2]}"] > [data-action="stage"]`) : null;
+  else if (m[5]) target = Array.from(card.querySelectorAll(`[data-action="${m[5]}"]`))[Number(m[6])];
   else if (STAGES.includes(m[3])) target = Array.from(card.querySelectorAll(`li[data-stage="${m[3]}"] [data-action="more"]`))[Number(m[4])];
   if (!target) return false;
   target.focus({ preventScroll: true });

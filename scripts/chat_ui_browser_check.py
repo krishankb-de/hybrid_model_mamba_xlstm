@@ -7,8 +7,10 @@ mouse and key events. The image is a synthetic PNG (tests/app_helpers.png_bytes)
 one `CHECK <name> PASS|FAIL <detail>` line each:
 
   stream    a turn streams: all six stages settle, the report grows over many snapshots, then the card says done
-  reload    Page.reload shows the identical card (its markup, text and stage states)
-  sessions  a second chat switches cleanly with the first, also when a turn is left running: no leaked stream, no stale image
+  reload    Page.reload shows the identical card (its markup, text and stage states; a picture's object URL names the document that
+            made it, so the server path in its data-src is what is compared, P6-B)
+  sessions  a second chat switches cleanly with the first, also when a turn is left running: no leaked stream, no stale image (every
+            picture on the page names a message of the chat it shows)
   exports   the JSON and Markdown exports download and open
   stop      Stop aborts a 150-token turn within a step: aborted, fewer than 150 snapshots, the card says stopped
   keyboard  Tab visits the controls in DOM order; Enter sends; Enter on Settings opens the drawer and Esc closes it, to Settings
@@ -83,16 +85,21 @@ LIVE_REFERENCE = "Findings: The heart is enlarged. Small left pleural effusion. 
 
 # ---- the page, as scripts: each is a function that the browser calls with one JSON argument ---------------------------------------
 
+# The card's markup is compared across a reload: its pictures (P6-B) are object URLs, which name the document that made them, so each
+# src="blob:..." is read as src="blob:" (the server path a picture shows is in its data-src, and that is compared). `pending` counts the
+# pictures still on their way: no source yet, or a source that has not loaded.
 CARD_JS = """() => {
   const cards = [...document.querySelectorAll('#conversation article.card')];
   const c = cards[cards.length - 1];
   if (!c) return null;
   const body = c.querySelector('.report-body');
   const stopped = c.querySelector('.note.stopped');
+  const pending = [...c.querySelectorAll('img')].filter((i) => i.hasAttribute('src') ? !i.complete : !i.hasAttribute('data-failed')).length;
   return {
     id: c.getAttribute('data-message-id'), status: c.getAttribute('data-status'), cards: cards.length,
     stages: Object.fromEntries([...c.querySelectorAll('.timeline > li')].map((l) => [l.getAttribute('data-stage'), l.getAttribute('data-state')])),
-    report: body ? body.textContent : '', stopped: stopped ? stopped.textContent : null, html: c.outerHTML, text: c.textContent,
+    report: body ? body.textContent : '', stopped: stopped ? stopped.textContent : null,
+    html: c.outerHTML.replace(/ src="blob:[^"]*"/g, ' src="blob:"'), text: c.textContent, pending,
   };
 }"""
 
@@ -364,7 +371,8 @@ class Context:
         return self.browser.evaluate("(%s)()" % CARD_JS)
 
     def wait_card(self, status: Optional[str] = None, timeout: float = 20.0, message: Optional[str] = None) -> Dict[str, Any]:
-        cond = "(() => { const c = (%s)(); return c && %s ? c : null; })()" % (
+        """The newest card, once it has this status and its pictures have loaded (P6-B: they arrive after the card)."""
+        cond = "(() => { const c = (%s)(); return c && c.pending === 0 && %s ? c : null; })()" % (
             CARD_JS, "c.status === %s" % json.dumps(status) if status else "true")
         return self.browser.wait_for(cond, timeout, message or "a card" + (" that is " + status if status else ""))
 
@@ -388,8 +396,8 @@ class Context:
         before = self.browser.evaluate("document.querySelectorAll('#conversation article.card').length")
         self.attach(name)
         self.send(note)
-        return self.browser.wait_for("(() => { const c = (%s)(); return c && c.cards > %d && c.status !== 'running' ? c : null; })()" % (CARD_JS, before),
-                                     timeout, "the turn to end")
+        return self.browser.wait_for("(() => { const c = (%s)(); return c && c.cards > %d && c.status !== 'running' && c.pending === 0 ? c : null; })()"
+                                     % (CARD_JS, before), timeout, "the turn to end")
 
     def shot(self, key: str, name: str, what: str, viewport: Tuple[int, int], scheme: str = "light") -> None:
         """A screenshot, once the page itself says that it shows what `key` claims (SHOT_RULES)."""
@@ -609,14 +617,20 @@ def check_reload(ctx: Context) -> Tuple[str, Dict[str, Any]]:
                                  "markup_chars": len(replayed["html"])}})
 
 
-def blob_images(b: Browser) -> List[str]:
-    return b.evaluate("[...document.querySelectorAll('#conversation img')].map((i) => i.getAttribute('src') || '')")
-
-
 def server_status(base: str, message: str) -> str:
     """A message's status as the server has it, asked from here: the page is under watch and must not be the one that asks."""
     with urllib.request.urlopen("{}v1/messages/{}?after=0".format(base, message), timeout=10) as response:
         return json.load(response)["status"]
+
+
+def stray_images(b: Browser, base: str, session: str) -> List[str]:
+    """The pictures in the conversation that are not this chat's own (P6-B): a picture of a chat is fetched from the server, and its data-src
+    names a message of that chat. One with no data-src is a preview the page made of a file (a stale one, once the chat is replayed), and one
+    whose data-src names another chat's message was left behind by it. The chat's messages are asked of the server from here."""
+    with urllib.request.urlopen("{}v1/sessions/{}".format(base, session), timeout=10) as response:
+        ids = [m["id"] for m in json.load(response)["messages"]]
+    shown = b.evaluate("[...document.querySelectorAll('#conversation img')].map((i) => i.getAttribute('data-src') || ('src ' + (i.getAttribute('src') || '')))")
+    return [s for s in shown if not any(s.startswith("/v1/messages/{}/image?".format(i)) for i in ids)]
 
 
 def check_sessions(ctx: Context) -> Tuple[str, Dict[str, Any]]:
@@ -636,10 +650,12 @@ def check_sessions(ctx: Context) -> Tuple[str, Dict[str, Any]]:
 
     def show(session: str, message: str, filename: str) -> Dict[str, Any]:
         b.click('#session-list li[data-session="%s"] a' % session)
-        card = b.wait_for("(() => { const c = (%s)(); return c && c.id === %s && c.status === 'done' ? c : null; })()" % (CARD_JS, json.dumps(message)),
-                          20, "the card of {}".format(session))
+        card = b.wait_for("(() => { const c = (%s)(); return c && c.id === %s && c.status === 'done' && c.pending === 0 ? c : null; })()"
+                          % (CARD_JS, json.dumps(message)), 20, "the card of {}".format(session))
+        # a user turn as it reads: its text, and its picture's alt text (P6-B: a replayed upload shows its thumbnail, named by its file)
         facts = b.evaluate("({ cards: document.querySelectorAll('#conversation article.card').length,"
-                           " users: [...document.querySelectorAll('#conversation .turn.user')].map((u) => u.textContent),"
+                           " users: [...document.querySelectorAll('#conversation .turn.user')].map((u) => u.textContent"
+                           " + [...u.querySelectorAll('img')].map((i) => ' ' + (i.getAttribute('alt') || '')).join('')),"
                            " current: [...document.querySelectorAll('#session-list [aria-current]')].map((a) => a.parentNode.getAttribute('data-session')),"
                            " hash: location.hash, preview: document.querySelector('#preview').hidden,"
                            " send: !document.querySelector('#send').disabled, stop: document.querySelector('#stop').hidden })")
@@ -647,7 +663,8 @@ def check_sessions(ctx: Context) -> Tuple[str, Dict[str, Any]]:
         expect(facts["hash"] == "#/s/" + session, "the address is {}".format(facts["hash"]))
         expect(facts["current"] == [session], "the sidebar marks {} as the current chat".format(facts["current"]))
         expect(len(facts["users"]) == 1 and filename in facts["users"][0], "the user turn is {!r}, not the one for {}".format(facts["users"], filename))
-        expect(not [s for s in blob_images(b) if s.startswith("blob:")], "a stale preview image is still on the page")
+        stray = stray_images(b, ctx.base, session)
+        expect(not stray, "a stale preview image, or another chat's, is still on the page: {}".format(stray))
         expect(facts["send"] and facts["stop"], "the composer is locked in {}".format(session))
         expect(facts["preview"], "an image is attached in the composer of {}".format(session))
         return card
@@ -670,7 +687,9 @@ def check_sessions(ctx: Context) -> Tuple[str, Dict[str, Any]]:
                if p["request"]["method"] == "POST" and p["request"]["url"].endswith("/messages")]
     expect(len(streams) == 1, "{} turn requests were sent for one turn".format(len(streams)))
     b.click('#session-list li[data-session="%s"] a' % id_a)
-    b.wait_for("(() => { const c = (%s)(); return c && c.id === %s ? c : null; })()" % (CARD_JS, json.dumps(msg_a)), 20, "the first chat's card")
+    b.wait_for("(() => { const c = (%s)(); return c && c.id === %s && c.pending === 0 ? c : null; })()" % (CARD_JS, json.dumps(msg_a)), 20,
+               "the first chat's card")
+    pictures_a = b.evaluate("document.querySelectorAll('#conversation img').length")   # its own (P6-B): the thumbnail and the card's two
     samples = 0
     deadline = time.time() + 20
     while server_status(ctx.base, msg_b2) == "running":
@@ -686,7 +705,9 @@ def check_sessions(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     time.sleep(0.4)   # and a little longer: nothing may still arrive
     after = b.evaluate("({ ids: [...document.querySelectorAll('#conversation article.card')].map((c) => c.getAttribute('data-message-id')),"
                        " img: [...document.querySelectorAll('#conversation img')].length })")
-    expect(after["ids"] == [msg_a] and after["img"] == 0, "the first chat changed after the other turn ended: {}".format(after))
+    after["stray"] = stray_images(b, ctx.base, id_a)
+    expect(after["ids"] == [msg_a] and after["img"] == pictures_a and not after["stray"],
+           "the first chat changed after the other turn ended: {} (it had {} pictures)".format(after, pictures_a))
     b.evaluate("0")
     dropped = [p for p in b.events("Network.loadingFailed", clear=False) if p["requestId"] == streams[0]]
     expect(dropped and dropped[0].get("canceled") is True, "the stream of the turn was not dropped when its chat was left: {}".format(dropped))
@@ -700,7 +721,8 @@ def check_sessions(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     expect(cards == [msg_b, msg_b2], "the second chat shows {} instead of [{}, {}]".format(cards, msg_b, msg_b2))
     report2 = b.evaluate("document.querySelectorAll('#conversation article.card')[1].querySelector('.report-body').textContent")
     expect(len(report2) > 100, "the turn that finished while the chat was left has a {}-character report".format(len(report2)))
-    expect(not [s for s in blob_images(b) if s.startswith("blob:")], "a stale preview image is on the second chat")
+    stray = stray_images(b, ctx.base, id_b)
+    expect(not stray, "a stale preview image, or another chat's, is on the second chat: {}".format(stray))
     return ("2 chats switched 4 times, each with its own card and user turn; leaving a running turn cancelled its stream (request aborted), "
             "nothing asked for it ({} samples), and it replays done".format(samples),
             {"sessions": [id_a, id_b], "messages": {"a": msg_a, "b": msg_b, "b2": msg_b2}, "samples_while_away": samples,

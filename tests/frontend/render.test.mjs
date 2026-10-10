@@ -17,6 +17,12 @@ import {
 } from '../../app/static/render.js';
 
 const { focusKey, restoreFocus } = render;   // fix round 1: read off the namespace, so a missing export fails its own tests only
+// P6-B..D: read off the namespace too, and called through a guard, so that a builder that does not exist yet fails its own tests and no other
+const builder = (name) => (...args) => {
+  assert.equal(typeof render[name], 'function', `render.js exports ${name}`);
+  return render[name](...args);
+};
+const renderImages = builder('renderImages');
 
 installDom();   // this file's process only: the other test files never see a document
 
@@ -877,11 +883,14 @@ test('markup in a user note, a filename, a label name, a notice, an error and a 
 // ---- a public-mode or partial view: missing fields are not errors (ruling 5) ----------------------------------------
 
 function everyBuilder(view, ctx) {
-  return {
+  const built = {
     card: renderAssistantCard(view, ctx), timeline: renderTimeline(view, ctx), report: renderReport(view, ctx),
     labels: renderLabels(view, ctx), provenance: renderProvenance(view, ctx), notes: renderNotes(view, ctx),
   };
+  for (const name of SECTION_BUILDERS) if (typeof render[name] === 'function') built[name] = render[name](view, ctx);   // P6-B..D
+  return built;
 }
+const SECTION_BUILDERS = ['renderImages'];
 // What a missing field must never print, in the text of a card or in any attribute of it.
 function assertClean(node, name) {
   assert.doesNotMatch(node.textContent, /undefined|NaN|\bnull\b|\[object|\bfalse\b/, `${name}: text`);
@@ -1230,6 +1239,129 @@ test('a turn without an image has no picture; an image with no usable source sho
   assert.equal(qa(named, 'img').length, 0);
   assert.equal(q(named, '.chip').textContent, 'chest.png');
   assert.equal(renderUserTurn({ text: 'a note' }).hasAttribute('hidden'), false);
+});
+
+// ---- the images row: your X-ray and what the model saw (P6-B) ----------------------------------------------------------
+
+const URLS = { original: '/v1/messages/u_test/image?variant=original', thumb: '/v1/messages/u_test/image?variant=thumb',
+               model_input: '/v1/messages/u_test/image?variant=model_input' };
+const imageStart = (image = {}, more = {}) => step('message_start', { ...START.data, ...more, image: { ...START.data.image, urls: URLS, ...image } });
+const PREPROCESSED = stageEnd('preprocess', 1.6, { format: 'PNG', input_px: [2544, 3056], source: 'upload' });
+// A loader that answers every path with an object URL named after its variant, and keeps what it was asked.
+function loader() {
+  const asked = [];
+  return { asked, loadImage: async (path) => { asked.push(path); return `blob:test/${String(path).split('variant=')[1] ?? path}`; } };
+}
+
+test('the images row shows your X-ray, labelled with its pixel size, and what the model saw, both through ctx.loadImage (P6-B)', async () => {
+  const { asked, loadImage } = loader();
+  const section = renderImages(viewOf([imageStart(), stageStart('preprocess', 0), PREPROCESSED]), { loadImage, turn: 2 });
+  assert.equal(section.localName, 'section');
+  assert.ok(section.classList.contains('images'));
+  assert.equal(section.hasAttribute('hidden'), false);
+  assert.equal(section.getAttribute('aria-label'), 'Images, turn 2');
+  assert.equal(q(section, 'h3').textContent, 'Images');
+  assert.deepEqual(texts(qa(section, 'figure figcaption')), ['Your X-ray · 2544×3056 px', 'What the model saw (224×224)']);
+  const imgs = qa(section, 'img');
+  assert.deepEqual(imgs.map((i) => i.getAttribute('data-src')), [URLS.thumb, URLS.model_input]);   // the 512 px thumbnail, not the original
+  assert.deepEqual(imgs.map((i) => i.getAttribute('alt')), ['Your X-ray', 'What the model saw']);
+  assert.ok(imgs.every((i) => !i.hasAttribute('src')));   // no source until a load resolves: an <img src> cannot carry the token
+  await tick();
+  assert.deepEqual(asked, [URLS.thumb, URLS.model_input]);
+  assert.deepEqual(imgs.map((i) => i.getAttribute('src')), ['blob:test/thumb', 'blob:test/model_input']);
+  assert.equal(qa(section, 'button').length, 0);   // no viewer to open: pictures only
+});
+
+test('your X-ray has no size until preprocess says it, a test study is named as one, and a public turn shows both pictures too', async () => {
+  const { loadImage } = loader();
+  const captions = (view) => texts(qa(renderImages(view, { loadImage }), 'figcaption'));
+  assert.deepEqual(captions(viewOf([imageStart()])), ['Your X-ray', 'What the model saw (224×224)']);   // message_start only
+  const study = viewOf([imageStart({ source: 'test_split', filename: null }), stageEnd('preprocess', 1, { input_px: [320, 320], source: 'test_split' })]);
+  assert.deepEqual(captions(study), ['Test-split X-ray · 320×320 px', 'What the model saw (224×224)']);
+  assert.equal(q(renderImages(study, { loadImage }), 'img').getAttribute('alt'), 'Test-split X-ray');
+  const pub = viewOf([imageStart({ urls: { thumb: URLS.thumb, model_input: URLS.model_input } }, { mode: 'public' }), PREPROCESSED]);
+  assert.deepEqual(captions(pub), ['Your X-ray · 2544×3056 px', 'What the model saw (224×224)']);   // a user's own upload, in both modes
+  for (const odd of [[320], ['a', 'b'], [0, 5], [1.5, 2], 'x', null]) {
+    const view = viewOf([imageStart(), stageEnd('preprocess', 1, { input_px: odd })]);
+    assert.equal(captions(view)[0], 'Your X-ray', JSON.stringify(odd));   // a size it cannot read is no size, never "undefined"
+  }
+});
+
+test('with nothing to show the images row is hidden: no loader, no image, no usable path; a failed load marks its own picture', async () => {
+  const { asked, loadImage } = loader();
+  const view = viewOf([imageStart(), PREPROCESSED]);
+  assert.equal(renderImages(view, {}).hasAttribute('hidden'), true);   // no loader: nothing can be fetched with the token
+  assert.equal(renderImages(viewOf([step('message_start', { ...START.data, image: null })]), { loadImage }).hasAttribute('hidden'), true);   // a question
+  assert.equal(renderImages(initialView('m'), { loadImage }).hasAttribute('hidden'), true);
+  const hostile = viewOf([imageStart({ urls: { thumb: 'https://evil.example/x.png', model_input: '//evil.example/y.png', original: 'blob:x' } })]);
+  assert.equal(renderImages(hostile, { loadImage }).hasAttribute('hidden'), true);
+  await tick();
+  assert.deepEqual(asked, []);   // not even asked: only a path on this origin is fetched with the token
+  const half = renderImages(viewOf([imageStart({ urls: { thumb: URLS.thumb } })]), { loadImage });
+  assert.deepEqual(texts(qa(half, 'figcaption')), ['Your X-ray']);   // the tile that has a path is shown, alone
+  const failing = renderImages(view, { loadImage: async (path) => { if (path === URLS.thumb) throw new Error('refused'); return 'blob:ok'; } });
+  await tick();
+  await tick();
+  assert.deepEqual(qa(failing, 'img').map((i) => [i.hasAttribute('data-failed'), i.getAttribute('src')]), [[true, null], [false, 'blob:ok']]);
+});
+
+test('with ctx.openViewer each picture is a button that opens it: your X-ray at full size, what the model saw at 224 (the hook P6-E fills)', () => {
+  const { loadImage } = loader();
+  const opened = [];
+  const ctx = { loadImage, openViewer: (spec) => opened.push(spec), turn: 2 };
+  const section = renderImages(viewOf([imageStart(), PREPROCESSED]), ctx);
+  const buttons = qa(section, 'button[data-action="view"]');
+  assert.deepEqual(buttons.map((b) => b.getAttribute('aria-label')), ['Open your X-ray in the viewer, turn 2', 'Open what the model saw in the viewer, turn 2']);
+  assert.ok(buttons.every((b) => q(b, 'img') && b.getAttribute('type') === 'button'));
+  buttons.forEach((b) => b.click());
+  assert.deepEqual(opened, [{ images: [{ url: URLS.original, label: 'Your X-ray · 2544×3056 px' }] },
+                            { images: [{ url: URLS.model_input, label: 'What the model saw (224×224)' }] }]);
+  opened.length = 0;
+  const pub = renderImages(viewOf([imageStart({ urls: { thumb: URLS.thumb, model_input: URLS.model_input } })]), ctx);
+  q(pub, 'button').click();
+  assert.deepEqual(opened, [{ images: [{ url: URLS.thumb, label: 'Your X-ray' }] }]);   // no original in public mode: the thumbnail
+});
+
+test('the card shows the images row after the labels when the page can load images, and is the card it always was without a loader', () => {
+  const { loadImage } = loader();
+  const view = viewOf([imageStart(), stageStart('preprocess', 0), PREPROCESSED, stageStart('generate', 3), snapshot('Findings: ok'),
+                       stageEnd('generate', 9, GENERATE), skipped('label', 'labeler_unavailable'), skipped('score', 'no_reference'),
+                       stopOf('done', { report: 'Findings: ok', display_report: 'Findings: ok' })]);
+  const card = renderAssistantCard(view, { loadImage, copy() {}, showModels() {} });
+  assert.deepEqual(card.children.map((c) => c.getAttribute('class')), ['timeline', 'notes', 'report', 'labels', 'images', 'provenance']);
+  const plain = renderAssistantCard(view, { copy() {}, showModels() {} });
+  assert.deepEqual(plain.children.map((c) => c.getAttribute('class')), ['timeline', 'notes', 'report', 'labels', 'provenance']);
+});
+
+test('a user turn\'s server thumbnail carries its path in data-src, and a test study\'s thumbnail says what it is', async () => {
+  const { loadImage } = loader();
+  const upload = renderUserTurn({ image: { url: URLS.thumb, filename: 'chest.png' } }, { loadImage });
+  assert.equal(q(upload, 'img').getAttribute('data-src'), URLS.thumb);
+  assert.equal(q(upload, 'img').getAttribute('alt'), 'Uploaded X-ray: chest.png');
+  const study = renderUserTurn({ image: { url: URLS.thumb, filename: null, source: 'test_split' } }, { loadImage });
+  assert.equal(q(study, 'img').getAttribute('alt'), 'Test-split X-ray');
+  await tick();
+  assert.equal(q(study, 'img').getAttribute('src'), 'blob:test/thumb');
+  const preview = renderUserTurn({ image: { url: 'blob:http://localhost/abc', filename: 'chest.png' } }, { loadImage });
+  assert.equal(q(preview, 'img').hasAttribute('data-src'), false);   // a local preview is the page's own: no server path
+});
+
+test('focusKey and restoreFocus find a viewer button again in the rebuilt card', () => {
+  const { loadImage } = loader();
+  const view = viewOf([imageStart(), PREPROCESSED, stageStart('generate', 3), snapshot('Findings: so far')]);
+  const ctx = { loadImage, openViewer() {}, ui: new Map() };
+  let card = renderAssistantCard(view, ctx);
+  document.body.replaceChildren(card);
+  const second = qa(card, 'button[data-action="view"]')[1];
+  second.focus();
+  assert.equal(focusKey(document.activeElement), 'view:1');
+  const next = renderAssistantCard(view, ctx);
+  card.replaceWith(next);
+  card = next;
+  assert.equal(restoreFocus(card, 'view:1'), true);
+  assert.equal(document.activeElement, qa(card, 'button[data-action="view"]')[1]);
+  assert.equal(restoreFocus(card, 'view:7'), false);   // no such button: false, quietly
+  document.body.replaceChildren();
 });
 
 // ---- UI state that outlives a re-render (ctx.ui) ----------------------------------------------------------------------

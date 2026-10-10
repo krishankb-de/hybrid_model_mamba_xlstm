@@ -22,7 +22,7 @@ import re
 from contextlib import asynccontextmanager, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 from fastapi import Depends, FastAPI, File, Form, Header, Query, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -39,11 +39,11 @@ from starlette.requests import Request
 from app.commands import COMMAND_HELP, parse_command
 from app.engine import REPO_ROOT, Engine, build_engine
 from app.gallery import Gallery, GalleryMismatch
-from app.imaging import (MAX_UPLOAD_BYTES, MIN_SIDE, TOO_LARGE_MSG, UploadError, load_upload, model_input_image,
+from app.imaging import (MAX_UPLOAD_BYTES, MIN_SIDE, TOO_LARGE_MSG, UploadError, load_upload, model_input_image, sniff_format,
                          thumbnail_jpeg)
 from app.labels import LabelerClient, LabelerUnavailable, RuleLabeler
-from app.pipeline import TEST_IMAGE_MSG, Pipeline, PublishedDumps, TurnJob, Worker, named_labels
-from app.redact import redact_card
+from app.pipeline import TEST_IMAGE_MSG, Pipeline, PublishedDumps, TurnJob, Worker, image_urls, named_labels
+from app.redact import redact_card, redact_event
 from app.schemas import DISCLAIMER, Options, error_body
 from app.store import Store
 
@@ -74,6 +74,12 @@ NO_LABELER_MSG = "Labels need a CheXbert labeller, which this server does not ha
 LABELER_DOWN_MSG = "The CheXbert labeller did not answer; try again shortly."
 BOTH_IMAGES_MSG = "Send an image or a test row, not both."
 RETRIEVE_FAILED_MSG = "The retrieval could not be run."
+NO_TURN_IMAGE_MSG = "This turn has no image."
+IMAGE_GONE_MSG = "This turn's image is no longer stored."
+UPLOAD_CACHE = {"Cache-Control": "private, max-age=3600"}   # a user's own upload, back to that user: a reload need not fetch it again
+NO_STORE = {"Cache-Control": "no-store"}                     # an image of the dataset (MIMIC): never kept by a browser or a proxy (R1)
+IMAGE_TYPES = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}   # sniff_format's names
+UPLOAD_TYPES = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}   # the stored files' extensions (original.<ext>)
 MAX_LABEL_CHARS = 20000   # what the labeller service takes in one request (app/labeler.py answers 422 above it)
 TINY_GALLERY_REFERENCE = "phase6_mimic_20260101T000000Z.json"   # the reference result that decides the tiny gallery's gate
 PLACEHOLDER = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>CXR Report Chat</title></head>"
@@ -146,7 +152,7 @@ REFUSALS = {   # what a status means in the reference; a route that can answer i
     400: "The request is malformed: `options` is not a JSON object, or in public mode `X-Client-Id` is missing or "
          "invalid.",
     403: "A test-split study was asked for in public mode.",
-    404: "The session or message does not exist or was deleted, or in public mode it belongs to another client.",
+    404: "The session, message or image does not exist or was deleted, or in public mode it belongs to another client.",
     413: "The image is over the {} MB upload limit.".format(UPLOAD_MB),
     422: "The request failed validation: a parameter, an option, the model or the image cannot be used, or there is "
          "no image to run.",
@@ -165,6 +171,13 @@ STREAM_RESPONSE = {200: {   # the turn is Server-Sent Events, not JSON
     "headers": {"X-Message-Id": {"description": "The new message's id, sent before the first event.",
                                  "schema": {"type": "string"}}},
     "content": {"text/event-stream": {"schema": {"type": "string"}}}}}
+VARIANT_DOC = ("Which picture: `original` (the bytes as uploaded), `thumb` (a JPEG at most 512 px on its long side) or `model_input` "
+               "(the 224x224 PNG the model saw).")
+IMAGE_RESPONSE = {200: {   # an image, not JSON
+    "description": "The image: PNG, JPEG or WEBP, as its content type says.",
+    "headers": {"Cache-Control": {"description": "`private, max-age=3600` for a user's own upload; `no-store` for an image of the "
+                                                 "dataset (a test-split study or a gallery image).", "schema": {"type": "string"}}},
+    "content": {kind: {"schema": {"type": "string", "format": "binary"}} for kind in IMAGE_TYPES.values()}}}
 EXPORT_RESPONSE = {200: {   # JSON is FastAPI's default; Markdown is the other format
     "description": "The session as a file: JSON (the default) or Markdown.",
     "headers": {"Content-Disposition": {"description": "An attachment named session-<id>.json or session-<id>.md.",
@@ -502,6 +515,16 @@ def _wire_published(dirs: Optional[Dict[str, str]], gallery: Optional[Gallery]) 
     return dumps
 
 
+def _image_urls(message: Dict[str, Any], mode: str) -> Optional[Dict[str, str]]:
+    """A user message's image variants as its turn's message_start.image.urls has them (P6-B), so a reload shows the thumbnail again.
+    They pass the one public policy (app/redact.py): a public turn's have no original, as its message_start has none. None for a turn
+    with no image (a question)."""
+    if not message.get("image_sha256"):
+        return None
+    turn_mode = "public" if "public" in (mode, message.get("mode")) else "private"
+    return redact_event("message_start", {"image": {"urls": image_urls(message["id"])}}, turn_mode)["image"]["urls"]
+
+
 def _clean_filename(name: Optional[str]) -> Optional[str]:
     """The upload's own name: no directory a browser put in front, one line, at most 200 characters."""
     return " ".join(os.path.basename((name or "").replace("\\", "/")).split())[:200] or None
@@ -665,12 +688,17 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         return {"sessions": sessions, "next_cursor": next_cursor}
 
     @app.get("/v1/sessions/{session_id}", summary="Get a session",
-             description="One session with its messages in order, user and assistant turns alike; a message's events "
-                         "come from `GET /v1/messages/{message_id}`. Answers 404 for an unknown or deleted session, "
-                         "or in public mode another client's.",
+             description="One session with its messages in order, user and assistant turns alike, each user message with the "
+                         "`image_urls` of its image (null when it had none); a message's events come from "
+                         "`GET /v1/messages/{message_id}`. Answers 404 for an unknown or deleted session, or in public mode another "
+                         "client's.",
              responses=_refusals({404: "Session not found."}))
     def get_session(session_id: str, client_id: Optional[str] = Depends(client_scope)):
-        return visible_session(session_id, client_id)
+        session = visible_session(session_id, client_id)
+        for message in session["messages"]:
+            if message["role"] == "user":   # P6-B: what a reload shows the turn's image from
+                message["image_urls"] = _image_urls(message, mode)
+        return session
 
     @app.delete("/v1/sessions/{session_id}", status_code=204, summary="Delete a session",
                 description="Hides the session from every route and removes its uploaded images at once; its stored "
@@ -777,6 +805,69 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
                                   422: "Invalid request: after: Input should be greater than or equal to 0"}))
     def get_message(message_id: str, after: int = Query(0, ge=0), client_id: Optional[str] = Depends(client_scope)):
         return dict(visible_message(message_id, client_id), events=store.events_after(message_id, after))
+
+    # ---- P6-B: a turn's image, from either message of the turn ---------------------------------------------------------------
+
+    def turn_image_message(message_id: str, client_id: Optional[str]) -> Dict[str, Any]:
+        """The user message that holds a turn's image, given either message of the turn: start_turn writes the user message just
+        before its assistant message. 404 for an unknown or hidden message, and for a turn that has no image (a question)."""
+        message: Optional[Dict[str, Any]] = visible_message(message_id, client_id)
+        if message["role"] == "assistant":
+            session = store.get_session(message["session_id"], client_id) or {"messages": []}
+            message = next((m for m in session["messages"] if m["role"] == "user"
+                            and m["seq_in_session"] == message["seq_in_session"] - 1), None)
+        if message is None or not message.get("image_sha256"):
+            raise HTTPException(404, NO_TURN_IMAGE_MSG)
+        return message
+
+    def test_split_image(row: int, variant: str) -> Response:
+        """A test study's image, read where the dataset keeps it and never copied: its 320 px JPEG is both the original and the
+        thumbnail, and the model input is made in memory as preprocess makes it. Its path holds subject and study ids, so a failure
+        names neither, in the message or in the log."""
+        gallery = worker.pipeline.gallery
+        if gallery is None:
+            raise HTTPException(503, NO_GALLERY_MSG)
+        try:
+            path = gallery.test_study(row)["image"]
+        except IndexError:   # a gallery other than the one the turn ran with: it has no such study
+            raise HTTPException(404, IMAGE_GONE_MSG) from None
+        try:
+            data = Path(path).read_bytes()
+            kind = sniff_format(data)
+            if variant == "model_input":
+                png = io.BytesIO()
+                model_input_image(load_upload(data)[0]).save(png, "PNG")   # exactly Prepared.model_input
+                data, kind = png.getvalue(), "PNG"
+        except (OSError, UploadError):
+            log.warning("a test-split image could not be read")
+            raise HTTPException(500, TEST_IMAGE_MSG) from None
+        return Response(data, media_type=IMAGE_TYPES[kind], headers=NO_STORE)
+
+    @app.get("/v1/messages/{message_id}/image", summary="Get a turn's image", response_class=Response,
+             responses={**IMAGE_RESPONSE, **_refusals({
+                 403: PUBLIC_TEST_SPLIT_MSG, 404: "Message not found.",
+                 422: "Invalid request: variant: Input should be 'original', 'thumb' or 'model_input'",
+                 500: TEST_IMAGE_MSG, 503: NO_GALLERY_MSG})},
+             description="One picture of a turn's image, given the user or the assistant message of the turn: an upload is sent "
+                         "with `Cache-Control: private, max-age=3600`, and a test-split study, read from the dataset in private "
+                         "mode only, with `no-store`. Answers 403 for a test-split image in public mode, 404 for an unknown or hidden "
+                         "message, a turn with no image or an image no longer stored, 422 for any other `variant`, 500 when a "
+                         "test-split image cannot be read and 503 when the server has no gallery for a test-split turn.")
+    def message_image(message_id: str, variant: Literal["original", "thumb", "model_input"] = Query(..., description=VARIANT_DOC),
+                      client_id: Optional[str] = Depends(client_scope)) -> Response:
+        user = turn_image_message(message_id, client_id)
+        if user.get("test_row") is not None:   # R1: a test study's image is private-mode data, whoever's session it is in
+            if "public" in (mode, user["mode"]):
+                raise HTTPException(403, PUBLIC_TEST_SPLIT_MSG)
+            return test_split_image(int(user["test_row"]), variant)
+        path = store.upload_path(user["session_id"], user["image_sha256"], variant)
+        try:
+            if path is None:
+                raise FileNotFoundError(variant)
+            data = path.read_bytes()
+        except OSError:   # removed from disk since the turn (the session is alive: a deleted one hid the message above)
+            raise HTTPException(404, IMAGE_GONE_MSG) from None
+        return Response(data, media_type=UPLOAD_TYPES.get(path.suffix[1:].lower(), "application/octet-stream"), headers=UPLOAD_CACHE)
 
     @app.post("/v1/messages/{message_id}/cancel", summary="Cancel a turn",
               description="Stops a queued or running turn at its next step, so it ends `aborted`; the call is "

@@ -356,6 +356,25 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .timeline table.nested { margin: 2px 0; }
 .timeline .values { margin: 0; padding-left: 1.25rem; }
 
+/* ---- the card's sections under the labels (P6-B..D): its images, the similar X-rays, the matching reports ------- */
+
+.section-title { margin: 0 0 6px; color: var(--muted); font-size: 0.8125rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.images .image-row { display: flex; flex-wrap: wrap; gap: 12px; }
+.image-tile { flex: 0 1 160px; min-width: 0; margin: 0; }
+.image-tile figcaption { margin-top: 4px; color: var(--muted); font-size: 0.75rem; overflow-wrap: anywhere; }
+.picture {   /* an X-ray, whole, on the dark ground it is read against: an aspect that the resize changed is plain to see */
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0b0b0a;
+}
+.picture:not([src]) { color: transparent; }   /* still loading: the box, not its alt text */
+.picture[data-failed] { color: #ece9e1; font-size: 0.75rem; overflow: hidden; }   /* failed: the alt text says what belongs here */
+#conversation .picture-button { display: block; width: 100%; min-height: 0; padding: 0; border: 0; border-radius: 8px; background: none; line-height: 0; }
+
 /* ---- composer: pinned under the conversation column ----------------------------------------------------------- */
 
 #composer {

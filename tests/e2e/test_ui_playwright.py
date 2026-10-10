@@ -772,6 +772,53 @@ def test_with_a_gallery_every_stage_runs_and_the_card_settles_on_labels_and_a_te
     ui.assert_clean()
 
 
+# ---- 16 (P6-B) ---------------------------------------------------------------------------------------------------------------------
+
+# The newest turn's pictures: the user turn's thumbnail and the card's images row, each with the server path it shows (data-src; none for
+# the page's own preview), whether its source is an object URL, whether it has loaded, and its natural size.
+PICTURES_JS = """() => {
+  const u = [...document.querySelectorAll('#conversation article.turn.user')].pop();
+  const c = [...document.querySelectorAll('#conversation article.card')].pop();
+  const look = (i) => i ? { path: i.getAttribute('data-src'), blob: (i.getAttribute('src') || '').startsWith('blob:'), alt: i.getAttribute('alt'),
+                            loaded: i.complete && i.naturalWidth > 0, natural: [i.naturalWidth, i.naturalHeight] } : null;
+  return { bubble: u ? look(u.querySelector('img')) : null,
+           tiles: c ? [...c.querySelectorAll('section.images figure')].map((f) => ({ caption: f.querySelector('figcaption').textContent,
+                                                                                    img: look(f.querySelector('img')) })) : [] };
+}"""
+PICTURES_LOADED = ("() => { const p = (%s)(); return !!p.bubble && p.bubble.loaded && p.tiles.length === 2"
+                   " && p.tiles.every((t) => t.img.loaded); }" % PICTURES_JS)
+
+
+def test_your_xray_and_what_the_model_saw_are_in_the_card_and_still_there_after_a_reload(ui, images):
+    """P6-B: the card's images row shows the upload's thumbnail, labelled with its pixel size, and the 224x224 image the model saw, both
+    fetched with the page's auth from GET /v1/messages/{id}/image. After a reload the user turn shows the server's thumbnail in place of
+    the page's own preview, and the card the same two pictures."""
+    page = ui.open()
+    card = ui.turn(images["xray_b.png"])   # 288 x 256
+    assert card["status"] == "done"
+    page.wait_for_function(PICTURES_LOADED)
+    shown = page.evaluate(PICTURES_JS)
+    sid = ui.session_id()
+    user = ui.server.session(sid)["messages"][0]
+    assert user["image_urls"] == {v: "/v1/messages/{}/image?variant={}".format(user["id"], v) for v in ("original", "thumb", "model_input")}
+    assert [t["caption"] for t in shown["tiles"]] == ["Your X-ray · 288×256 px", "What the model saw (224×224)"]
+    assert [t["img"]["path"] for t in shown["tiles"]] == [user["image_urls"]["thumb"], user["image_urls"]["model_input"]]
+    assert all(t["img"]["blob"] for t in shown["tiles"])   # through loadImage: the token never rides an <img src>
+    assert [t["img"]["natural"] for t in shown["tiles"]] == [[288, 256], [224, 224]]
+    assert shown["bubble"]["path"] is None and shown["bubble"]["blob"]   # the live turn shows the page's own preview of the file
+    ui.reload()
+    page.wait_for_function(PICTURES_LOADED)
+    again = page.evaluate(PICTURES_JS)
+    assert again["bubble"]["path"] == user["image_urls"]["thumb"] and again["bubble"]["natural"] == [288, 256]   # the server's thumbnail now
+    assert again["bubble"]["alt"] == "Uploaded X-ray: xray_b.png"
+    assert [t["caption"] for t in again["tiles"]] == [t["caption"] for t in shown["tiles"]]
+    assert [t["img"]["natural"] for t in again["tiles"]] == [[288, 256], [224, 224]]
+    asked = [path for method, path in ui.requests if method == "GET" and path == "/v1/messages/{}/image".format(user["id"])]
+    assert len(asked) >= 3   # the card's two before the reload, the bubble's and the card's after it; assert_clean fails any refusal
+    ui.shot("images_row_1280x900_light.png")
+    ui.assert_clean()
+
+
 # ---- the harness itself ----------------------------------------------------------------------------------------------------------
 
 PROBE_CONFTEST = """\

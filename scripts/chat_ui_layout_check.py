@@ -17,6 +17,10 @@ page); six chips and a 140-character unbroken word are injected, and Stop is sho
   h  (P4-G, one more case for every viewport in every scheme) the drawer's Save button is rendered when the drawer is open and not
      when it is closed; in the open drawer it lies inside the drawer's width, is at least 40 px tall, is in sight without scrolling
      (it sticks to the bottom of the drawer) and is not covered once it is scrolled to
+  i  (P6-B..D, one more case for every viewport in every scheme) the card's own sections (SECTIONS), drawn by render.js in the page from a
+     synthetic finished turn with every picture a generated PNG (nothing is fetched): each section is there, lies inside the card's width
+     and does not overflow it, every picture has loaded with a size and lies inside the card, and nothing overflows the page horizontally,
+     with the drawer closed and open
 
 On the short viewports, where the page scrolls instead (667x375, 320x256), c and d give way to: the report keeps its
 natural height (no scroller of its own, at least 120 px), the composer is not capped, the banner stays at the top of
@@ -42,6 +46,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+from app.labels import CHEXBERT_14  # noqa: E402  (standard library only, like this script)
 from scripts.chat_ui_cdp import App, Browser, exit_on_sigterm, find_chrome  # noqa: E402
 
 WIDTHS = [320, 375, 800, 801, 820, 834, 900, 925, 1024, 1280]
@@ -57,6 +62,45 @@ CHIPS = ["beam 3", "100 tok", "cached", "k 4/3", "label on", "repair off"]
 LONG_WORD = "x" * 140
 REPORT_TEXT = ("The lungs are clear. There is no focal consolidation, pleural effusion or pneumothorax. The "
                "cardiomediastinal silhouette is within normal limits. No acute osseous abnormality is seen. ") * 3
+SECTIONS = ["section.images"]   # the card's own sections (check i): P6-B's images row; P6-C and P6-D add theirs
+
+
+def section_events() -> List[Dict[str, Any]]:
+    """A finished private turn with every section a card can show, as the server streams it: synthetic, nothing MIMIC-derived. Each picture
+    names a path on the page's own origin, which INJECT_SECTIONS_JS answers with a generated PNG, so nothing is fetched. The lists are as long
+    as the options allow (12 similar X-rays, 10 matching reports) and one report holds a 140-character word, the widest a card must take."""
+    def labels(*positives: str) -> Dict[str, int]:
+        return {name: int(name in positives) for name in CHEXBERT_14}
+
+    image = {"sha256": "ab" * 32, "filename": "layout.png", "source": "upload",
+             "urls": {v: "/v1/messages/u_layout/image?variant={}".format(v) for v in ("original", "thumb", "model_input")}}
+    neighbours = [{"rank": r, "similarity": round(0.95 - 0.03 * r, 3), "gallery_row": 100 + r, "study_id": 50000000 + r, "txt_row": 200 + r,
+                   "image_url": "/v1/gallery/images/{}".format(100 + r), "labels": labels("Edema" if r % 2 else "Cardiomegaly")}
+                  for r in range(1, 13)]
+    matches = [{"rank": r, "similarity": round(0.6 - 0.02 * r, 3), "group": 300 + r, "group_size": 37 if r == 1 else 1, "txt_row": 400 + r,
+                "report": (LONG_WORD + " " if r == 2 else "") + REPORT_TEXT, "labels": labels("Pleural Effusion")} for r in range(1, 11)]
+    agreement = [{"rank": n["rank"], "agree": 12, "of": 14, "both_positive": [], "neighbor_only": ["Edema"], "generated_only": ["Cardiomegaly"]}
+                 for n in neighbours]
+    steps = [
+        ("message_start", {"message_id": "m_layout", "user_message_id": "u_layout", "session_id": "s_layout", "mode": "private",
+                           "model": {"name": "tiny", "device": "cpu"}, "options": {"k_images": 12, "k_reports": 10, "test_row": 7}, "image": image}),
+        ("stage_end", {"stage": "preprocess", "ms": 2.0, "detail": {"format": "PNG", "input_px": [2544, 3056], "source": "upload"}}),
+        ("stage_end", {"stage": "encode", "ms": 5.0, "detail": {"pooled_dim": 16}}),
+        ("stage_end", {"stage": "retrieve", "ms": 3.0, "detail": {
+            "image_neighbors": neighbours, "report_matches": matches,
+            "true_report_rank": {"rank": 3, "of": 2663, "rank_dedup": 2, "n_tied": 1, "hit_at_10": True, "protocol": "i2t, official test split"},
+            "gallery": {"build_id": "layout", "images": 200, "report_rows": 240, "report_groups": 78, "towers_identical": True}}}),
+        ("content_block_delta", {"index": 0, "delta": {"type": "beam_snapshot", "step": 0, "text": REPORT_TEXT}}),
+        ("stage_end", {"stage": "generate", "ms": 9.0, "detail": {"decode": "beam", "beam_size": 3, "tokens": 100, "stopped": "budget"}}),
+        ("stage_end", {"stage": "label", "ms": 2.0, "detail": {"chexbert_14": labels("Cardiomegaly"), "positives": ["Cardiomegaly"],
+                                                              "neighbor_agreement": agreement}}),
+        ("stage_end", {"stage": "score", "ms": 1.0, "detail": {
+            "rouge_l": 0.2, "bleu_1": 0.3, "bleu_4": 0.1, "reference_source": "test_split",
+            "published": {"model_report": REPORT_TEXT, "floor_report": LONG_WORD + " " + REPORT_TEXT, "live_equals_published": False}}}),
+        ("message_stop", {"message_id": "m_layout", "status": "done", "total_ms": 30.0, "report": REPORT_TEXT, "display_report": REPORT_TEXT,
+                          "truncated_mid_sentence": False}),
+    ]
+    return [{"event": event, "data": dict(data, seq=i)} for i, (event, data) in enumerate(steps, start=1)]
 
 INJECT_JS = """(args) => {
   const q = (s) => document.querySelector(s);
@@ -152,6 +196,82 @@ MEASURE_SAVE_JS = """(args) => {
   out.hit = { ok: !!top && (top === save || save.contains(top)) && inside(b), at: [Math.round(x), Math.round(y)], got: name(top) };
   return out;
 }"""
+
+
+# Check i: a real card in place of the injected one, drawn by the page's own render.js from the synthetic turn (args.events), with its
+# pictures answered by a generated PNG. It resolves once every picture has its source and has decoded.
+INJECT_SECTIONS_JS = """async (args) => {
+  const render = await import('/static/render.js');
+  const state = await import('/static/state.js');
+  const canvas = document.createElement('canvas');
+  canvas.width = 96;
+  canvas.height = 80;
+  const g = canvas.getContext('2d');
+  g.fillStyle = '#777777';
+  g.fillRect(0, 0, 96, 80);
+  g.fillStyle = '#dddddd';
+  g.fillRect(24, 16, 48, 48);
+  const png = canvas.toDataURL('image/png');
+  const card = render.renderAssistantCard(state.replay(args.events), { loadImage: async () => png, labelNames: args.names, turn: 1, ui: new Map() });
+  document.querySelector('#conversation').replaceChildren(card);
+  for (let i = 0; i < 20 && [...card.querySelectorAll('img')].some((img) => !img.hasAttribute('src')); i++) await new Promise((r) => setTimeout(r, 10));
+  await Promise.all([...card.querySelectorAll('img')].map((img) => img.decode().catch(() => null)));
+  return true;
+}"""
+
+MEASURE_SECTIONS_JS = """(args) => {
+  const q = (s) => document.querySelector(s);
+  const doc = document.documentElement;
+  const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+  const card = q('#conversation article.card');
+  window.scrollTo(0, 0);
+  const out = { doc: [doc.scrollWidth, doc.clientWidth], conversation: [q('#conversation').scrollWidth, q('#conversation').clientWidth],
+                card: card ? box(card) : null, sections: {} };
+  for (const s of args.sections) {
+    const el = card ? card.querySelector(s) : null;
+    out.sections[s] = !el ? null : { box: box(el), sw: el.scrollWidth, cw: el.clientWidth,
+      pictures: [...el.querySelectorAll('img')].map((i) => ({ box: box(i), loaded: i.complete && i.naturalWidth > 0 })) };
+  }
+  return out;
+}"""
+
+
+def check_sections(m: Dict[str, Any], width: int, sections: List[str]) -> List[str]:
+    """The failures in one measurement of the card's own sections (check i): each is there, inside the card's width and not wider inside
+    than it is; each picture has loaded, has a size and lies inside the card; neither the page nor the conversation overflows horizontally."""
+    failures = []
+    for name, (sw, cw) in (("documentElement", m["doc"]), ("#conversation", m["conversation"])):
+        if sw > cw:
+            failures.append("{} overflows horizontally: scrollWidth {} > clientWidth {}".format(name, sw, cw))
+    card = m["card"]
+    if card is None:
+        return failures + ["no card was drawn"]
+    if card[0] < -0.5 or card[2] > width + 0.5:
+        failures.append("the card leaves the viewport's width: left {:.0f}, right {:.0f}, viewport {}".format(card[0], card[2], width))
+    for selector in sections:
+        section = m["sections"].get(selector)
+        if section is None:
+            failures.append("{} is not in the card".format(selector))
+            continue
+        left, _, right, _ = section["box"]
+        if left < card[0] - 0.5 or right > card[2] + 0.5:
+            failures.append("{} leaves the card: left {:.0f}, right {:.0f}, card {:.0f} to {:.0f}".format(selector, left, right, card[0], card[2]))
+        if section["sw"] > section["cw"]:
+            failures.append("{} overflows inside: scrollWidth {} > clientWidth {}".format(selector, section["sw"], section["cw"]))
+        if not section["pictures"] and selector in PICTURED:
+            failures.append("{} shows no picture".format(selector))
+        for n, picture in enumerate(section["pictures"], start=1):
+            p_left, p_top, p_right, p_bottom = picture["box"]
+            if not picture["loaded"]:
+                failures.append("{} picture {} has not loaded".format(selector, n))
+            if p_right - p_left < 1 or p_bottom - p_top < 1:
+                failures.append("{} picture {} has no size".format(selector, n))
+            if p_left < card[0] - 0.5 or p_right > card[2] + 0.5:
+                failures.append("{} picture {} leaves the card: left {:.0f}, right {:.0f}".format(selector, n, p_left, p_right))
+    return failures
+
+
+PICTURED = {"section.images"}   # the sections that must show pictures in the synthetic turn
 
 
 def check_save(m: Dict[str, Any], width: int, height: int, scroll: bool, drawer_open: bool) -> List[str]:
@@ -268,7 +388,8 @@ def check_tall(m: Dict[str, Any], height: int) -> List[str]:
 
 def run_checks(browser: Browser, url: str) -> Tuple[int, List[str]]:
     """Every viewport in every scheme, drawer closed and open, Stop hidden and shown. A case is a viewport in a scheme
-    with the drawer closed or open. -> (cases, failures); a failure seen in both schemes is reported once."""
+    with the drawer closed or open, or (one case each) its Save button and its card sections in both drawer states.
+    -> (cases, failures); a failure seen in both schemes is reported once."""
     cases = 0
     seen = {}   # type: Dict[Tuple[str, str, str], List[str]]   # (viewport, state, failure) -> schemes
     viewports = [(w, h, False) for h in HEIGHTS for w in WIDTHS] + [(w, h, True) for w, h in SHORT_VIEWPORTS]
@@ -295,6 +416,13 @@ def run_checks(browser: Browser, url: str) -> Tuple[int, List[str]]:
                 browser.evaluate("document.querySelector('#drawer').hidden = {}".format("false" if drawer == "open" else "true"))
                 for failure in check_save(browser.run(MEASURE_SAVE_JS, {"scroll": scroll}), width, height, scroll, drawer == "open"):
                     seen.setdefault(("{}x{}".format(width, height), "drawer={} save".format(drawer), failure), []).append(scheme)
+            cases += 1   # the card's own sections (P6-B..D), with the drawer closed and then open
+            browser.evaluate("document.querySelector('#drawer').hidden = true")
+            browser.run(INJECT_SECTIONS_JS, {"events": section_events(), "names": CHEXBERT_14})
+            for drawer in ("closed", "open"):
+                browser.evaluate("document.querySelector('#drawer').hidden = {}".format("false" if drawer == "open" else "true"))
+                for failure in check_sections(browser.run(MEASURE_SECTIONS_JS, {"sections": SECTIONS}), width, SECTIONS):
+                    seen.setdefault(("{}x{}".format(width, height), "drawer={} card sections".format(drawer), failure), []).append(scheme)
     for width in TALL_WIDTHS:   # a composer taller than the viewport: the report's floor
         for scheme in SCHEMES:
             serial += 1

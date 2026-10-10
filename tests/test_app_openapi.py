@@ -18,6 +18,7 @@ from app.store import FINAL_STATUSES
 from tests.app_helpers import decide_gate, iter_sse, png_bytes
 
 MESSAGES = "/v1/sessions/{session_id}/messages"   # the streaming turn
+IMAGE = "/v1/messages/{message_id}/image"          # a turn's image (P6-B)
 STREAM_EVENTS = ["message_start", "stage_start", "stage_end", "content_block_start", "content_block_delta",
                  "content_block_stop", "warning", "error", "message_stop"]   # every event name of the stream
 # The Options dict test_curl_walkthrough_options_validate pins: what the README's curl walkthrough sends (P8-E).
@@ -53,7 +54,8 @@ def test_openapi_documents_every_v1_route(client):
     routes = {(m.upper(), p) for p, ops in spec["paths"].items() for m in ops}
     for want in [("POST", "/v1/sessions"), ("GET", "/v1/sessions"), ("POST", "/v1/sessions/{session_id}/messages"),
                  ("GET", "/v1/messages/{message_id}"), ("POST", "/v1/messages/{message_id}/cancel"),
-                 ("POST", "/v1/retrieve"), ("POST", "/v1/label"), ("GET", "/v1/test-studies")]:   # P5-E
+                 ("POST", "/v1/retrieve"), ("POST", "/v1/label"), ("GET", "/v1/test-studies"),   # P5-E
+                 ("GET", "/v1/messages/{message_id}/image")]:   # P6-B
         assert want in routes
     for path, ops in spec["paths"].items():
         for op in ops.values():
@@ -211,6 +213,7 @@ REFUSED_BY_THE_ROUTE = {   # what each route declares by itself; 401, 403 and th
     ("GET", "/v1/models"): set(), ("GET", "/healthz"): set(),
     ("POST", "/v1/retrieve"): {413, 422, 429, 500, 503}, ("POST", "/v1/label"): {422, 503},   # P5-E
     ("GET", "/v1/test-studies"): {403, 422, 503},
+    ("GET", "/v1/messages/{message_id}/image"): {403, 404, 422, 500, 503},   # P6-B
 }
 
 
@@ -263,10 +266,20 @@ def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, m
         ("POST", "/v1/label", "/v1/label", {"json": {"text": ""}}, 422),
         ("GET", "/v1/test-studies", "/v1/test-studies", {}, 503),
         ("GET", "/v1/test-studies", "/v1/test-studies?limit=0", {}, 422),
+        # P6-B: a turn's image
+        ("GET", IMAGE, "/v1/messages/m_missing/image?variant=thumb", {}, 404),
+        ("GET", IMAGE, "/v1/messages/m_missing/image?variant=huge", {}, 422),
     ]:
         check(client.request(method, url, **kwargs), method, path, status)
+    planted, _ = client.app.state.store.start_turn(sid, "", "private", {}, "ab" * 32, None, 0)   # a test study, on a server with no gallery
+    check(client.get("/v1/messages/{}/image?variant=thumb".format(planted)), "GET", IMAGE, 503)
     with TestClient(create_app(engine="tiny", home=str(tmp_path / "gallery_home"),
                                gallery=Gallery.open(decide_gate(tiny_gallery), None))) as g:
+        gsid = g.post("/v1/sessions", json={}).json()["id"]
+        studied = g.post(MESSAGES.format(session_id=gsid), data={"options": json.dumps({"test_row": 1, "max_new_tokens": 16})})
+        assert studied.status_code == 200
+        g.app.state.gallery.test_study(1)["image"].unlink()   # gone since the turn ran
+        check(g.get("/v1/messages/{}/image?variant=original".format(studied.headers["x-message-id"])), "GET", IMAGE, 500)
         check(g.post("/v1/retrieve", files={"image": ("x.png", bytes(MAX_UPLOAD_BYTES + 1), "image/png")}),
               "POST", "/v1/retrieve", 413)
         with monkeypatch.context() as m:
@@ -295,6 +308,9 @@ def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, m
         r = c.post(MESSAGES.format(session_id=psid), data={"options": json.dumps({"test_row": 0})}, headers=public)
         check(r, "POST", MESSAGES, 403)   # a test-split study in public mode
         check(c.get("/v1/test-studies", headers=public), "GET", "/v1/test-studies", 403)   # and the picker's list
+        planted, _ = c.app.state.store.start_turn(psid, "", "public", {}, "ab" * 32, None)
+        c.app.state.store._con.execute("UPDATE messages SET test_row = 0 WHERE id = ?", (planted,))   # never stored in public: planted
+        check(c.get("/v1/messages/{}/image?variant=thumb".format(planted), headers=public), "GET", IMAGE, 403)   # and its image
 
 
 ROUTE_BODIES = {("POST", "/v1/sessions"): {"json": {}}, ("POST", MESSAGES): {"data": {"options": "{}"}}}   # to parse

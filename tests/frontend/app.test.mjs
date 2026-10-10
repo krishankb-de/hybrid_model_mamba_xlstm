@@ -424,6 +424,23 @@ test('every command rule of the page has an example in fixtures/commands.json, s
   assert.deepEqual(uncovered([...COMMANDS, /^stop (?:on|off)$/i]).map(String), ['/^stop (?:on|off)$/i']);   // the guard bites
 });
 
+test('a stored user message with its image URLs becomes a user turn that shows the server\'s thumbnail; a re-run keeps its file name (P6-B)', () => {
+  const options = { beam_size: 3 };
+  const urls = { original: '/v1/messages/u_1/image?variant=original', thumb: '/v1/messages/u_1/image?variant=thumb',
+                 model_input: '/v1/messages/u_1/image?variant=model_input' };
+  const user = { text: '', image_filename: 'chest.png', image_urls: urls };
+  assert.deepEqual(userTurnMessage(user, { options }, { image: { source: 'upload' } }), { text: '', image: { url: urls.thumb, filename: 'chest.png' }, options });
+  assert.deepEqual(userTurnMessage(user, { options }).image, { url: urls.thumb, filename: 'chest.png' });   // a log that could not be read: shown all the same
+  assert.deepEqual(userTurnMessage({ ...user, text: 'greedy' }, { options }, { image: { source: 'previous' } }).image,
+                   { url: null, filename: 'chest.png' });   // a re-run ran an earlier upload: its file name, as the live turn showed no picture
+  assert.deepEqual(userTurnMessage({ text: '', image_filename: null, image_urls: urls, test_row: 3 }, { options }, { image: { source: 'test_split' } }),
+                   { text: '', image: { url: urls.thumb, filename: null, source: 'test_split' }, options });   // a test study: its picture
+  for (const odd of [null, 'x', { thumb: 7 }, { thumb: null }, []]) {
+    assert.deepEqual(userTurnMessage({ ...user, image_urls: odd }, { options }).image, { url: null, filename: 'chest.png' }, JSON.stringify(odd));
+  }
+  assert.deepEqual(userTurnMessage({ text: 'a', image_filename: null, image_urls: null }, { options }).image, null);   // a question has none
+});
+
 test('a stored question (a user message with no image) becomes a user turn with no chips: it ran no model, so it used no settings (P4-H)', () => {
   const options = { beam_size: 3, max_new_tokens: 100 };
   assert.deepEqual(userTurnMessage({ text: 'is it pneumonia?', image_filename: null }, { options }), { text: 'is it pneumonia?', image: null, options: null });
@@ -735,11 +752,35 @@ test('start with no hash opens the newest session and replays it: its user turn,
   assert.deepEqual(texts(qa(user, '.options .chip')), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text', 'full budget']);   // the options the assistant row carries (this turn ran with Display repair and the stop switch off)
   assert.equal(user.getAttribute('aria-label'), 'Your message, turn 1');
   const replayed = fixture.reduce(applyEvent, initialView(botId));
-  const fresh = renderAssistantCard(replayed, { copy() {}, showModels() {}, turn: 1, ui: new Map() });
+  const fresh = renderAssistantCard(replayed, { copy() {}, showModels() {}, loadImage: h.api.loadImage, turn: 1, ui: new Map() });   // P6-B: its images too
+  await flush();
   assert.equal(serialize(card), serialize(fresh));   // the same builders over the same log: the same card
   assert.equal(h.fetch.calls.every((c) => c.headers['X-Client-Id'] && !c.headers.Authorization || c.url === '/healthz'), true);
   assert.equal($('send').disabled, false);
   assert.equal($('stop').hidden, true);
+});
+
+test('a reloaded chat shows each upload\'s thumbnail from the server, and its card the images row (P6-B)', async () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/turn_tiny.json', import.meta.url)));
+  const { message_id: botId, user_message_id: userId, options, image } = fixture[0].data;
+  const h = harness({
+    sessions: [sess('s_b', 'chest.png', 1, 3)],
+    routes: {
+      'GET /v1/sessions/s_b': { ...sess('s_b', 'chest.png', 1),
+                                messages: [{ ...userMsg(userId, '', 'chest.png'), image_urls: image.urls }, botMsg(botId, 'done', options)] },
+      [`GET /v1/messages/${botId}`]: { ...botMsg(botId, 'done', options), events: rows(fixture) },
+    },
+  });
+  await h.app.start();
+  await flush();
+  const [user, card] = $('conversation').children;
+  const thumb = q(user, 'img');
+  assert.equal(thumb.getAttribute('data-src'), image.urls.thumb);
+  assert.equal(thumb.getAttribute('src'), `blob:fake/${image.urls.thumb}`);   // fetched with the page's auth (D23): never an <img src> to the server
+  assert.equal(thumb.getAttribute('alt'), 'Uploaded X-ray: chest.png');
+  assert.equal(qa(user, '.chip').some((c) => c.textContent === 'chest.png'), false);   // the picture now, not its name
+  assert.deepEqual(qa(card, 'section.images img').map((i) => i.getAttribute('data-src')), [image.urls.thumb, image.urls.model_input]);
+  assert.deepEqual(texts(qa(card, 'section.images figcaption')), ['Your X-ray · 320×320 px', 'What the model saw (224×224)']);
 });
 
 test('a deep link opens that session and not the newest, and a malformed one is home', async () => {

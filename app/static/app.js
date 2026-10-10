@@ -336,14 +336,20 @@ export function exportFilename(contentDisposition, sessionId, format) {
 }
 
 // A user message and the assistant message that answers it, as the user turn draws them. The assistant row carries the
-// turn's resolved options. A replayed upload has no image URL until the image endpoint exists (P6-B): the file name only.
-// A user message with neither an image nor a test row is a question the server answered with no model: it shows no options (P4-H).
-export function userTurnMessage(user, assistant) {
+// turn's resolved options. A user message with neither an image nor a test row is a question the server answered with no model: it
+// shows no options (P4-H). start is the data of the turn's message_start, when its log could be read.
+// P6-B: the server lists a user message's image_urls, so a replayed upload, or a test study, shows its thumbnail again (fetched through
+// ctx.loadImage). A text-only re-run (message_start.image.source 'previous') ran an earlier upload: the live turn showed no picture of its
+// own for it, so its file name stays, as before.
+export function userTurnMessage(user, assistant, start = null) {
   const filename = text(user?.image_filename);
-  const ran = !!filename || Number.isInteger(user?.test_row);
+  const study = Number.isInteger(user?.test_row);
+  const ran = !!filename || study;
+  const thumb = isObject(user?.image_urls) && typeof user.image_urls.thumb === 'string' ? user.image_urls.thumb : null;
+  const url = start?.image?.source === 'previous' ? null : thumb;
   return {
     text: typeof user?.text === 'string' ? user.text : '',
-    image: filename ? { url: null, filename } : null,
+    image: filename || url ? { url, filename: filename || null, ...(study && url ? { source: 'test_split' } : {}) } : null,
     options: ran && isObject(assistant?.options) ? assistant.options : null,
   };
 }
@@ -991,7 +997,9 @@ export function createApp(env) {
     for (const { user: u, assistant: a } of pairs) {
       const turn = makeTurn(view, view.turns.length + 1);
       if (u) {
-        const shown = userTurnMessage(u, a);
+        const events = a ? logs.get(a.id)?.log?.events : null;
+        const start = Array.isArray(events) ? events.find((e) => e?.event === 'message_start')?.data ?? null : null;
+        const shown = userTurnMessage(u, a, start);
         turn.text = shown.text;      // a turn that was still queued has no events: its message_start rebuilds this bubble,
         turn.image = shown.image;    // and rebuilds it from these
         turn.userEl = renderUserTurn(shown, cardCtx(turn.n, shown.options?.model));

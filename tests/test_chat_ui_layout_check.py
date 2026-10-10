@@ -623,6 +623,66 @@ def test_a_composer_that_runs_off_the_page_or_cannot_be_scrolled_to_its_buttons_
     assert any("#send cannot be reached" in f for f in failures) and any("#settings cannot be reached" in f for f in failures)
 
 
+def _sections(width: int = 1280, sections: Optional[List[str]] = None) -> Dict[str, Any]:
+    """What MEASURE_SECTIONS_JS reports for a card whose own sections are in order (check i, P6-B..D): each inside the card and no wider
+    inside than it is, its pictures loaded, with a size, inside the card; nothing overflows the page."""
+    card = [24.0, 60.0, width - 24.0, 2400.0]
+    picture = {"box": [card[0] + 16.0, 320.0, card[0] + 176.0, 480.0], "loaded": True}
+    one = lambda: {"box": [card[0] + 16.0, 300.0, card[2] - 16.0, 520.0], "sw": 300, "cw": 300, "pictures": [dict(picture)]}
+    return {"doc": [width, width], "conversation": [width, width], "card": card,
+            "sections": {name: one() for name in (layout.SECTIONS if sections is None else sections)}}
+
+
+def test_card_sections_in_order_have_no_failures():
+    assert layout.check_sections(_sections(), 1280, layout.SECTIONS) == []
+    assert layout.SECTIONS[0] == "section.images" and set(layout.PICTURED) <= set(layout.SECTIONS)
+
+
+def test_a_card_section_that_is_missing_wide_or_holds_a_bad_picture_fails():
+    first = layout.SECTIONS[0]
+    gone = _sections()
+    gone["sections"][first] = None
+    assert layout.check_sections(gone, 1280, layout.SECTIONS) == ["{} is not in the card".format(first)]
+    wide = _sections()
+    wide["sections"][first]["sw"] = 360   # a long word or a grid that does not wrap
+    assert any("overflows inside: scrollWidth 360 > clientWidth 300" in f for f in layout.check_sections(wide, 1280, layout.SECTIONS))
+    out = _sections(width=375)
+    out["sections"][first]["box"][2] = 400.0
+    assert any("leaves the card" in f for f in layout.check_sections(out, 375, layout.SECTIONS))
+    unloaded = _sections()
+    unloaded["sections"][first]["pictures"][0]["loaded"] = False
+    assert any("picture 1 has not loaded" in f for f in layout.check_sections(unloaded, 1280, layout.SECTIONS))
+    flat = _sections()
+    flat["sections"][first]["pictures"][0]["box"] = [40.0, 320.0, 40.0, 480.0]
+    assert any("picture 1 has no size" in f for f in layout.check_sections(flat, 1280, layout.SECTIONS))
+    stray = _sections()
+    stray["sections"][first]["pictures"][0]["box"] = [1200.0, 320.0, 1300.0, 480.0]
+    assert any("picture 1 leaves the card" in f for f in layout.check_sections(stray, 1280, layout.SECTIONS))
+    bare = _sections()
+    bare["sections"][first]["pictures"] = []
+    assert "{} shows no picture".format(first) in layout.check_sections(bare, 1280, layout.SECTIONS)
+
+
+def test_a_page_that_overflows_or_draws_no_card_fails_the_sections_case():
+    m = _sections(width=320)
+    m["doc"] = [460, 320]
+    assert "documentElement overflows horizontally: scrollWidth 460 > clientWidth 320" in layout.check_sections(m, 320, layout.SECTIONS)
+    none = _sections()
+    none["card"] = None
+    assert layout.check_sections(none, 1280, layout.SECTIONS) == ["no card was drawn"]
+
+
+def test_the_synthetic_turn_is_a_private_one_with_every_section_and_the_widest_text():
+    events = layout.section_events()
+    assert [e["data"]["seq"] for e in events] == list(range(1, len(events) + 1))
+    assert events[0]["event"] == "message_start" and events[-1]["event"] == "message_stop"
+    retrieve = next(e["data"]["detail"] for e in events if e["data"].get("stage") == "retrieve")
+    assert len(retrieve["image_neighbors"]) == 12 and len(retrieve["report_matches"]) == 10   # as many as the options allow
+    assert any(layout.LONG_WORD in m["report"] for m in retrieve["report_matches"])
+    paths = [events[0]["data"]["image"]["urls"][v] for v in ("thumb", "model_input")] + [n["image_url"] for n in retrieve["image_neighbors"]]
+    assert all(p.startswith("/v1/") for p in paths)   # same-origin paths: the injected loader answers them, nothing is fetched
+
+
 # ---- the loop, with a page that answers from a script ------------------------------------------------------------------------------------
 
 class FakePage:
@@ -634,6 +694,7 @@ class FakePage:
         self.width, self.height = 0, 0
         self.drawer, self.stop = False, False
         self.opened = 0
+        self.sections_drawn, self.sections_measured = 0, 0
 
     def open(self, url: str, width: int, height: int, scheme: str) -> None:
         self.width, self.height, self.drawer, self.stop = width, height, False, False
@@ -664,6 +725,11 @@ class FakePage:
             if self.drawer and not self.save_renders:
                 m["rendered"], m["box"], m["hit"] = False, None, None
             return m
+        if function == layout.MEASURE_SECTIONS_JS:
+            self.sections_measured += 1
+            return _sections(self.width, argument["sections"])
+        if function == layout.INJECT_SECTIONS_JS:
+            self.sections_drawn += 1
         return True
 
 
@@ -673,22 +739,25 @@ def test_the_loop_runs_every_case_and_passes_on_a_page_in_order():
     viewports = len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)
     expected = (len(layout.WIDTHS) * len(layout.HEIGHTS) * len(layout.SCHEMES) * 2
                 + len(layout.SHORT_VIEWPORTS) * len(layout.SCHEMES) * 2 + len(layout.TALL_WIDTHS) * len(layout.SCHEMES)
-                + viewports * len(layout.SCHEMES))   # P4-G: one more case for each viewport in each scheme, for the Save button
-    assert cases == expected == 138
+                + viewports * len(layout.SCHEMES)    # P4-G: one more case for each viewport in each scheme, for the Save button
+                + viewports * len(layout.SCHEMES))   # P6-B: and one for the card's own sections
+    assert cases == expected == 182
     assert failures == []
     assert page.opened == ((len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)) * len(layout.SCHEMES)
                            + len(layout.TALL_WIDTHS) * len(layout.SCHEMES))   # one load per viewport and scheme, the drawer and Stop are toggled in it
+    assert page.sections_drawn == viewports * len(layout.SCHEMES)                  # the card drawn once per viewport and scheme,
+    assert page.sections_measured == viewports * len(layout.SCHEMES) * 2           # and measured with the drawer closed and open
 
 
 def test_the_loop_reports_a_stop_button_that_never_renders_in_the_cases_that_show_it():
     cases, failures = layout.run_checks(FakePage(stop_renders=False), "http://x/")
     assert failures and all("#stop is not rendered, but the case shows it" in f and "stop=shown" in f for f in failures)
-    assert cases == 138
+    assert cases == 182
 
 
 def test_the_loop_reports_a_save_button_that_never_renders_in_the_save_cases_only():
     cases, failures = layout.run_checks(FakePage(save_renders=False), "http://x/")
-    assert cases == 138 and len(failures) == len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)   # once per viewport: both schemes fail alike
+    assert cases == 182 and len(failures) == len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)   # once per viewport: both schemes fail alike
     assert all("light+dark" in f and "save" in f and "#drawer-save is not rendered" in f for f in failures), failures
 
 
