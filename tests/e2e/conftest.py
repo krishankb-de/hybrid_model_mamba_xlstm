@@ -2,7 +2,8 @@
 
 Each test gets a tiny server of its own and pages of its own in one headless Google Chrome:
   * The server is app.server.create_app(engine="tiny") (random weights, a toy vocabulary: no checkpoint and no data) on a free
-    loopback port with a temporary CHAT_HOME. It runs from this checkout with PYTHONPATH set to it, because the venv's editable
+    loopback port with a temporary CHAT_HOME; a test that parametrizes `ui` with {"tiny_gallery": True} gets one with the synthetic
+    gallery and the keyword labeller too (P5-E), so every stage runs. It runs from this checkout with PYTHONPATH set to it, because the venv's editable
     install maps `scripts` and `hybrid_xmamba` to wherever it was installed from, and in a process group of its own, so that
     stopping it reaches everything it started. A test can kill it (SIGKILL: a crash) and start it again on the same port and home.
   * The browser is Playwright's chromium with channel="chrome": the Google Chrome installed on the machine, nothing downloaded. One
@@ -29,7 +30,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import numpy as np
 import pytest
@@ -47,7 +48,7 @@ DESKTOP = (1280, 900)
 # The app as these tests run it: create_app's arguments (the step delay among them) cannot pass through the uvicorn CLI. One fault is
 # planted, and only here: a turn whose budget is FAULT_TOKENS raises ImportError inside the engine, the class the stale dev server of
 # 2026-10-09 raised at every turn, so that the card for an internal error is seen end to end. The server must send the class name and
-# never the exception's text, which goes to its log. argv: home, step delay in seconds, port.
+# never the exception's text, which goes to its log. argv: home, step delay in seconds, port, and "tiny_gallery" for the P5-E stages.
 LAUNCH = """\
 import sys
 import uvicorn
@@ -65,7 +66,8 @@ def generate(self, enc, opts, on_snapshot, cancel):
 
 
 engine.Engine.generate = generate
-uvicorn.run(server.create_app(engine="tiny", home=sys.argv[1], tiny_step_delay_s=float(sys.argv[2])),
+uvicorn.run(server.create_app(engine="tiny", home=sys.argv[1], tiny_step_delay_s=float(sys.argv[2]),
+                              tiny_gallery=sys.argv[4:] == ["tiny_gallery"]),
             host="127.0.0.1", port=int(sys.argv[3]), log_level="warning")
 """ % FAULT_TOKENS
 
@@ -194,8 +196,8 @@ class TinyServer:
     """The tiny app in a process group of its own on a free loopback port: started, killed and started again on the same port and
     home, and stopped (SIGTERM, then SIGKILL for what is left)."""
 
-    def __init__(self, home: str, step_delay_s: float = STEP_DELAY_S) -> None:
-        self.home, self.step_delay_s = home, float(step_delay_s)
+    def __init__(self, home: str, step_delay_s: float = STEP_DELAY_S, tiny_gallery: bool = False) -> None:
+        self.home, self.step_delay_s, self.tiny_gallery = home, float(step_delay_s), bool(tiny_gallery)
         self.port = free_port()
         self.url = "http://127.0.0.1:{}/".format(self.port)
         self.log_path = os.path.join(home, "server.log")
@@ -205,7 +207,8 @@ class TinyServer:
     def start(self, timeout: float = 90.0) -> None:
         with open(self.log_path, "a") as log:
             self.proc = subprocess.Popen(
-                [sys.executable, "-c", LAUNCH, self.home, repr(self.step_delay_s), str(self.port)], cwd=REPO_ROOT,
+                [sys.executable, "-c", LAUNCH, self.home, repr(self.step_delay_s), str(self.port)]
+                + (["tiny_gallery"] if self.tiny_gallery else []), cwd=REPO_ROOT,
                 env=dict(os.environ, PYTHONPATH=REPO_ROOT), stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         deadline = time.time() + timeout
         while time.time() < deadline and self.proc.poll() is None:
@@ -242,6 +245,15 @@ class TinyServer:
                 return response.status
         except urllib.error.HTTPError as exc:
             return exc.code
+
+    def post_turn(self, session_id: str, options: Dict[str, Any], text: str = "") -> str:
+        """A turn with no image, sent as an API client sends it (a command, or a test study by options.test_row), read to its end:
+        -> its message id. The page does not see it until it loads the chat again."""
+        body = urlencode({"text": text, "options": json.dumps(options)}).encode()
+        request = urllib.request.Request(self.url + "v1/sessions/{}/messages".format(session_id), data=body, method="POST")
+        with urllib.request.urlopen(request, timeout=120) as response:
+            response.read()
+            return response.headers["X-Message-Id"]
 
     def sessions(self) -> List[Dict[str, Any]]:
         return self.get("v1/sessions")["sessions"]
@@ -521,10 +533,11 @@ def pytest_runtest_makereport(item, call):
 
 @pytest.fixture
 def ui(request, browser, tmp_path):
-    """A fresh tiny server and a fresh page, both gone when the test ends, however it ends."""
+    """A fresh tiny server and a fresh page, both gone when the test ends, however it ends. Parametrized indirectly, its
+    param is TinyServer's keyword arguments ({"tiny_gallery": True})."""
     home = tmp_path / "chat_home"
     home.mkdir()
-    server = TinyServer(str(home))
+    server = TinyServer(str(home), **getattr(request, "param", {}))
     harness = None
     try:
         harness = UI(browser, server, os.environ.get(EVIDENCE_ENV) or None)

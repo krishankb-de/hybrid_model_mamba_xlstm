@@ -56,8 +56,11 @@ def test_generated_report_is_not_redacted():   # model output is not MIMIC data
 
 # ---- helpers ----------------------------------------------------------------------------------------------------
 
-R1_KEYS = ["image_url", "study_id", "subject_id", "gallery_row", "txt_row", "group", "group_size",
-           "neighbor_agreement", "reference", "test_row", "identical_to", "true_report_rank"]
+PLAN_R1_KEYS = ["image_url", "study_id", "subject_id", "gallery_row", "txt_row", "group", "group_size",
+                "neighbor_agreement", "reference", "test_row", "identical_to", "true_report_rank"]
+# P5-E: the score stage's reference labels and published lines (a dump line, a retrieved MIMIC report) are R1 data wherever they sit.
+P5E_KEYS = ["reference_chexbert_14", "published", "model_report", "floor_report"]
+R1_KEYS = PLAN_R1_KEYS + P5E_KEYS
 
 
 def _keys_anywhere(obj):
@@ -267,7 +270,10 @@ UNKNOWN_PAYLOAD = {
         {"keep": 3, "deeper": {"rows": [{"keep": 4, "neighbor_agreement": [{"rank": 1, "agree": 13}],
                                          "reference": "SECRET-reference", "test_row": 5,
                                          "identical_to": {"split": "train", "row": 6},
-                                         "true_report_rank": {"rank": 3, "of": 2663}}]}},
+                                         "true_report_rank": {"rank": 3, "of": 2663},
+                                         "reference_chexbert_14": {"Edema": 1},
+                                         "published": {"model_report": "SECRET-dump", "live_equals_published": True},
+                                         "model_report": "SECRET-model-line", "floor_report": "SECRET-floor-line"}]}},
         "plain", None, 3],
 }
 UNKNOWN_KEPT = {"note": "kept", "items": [{"keep": 1, "inner": [{"keep": 2}]},
@@ -629,3 +635,113 @@ def test_a_whole_private_turn_is_clean_in_public_mode_and_equal_in_private_mode(
     for shown in ("Heart size is normal.", "similarity", "chexbert_14", "towers_identical"):
         assert shown in dumped
     assert [redact_event(e, copy.deepcopy(d), "private") for e, d in PRIVATE_TURN] == [d for _, d in PRIVATE_TURN]
+
+
+# ---- P5-E: every field the retrieve, label and score stages add, private and public (R1, U2) ------------------------
+
+NAMES = ["Enlarged Cardiomediastinum", "Cardiomegaly", "Lung Opacity", "Lung Lesion", "Edema", "Consolidation", "Pneumonia",
+         "Atelectasis", "Pneumothorax", "Pleural Effusion", "Pleural Other", "Fracture", "Support Devices", "No Finding"]
+P5E_START = dict(MESSAGE_START, options={"beam_size": 3, "k_images": 4, "k_reports": 3, "label": True, "reference": None,
+                                         "test_row": 987605},
+                 image={"sha256": "cd" * 32, "filename": None, "source": "test_split",
+                        "urls": {"original": "/v1/messages/m_1/image?variant=original", "thumb": "/v1/messages/m_1/image?variant=thumb",
+                                 "model_input": "/v1/messages/m_1/image?variant=model_input"}})
+P5E_PREPROCESS = {"stage": "preprocess", "ms": 1.0, "seq": 3, "detail": {
+    "format": "JPEG", "input_px": [320, 320], "source": "test_split", "test_row": 987605, "identical_to": {"split": "test", "row": 987605}}}
+P5E_RETRIEVE = {"stage": "retrieve", "ms": 3.0, "seq": 7, "detail": {
+    "image_neighbors": [{"rank": 1, "similarity": 0.83, "gallery_row": 987601, "study_id": 98760001, "txt_row": 987602,
+                         "image_url": "/v1/gallery/images/987601", "labels": dict.fromkeys(NAMES, 0)},
+                        {"rank": 2, "similarity": 0.81, "gallery_row": 987611, "study_id": 98760011, "txt_row": 987612,
+                         "image_url": "/v1/gallery/images/987611", "labels": None}],
+    "report_matches": [{"rank": 1, "similarity": 0.52, "group": 987603, "group_size": 987609, "txt_row": 987604,
+                        "report": "Findings: SECRET-P5E matched report.", "labels": dict.fromkeys(NAMES, 1)}],
+    "true_report_rank": {"rank": 987606, "of": 987607, "rank_dedup": 987608, "n_tied": 987610, "hit_at_10": False,
+                         "protocol": "SECRET-protocol"},
+    "gallery": {"build_id": "SECRET-20261010_9876", "images": 200, "report_rows": 240, "report_groups": 78, "towers_identical": True}}}
+P5E_LABEL = {"stage": "label", "ms": 2.0, "seq": 14, "detail": {
+    "chexbert_14": dict(dict.fromkeys(NAMES, 0), Edema=1), "positives": ["Edema"],
+    "neighbor_agreement": [{"rank": 1, "agree": 13, "of": 14, "both_positive": [], "neighbor_only": [], "generated_only": ["Edema"]}]}}
+P5E_SCORE = {"stage": "score", "ms": 1.0, "seq": 16, "detail": {
+    "rouge_l": 0.21, "bleu_1": 0.33, "bleu_4": 0.07, "chexbert_14_micro_f1": 0.5, "exact_match_14": False,
+    "reference_source": "test_split", "reference_chexbert_14": dict(dict.fromkeys(NAMES, 0), Cardiomegaly=1),
+    "published": {"model_report": "SECRET-published model line", "floor_report": "SECRET-floor report",
+                  "live_equals_published": False}}}
+P5E_EVENTS = [("message_start", P5E_START), ("stage_end", P5E_PREPROCESS), ("stage_start", {"stage": "retrieve", "index": 2, "seq": 6}),
+              ("stage_end", P5E_RETRIEVE), ("stage_start", {"stage": "label", "index": 4, "seq": 13}), ("stage_end", P5E_LABEL),
+              ("stage_start", {"stage": "score", "index": 5, "seq": 15}), ("stage_end", P5E_SCORE),
+              ("stage_end", {"stage": "label", "skipped": "labels_pending", "seq": 17}),
+              ("stage_end", {"stage": "retrieve", "skipped": "k_zero", "seq": 18}),
+              ("stage_end", {"stage": "label", "skipped": "labeler_unavailable", "seq": 19})]
+SCORE_FIELDS = ["rouge_l", "bleu_1", "bleu_4", "chexbert_14_micro_f1", "exact_match_14", "reference_source", "reference_chexbert_14",
+                "published.model_report", "published.floor_report", "published.live_equals_published"]
+P5E_FIELDS = (   # (event, data, path, kept in public)
+    [("message_start", P5E_START, "options.test_row", False), ("message_start", P5E_START, "image.source", True)]
+    + [("stage_end", P5E_PREPROCESS, "detail." + k, False) for k in ("test_row", "identical_to")]
+    + [("stage_end", P5E_RETRIEVE, "detail.image_neighbors[]." + k, k in ("rank", "similarity"))
+       for k in ("rank", "similarity", "gallery_row", "study_id", "txt_row", "image_url", "labels")]
+    + [("stage_end", P5E_RETRIEVE, "detail.report_matches[]." + k, k in ("rank", "similarity"))
+       for k in ("rank", "similarity", "group", "group_size", "txt_row", "report", "labels")]
+    + [("stage_end", P5E_RETRIEVE, "detail.true_report_rank." + k, False)
+       for k in ("rank", "of", "rank_dedup", "n_tied", "hit_at_10", "protocol")]
+    + [("stage_end", P5E_RETRIEVE, "detail.gallery." + k, k != "build_id")
+       for k in ("build_id", "images", "report_rows", "report_groups", "towers_identical")]
+    + [("stage_end", P5E_LABEL, "detail." + k, k != "neighbor_agreement") for k in ("chexbert_14", "positives", "neighbor_agreement")]
+    + [("stage_end", P5E_SCORE, "detail." + k, False) for k in SCORE_FIELDS]
+    + [("stage_end", data, "skipped", True) for event, data in P5E_EVENTS[-3:]])
+
+
+def _at(obj, path):
+    """Every value at a dotted path ("[]" walks a list); [] when there is none."""
+    found = [obj]
+    for part in path.split("."):
+        walk, key = part.endswith("[]"), part[:-2] if part.endswith("[]") else part
+        step = []
+        for item in found:
+            if isinstance(item, dict) and key in item:
+                if not walk:
+                    step.append(item[key])
+                elif isinstance(item[key], list):
+                    step.extend(item[key])
+        found = step
+    return found
+
+
+def _field_id(event, data, path, public):
+    return "{}:{} {}".format(event, data.get("stage", ""), path)
+
+
+@pytest.mark.parametrize("event, data, path, public", P5E_FIELDS, ids=[_field_id(*f) for f in P5E_FIELDS])
+def test_each_p5e_field_is_kept_whole_in_private_mode(event, data, path, public):
+    assert _at(data, path), path   # the fixture really carries the field
+    assert _at(redact_event(event, copy.deepcopy(data), "private"), path) == _at(data, path)
+
+
+@pytest.mark.parametrize("event, data, path, public", P5E_FIELDS, ids=[_field_id(*f) for f in P5E_FIELDS])
+def test_each_p5e_field_is_dropped_in_public_mode_unless_r1_lets_it_through(event, data, path, public):
+    out = redact_event(event, copy.deepcopy(data), "public")
+    if public:
+        assert _at(out, path) == _at(data, path)
+    else:
+        assert out is None or _at(out, path) == []
+
+
+def test_the_public_score_stage_is_gone_whole_with_its_reference_labels_and_published_lines():
+    assert redact_event("stage_end", copy.deepcopy(P5E_SCORE), "public") is None
+    assert redact_event("stage_start", {"stage": "score", "index": 5}, "public") is None
+
+
+def test_no_private_value_of_a_p5e_turn_survives_into_a_public_payload(caplog):
+    with caplog.at_level(logging.DEBUG, logger="app.redact"):
+        public = [redact_event(e, copy.deepcopy(d), "public") for e, d in P5E_EVENTS]
+    assert _redactions(caplog) == []   # PUBLIC_DROP covers every P5-E shape on its own: the catch-all is the second line
+    dumped = json.dumps([out for out in public if out is not None])
+    assert "SECRET" not in dumped and "98760" not in dumped   # every private string and every private number of the fixture
+    assert not _keys_anywhere(json.loads(dumped)) & (redact.CATCH_ALL_KEYS | {"labels", "build_id", "report"})
+    assert [redact_event(e, copy.deepcopy(d), "private") for e, d in P5E_EVENTS] == [d for _, d in P5E_EVENTS]
+
+
+@pytest.mark.parametrize("key", P5E_KEYS)
+def test_the_score_fields_are_caught_outside_the_score_stage_too(key):
+    data = {"stage": "label", "ms": 1.0, "detail": {"chexbert_14": {"Edema": 1}, key: {"SECRET": 1}}}
+    assert redact_event("stage_end", copy.deepcopy(data), "public") == {"stage": "label", "ms": 1.0, "detail": {"chexbert_14": {"Edema": 1}}}
+    assert redact_event("stage_end", copy.deepcopy(data), "private") == data

@@ -332,6 +332,15 @@ const CHIP_SPOKEN = { positive: 'positive', negative: 'negative', unknown: 'not 
 const SCORES = [['ROUGE-L', 'rouge_l'], ['BLEU-1', 'bleu_1'], ['BLEU-4', 'bleu_4'], ['CheXbert-14 micro F1', 'chexbert_14_micro_f1']];
 const REFERENCES = { user: 'your reference', test_split: 'test-split reference' };
 
+// What the chips say once the label stage has ended skipped (P5-E), so the placeholder never outlives the stage: the user's own
+// setting is "labels off" whatever else is true, a gallery whose labels are still being built is that and not a fault, and any
+// other reason is named.
+function skippedLabels(why, off) {
+  if (off || why === 'label_off') return 'labels off';
+  if (why === 'labels_pending') return 'labels pending: the gallery is still being labelled';
+  return `labels unavailable${why ? ` (${why})` : ''}`;
+}
+
 export function renderLabels(view, ctx) {
   const v = whole(view);
   const cx = ctx ?? {};
@@ -346,7 +355,7 @@ export function renderLabels(view, ctx) {
   } else {
     const st = stageState(v, 'label');   // a stop or an error settles it; a settled turn that never got here shows nothing
     const why = str(st.skipped);
-    if (st.state === 'skipped') body = note(off || why === 'label_off' ? 'labels off' : `labels unavailable${why ? ` (${why})` : ''}`);
+    if (st.state === 'skipped') body = note(skippedLabels(why, off));
     else if (st.state === 'error') body = note('labels unavailable (error)');
     else if (st.state === 'done') body = note('labels unavailable');
   }

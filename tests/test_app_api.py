@@ -756,7 +756,8 @@ def test_the_last_three_stages_end_skipped_with_their_fixed_reasons(tmp_path):
         frames = _turn(c, sid, options={"max_new_tokens": 16, "label": False})
         assert _stage_ends(frames)["label"]["skipped"] == "label_off"
         frames = _turn(c, sid, options={"max_new_tokens": 16, "reference": "Findings: clear."})   # P5-E scores it
-        assert _stage_ends(frames)["score"]["skipped"] == "no_reference"
+        score = _stage_ends(frames)["score"]["detail"]   # a private reference is scored; with the labeller down, on text alone
+        assert score["reference_source"] == "user" and set(score) == {"rouge_l", "bleu_1", "bleu_4", "reference_source"}
         assert not [f for f in frames if f["event"] == "warning"]
 
 

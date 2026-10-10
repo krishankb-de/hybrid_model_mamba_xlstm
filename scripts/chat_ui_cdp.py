@@ -38,16 +38,19 @@ CLOSE_WAIT_S = 3.0   # how long, in all, Chrome has to answer the DevTools Brows
 TERM_WAIT_S = 5.0    # how long a process has to exit after SIGTERM, before it is sent SIGKILL
 
 # The app as the checks run it. The uvicorn CLI cannot pass create_app its arguments (the step delay of the tiny engine is
-# one), so this is a three-line launcher. argv: home, step delay in seconds, port, and optionally a directory of static files.
+# one), so this is a short launcher. argv: home, step delay in seconds, port, and optionally a directory of static files;
+# --tiny-gallery, anywhere after them, gives the app the synthetic gallery and the keyword labeller (P5-E).
 LAUNCH = """\
 import sys
 from pathlib import Path
 import uvicorn
 import app.server as server
-if len(sys.argv) > 4:
-    server.STATIC_DIR = Path(sys.argv[4])
-uvicorn.run(server.create_app(engine="tiny", home=sys.argv[1], tiny_step_delay_s=float(sys.argv[2])),
-            host="127.0.0.1", port=int(sys.argv[3]), log_level="warning")
+args = [a for a in sys.argv[1:] if a != "--tiny-gallery"]
+if len(args) > 3:
+    server.STATIC_DIR = Path(args[3])
+uvicorn.run(server.create_app(engine="tiny", home=args[0], tiny_step_delay_s=float(args[1]),
+                              tiny_gallery="--tiny-gallery" in sys.argv[1:]),
+            host="127.0.0.1", port=int(args[2]), log_level="warning")
 """
 
 
@@ -399,10 +402,11 @@ def free_port() -> int:
 class App:
     """The tiny app (random weights, a toy vocabulary) on a free loopback port, in one uvicorn process of its own. home is its
     CHAT_HOME: a temporary directory removed by stop() unless one is given (then the caller owns it). static_dir serves another
-    copy of app/static, for a check of a changed page. step_delay_s paces the tiny engine so that a turn can be watched."""
+    copy of app/static, for a check of a changed page. step_delay_s paces the tiny engine so that a turn can be watched.
+    tiny_gallery runs every stage: the synthetic gallery and the keyword labeller (create_app's laptop convenience, P5-E)."""
 
     def __init__(self, step_delay_s: float = 0.0, home: Optional[str] = None, static_dir: Optional[str] = None,
-                 startup_timeout: float = 90.0) -> None:
+                 startup_timeout: float = 90.0, tiny_gallery: bool = False) -> None:
         self.owns_home = home is None
         self.static_dir = static_dir
         self.home = home or tempfile.mkdtemp(prefix="chat_ui_home_")
@@ -414,6 +418,8 @@ class App:
             argv = [sys.executable, "-c", LAUNCH, self.home, repr(float(step_delay_s)), str(port)]
             if static_dir:
                 argv.append(static_dir)
+            if tiny_gallery:
+                argv.append("--tiny-gallery")
             with open(self.log_path, "w") as log:
                 self.proc = subprocess.Popen(argv, cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             self.url = "http://127.0.0.1:{}/".format(port)

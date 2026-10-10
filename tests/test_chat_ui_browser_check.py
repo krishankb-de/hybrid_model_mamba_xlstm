@@ -1,8 +1,9 @@
-"""CHAT_UI_PLAN.md P4-E: the parts of the browser checklist (scripts/chat_ui_browser_check.py) that are plain Python: the synthetic
-labelled turn it seeds, the accessibility-tree reader, and the consistency of its own lists. No Chrome and no app process.
+"""CHAT_UI_PLAN.md P4-E: the parts of the browser checklist (scripts/chat_ui_browser_check.py) that are plain Python: the labelled turn
+its a11y check runs (P5-E: live, on a tiny app with the tiny gallery), the accessibility-tree reader, and the consistency of its own
+lists. No Chrome and no app process.
 
 The run itself needs Chrome and is a local tool (venv/bin/python scripts/chat_ui_browser_check.py); validate.sh does not run it.
-Synthetic data only: the seeded turn says so in its report, its model card and its file name.
+Synthetic data only: the tiny engine, the tiny gallery, and a reference written for the check.
 """
 import json
 import re
@@ -12,55 +13,39 @@ from typing import Any, Dict, List
 import pytest
 from fastapi.testclient import TestClient
 
+from app.commands import parse_command
+from app.labels import CHEXBERT_14
 from app.server import create_app
 from scripts import chat_ui_browser_check as check
+from tests.app_helpers import iter_sse, png_bytes
 
 SCRIPT = Path(check.__file__)
 
 
-# ---- the seeded turn: the same replay path as any stored chat ------------------------------------------------------------------------
+# ---- the labelled turn of the a11y check: live, on a tiny app with the tiny gallery (P5-E) ------------------------------------------
 
 @pytest.fixture
-def seeded(tmp_path):
-    check.seed_labelled_home(str(tmp_path))
-    with TestClient(create_app(engine="tiny", home=str(tmp_path))) as client:
+def labelled(tmp_path):
+    with TestClient(create_app(engine="tiny", home=str(tmp_path), tiny_gallery=True)) as client:
         yield client
 
 
-def test_the_seeded_turn_is_one_finished_chat_the_server_lists_and_replays(seeded):
-    sessions = seeded.get("/v1/sessions").json()["sessions"]
-    assert len(sessions) == 1 and sessions[0]["title"] == "synthetic.png" and sessions[0]["turns"] == 1
-    session = seeded.get("/v1/sessions/" + sessions[0]["id"]).json()
-    assert [m["role"] for m in session["messages"]] == ["user", "assistant"]
-    assistant = session["messages"][1]
-    assert assistant["status"] == "done"
-    log = seeded.get("/v1/messages/{}?after=0".format(assistant["id"])).json()
-    names = [e["event"] for e in log["events"]]
-    assert [e["seq"] for e in log["events"]] == list(range(1, len(names) + 1))   # 1, 2, ... with no gap
-    assert names[0] == "message_start" and names[-1] == "message_stop"
-    assert [e["data"]["stage"] for e in log["events"] if e["event"] == "stage_end"] == check.STAGES   # every stage ends once, in order
-    assert log["events"][-1]["data"]["status"] == "done"
+def test_the_note_of_the_labelled_turn_is_a_reference_command():
+    assert parse_command("reference: " + check.LIVE_REFERENCE) == {"reference": check.LIVE_REFERENCE}
+    assert "SYNTHETIC" not in check.LIVE_REFERENCE and len(check.LIVE_REFERENCE) < 200   # written for the check: no MIMIC text
 
 
-def test_the_seeded_turn_carries_the_labels_the_chips_are_checked_against(seeded):
-    sessions = seeded.get("/v1/sessions").json()["sessions"]
-    message = seeded.get("/v1/sessions/" + sessions[0]["id"]).json()["messages"][1]["id"]
-    events = {(e["event"], e["data"].get("stage")): e["data"] for e in seeded.get("/v1/messages/{}?after=0".format(message)).json()["events"]}
-    labels = events[("stage_end", "label")]["detail"]["chexbert_14"]
-    reference = events[("stage_end", "score")]["detail"]["reference_chexbert_14"]
-    assert list(labels) == check.CHEXBERT_14 and list(reference) == check.CHEXBERT_14   # the 14 names, in the labeller's order
-    assert sorted(n for n, v in labels.items() if v) == sorted(check.SYNTHETIC_POSITIVE)
-    assert sorted(n for n, v in reference.items() if v) == sorted(check.SYNTHETIC_REFERENCE)
-    assert sorted(set(check.SYNTHETIC_POSITIVE) ^ set(check.SYNTHETIC_REFERENCE)) == ["Edema", "Pleural Effusion"]   # the two chips that disagree
-
-
-def test_nothing_in_the_seeded_turn_looks_like_model_output_or_mimic(seeded):
-    sessions = seeded.get("/v1/sessions").json()["sessions"]
-    export = seeded.get("/v1/sessions/{}/export?format=json".format(sessions[0]["id"])).text
-    assert "SYNTHETIC" in export
-    for forbidden in ("study_id", "subject_id", "gallery_row", "mimic"):
-        assert forbidden not in export.lower(), forbidden
-    assert check.SYNTHETIC_REPORT.startswith("Findings: SYNTHETIC")
+def test_the_labelled_turn_runs_every_stage_and_scores_its_report_against_that_reference(labelled):
+    sid = labelled.post("/v1/sessions", json={}).json()["id"]
+    r = labelled.post("/v1/sessions/{}/messages".format(sid), files={"image": ("xray_a.png", png_bytes(320, 320), "image/png")},
+                      data={"text": "reference: " + check.LIVE_REFERENCE, "options": json.dumps({"max_new_tokens": 24})})
+    frames = list(iter_sse([r.text]))
+    ends = {f["data"]["stage"]: f["data"] for f in frames if f["event"] == "stage_end"}
+    assert [stage for stage in check.STAGES if "skipped" in ends[stage]] == []   # every stage ran, so every chip has its reference
+    assert list(ends["label"]["detail"]["chexbert_14"]) == CHEXBERT_14
+    score = ends["score"]["detail"]
+    assert score["reference_source"] == "user" and list(score["reference_chexbert_14"]) == CHEXBERT_14
+    assert sorted(n for n, v in score["reference_chexbert_14"].items() if v) == ["Cardiomegaly", "Pleural Effusion", "Support Devices"]
 
 
 # ---- the accessibility-tree reader ----------------------------------------------------------------------------------------------------

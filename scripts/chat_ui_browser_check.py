@@ -14,7 +14,7 @@ one `CHECK <name> PASS|FAIL <detail>` line each:
   keyboard  Tab visits the controls in DOM order; Enter sends; Enter on Settings opens the drawer and Esc closes it, to Settings
   narrow    375 x 812: a full turn, its details open, the sidebar and the drawer, with no horizontal overflow
   a11y      the accessibility tree: stage buttons named from their text with their expanded state, label chips that say
-            positive or negative, a status region that says "Report ready"
+            positive or negative (and whether each agrees with the reference), a status region that says "Report ready"
   error     a server 422 shows the dismissible notice and keeps the composer as it was
   settings  (P4-F, P4-G) the drawer is a form that ends in Save, and says what it took. A click into a field that holds a value selects
             all of it (the first click after a Tab places the caret), and a budget typed with real keys replaces it (it is not appended)
@@ -30,10 +30,11 @@ The tiny model never writes an end-of-report token and loops after about 20 toke
 starts repeating, on) a tiny turn ends by itself near 21 tokens. The checks that need a long turn (stream, reload, sessions, stop) turn
 that switch off first, by storing the setting before the page loads; every check starts from the page's defaults.
 
-No check passes while the page logged a console error or threw. Chips: the tiny pipeline skips retrieval, labelling and
-scoring until P5-E, so the a11y check reads its chips from a second tiny app whose home was seeded with one SYNTHETIC
-labelled turn (app.store.Store, the same replay path as any stored chat). Screenshots go to docs/chat_ui/evidence/p4e/ with
-checklist.json (the result and each check's measurements); --no-evidence runs without writing anything.
+No check passes while the page logged a console error or threw. Chips: the tiny app the checks run skips retrieval, labelling
+and scoring (it has no gallery and no labeller), so the a11y check reads its chips from a live turn on a second tiny app started
+with tiny_gallery (P5-E: the synthetic gallery and the keyword labeller), its note a reference command, so the turn is labelled
+and scored and every chip says whether it agrees. Screenshots go to docs/chat_ui/evidence/p4e/ with checklist.json (the result
+and each check's measurements); --no-evidence runs without writing anything.
 
     venv/bin/python scripts/chat_ui_browser_check.py [--url http://127.0.0.1:8000/] [--out DIR] [--no-evidence]
 
@@ -54,7 +55,6 @@ import tempfile
 import time
 import urllib.request
 import uuid
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -77,12 +77,9 @@ EVIDENCE_FILES = ["streaming_1280x900_light.png", "settled_1280x900_light.png", 
 STAGES = ["preprocess", "encode", "retrieve", "generate", "label", "score"]
 DETAILED = ("preprocess", "encode", "generate")   # the stages of the tiny pipeline that have a detail, so a disclosure button
 SETTLED = ("done", "skipped")  # what a stage of a finished turn can be
-CHEXBERT_14 = ["Enlarged Cardiomediastinum", "Cardiomegaly", "Lung Opacity", "Lung Lesion", "Edema", "Consolidation", "Pneumonia",
-               "Atelectasis", "Pneumothorax", "Pleural Effusion", "Pleural Other", "Fracture", "Support Devices", "No Finding"]
-SYNTHETIC_POSITIVE = ["Cardiomegaly", "Edema", "Support Devices"]          # what the seeded turn's "model" found
-SYNTHETIC_REFERENCE = ["Cardiomegaly", "Pleural Effusion", "Support Devices"]   # and what its "reference" says
-SYNTHETIC_REPORT = "Findings: SYNTHETIC placeholder report for the browser check, not model output. Impression: none."
-SYNTHETIC_SHA = "ab" * 32
+# The a11y check's labelled turn sends this as its note: a reference command, so its report is scored against it. Synthetic text,
+# with words the keyword labeller marks (enlarged, effusion, tube), so the reference has positives to agree or differ with.
+LIVE_REFERENCE = "Findings: The heart is enlarged. Small left pleural effusion. Nasogastric tube in place. Impression: Cardiomegaly."
 
 # ---- the page, as scripts: each is a function that the browser calls with one JSON argument ---------------------------------------
 
@@ -925,50 +922,6 @@ def check_narrow(ctx: Context) -> Tuple[str, Dict[str, Any]]:
                                                   for state, m in measured.items()}})
 
 
-def seed_labelled_home(home: str) -> None:
-    """One SYNTHETIC finished turn in a fresh CHAT_HOME, with the label and score stages the tiny pipeline does not run yet."""
-    from app.schemas import DISCLAIMER
-    from app.store import Store
-    options = {"model": "tiny", "decode": "beam", "beam_size": 3, "max_new_tokens": 100, "cached_decode": True, "compile": False, "k_images": 4,
-               "k_reports": 3, "label": True, "reference": None, "display_repair": False, "test_row": None}
-    card = {"name": "tiny", "checkpoint": None, "checkpoint_sha256": None, "prefix_k": 4, "scan_impl": "legacy", "tfla_impl": "exact",
-            "device": "cpu", "cached_decode_available": True,
-            "drift_note": "SYNTHETIC turn seeded by scripts/chat_ui_browser_check.py: not model output"}
-    generated = {n: 1 if n in SYNTHETIC_POSITIVE else 0 for n in CHEXBERT_14}
-    reference = {n: 1 if n in SYNTHETIC_REFERENCE else 0 for n in CHEXBERT_14}
-    store = Store(Path(home))
-    try:
-        session = store.create_session("private")
-        user_id, message_id = store.start_turn(session["id"], "", "private", options, image_sha256=SYNTHETIC_SHA, image_filename="synthetic.png")
-        events = [
-            ("message_start", {"message_id": message_id, "user_message_id": user_id, "session_id": session["id"], "mode": "private", "model": card,
-                               "options": options, "image": {"sha256": SYNTHETIC_SHA, "filename": "synthetic.png", "source": "upload", "urls": {}}}),
-            ("stage_start", {"stage": "preprocess", "index": 0}),
-            ("stage_end", {"stage": "preprocess", "ms": 1.0, "detail": {"format": "PNG", "resized_to": [224, 224]}}),
-            ("stage_start", {"stage": "encode", "index": 1}),
-            ("stage_end", {"stage": "encode", "ms": 2.0, "detail": {"patch_grid": [197, 32], "pooled_dim": 16, "prefix_tokens": 4}}),
-            ("stage_end", {"stage": "retrieve", "skipped": "gallery_unavailable"}),
-            ("stage_start", {"stage": "generate", "index": 3}),
-            ("content_block_start", {"index": 0, "content_block": {"type": "report", "text": ""}}),
-            ("content_block_delta", {"index": 0, "delta": {"type": "beam_snapshot", "step": 0, "text": SYNTHETIC_REPORT}}),
-            ("content_block_stop", {"index": 0}),
-            ("stage_end", {"stage": "generate", "ms": 3.0, "detail": {"decode": "beam", "beam_size": 3, "tokens": 20, "device": "cpu"}}),
-            ("stage_start", {"stage": "label", "index": 4}),
-            ("stage_end", {"stage": "label", "ms": 1.0, "detail": {"chexbert_14": generated, "positives": SYNTHETIC_POSITIVE}}),
-            ("stage_start", {"stage": "score", "index": 5}),
-            ("stage_end", {"stage": "score", "ms": 1.0, "detail": {"rouge_l": 0.25, "bleu_1": 0.5, "bleu_4": 0.125, "chexbert_14_micro_f1": 0.75,
-                                                                  "exact_match_14": False, "reference_source": "user",
-                                                                  "reference_chexbert_14": reference}}),
-            ("message_stop", {"message_id": message_id, "status": "done", "total_ms": 8.0, "report": SYNTHETIC_REPORT,
-                              "display_report": SYNTHETIC_REPORT, "truncated_mid_sentence": False, "disclaimer": DISCLAIMER}),
-        ]
-        for event, data in events:
-            store.append_event(message_id, event, data)
-        store.finish_turn(message_id, "done", report=SYNTHETIC_REPORT, display_report=SYNTHETIC_REPORT, provenance=card, total_ms=8.0)
-    finally:
-        store.close()
-
-
 def check_a11y(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     b = ctx.browser
     b.call("Accessibility.enable")
@@ -1028,14 +981,22 @@ def check_a11y(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     faint["settled card, dark"] = contrast_issues(b)
     b.set_viewport(DESKTOP[0], DESKTOP[1], "light")
     expect(not any(faint.values()), "text below WCAG AA contrast: {}".format({k: v[:3] for k, v in faint.items() if v}))
-    # -- a labelled turn, on a second app whose home was seeded: the chips
-    home = tempfile.mkdtemp(prefix="chat_ui_seed_")
-    seeded = None
+    # -- a labelled turn, live, on a second app with the tiny gallery: the chips
+    labelled = None
     try:
-        seed_labelled_home(home)
-        seeded = App(home=home, static_dir=ctx.app.static_dir if ctx.app is not None else None)   # the page under test, over the seeded chat
-        ctx.open("", DESKTOP, "light", base=seeded.url)
-        ctx.wait_card("done", message="the seeded turn")
+        labelled = App(static_dir=ctx.app.static_dir if ctx.app is not None else None, tiny_gallery=True)   # the page under test
+        ctx.open("", DESKTOP, "light", base=labelled.url)
+        settled = ctx.run_turn("a", "reference: " + LIVE_REFERENCE)
+        expect(settled["status"] == "done", "the labelled turn ended {}".format(settled["status"]))
+        expect(settled["stages"] == dict.fromkeys(STAGES, "done"), "the labelled turn's stages are {}".format(settled["stages"]))
+        with urllib.request.urlopen(labelled.url + "v1/messages/" + settled["id"], timeout=10) as response:
+            events = json.load(response)["events"]
+        found = {row["data"]["stage"]: row["data"].get("detail") or {} for row in events if row["event"] == "stage_end"}
+        positives = [n for n, v in found["label"].get("chexbert_14", {}).items() if v]
+        expect(len(found["label"].get("chexbert_14", {})) == 14, "the label stage stored {} labels".format(len(found["label"].get("chexbert_14", {}))))
+        expect(found["score"].get("reference_chexbert_14"), "the score stage stored no labels of the reference")
+        notes = b.evaluate("[...[...document.querySelectorAll('#conversation article.card')].pop().querySelectorAll('.labels .note')].map((n) => n.textContent)")
+        expect(notes == [], "the settled card still says {} where its chips are".format(notes))   # never "labelling…" once labelled
         ax3 = Ax(b)
         chips = []
         for backend, label, value, agree in zip(
@@ -1047,28 +1008,30 @@ def check_a11y(ctx: Context) -> Tuple[str, Dict[str, Any]]:
             spoken = ax3.text(node)
             state = "positive" if value == "1" else "negative"
             expect(spoken.startswith(label) and (": " + state) in spoken, "the {} chip reads {!r}, not '{}: {}'".format(label, spoken, label, state))
+            expect(agree in ("true", "false"), "the {} chip has no agreement with the reference ({!r})".format(label, agree))
             if agree == "true":
                 expect("matches reference" in spoken, "the {} chip reads {!r}, without 'matches reference'".format(label, spoken))
-            elif agree == "false":
+            else:
                 expect("differs from reference" in spoken, "the {} chip reads {!r}, without 'differs from reference'".format(label, spoken))
             expect("✓" not in spoken and "✗" not in spoken, "the {} chip reads its mark glyph aloud: {!r}".format(label, spoken))
             chips.append(spoken)
         expect(len(chips) == 14, "{} chips, not 14".format(len(chips)))
-        expect(sum(": positive" in c for c in chips) == len(SYNTHETIC_POSITIVE) and sum(": negative" in c for c in chips) == 14 - len(SYNTHETIC_POSITIVE),
-               "the chips say {} positive and {} negative".format(sum(": positive" in c for c in chips), sum(": negative" in c for c in chips)))
+        expect(sum(": positive" in c for c in chips) == len(positives) and sum(": negative" in c for c in chips) == 14 - len(positives),
+               "the chips say {} positive and {} negative, the label stage {} positive".format(
+                   sum(": positive" in c for c in chips), sum(": negative" in c for c in chips), len(positives)))
         lists = [n for n in ax3.by_id.values() if Ax.role(n) == "list" and Ax.name(n).startswith("CheXbert-14")]
         expect(len(lists) == 1, "the chip list has no accessible name that starts with 'CheXbert-14'")
         b.evaluate("document.querySelector('#conversation .labels').scrollIntoView({ block: 'center' })")
-        ctx.shot("labelled_chips", "labelled_chips", "the 14 label chips of a SYNTHETIC labelled turn, filled for positive, with agreement marks", DESKTOP)
+        ctx.shot("labelled_chips", "labelled_chips", "the 14 label chips of a live labelled turn, with agreement marks", DESKTOP)
     finally:
-        if seeded is not None:
-            seeded.stop()
-        shutil.rmtree(home, ignore_errors=True)
-    return ("stage buttons: their text, then state, with expanded, no glyph first; status region live=polite reads 'Report ready'; 14 chips read "
-            "'<name>: positive|negative'; every control named; no text under AA contrast in 4 states",
+        if labelled is not None:
+            labelled.stop()
+    return ("stage buttons: their text, then state, with expanded, no glyph first; status region live=polite reads 'Report ready'; 14 chips of "
+            "a live labelled turn read '<name>: positive|negative' and whether each agrees with the reference; every control named; no text "
+            "under AA contrast in 4 states",
             {"contrast_issues_under_aa": faint, "focusable_controls_named": len(exposed), "stage_buttons": buttons, "skipped_stages": plain,
              "stage_items_as_read": items,
-             "status_region": {"live": "polite", "text": "Report ready", "history": said}, "chips_on_seeded_synthetic_turn": chips})
+             "status_region": {"live": "polite", "text": "Report ready", "history": said}, "chips_on_live_labelled_turn": chips})
 
 
 def check_error(ctx: Context) -> Tuple[str, Dict[str, Any]]:
@@ -1570,8 +1533,9 @@ def environment(browser: Browser, app: Optional[App], warm: Optional[float]) -> 
             "tiny_step_delay_s": STEP_DELAY_S if app is not None else None, "image": "synthetic PNG (tests/app_helpers.png_bytes)",
             "browser": version + " (headless)", "python": platform.python_version(), "os": platform.system(),
             "warm_up_turn_s": None if warm is None else round(warm, 2), "viewports": {"desktop": list(DESKTOP), "phone": list(PHONE)},
-            "notes": ["The tiny pipeline skips retrieve, label and score until P5-E, so the a11y check reads its label chips from a second tiny app "
-                      "whose home was seeded with one SYNTHETIC labelled turn (labelled_chips_*.png); the other checks run the live pipeline.",
+            "notes": ["The tiny app of the checks has no gallery and no labeller, so it skips retrieve, label and score; the a11y check reads its label "
+                      "chips from a live turn on a second tiny app started with tiny_gallery (the synthetic gallery and the keyword labeller), its note "
+                      "a reference command, so that turn is labelled and scored (labelled_chips_*.png).",
                       "The settings drawer refuses a token budget outside the server's 16-200 with a line under the field, so the 422 of the error check "
                       "is reached through the note's command ('tokens 500'), which the server applies on top of the drawer's options.",
                       "Display repair and Stop when the report starts repeating are on by default in the page (the server's own defaults stay off). "

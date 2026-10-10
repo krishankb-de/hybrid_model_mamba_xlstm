@@ -719,6 +719,59 @@ def test_two_tabs_run_turns_at_once_and_neither_disturbs_the_other(ui, images):
     ui.assert_clean()
 
 
+# ---- 15 (P5-E) ---------------------------------------------------------------------------------------------------------------------
+
+# The newest card's label area: its chips (how many, positive, marked against a reference), any note in place of them, and the scores.
+LABELS_JS = """() => {
+  const c = [...document.querySelectorAll('#conversation article.card')].pop();
+  const chips = [...c.querySelectorAll('.labels li.chip.label')];
+  const source = c.querySelector('.labels .score-source');
+  return { chips: chips.length, positive: chips.filter((x) => x.classList.contains('positive')).length,
+           marked: chips.filter((x) => x.hasAttribute('data-agree')).length,
+           notes: [...c.querySelectorAll('.labels .note')].map((n) => n.textContent),
+           scores: [...c.querySelectorAll('.labels .score dt')].map((n) => n.textContent), source: source ? source.textContent : null };
+}"""
+GALLERY_STAGES = {"preprocess": "done", "encode": "done", "retrieve": "done", "generate": "done", "label": "done", "score": "skipped"}
+
+
+@pytest.mark.parametrize("ui", [{"tiny_gallery": True}], indirect=True, ids=["tiny_gallery"])
+def test_with_a_gallery_every_stage_runs_and_the_card_settles_on_labels_and_a_test_studys_score(ui, images):
+    """P5-E on a tiny_gallery server (the synthetic gallery and the keyword labeller). An upload's stored events carry its similar
+    X-rays and matching reports, and one label agreement per neighbour; its card settles on the 14 label chips with no placeholder
+    left behind. A test study, sent as the picker will send it (options.test_row and no image; the picker itself is P6-D), is scored
+    against its reference, and once the chat is loaded again its card shows the scores and an agree mark on every chip."""
+    page = ui.open()
+    assert ui.server.get("v1/models")["features"] == {"retrieval": True, "labels": True}
+    card = ui.turn(images["xray_a.png"])
+    assert card["status"] == "done" and card["stages"] == GALLERY_STAGES and card["spinning"] == 0   # no reference: no score
+    labels = page.evaluate(LABELS_JS)
+    assert labels["chips"] == 14 and labels["positive"] >= 1 and labels["notes"] == [] and labels["marked"] == 0   # not "labelling…"
+    assert card["labels"] == []
+    assert bubble(ui)["chips"] == ["beam 3", "100 tok", "cached", "k 4/3"]   # retrieval ran, so the k it used is shown
+    sid = ui.session_id()
+    [upload] = assistants(ui, sid)
+    retrieve, label = stage_detail(upload, "retrieve"), stage_detail(upload, "label")
+    assert len(retrieve["image_neighbors"]) == 4 and len(retrieve["report_matches"]) == 3   # the drawer's k 4/3
+    assert [a["rank"] for a in label["neighbor_agreement"]] == [n["rank"] for n in retrieve["image_neighbors"]] == [1, 2, 3, 4]
+    assert all(a["of"] == 14 for a in label["neighbor_agreement"]) and len(label["chexbert_14"]) == 14
+
+    picked = ui.server.message(ui.server.post_turn(sid, {"test_row": 0, "max_new_tokens": 24}))
+    assert picked["status"] == "done" and picked["events"][0]["data"]["image"]["source"] == "test_split"
+    score = stage_detail(picked, "score")
+    assert score["reference_source"] == "test_split" and len(score["reference_chexbert_14"]) == 14
+    assert stage_detail(picked, "retrieve")["true_report_rank"]["of"] == 40   # the tiny test split
+    ui.reload()
+    card = ui.card()
+    assert card["n"] == 2 and card["status"] == "done" and set(card["stages"].values()) == {"done"} and card["labels"] == []
+    labels = page.evaluate(LABELS_JS)
+    assert labels["chips"] == 14 and labels["marked"] == 14 and labels["notes"] == []
+    assert labels["scores"] == ["ROUGE-L", "BLEU-1", "BLEU-4", "CheXbert-14 micro F1", "CheXbert-14 exact match"]
+    assert labels["source"].startswith("vs test-split reference")
+    assert "test row 0" in bubble(ui)["chips"]
+    ui.shot("labels_and_score_1280x900_light.png")
+    ui.assert_clean()
+
+
 # ---- the harness itself ----------------------------------------------------------------------------------------------------------
 
 PROBE_CONFTEST = """\

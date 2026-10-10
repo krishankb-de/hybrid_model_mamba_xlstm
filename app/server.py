@@ -19,10 +19,10 @@ import json
 import logging
 import os
 import re
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence, Tuple
 
 from fastapi import Depends, FastAPI, File, Form, Header, Query, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -30,7 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException
@@ -38,9 +38,11 @@ from starlette.requests import Request
 
 from app.commands import COMMAND_HELP, parse_command
 from app.engine import REPO_ROOT, Engine, build_engine
+from app.gallery import Gallery, GalleryMismatch
 from app.imaging import (MAX_UPLOAD_BYTES, MIN_SIDE, TOO_LARGE_MSG, UploadError, load_upload, model_input_image,
                          thumbnail_jpeg)
-from app.pipeline import Pipeline, TurnJob, Worker
+from app.labels import LabelerClient, LabelerUnavailable, RuleLabeler
+from app.pipeline import Pipeline, PublishedDumps, TurnJob, Worker, named_labels
 from app.redact import redact_card
 from app.schemas import DISCLAIMER, Options, error_body
 from app.store import Store
@@ -57,12 +59,23 @@ PING_S = 15.0                                             # a keep-alive comment
 CLIENT_ID = re.compile(r"[\x21-\x7e]{1,128}")             # visible ASCII: it scopes by equality only
 ERROR_KINDS = {400: "invalid_request_error", 401: "authentication_error", 403: "permission_error",
                404: "not_found_error", 413: "validation_error", 422: "validation_error", 429: "overloaded_error",
-               500: "internal_error"}   # 413 as P8-A's test expects; 403 as every public test-split refusal (fix-1)
+               500: "internal_error", 503: "unavailable_error"}   # 413 as P8-A's test expects; 403 as every public test-split
+                                                                  # refusal (fix-1); 503 when the gallery or the labeller is not there
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 NO_CACHE = {"Cache-Control": "no-cache"}   # the page and its files: revalidate (ETag, Last-Modified) after a redeploy
 NO_IMAGE_MSG = "Attach an X-ray first."
 NO_CACHE_MSG = "{} has no O(1) decode cache; set cached_decode=false."   # the engine's own wording (P2-D)
 NO_TOKEN_MSG = "This server has no token; connect through loopback."
+BUSY_MSG = "The server is busy with {} turns; try again shortly."
+PUBLIC_TEST_SPLIT_MSG = "Test-split studies are not available in public mode."
+NO_GALLERY_MSG = "Test-split studies need the gallery, which this server has not loaded."
+NO_RETRIEVAL_MSG = "Retrieval needs the gallery, which this server has not loaded."
+NO_LABELER_MSG = "Labels need a CheXbert labeller, which this server does not have."
+LABELER_DOWN_MSG = "The CheXbert labeller did not answer; try again shortly."
+TEST_IMAGE_MSG = "Could not read the test-split image."
+BOTH_IMAGES_MSG = "Send an image or a test row, not both."
+MAX_LABEL_CHARS = 20000   # what the labeller service takes in one request (app/labeler.py answers 422 above it)
+TINY_GALLERY_REFERENCE = "phase6_mimic_20260101T000000Z.json"   # the reference result that decides the tiny gallery's gate
 PLACEHOLDER = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>CXR Report Chat</title></head>"
                "<body><p>{}</p><p>The chat page is not built yet. The API is under <code>/v1/</code>, and its "
                "reference is at <a href=\"/docs\">/docs</a>.</p></body></html>")
@@ -112,8 +125,8 @@ API_DESCRIPTION = (
     "kind of its status: " + ", ".join("{} {}".format(status, kind) for status, kind in ERROR_KINDS.items()) + ".")
 CLIENT_ID_DOC = ("Public mode only: names the caller, 1 to 128 visible ASCII characters, and scopes its sessions and "
                  "messages. A private server ignores it.")
-IMAGE_DOC = ("The chest X-ray: PNG, JPEG or WEBP, at most {} MB, each side at least {} px. Leave it out to reuse the "
-             "session's latest image; a session with no image yet answers 422.".format(UPLOAD_MB, MIN_SIDE))
+XRAY_DOC = "The chest X-ray: PNG, JPEG or WEBP, at most {} MB, each side at least {} px.".format(UPLOAD_MB, MIN_SIDE)
+IMAGE_DOC = XRAY_DOC + (" Leave it out to reuse the session's latest image; a session with no image yet answers 422.")
 TEXT_DOC = ("A command that changes this turn's options, or a note kept with the turn. " + COMMAND_HELP + " Sent "
             "without an image, a command (or no text) runs the session's latest image again, and any other text is "
             "answered with the command list and no model runs; a session with no image yet answers a text-only turn "
@@ -138,7 +151,8 @@ REFUSALS = {   # what a status means in the reference; a route that can answer i
     422: "The request failed validation: a parameter, an option, the model or the image cannot be used, or there is "
          "no image to run.",
     429: "The server is busy: its queue of accepted turns is full.",
-    500: "The server could not store the image.",
+    500: "The server could not store the image, or read a test-split one.",
+    503: "What the route needs is not on this server or does not answer: the retrieval gallery or the CheXbert labeller.",
 }
 STREAM_RESPONSE = {200: {   # the turn is Server-Sent Events, not JSON
     "description": "The turn's events, one frame each: `event: <name>`, then `data: <one-line JSON>` with a `seq` that "
@@ -184,6 +198,12 @@ def _refusals(messages: Dict[int, str], token: bool = True, client_id: bool = Tr
 class NewSession(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title: str = ""
+
+
+class LabelText(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1, max_length=MAX_LABEL_CHARS,
+                      description="The report to label, 1 to {:,} characters.".format(MAX_LABEL_CHARS))
 
 
 def sse(event: str, data: Dict[str, Any]) -> str:
@@ -372,13 +392,110 @@ def _save_upload(store: Store, session_id: str, sha256: str, data: bytes, img: I
     store.save_upload(session_id, sha256, data, ext, thumbnail_jpeg(img), png.getvalue())
 
 
-def _previous_image(store: Store, session: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The newest image of the session whose original is still on disk: what a text-only turn reruns."""
+def _test_count(gallery: Gallery) -> int:
+    """The test split's size: the gallery's report rows are its train reports, then its test reports."""
+    facts = gallery.facts()
+    return facts["report_rows"] - facts["images"]
+
+
+def _test_image_sha256(gallery: Gallery, row: int) -> str:
+    """A test study's image, read and checked as an upload is before the stream opens; -> its sha256. It is never copied:
+    preprocess reads it again from the dataset."""
+    try:
+        data = Path(gallery.test_study(row)["image"]).read_bytes()
+    except OSError:
+        log.warning("a test-split image could not be read")
+        raise HTTPException(500, TEST_IMAGE_MSG) from None
+    return _checked_upload(data)[2]
+
+
+def _previous_image(store: Store, session: Dict[str, Any], gallery: Optional[Gallery] = None) -> Optional[Dict[str, Any]]:
+    """The newest image of the session that can still run: an upload whose original is on disk, or a test study the gallery
+    still has (pass the gallery in private mode only; a public session stores no test row). What a text-only turn reruns."""
     for message in reversed(session["messages"]):
-        sha256 = message["image_sha256"]
-        if message["role"] == "user" and sha256 and store.upload_path(session["id"], sha256, "original") is not None:
+        sha256, row = message["image_sha256"], message.get("test_row")
+        if message["role"] != "user" or not sha256:
+            continue
+        if row is not None:
+            if gallery is not None and row < _test_count(gallery):
+                return {"sha256": sha256, "filename": message["image_filename"], "test_row": row}
+        elif store.upload_path(session["id"], sha256, "original") is not None:
             return {"sha256": sha256, "filename": message["image_filename"]}
     return None
+
+
+def _wire_gallery(given: Optional[Gallery], gallery_dir: Optional[str], tiny_gallery: bool, home: Path,
+                  engines: Dict[str, Engine], default_model: str) -> Tuple[Optional[Gallery], Optional[List[str]]]:
+    """The gallery the pipeline queries: the one passed in; else gallery_dir, opened against the default engine's tower hash
+    (P5-D), and served only to the engines whose tower is that one; else, with tiny_gallery, a synthetic one; else none. A
+    gallery_dir that cannot be served leaves the server running without retrieval, and says why (counts and file names only,
+    R7). -> (the gallery, the engines it serves; None for every engine)."""
+    if given is not None:
+        return given, None
+    if gallery_dir:
+        towers = {name: e.tower_sha256() for name, e in engines.items()}
+        try:
+            gallery = Gallery.open(Path(gallery_dir).expanduser(), expect_tower_sha256=towers[default_model])
+        except GalleryMismatch as exc:
+            print("[server] gallery unavailable: {}".format(exc), flush=True)
+            return None, None
+        served = [name for name, tower in towers.items() if tower == towers[default_model]]
+        facts = gallery.facts()
+        print("[server] gallery: {} images, {} report rows, labels {}".format(
+            facts["images"], facts["report_rows"], "pending" if gallery.labels is None else "done"), flush=True)
+        if len(served) < len(towers):
+            print("[server] gallery: no retrieval for {}: another image tower".format(
+                ", ".join(name for name in towers if name not in served)), flush=True)
+        return gallery, served
+    if tiny_gallery:
+        return _tiny_gallery(home), None
+    return None, None
+
+
+def _tiny_gallery(home: Path) -> Gallery:
+    """A laptop convenience (tiny_gallery=True): the synthetic gallery of scripts/build_retrieval_gallery.py --tiny under
+    <home>/gallery/tiny, built once and kept. Its vectors are 16-d, the tiny engine's pooled width, so a tiny turn's query meets
+    them. Its R@k gate is decided as the cluster decides it (a reference result equal to the build's own, then compare_rk), and
+    it opens without a tower check: its tower hash is a fixed text's, no engine's. Nothing in it is MIMIC-derived."""
+    from scripts.build_retrieval_gallery import build_tiny, compare_rk
+    root = Path(home) / "gallery" / "tiny"
+    if not (root / "manifest.json").is_file():
+        build_tiny(root)
+    gate = json.loads((root / "manifest.json").read_text()).get("gate_rk")
+    if not (isinstance(gate, dict) and gate.get("equal") is True):
+        (root / "reference_rk").mkdir(exist_ok=True)
+        app_rk = json.loads((root / "gate_rk.json").read_text())["app"]
+        (root / "reference_rk" / TINY_GALLERY_REFERENCE).write_text(json.dumps({"metrics": app_rk}))
+        with redirect_stdout(io.StringIO()):   # its RESULT line is for a job log
+            compare_rk(root)
+    return Gallery.open(root, expect_tower_sha256=None)
+
+
+def _wire_labeler(given: Any, labeler_url: Optional[str], tiny_gallery: bool) -> Any:
+    """The labeller: the one passed in (anything with label and healthy), else the service at labeler_url, else, with
+    tiny_gallery, the keyword RuleLabeler; else none."""
+    if given is not None:
+        return given
+    if labeler_url:
+        return LabelerClient(labeler_url)
+    return RuleLabeler() if tiny_gallery else None
+
+
+def _wire_published(dirs: Optional[Dict[str, str]], gallery: Optional[Gallery]) -> Optional[PublishedDumps]:
+    """The published dumps (D18), from {"model": dir, "floor": dir}; None on the laptop. Dumps that cannot be read, or whose
+    lines are not one per test study of the gallery, are not used: a line would sit beside the wrong study."""
+    if not dirs:
+        return None
+    try:
+        dumps = PublishedDumps.load(Path(dirs["model"]), Path(dirs["floor"]))
+    except (OSError, KeyError, UnicodeDecodeError) as exc:
+        print("[server] published dumps unavailable ({})".format(type(exc).__name__), flush=True)
+        return None
+    if gallery is not None and not len(dumps.model_hyps) == len(dumps.floor_hyps) == _test_count(gallery):
+        print("[server] published dumps unavailable: {} and {} lines for {} test studies".format(
+            len(dumps.model_hyps), len(dumps.floor_hyps), _test_count(gallery)), flush=True)
+        return None
+    return dumps
 
 
 def _clean_filename(name: Optional[str]) -> Optional[str]:
@@ -391,10 +508,16 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
                labeler_url: Optional[str] = None, models: Sequence[str] = ("hybrid_150m_m3_rrg",),
                allow_compile: bool = False, cors_origins: Sequence[str] = (),
                published_dirs: Optional[Dict[str, str]] = None, tiny_step_delay_s: float = 0.0,
-               drift_note: str = "") -> FastAPI:
+               drift_note: str = "", gallery: Optional[Gallery] = None, labeler: Any = None,
+               tiny_gallery: bool = False) -> FastAPI:
     """The app. It refuses to exist without a token on a non-loopback address or in public mode (R6, D9).
 
-    gallery_dir, labeler_url and published_dirs are kept on app.state for the stages P5-E adds.
+    The retrieve, label and score stages (P5-E) get their gallery from `gallery` (an opened Gallery), else from gallery_dir
+    (opened against the default engine's tower hash), and their labeller from `labeler` (anything with label and healthy),
+    else from labeler_url (a LabelerClient). tiny_gallery is a laptop convenience: with neither given, a synthetic gallery is
+    built under <home>/gallery/tiny and the keyword RuleLabeler labels, so the tiny server runs every stage. published_dirs
+    ({"model": dir, "floor": dir}, each holding a hyps.txt) puts the published lines beside a test study's score. All of them
+    are on app.state, with gallery_dir, labeler_url and published_dirs as given.
     """
     if mode not in ("private", "public"):
         raise ValueError("mode must be 'private' or 'public', got {!r}".format(mode))
@@ -413,11 +536,15 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     print("[server] recovered {} running turn(s)".format(store.recover_after_restart()), flush=True)
     try:
         engines = _engines(engine, models, tiny_step_delay_s, drift_note)
+        default_model = next(iter(engines))
+        gallery, retrieval_models = _wire_gallery(gallery, gallery_dir, tiny_gallery, store.home, engines, default_model)
+        labeler = _wire_labeler(labeler, labeler_url, tiny_gallery)
+        published = _wire_published(published_dirs, gallery)
     except BaseException:
         store.close()
         raise
-    default_model = next(iter(engines))
-    worker = Worker(Pipeline(engines, default_model, store, mode, drift_note=drift_note), queue_cap)
+    worker = Worker(Pipeline(engines, default_model, store, mode, gallery=gallery, labeler=labeler, published=published,
+                             drift_note=drift_note, retrieval_models=retrieval_models), queue_cap)
     static_dir = STATIC_DIR
     # Read once, here: the code this process runs is what it imported at the start, whatever the checkout says later (P4-H A2). The card's
     # provenance: the checkout's HEAD, else the .sync_stamp; "-dirty" when that tree had changes its commit does not hold. /healthz needs
@@ -442,6 +569,7 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     app.state.store, app.state.engines, app.state.worker = store, engines, worker
     app.state.mode, app.state.default_model = mode, default_model
     app.state.gallery_dir, app.state.labeler_url, app.state.published_dirs = gallery_dir, labeler_url, published_dirs
+    app.state.gallery, app.state.labeler, app.state.published = gallery, labeler, published
     app.add_middleware(_Guard, token=token)
     if cors_origins:   # added last, so it runs first: a preflight is answered before the token check
         app.add_middleware(CORSMiddleware, allow_origins=list(cors_origins), allow_methods=["GET", "POST", "DELETE"],
@@ -555,10 +683,10 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
                           "/v1/messages/{message_id}` at once; every refusal (400, 403, 404, 413, 422, 429, 500) "
                           "comes before the stream opens, as a JSON error envelope.",
               responses={**STREAM_RESPONSE, **_refusals({
-                  400: "options must be a JSON object.", 403: "Test-split studies are not available in public mode.",
+                  400: "options must be a JSON object.", 403: PUBLIC_TEST_SPLIT_MSG,
                   404: "Session not found.", 413: TOO_LARGE_MSG,
                   422: "Invalid options: beam_size: Input should be less than or equal to 8",
-                  429: "The server is busy with {} turns; try again shortly.".format(queue_cap),
+                  429: BUSY_MSG.format(queue_cap),
                   500: "Could not store the image."})})
     async def post_message(session_id: str, image: Optional[UploadFile] = File(None, description=IMAGE_DOC),
                            text: str = Form("", description=TEXT_DOC),
@@ -574,10 +702,19 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
             raise HTTPException(422, NO_CACHE_MSG.format(engines[model].name))
         if opts.compile and not allow_compile:
             raise HTTPException(422, "compile is not enabled on this server.")
+        private = "public" not in (mode, session["mode"])
+        gallery = worker.pipeline.gallery
+        test_sha256 = None
         if opts.test_row is not None:   # R1: test-split studies are private-mode data
-            if "public" in (mode, session["mode"]):   # 403, as every public test-split access (fix-1 (b))
-                raise HTTPException(403, "Test-split studies are not available in public mode.")
-            raise HTTPException(422, "Test-split studies need the gallery, which this server has not loaded.")
+            if not private:   # 403, as every public test-split access (fix-1 (b))
+                raise HTTPException(403, PUBLIC_TEST_SPLIT_MSG)
+            if gallery is None:
+                raise HTTPException(422, NO_GALLERY_MSG)
+            if opts.test_row >= _test_count(gallery):
+                raise HTTPException(422, "test_row must be below {}.".format(_test_count(gallery)))
+            if image is not None:
+                raise HTTPException(422, BOTH_IMAGES_MSG)
+            test_sha256 = await run_in_threadpool(_test_image_sha256, gallery, opts.test_row)
         upload = sha256 = filename = checked = None
         if image is not None:
             upload = await image.read(MAX_UPLOAD_BYTES + 1)
@@ -585,21 +722,25 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
                 raise HTTPException(413, TOO_LARGE_MSG)
             checked = await run_in_threadpool(_checked_upload, upload)
             sha256, filename = checked[2], _clean_filename(image.filename)
-        else:   # a text-only turn reruns the session's newest image still on disk
-            previous = await run_in_threadpool(_previous_image, store, session)
+        elif test_sha256 is not None:   # the picker: that study's image, read from the dataset by preprocess
+            sha256 = test_sha256
+        else:   # a text-only turn reruns the session's newest image still on disk, or the test study it last ran
+            previous = await run_in_threadpool(_previous_image, store, session, gallery if private else None)
             if previous is None:
                 raise HTTPException(422, NO_IMAGE_MSG)
             question = bool(text.strip()) and parse_command(text) is None
             if not question:   # a question gets the fixed answer: no model runs, so no image is used or recorded
                 sha256, filename = previous["sha256"], previous["filename"]
+                if previous.get("test_row") is not None:   # the turn runs that study again, as its resolved options say
+                    opts = opts.model_copy(update={"test_row": previous["test_row"]})
         if not worker.reserve():
-            raise HTTPException(429, "The server is busy with {} turns; try again shortly.".format(queue_cap))
+            raise HTTPException(429, BUSY_MSG.format(queue_cap))
         try:
             if checked is not None:   # stored before start_turn records it (fix-1 I1)
                 await run_in_threadpool(_save_upload, store, session_id, sha256, upload, checked[0], checked[1])
             user_message_id, message_id = await run_in_threadpool(
                 store.start_turn, session_id, text, session["mode"], dict(opts.model_dump(), model=model),
-                sha256, filename)
+                sha256, filename, opts.test_row)
         except KeyError:   # deleted since it was looked up
             worker.release()
             raise HTTPException(404, "Session not found.") from None
@@ -657,5 +798,65 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
             raise HTTPException(422, "format must be json or md.") from None
         return Response(body, media_type=media_type,
                         headers={"Content-Disposition": 'attachment; filename="{}"'.format(filename)})
+
+    # ---- P5-E: retrieval and labels on their own, and the test-split picker's list ------------------------------------
+
+    def private_only() -> None:
+        """Test-split studies are private-mode data (R1): 403 in public mode, before anything else about the request."""
+        if mode == "public":
+            raise HTTPException(403, PUBLIC_TEST_SPLIT_MSG)
+
+    @app.post("/v1/retrieve", summary="Find similar X-rays and reports",
+              description="Runs the X-ray through preprocess and encode on the turn worker and returns what a turn's retrieve stage "
+                          "shows: the `k_images` most similar training X-rays and the `k_reports` best-matching report groups, as rank "
+                          "and similarity only in public mode. Answers 413 for an image over the limit, 422 for an image that cannot "
+                          "be used or a k out of range, 429 when the queue is full and 503 when the server has no retrieval gallery.",
+              responses=_refusals({413: TOO_LARGE_MSG,
+                                   422: "Invalid request: k_images: Input should be less than or equal to 12",
+                                   429: BUSY_MSG.format(queue_cap), 503: NO_RETRIEVAL_MSG}, client_id=False))
+    async def retrieve(image: UploadFile = File(..., description=XRAY_DOC),
+                       k_images: int = Form(4, ge=0, le=12, description="How many similar training X-rays, 0 to 12."),
+                       k_reports: int = Form(3, ge=0, le=10, description="How many matching report groups, 0 to 10.")):
+        pipeline = worker.pipeline
+        if not pipeline.retrieval_ready(default_model):
+            raise HTTPException(503, NO_RETRIEVAL_MSG)
+        data = await image.read(MAX_UPLOAD_BYTES + 1)
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, TOO_LARGE_MSG)
+        await run_in_threadpool(_checked_upload, data)
+        if not worker.reserve():
+            raise HTTPException(429, BUSY_MSG.format(queue_cap))
+        future = worker.run_task(lambda: pipeline.retrieve_upload(data, k_images, k_reports))
+        return await asyncio.wrap_future(future)
+
+    @app.post("/v1/label", summary="Label a report",
+              description="The 14 CheXbert labels of the text, each 0 or 1, as `chexbert_14`. Answers 422 for a missing, empty or "
+                          "too long text (at most {:,} characters) and 503 when the server has no labeller or it does not "
+                          "answer.".format(MAX_LABEL_CHARS),
+              responses=_refusals({422: "Invalid request: text: String should have at least 1 character",
+                                   503: NO_LABELER_MSG}, client_id=False))
+    def label_text(body: LabelText):
+        labeler = worker.pipeline.labeler
+        if labeler is None:
+            raise HTTPException(503, NO_LABELER_MSG)
+        try:
+            row = labeler.label([body.text])[0]
+        except LabelerUnavailable:
+            raise HTTPException(503, LABELER_DOWN_MSG) from None
+        return {"chexbert_14": named_labels(row)}
+
+    @app.get("/v1/test-studies", summary="List test-split studies", dependencies=[Depends(private_only)],
+             description="The studies of the official test split whose study id starts with `q`, in test-row order, `limit` at a "
+                         "time (1 to 200, default 50), each with the `test_row` a turn's options take. Private mode only: answers "
+                         "403 in public mode, 422 for a `limit` outside 1 to 200 and 503 when the server has no retrieval gallery.",
+             responses=_refusals({403: PUBLIC_TEST_SPLIT_MSG,
+                                  422: "Invalid request: limit: Input should be greater than or equal to 1",
+                                  503: NO_GALLERY_MSG}, client_id=False))
+    def test_studies(q: str = Query("", max_length=64, description="The start of a study id; empty lists every study."),
+                     limit: int = Query(50, ge=1, le=200)):
+        gallery = worker.pipeline.gallery
+        if gallery is None:
+            raise HTTPException(503, NO_GALLERY_MSG)
+        return {"studies": gallery.list_test_studies(q, limit)}
 
     return app

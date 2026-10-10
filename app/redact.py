@@ -36,9 +36,12 @@ PUBLIC_DROP: Dict[str, Union[str, List[str]]] = {   # dotted paths; "[]" walks a
 }
 
 # R1 key names that are never legitimate in a public payload. report and labels are not here: model output uses them,
-# so they are dropped only at their PUBLIC_DROP paths.
+# so they are dropped only at their PUBLIC_DROP paths. The last four are the score stage's (P5-E): the reference's own labels
+# and the published lines (a dump line, and the retrieval floor's line, which is a MIMIC report). Public mode drops that whole
+# stage; these keep them out of any other event as well.
 CATCH_ALL_KEYS = frozenset({"image_url", "study_id", "subject_id", "gallery_row", "txt_row", "group", "group_size",
-                            "neighbor_agreement", "reference", "test_row", "identical_to", "true_report_rank"})
+                            "neighbor_agreement", "reference", "test_row", "identical_to", "true_report_rank",
+                            "reference_chexbert_14", "published", "model_report", "floor_report"})
 
 # U2: every element of a list stored under one of these names, at any depth, keeps only these keys.
 U2_LISTS = frozenset({"image_neighbors", "report_matches"})

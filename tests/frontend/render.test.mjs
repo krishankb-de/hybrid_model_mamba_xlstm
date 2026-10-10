@@ -596,6 +596,29 @@ test('a skipped label stage says "labels unavailable" with its reason', () => {
   assert.equal(renderLabels(stopped).textContent, 'labels unavailable (stopped)');   // never "labelling…" on a finished turn
 });
 
+test('the label states follow the stage (P5-E): labelling while it runs, then labels or why there are none, never stuck', () => {
+  const live = [START, stageStart('preprocess', 0), stageEnd('preprocess', 1, {}), stageStart('generate', 3), snapshot('Findings: so far'),
+                stageEnd('generate', 9, GENERATE)];
+  const text = (...steps) => renderLabels(viewOf([...live, ...steps]), { labelNames: LABEL_NAMES }).textContent;
+  assert.equal(text(), 'labelling…');                                  // the stage is next
+  assert.equal(text(stageStart('label', 4)), 'labelling…');            // the stage runs
+  const done = renderLabels(viewOf([...live, stageStart('label', 4), stageEnd('label', 3, { chexbert_14: labelled(['Edema']) })]),
+                            { labelNames: LABEL_NAMES });
+  assert.equal(qa(done, '.chip').length, 14);                          // then the labels, and no placeholder beside them
+  assert.equal(q(done, '.note'), null);
+  const reasons = {
+    label_off: 'labels off',
+    labeler_unavailable: 'labels unavailable (labeler_unavailable)',
+    labels_pending: 'labels pending: the gallery is still being labelled',
+  };
+  for (const [reason, said] of Object.entries(reasons)) {
+    assert.equal(text(skipped('label', reason)), said, reason);                          // the turn still runs: the stage has ended
+    assert.equal(text(skipped('label', reason), skipped('score', 'no_reference'), stopOf('done')), said, reason);   // and settled
+    assert.equal(text(stageStart('label', 4), skipped('label', reason), stopOf('done')), said, reason);           // started, then skipped
+  }
+  assert.doesNotMatch(text(skipped('label', 'labels_pending'), stopOf('done')), /labelling|unavailable/);   // a build still running, not a fault
+});
+
 test('the chips are the 14 names in ctx.labelNames order: positives filled, negatives outlined', () => {
   const view = finished({ labels: labelled(['Cardiomegaly', 'Support Devices']) });
   const labels = renderLabels(view, { labelNames: LABEL_NAMES });

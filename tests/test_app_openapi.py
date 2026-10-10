@@ -10,11 +10,12 @@ from pydantic import BaseModel, Field
 
 from app import server
 from app.commands import COMMAND_HELP
+from app.gallery import Gallery
 from app.imaging import MAX_UPLOAD_BYTES
 from app.schemas import Options
 from app.server import ERROR_KINDS, create_app
 from app.store import FINAL_STATUSES
-from tests.app_helpers import iter_sse, png_bytes
+from tests.app_helpers import decide_gate, iter_sse, png_bytes
 
 MESSAGES = "/v1/sessions/{session_id}/messages"   # the streaming turn
 STREAM_EVENTS = ["message_start", "stage_start", "stage_end", "content_block_start", "content_block_delta",
@@ -51,7 +52,8 @@ def test_openapi_documents_every_v1_route(client):
     spec = client.get("/openapi.json").json()
     routes = {(m.upper(), p) for p, ops in spec["paths"].items() for m in ops}
     for want in [("POST", "/v1/sessions"), ("GET", "/v1/sessions"), ("POST", "/v1/sessions/{session_id}/messages"),
-                 ("GET", "/v1/messages/{message_id}"), ("POST", "/v1/messages/{message_id}/cancel")]:
+                 ("GET", "/v1/messages/{message_id}"), ("POST", "/v1/messages/{message_id}/cancel"),
+                 ("POST", "/v1/retrieve"), ("POST", "/v1/label"), ("GET", "/v1/test-studies")]:   # P5-E
         assert want in routes
     for path, ops in spec["paths"].items():
         for op in ops.values():
@@ -207,6 +209,8 @@ REFUSED_BY_THE_ROUTE = {   # what each route declares by itself; 401, 403 and th
     ("GET", "/v1/messages/{message_id}"): {404, 422}, ("POST", "/v1/messages/{message_id}/cancel"): {404},
     ("GET", "/v1/sessions/{session_id}/export"): {404, 422},
     ("GET", "/v1/models"): set(), ("GET", "/healthz"): set(),
+    ("POST", "/v1/retrieve"): {413, 422, 429, 503}, ("POST", "/v1/label"): {422, 503},   # P5-E
+    ("GET", "/v1/test-studies"): {403, 422, 503},
 }
 
 
@@ -226,7 +230,7 @@ def test_refusals_are_declared_as_the_error_envelope_and_named_in_the_descriptio
         assert "HTTPValidationError" not in json.dumps(responses), key   # FastAPI's 422 is not this API's body
 
 
-def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, monkeypatch):
+def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, monkeypatch, tiny_gallery):
     spec = client.get("/openapi.json").json()
     sid = client.post("/v1/sessions", json={}).json()["id"]
     turn, image = MESSAGES.format(session_id=sid), {"image": ("x.png", png_bytes(), "image/png")}
@@ -252,8 +256,22 @@ def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, m
         ("POST", MESSAGES, turn, {"files": image, "data": {"options": "[1, 2]"}}, 400),
         ("POST", MESSAGES, turn, {"files": image, "data": {"options": '{"beam_size": 9}'}}, 422),
         ("POST", MESSAGES, turn, {"files": {"image": ("x.png", bytes(MAX_UPLOAD_BYTES + 1), "image/png")}}, 413),
+        # P5-E: this server has no gallery and no labeller
+        ("POST", "/v1/retrieve", "/v1/retrieve", {"files": image}, 503),
+        ("POST", "/v1/retrieve", "/v1/retrieve", {"files": image, "data": {"k_images": "13"}}, 422),
+        ("POST", "/v1/label", "/v1/label", {"json": {"text": "Findings: clear."}}, 503),
+        ("POST", "/v1/label", "/v1/label", {"json": {"text": ""}}, 422),
+        ("GET", "/v1/test-studies", "/v1/test-studies", {}, 503),
+        ("GET", "/v1/test-studies", "/v1/test-studies?limit=0", {}, 422),
     ]:
         check(client.request(method, url, **kwargs), method, path, status)
+    with TestClient(create_app(engine="tiny", home=str(tmp_path / "gallery_home"),
+                               gallery=Gallery.open(decide_gate(tiny_gallery), None))) as g:
+        check(g.post("/v1/retrieve", files={"image": ("x.png", bytes(MAX_UPLOAD_BYTES + 1), "image/png")}),
+              "POST", "/v1/retrieve", 413)
+        with monkeypatch.context() as m:
+            m.setattr(g.app.state.worker, "reserve", lambda: False)
+            check(g.post("/v1/retrieve", files=image), "POST", "/v1/retrieve", 429)
     with monkeypatch.context() as m:   # 429: the queue is full
         m.setattr(client.app.state.worker, "reserve", lambda: False)
         check(client.post(turn, files=image), "POST", MESSAGES, 429)
@@ -269,6 +287,7 @@ def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, m
         psid = c.post("/v1/sessions", json={}, headers=public).json()["id"]
         r = c.post(MESSAGES.format(session_id=psid), data={"options": json.dumps({"test_row": 0})}, headers=public)
         check(r, "POST", MESSAGES, 403)   # a test-split study in public mode
+        check(c.get("/v1/test-studies", headers=public), "GET", "/v1/test-studies", 403)   # and the picker's list
 
 
 ROUTE_BODIES = {("POST", "/v1/sessions"): {"json": {}}, ("POST", MESSAGES): {"data": {"options": "{}"}}}   # to parse
