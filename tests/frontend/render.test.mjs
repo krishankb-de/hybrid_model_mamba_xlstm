@@ -606,17 +606,32 @@ test('the label states follow the stage (P5-E): labelling while it runs, then la
                             { labelNames: LABEL_NAMES });
   assert.equal(qa(done, '.chip').length, 14);                          // then the labels, and no placeholder beside them
   assert.equal(q(done, '.note'), null);
-  const reasons = {
-    label_off: 'labels off',
-    labeler_unavailable: 'labels unavailable (labeler_unavailable)',
-    labels_pending: 'labels pending: the gallery is still being labelled',
-  };
+  const reasons = { label_off: 'labels off', labeler_unavailable: 'labels unavailable (labeler_unavailable)' };
   for (const [reason, said] of Object.entries(reasons)) {
     assert.equal(text(skipped('label', reason)), said, reason);                          // the turn still runs: the stage has ended
     assert.equal(text(skipped('label', reason), skipped('score', 'no_reference'), stopOf('done')), said, reason);   // and settled
     assert.equal(text(stageStart('label', 4), skipped('label', reason), stopOf('done')), said, reason);           // started, then skipped
   }
-  assert.doesNotMatch(text(skipped('label', 'labels_pending'), stopOf('done')), /labelling|unavailable/);   // a build still running, not a fault
+});
+
+test('while the gallery is still being labelled the chips come with an "agreement pending" note (P5-E fix 1), in either mode', () => {
+  const live = [START, stageStart('generate', 3), snapshot('Findings: so far'), stageEnd('generate', 9, GENERATE), stageStart('label', 4)];
+  const detail = { chexbert_14: labelled(['Edema']), positives: ['Edema'], neighbor_agreement: [], neighbor_agreement_pending: true };
+  for (const start of [START, step('message_start', { ...START.data, mode: 'public' })]) {
+    const labels = renderLabels(viewOf([start, ...live.slice(1), stageEnd('label', 3, detail), stopOf('done')]), { labelNames: LABEL_NAMES });
+    assert.equal(qa(labels, '.chip').length, 14);                         // the report is labelled all the same
+    assert.deepEqual(texts(qa(labels, '.note')), ['agreement pending: the gallery is still being labelled']);
+    assert.equal(labels.children.at(-1).textContent, 'agreement pending: the gallery is still being labelled');   // after the chips
+  }
+  const plain = renderLabels(viewOf([...live, stageEnd('label', 3, { ...detail, neighbor_agreement_pending: undefined }), stopOf('done')]),
+                             { labelNames: LABEL_NAMES });
+  assert.equal(q(plain, '.note'), null);                                   // no marker, no note
+  const odd = renderLabels(viewOf([...live, stageEnd('label', 3, { ...detail, neighbor_agreement_pending: 'yes' }), stopOf('done')]),
+                           { labelNames: LABEL_NAMES });
+  assert.equal(q(odd, '.note'), null);                                     // only a true marker says so
+  const scored = renderLabels(viewOf([...live, stageEnd('label', 3, detail), stageStart('score', 5), stageEnd('score', 1, SCORE), stopOf('done')]),
+                              { labelNames: LABEL_NAMES });
+  assert.deepEqual([...scored.children].map((c) => c.getAttribute('class')), ['label-chips', 'note', 'score-block']);   // chips, note, scores
 });
 
 test('the chips are the 14 names in ctx.labelNames order: positives filled, negatives outlined', () => {

@@ -209,7 +209,7 @@ REFUSED_BY_THE_ROUTE = {   # what each route declares by itself; 401, 403 and th
     ("GET", "/v1/messages/{message_id}"): {404, 422}, ("POST", "/v1/messages/{message_id}/cancel"): {404},
     ("GET", "/v1/sessions/{session_id}/export"): {404, 422},
     ("GET", "/v1/models"): set(), ("GET", "/healthz"): set(),
-    ("POST", "/v1/retrieve"): {413, 422, 429, 503}, ("POST", "/v1/label"): {422, 503},   # P5-E
+    ("POST", "/v1/retrieve"): {413, 422, 429, 500, 503}, ("POST", "/v1/label"): {422, 503},   # P5-E
     ("GET", "/v1/test-studies"): {403, 422, 503},
 }
 
@@ -272,6 +272,13 @@ def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, m
         with monkeypatch.context() as m:
             m.setattr(g.app.state.worker, "reserve", lambda: False)
             check(g.post("/v1/retrieve", files=image), "POST", "/v1/retrieve", 429)
+
+        def broken(*args):
+            raise RuntimeError("boom")
+
+        with monkeypatch.context() as m:   # P5-E fix 1: a retrieval that fails is a 500 in the envelope
+            m.setattr(g.app.state.worker.pipeline, "retrieve_upload", broken)
+            check(g.post("/v1/retrieve", files=image), "POST", "/v1/retrieve", 500)
     with monkeypatch.context() as m:   # 429: the queue is full
         m.setattr(client.app.state.worker, "reserve", lambda: False)
         check(client.post(turn, files=image), "POST", MESSAGES, 429)

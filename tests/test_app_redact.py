@@ -661,6 +661,10 @@ P5E_RETRIEVE = {"stage": "retrieve", "ms": 3.0, "seq": 7, "detail": {
 P5E_LABEL = {"stage": "label", "ms": 2.0, "seq": 14, "detail": {
     "chexbert_14": dict(dict.fromkeys(NAMES, 0), Edema=1), "positives": ["Edema"],
     "neighbor_agreement": [{"rank": 1, "agree": 13, "of": 14, "both_positive": [], "neighbor_only": [], "generated_only": ["Edema"]}]}}
+# Fix round 1, ruling (a): while the gallery's labels are still being built the report is labelled and the agreement is marked pending.
+P5E_LABEL_PENDING = {"stage": "label", "ms": 2.0, "seq": 17, "detail": {
+    "chexbert_14": dict(dict.fromkeys(NAMES, 0), Edema=1), "positives": ["Edema"], "neighbor_agreement": [],
+    "neighbor_agreement_pending": True}}
 P5E_SCORE = {"stage": "score", "ms": 1.0, "seq": 16, "detail": {
     "rouge_l": 0.21, "bleu_1": 0.33, "bleu_4": 0.07, "chexbert_14_micro_f1": 0.5, "exact_match_14": False,
     "reference_source": "test_split", "reference_chexbert_14": dict(dict.fromkeys(NAMES, 0), Cardiomegaly=1),
@@ -668,8 +672,7 @@ P5E_SCORE = {"stage": "score", "ms": 1.0, "seq": 16, "detail": {
                   "live_equals_published": False}}}
 P5E_EVENTS = [("message_start", P5E_START), ("stage_end", P5E_PREPROCESS), ("stage_start", {"stage": "retrieve", "index": 2, "seq": 6}),
               ("stage_end", P5E_RETRIEVE), ("stage_start", {"stage": "label", "index": 4, "seq": 13}), ("stage_end", P5E_LABEL),
-              ("stage_start", {"stage": "score", "index": 5, "seq": 15}), ("stage_end", P5E_SCORE),
-              ("stage_end", {"stage": "label", "skipped": "labels_pending", "seq": 17}),
+              ("stage_start", {"stage": "score", "index": 5, "seq": 15}), ("stage_end", P5E_SCORE), ("stage_end", P5E_LABEL_PENDING),
               ("stage_end", {"stage": "retrieve", "skipped": "k_zero", "seq": 18}),
               ("stage_end", {"stage": "label", "skipped": "labeler_unavailable", "seq": 19})]
 SCORE_FIELDS = ["rouge_l", "bleu_1", "bleu_4", "chexbert_14_micro_f1", "exact_match_14", "reference_source", "reference_chexbert_14",
@@ -686,8 +689,10 @@ P5E_FIELDS = (   # (event, data, path, kept in public)
     + [("stage_end", P5E_RETRIEVE, "detail.gallery." + k, k != "build_id")
        for k in ("build_id", "images", "report_rows", "report_groups", "towers_identical")]
     + [("stage_end", P5E_LABEL, "detail." + k, k != "neighbor_agreement") for k in ("chexbert_14", "positives", "neighbor_agreement")]
+    + [("stage_end", P5E_LABEL_PENDING, "detail." + k, k != "neighbor_agreement")
+       for k in ("chexbert_14", "positives", "neighbor_agreement", "neighbor_agreement_pending")]
     + [("stage_end", P5E_SCORE, "detail." + k, False) for k in SCORE_FIELDS]
-    + [("stage_end", data, "skipped", True) for event, data in P5E_EVENTS[-3:]])
+    + [("stage_end", data, "skipped", True) for event, data in P5E_EVENTS[-2:]])
 
 
 def _at(obj, path):
@@ -745,3 +750,11 @@ def test_the_score_fields_are_caught_outside_the_score_stage_too(key):
     data = {"stage": "label", "ms": 1.0, "detail": {"chexbert_14": {"Edema": 1}, key: {"SECRET": 1}}}
     assert redact_event("stage_end", copy.deepcopy(data), "public") == {"stage": "label", "ms": 1.0, "detail": {"chexbert_14": {"Edema": 1}}}
     assert redact_event("stage_end", copy.deepcopy(data), "private") == data
+
+
+def test_the_pending_agreement_marker_is_server_state_that_both_modes_keep():   # fix round 1, ruling (a)
+    for mode in ("public", "private"):
+        out = redact_event("stage_end", copy.deepcopy(P5E_LABEL_PENDING), mode)
+        assert out["detail"]["neighbor_agreement_pending"] is True and out["detail"]["chexbert_14"] == P5E_LABEL_PENDING["detail"]["chexbert_14"]
+        assert ("neighbor_agreement" in out["detail"]) is (mode == "private")   # the agreement itself stays private
+    assert "neighbor_agreement_pending" not in redact.CATCH_ALL_KEYS

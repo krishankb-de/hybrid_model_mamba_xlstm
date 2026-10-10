@@ -4208,6 +4208,62 @@ test('a server that runs the stages, and an older one that does not say, leave t
   assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached']);
 });
 
+// P5-E fix 1: GET /v1/models also says per model whether its retrieval and labels run (a model whose tower is not the gallery's has no
+// retrieval); the top-level `features` stays the default model's.
+const PER_MODEL = { ...MODELS, features: { retrieval: true, labels: true },
+                    models: [{ ...CARD_CACHED, features: { retrieval: true, labels: true } }, { ...CARD_PLAIN, features: { retrieval: false, labels: true } }] };
+
+test('serverHas reads the named model\'s features, else the default model\'s, else the server-wide ones', () => {
+  assert.equal(serverHas(PER_MODEL, 'retrieval', CARD_PLAIN.name), false);
+  assert.equal(serverHas(PER_MODEL, 'labels', CARD_PLAIN.name), true);
+  assert.equal(serverHas(PER_MODEL, 'retrieval', CARD_CACHED.name), true);
+  const defaultSays = { ...PER_MODEL, models: [{ ...CARD_CACHED, features: { retrieval: false, labels: true } }, CARD_PLAIN] };
+  assert.equal(serverHas(defaultSays, 'retrieval'), false);                   // no model named: the default's card
+  assert.equal(serverHas(defaultSays, 'retrieval', ''), false);
+  assert.equal(serverHas(defaultSays, 'retrieval', 'not listed'), false);     // a model the server does not list runs as the default
+  assert.equal(serverHas(defaultSays, 'retrieval', CARD_PLAIN.name), true);   // a card that does not say: the server-wide value
+  assert.equal(serverHas(NO_STAGES, 'retrieval', CARD_PLAIN.name), false);    // cards without features: the server-wide value
+  assert.equal(serverHas({ ...MODELS, models: [{ ...CARD_CACHED, features: 'none' }] }, 'retrieval'), true);   // not told: available
+});
+
+test('the drawer and the chips follow the chosen model\'s features: k is off, and explained, for a model with no retrieval', async () => {
+  const h = harness({ models: PER_MODEL });
+  await h.app.start();
+  await flush();
+  $('settings').click();
+  assert.deepEqual([control(SIMILAR).disabled, control(MATCHING).disabled, $('retrieval-note').hidden], [false, false, true]);
+  assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3']);
+  const model = control('Model');
+  model.value = CARD_PLAIN.name;
+  change(model);
+  assert.equal(saved(h).model, CARD_PLAIN.name);
+  assert.deepEqual([control(SIMILAR).disabled, control(MATCHING).disabled, $('retrieval-note').hidden], [true, true, false]);
+  assert.equal(control(SIMILAR).getAttribute('aria-describedby'), 'retrieval-note');
+  assert.equal(control('CheXbert labels').disabled, false);                  // its labels still run
+  assert.equal(chipsText().some((c) => c.startsWith('k ')), false);
+  model.value = CARD_CACHED.name;
+  change(model);
+  assert.deepEqual([control(SIMILAR).disabled, $('retrieval-note').hidden], [false, true]);
+  assert.equal(chipsText().includes('k 4/3'), true);
+});
+
+test('a replayed user turn shows k only if the model it ran on runs retrieval', async () => {
+  resetEvents();
+  const routes = {
+    'GET /v1/sessions/s_a': { ...sess('s_a', 'two', 2), messages: [
+      userMsg('u_1', '', 'chest.png'), botMsg('m_1', 'done', { ...START_DATA.options, model: CARD_PLAIN.name }),
+      userMsg('u_2', '', 'chest.png'), botMsg('m_2', 'done', { ...START_DATA.options, model: CARD_CACHED.name })] },
+    'GET /v1/messages/m_1': () => ({ ...botMsg('m_1'), events: rows(fullTurn('m_1')) }),
+    'GET /v1/messages/m_2': () => ({ ...botMsg('m_2'), events: rows(fullTurn('m_2')) }),
+  };
+  const h = harness({ models: PER_MODEL, sessions: [sess('s_a', 'two', 2)], routes });
+  await h.app.start();
+  await flush();
+  const [first, , second] = $('conversation').children;
+  assert.equal(texts(qa(first, '.options .chip')).some((c) => c.startsWith('k ')), false);   // ran on the model with no retrieval
+  assert.equal(texts(qa(second, '.options .chip')).includes('k 4/3'), true);
+});
+
 test('serverHas is false only where the server says that a stage is not there', () => {
   assert.equal(serverHas(NO_STAGES, 'retrieval'), false);
   assert.equal(serverHas(NO_STAGES, 'labels'), false);

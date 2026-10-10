@@ -9,10 +9,11 @@ The server stores an upload before it accepts the turn (fix-1 I1), so preprocess
 picker's options.test_row) is read where the dataset keeps it and never copied.
 
 The last three stages (P5-E) end skipped, the turn going on to done, when they cannot run: retrieve with no gallery for
-the turn's engine (gallery_unavailable) or both k at 0 (k_zero); label when it is off (label_off), when the labeller is
-missing or down (labeler_unavailable), or while the gallery's labels are still being built (labels_pending: there would be
-no neighbour agreement); score with no reference (no_reference). A test study (picked, or an upload that is one of its
-files byte for byte) gets its own report's rank and is scored against its reference, which public mode never does (R1).
+the turn's engine (gallery_unavailable) or both k at 0 (k_zero); label when it is off (label_off) or the labeller is missing
+or down (labeler_unavailable); score with no reference (no_reference). While the gallery's own labels are still being built
+the report is labelled all the same and the label detail says neighbor_agreement_pending (there is nothing to agree with
+yet). A test study (picked, or an upload that is one of its files byte for byte) gets its own report's rank and is scored
+against its reference, which public mode never does (R1).
 """
 import hashlib
 import logging
@@ -39,8 +40,11 @@ URL_VARIANTS = ("original", "thumb", "model_input")
 REFERENCE_IGNORED_PUBLIC = "Public mode does not use a reference report, so this turn is not scored."
 PUBLISHED_MODEL = "hybrid_150m_m3_rrg"   # the published dumps are this model's: only its turns get a model_report line
 # What the published dump decoded with (section 2): live_equals_published is compared only for a turn decoded the same way,
-# stop_on_repeat off among it (P4-G).
-PUBLISHED_PROTOCOL = {"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "stop_on_repeat": False}
+# stop_on_repeat off among it (P4-G), and uncompiled.
+PUBLISHED_PROTOCOL = {"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "stop_on_repeat": False, "compile": False}
+TEST_IMAGE_MSG = "Could not read the test-split image."   # its path holds subject and study ids: never in a message or the log
+LABELER_DOWN_TTL_S = 30.0   # a labeller found down is not asked again for this long, so it cannot stall every turn
+_clock = time.monotonic     # the labeller's down window runs on this (a test replaces it)
 
 Emit = Callable[[str, Dict[str, Any]], None]
 
@@ -130,6 +134,14 @@ class _Gone(Exception):
     """The turn's session was deleted mid-turn: the turn ends quietly, without a result."""
 
 
+class ImageUnreadable(RuntimeError):
+    """A test study's image could not be read once the turn was running. The message is fixed: the OSError's would hold the
+    file's path, which holds subject and study ids."""
+
+    def __init__(self) -> None:
+        super().__init__(TEST_IMAGE_MSG)
+
+
 class _Skipped(Exception):
     """A stage that had started found it could not finish (the labeller went down between its health check and its call): it
     ends skipped with this reason, and the turn goes on."""
@@ -180,6 +192,7 @@ class Pipeline:
         self.engines, self.default_model, self.store, self.mode = engines, default_model, store, mode
         self.gallery, self.labeler, self.published, self.drift_note = gallery, labeler, published, drift_note
         self.retrieval_models = None if retrieval_models is None else frozenset(retrieval_models)
+        self._labeler_down_until = 0.0   # _clock() time before which the labeller is taken to be down
 
     def retrieval_ready(self, model: str) -> bool:
         """A gallery is loaded and its vectors are this engine's tower's: a query of another tower would land in another space."""
@@ -214,6 +227,9 @@ class Pipeline:
                 status = "aborted"
         except UploadError as exc:   # its messages are written for the user
             status, error = "error", error_body("validation_error", str(exc))
+        except ImageUnreadable as exc:   # the fixed message, in the event and in the log: no path (M1)
+            log.warning("turn %s: %s", job.message_id, exc)
+            status, error = "error", error_body("model_error", str(exc))
         except _Gone:
             status = "aborted"
             log.warning("turn %s: its session was deleted mid-turn; the turn stops here", job.message_id)
@@ -278,7 +294,10 @@ class Pipeline:
         if source == "upload":
             data = job.upload
         elif source == "test_split":
-            data = Path(self.gallery.test_study(turn.test_row)["image"]).read_bytes()
+            try:
+                data = Path(self.gallery.test_study(turn.test_row)["image"]).read_bytes()
+            except OSError:   # gone since the server read it: its path holds ids, so it stays out of the message and the log
+                raise ImageUnreadable() from None
         else:
             path = self.store.upload_path(job.session_id, job.previous_sha256, "original")
             try:
@@ -325,28 +344,40 @@ class Pipeline:
         -> the report's label row, or None when the stage is skipped."""
         if not turn.job.options.label:
             reason = "label_off"
-        elif self.labeler is None:
-            reason = "labeler_unavailable"
-        elif _labels_pending(self.gallery):
-            reason = "labels_pending"
-        elif not _healthy(self.labeler):   # a labeller that is down is skipped before the stage starts
+        elif self.labeler is None or not self._labeler_up():   # a labeller that is down is skipped before the stage starts
             reason = "labeler_unavailable"
         else:
             return self._stage(turn, "label", lambda: self._labelling(gen, retrieved))
         self._skip(turn, "label", reason)
         return None
 
+    def _labeler_up(self) -> bool:
+        """The labeller's health check, unless it was found down less than LABELER_DOWN_TTL_S ago (a failed check or a failed call):
+        a labeller that is down or slow cannot stall every turn. A labeller found up is asked again at the next turn."""
+        if _clock() < self._labeler_down_until:
+            return False
+        if _healthy(self.labeler):
+            return True
+        self._labeler_down()
+        return False
+
+    def _labeler_down(self) -> None:
+        self._labeler_down_until = _clock() + LABELER_DOWN_TTL_S
+
     def _labelling(self, gen: Generated, retrieved: Optional[Dict[str, Any]]) -> Tuple[StageResult, List[int]]:
         t0 = time.perf_counter()
         try:
             row = self.labeler.label([gen.report])[0]   # the raw protocol text, as the published CheXbert numbers label it
         except LabelerUnavailable:
+            self._labeler_down()
             raise _Skipped("labeler_unavailable") from None
         neighbours = (retrieved or {}).get("image_neighbors", [])
         agreement = [dict(rank=n["rank"], **label_agreement(row, [n["labels"][name] for name in CHEXBERT_14]))
                      for n in neighbours if n.get("labels")]
         detail = {"chexbert_14": named_labels(row), "positives": [n for n, v in zip(CHEXBERT_14, row) if v],
                   "neighbor_agreement": agreement}
+        if _labels_pending(self.gallery):   # the gallery's labels are still being built: no neighbour has any to agree with yet
+            detail["neighbor_agreement_pending"] = True
         return StageResult(detail, _ms(t0)), row
 
     def _score(self, turn: _Turn, model: str, gen: Generated, labels: Optional[List[int]]) -> None:
@@ -378,6 +409,7 @@ class Pipeline:
             try:
                 reference_labels = self.labeler.label([reference])[0]
             except LabelerUnavailable:
+                self._labeler_down()
                 log.warning("turn %s: the labeller did not label the reference; the score has no CheXbert part", turn.job.message_id)
         detail = score_pair(gen.report, reference, labels, reference_labels)
         detail["reference_source"] = source
@@ -517,18 +549,15 @@ class Worker:
 
     def run_task(self, fn: Callable[[], Any]) -> "Future[Any]":
         """Run fn on the worker thread, behind the turns queued before it (POST /v1/retrieve: the engines are only ever used
-        there). The caller reserved a slot, which is given back once fn has ended, however it ended."""
-        def task() -> Any:
-            try:
-                return fn()
-            finally:
-                self.release()
-
+        there). The caller reserved a slot, which is given back once the future is done, however: finished, failed, or cancelled
+        while it still waited (a client that went away), when fn never runs at all."""
         try:
-            return self._pool.submit(task)
+            future = self._pool.submit(fn)
         except RuntimeError:   # the pool is shut down: the server is stopping
             self.release()
             raise
+        future.add_done_callback(lambda _: self.release())
+        return future
 
     def _run(self, job: TurnJob, emit: Emit, stop: Stop, done: Callable[[], None]) -> None:
         try:

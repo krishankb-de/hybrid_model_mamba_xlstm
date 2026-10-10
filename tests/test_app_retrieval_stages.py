@@ -4,19 +4,24 @@ Tiny engine + the tiny gallery (scripts/build_retrieval_gallery.py --tiny, its g
 synthetic data only (R7), so an assertion may print whatever it compares.
 """
 import json
+import logging
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app import pipeline as pipeline_module
 from app import server
 from app.engine import build_engine
 from app.gallery import Gallery
 from app.labels import CHEXBERT_14, LabelerClient, LabelerUnavailable, RuleLabeler, label_agreement
-from app.pipeline import PUBLISHED_MODEL, PublishedDumps
+from app.pipeline import PUBLISHED_MODEL, Pipeline, PublishedDumps, Stop, TurnJob, Worker
+from app.schemas import Options
 from app.scoring import score_pair
 from app.server import create_app
+from app.store import Store
 from scripts.build_retrieval_gallery import build_tiny
-from tests.app_helpers import decide_gate, iter_sse, png_bytes
+from tests.app_helpers import decide_gate, iter_sse, png_bytes, wait_until
 
 PUBLIC = {"Authorization": "Bearer t", "X-Client-Id": "a"}
 STAGES = ["preprocess", "encode", "retrieve", "generate", "label", "score"]
@@ -269,20 +274,46 @@ def test_a_labeller_that_is_down_skips_label_and_the_turn_still_ends_done(tmp_pa
         assert set(score) == {"rouge_l", "bleu_1", "bleu_4", "reference_source"} and score["reference_source"] == "user"
 
 
-def test_labels_off_and_a_gallery_whose_labels_are_pending_skip_label_with_their_own_reasons(tmp_path, gallery):
-    with TestClient(create_app(engine="tiny", home=str(tmp_path / "a"), gallery=gallery, labeler=RuleLabeler())) as c:
-        frames = _turn(c, {"max_new_tokens": 16, "label": False})
-        assert _ends(frames)["label"]["skipped"] == "label_off" and frames[-1]["data"]["status"] == "done"
+def _pending_gallery(tmp_path):
+    """A tiny gallery whose labels are not built yet (labels_status pending), its gate decided."""
     build_tiny(tmp_path / "unlabelled", with_labels=False)
     pending = Gallery.open(decide_gate(tmp_path / "unlabelled"), None)
     assert pending.labels is None
-    with TestClient(create_app(engine="tiny", home=str(tmp_path / "b"), gallery=pending, labeler=RuleLabeler())) as c:
+    return pending
+
+
+def test_labels_off_skips_label_and_says_so(tmp_path, gallery):
+    with TestClient(create_app(engine="tiny", home=str(tmp_path / "a"), gallery=gallery, labeler=RuleLabeler())) as c:
+        frames = _turn(c, {"max_new_tokens": 16, "label": False})
+        assert _ends(frames)["label"]["skipped"] == "label_off" and frames[-1]["data"]["status"] == "done"
+        assert "label" not in _starts(frames)
+
+
+def test_a_gallery_whose_labels_are_pending_still_labels_the_report_and_marks_the_agreement_pending(tmp_path):
+    # Ruling (a), fix round 1: pending gallery labels take only the neighbour agreement away, not the report's labels
+    with TestClient(create_app(engine="tiny", home=str(tmp_path / "b"), gallery=_pending_gallery(tmp_path),
+                               labeler=RuleLabeler())) as c:
         frames = _turn(c, {"max_new_tokens": 16, "test_row": 0}, image=None)
-        assert _ends(frames)["label"]["skipped"] == "labels_pending" and frames[-1]["data"]["status"] == "done"
-        assert all(n["labels"] is None for n in _ends(frames)["retrieve"]["detail"]["image_neighbors"])
-        score = _ends(frames)["score"]["detail"]
-        assert "chexbert_14_micro_f1" not in score and "reference_chexbert_14" not in score   # no labels of the report
-        assert c.get("/v1/models").json()["features"] == {"retrieval": True, "labels": True}
+        ends = _ends(frames)
+        assert all(n["labels"] is None for n in ends["retrieve"]["detail"]["image_neighbors"])
+        label, report = ends["label"]["detail"], frames[-1]["data"]["report"]
+        assert label == {"chexbert_14": _named(RuleLabeler().label([report])[0]), "positives": label["positives"],
+                         "neighbor_agreement": [], "neighbor_agreement_pending": True}
+        score = ends["score"]["detail"]
+        assert "chexbert_14_micro_f1" in score and "exact_match_14" in score and "reference_chexbert_14" in score   # it keeps its CheXbert part
+        assert "label" in _starts(frames) and frames[-1]["data"]["status"] == "done"
+        assert c.get("/v1/models").json()["features"] == {"retrieval": True, "labels": True}   # true, and the stage really runs
+
+
+def test_the_pending_agreement_marker_is_server_state_that_public_mode_shows(tmp_path):
+    with TestClient(create_app(engine="tiny", home=str(tmp_path / "home"), mode="public", token="t",
+                               gallery=_pending_gallery(tmp_path), labeler=RuleLabeler())) as c:
+        label = _ends(_turn(c, headers=PUBLIC))["label"]["detail"]
+        assert label["neighbor_agreement_pending"] is True and "neighbor_agreement" not in label and label["chexbert_14"]
+
+
+def test_a_labelled_gallery_puts_no_pending_marker_on_the_label_stage(client):
+    assert "neighbor_agreement_pending" not in _ends(_turn(client))["label"]["detail"]
 
 
 # ---- score --------------------------------------------------------------------------------------------------------------
@@ -365,7 +396,7 @@ def test_live_equals_published_is_compared_only_under_the_published_protocol(tmp
     _set_manifest(root, tower_sha256=build_engine("tiny").tower_sha256())
     n_test = json.loads((root / "manifest.json").read_text())["counts"]["test"]
     with TestClient(create_app(engine="real", models=(PUBLISHED_MODEL,), home=str(tmp_path / "home"), gallery_dir=str(root),
-                               labeler=RuleLabeler(), published_dirs=_dumps(tmp_path, n_test))) as c:
+                               labeler=RuleLabeler(), published_dirs=_dumps(tmp_path, n_test), allow_compile=True)) as c:
         published = _ends(_turn(c, {"test_row": 2}, image=None))   # the server's defaults: beam 3, 100 tokens, no stop on repeat
         live = published["generate"]["detail"]
         assert (live["decode"], live["beam_size"], live["stopped"]) == ("beam", 3, "budget")
@@ -377,7 +408,7 @@ def test_live_equals_published_is_compared_only_under_the_published_protocol(tmp
         c.app.state.worker.pipeline.published = PublishedDumps([report if i == 2 else line for i, line in enumerate(dumps.model_hyps)],
                                                                dumps.floor_hyps)
         assert _ends(_turn(c, {"test_row": 2}, image=None))["score"]["detail"]["published"]["live_equals_published"] is True
-        for other in ({"stop_on_repeat": True}, {"beam_size": 2}, {"decode": "greedy"}, {"max_new_tokens": 16}):
+        for other in ({"stop_on_repeat": True}, {"beam_size": 2}, {"decode": "greedy"}, {"max_new_tokens": 16}, {"compile": True}):
             block = _ends(_turn(c, dict(other, test_row=2), image=None))["score"]["detail"]["published"]
             assert block["model_report"] == report and block["live_equals_published"] is None, other
 
@@ -495,7 +526,22 @@ def test_get_test_studies_lists_the_picker_in_private_mode_only(client, gallery,
 # ---- wiring --------------------------------------------------------------------------------------------------------------
 
 def test_models_says_retrieval_and_labels_once_a_gallery_and_a_labeller_are_wired(client):
-    assert client.get("/v1/models").json()["features"] == {"retrieval": True, "labels": True}
+    listed = client.get("/v1/models").json()
+    assert listed["features"] == {"retrieval": True, "labels": True}
+    assert [m["features"] for m in listed["models"]] == [{"retrieval": True, "labels": True}]
+
+
+def test_models_says_per_model_whether_each_runs_retrieval(tmp_path, tiny_gallery, monkeypatch):
+    # M4, fix round 1: the gallery serves only the models of its tower, so retrieval is a property of each model
+    _fake_real_engines(monkeypatch, other_tower=("hybrid_150m_v2_rrg",))
+    root = decide_gate(tiny_gallery)
+    _set_manifest(root, tower_sha256=build_engine("tiny").tower_sha256())
+    with TestClient(create_app(engine="real", models=("hybrid_150m_m3_rrg", "hybrid_150m_v2_rrg"), home=str(tmp_path),
+                               gallery_dir=str(root), labeler=RuleLabeler())) as c:
+        listed = c.get("/v1/models").json()
+        assert {m["name"]: m["features"] for m in listed["models"]} == {
+            "hybrid_150m_m3_rrg": {"retrieval": True, "labels": True}, "hybrid_150m_v2_rrg": {"retrieval": False, "labels": True}}
+        assert listed["features"] == {"retrieval": True, "labels": True}   # the default model's, as before
 
 
 def test_tiny_gallery_builds_decides_and_opens_a_synthetic_gallery_with_the_rule_labeller(tmp_path):
@@ -568,3 +614,126 @@ def test_a_gallery_dir_that_cannot_be_opened_leaves_the_server_running_without_r
         assert c.app.state.gallery is None
         assert _ends(_turn(c))["retrieve"]["skipped"] == "gallery_unavailable"
     assert "[server] gallery unavailable: manifest.json is missing" in capsys.readouterr().out
+
+
+# ---- fix round 1: the test-split file, the worker's slots, a failed retrieval, a labeller that is down -----------------------
+
+def test_a_follow_up_whose_test_image_has_vanished_is_refused_before_the_stream_and_no_path_is_logged(client, gallery, caplog):
+    # M1: the real layout puts subject and study ids in the path
+    sid = _session(client)
+    _turn(client, {"max_new_tokens": 16, "test_row": 4}, image=None, sid=sid)
+    image = gallery.test_study(4)["image"]
+    image.rename(image.with_name("moved.jpg"))
+    with caplog.at_level(logging.DEBUG):
+        r = _post(client, sid, {"max_new_tokens": 16}, image=None, text="beam 2")
+    assert r.status_code == 422 and r.json()["error"]["message"] == "Attach an X-ray first."   # as an upload gone from disk
+    assert [m["role"] for m in client.get("/v1/sessions/{}".format(sid)).json()["messages"]] == ["user", "assistant"]
+    assert str(image) not in caplog.text and image.name not in caplog.text and str(image.parent) not in caplog.text
+
+
+def test_a_test_image_that_vanishes_once_the_turn_is_accepted_ends_it_with_a_fixed_error_and_no_path_in_the_log(tmp_path, gallery,
+                                                                                                                 caplog):
+    store = Store(tmp_path / "home")
+    try:
+        engine = build_engine("tiny")
+        pipe = Pipeline({"tiny": engine}, "tiny", store, "private", gallery=gallery, labeler=RuleLabeler())
+        session = store.create_session("private")
+        uid, mid = store.start_turn(session["id"], "", "private", {"test_row": 4}, "ab" * 32, None, 4)
+        image = gallery.test_study(4)["image"]
+        image.unlink()   # after the server read and checked it, before preprocess reads it again
+        sent = []
+        with caplog.at_level(logging.DEBUG):
+            pipe.run(TurnJob(session["id"], uid, mid, "", None, None, Options(max_new_tokens=16, test_row=4), mode="private",
+                             previous_sha256="ab" * 32), lambda event, data: sent.append((event, data)), Stop())
+        assert [e for e, _ in sent][-2:] == ["error", "message_stop"] and sent[-1][1]["status"] == "error"
+        assert sent[-2][1]["error"] == {"type": "model_error", "message": "Could not read the test-split image."}
+        assert str(image) not in caplog.text and image.name not in caplog.text and str(image.parent) not in caplog.text
+        assert "Could not read the test-split image." in caplog.text   # the operator still sees what happened
+    finally:
+        store.close()
+
+
+def test_a_cancelled_queued_task_gives_its_slot_back():
+    # M2: a future cancelled while it waits never runs, so its slot cannot be given back from inside the task
+    worker = Worker(None, cap=4)
+    gate = threading.Event()
+    try:
+        assert worker.reserve()
+        blocker = worker.run_task(gate.wait)   # holds the one worker thread
+        assert worker.reserve()
+        queued = worker.run_task(lambda: "never runs")
+        assert worker.in_flight == 2
+        assert queued.cancel()
+        assert worker.in_flight == 1
+        gate.set()
+        blocker.result(timeout=5)
+        wait_until(lambda: worker.in_flight == 0, timeout=5)
+    finally:
+        gate.set()
+        worker.shutdown()
+
+
+def test_a_retrieval_that_fails_is_a_500_in_the_envelope_and_logs_the_class_only(client, monkeypatch, caplog):
+    # M3
+    def boom(*args):
+        raise RuntimeError("SECRET /sc/home/user/dataset/p10/p10000032/s50414267/x.jpg")
+
+    monkeypatch.setattr(client.app.state.worker.pipeline, "retrieve_upload", boom)
+    with caplog.at_level(logging.DEBUG):
+        r = _retrieve(client)
+    assert r.status_code == 500 and r.json() == {"type": "error", "error": {"type": "internal_error",
+                                                                             "message": "The retrieval could not be run."}}
+    assert "RuntimeError" in caplog.text and "SECRET" not in caplog.text
+    assert client.app.state.worker.in_flight == 0
+
+
+class _Probe:
+    """A labeller whose health check says what it is told, and counts how often it was asked."""
+
+    def __init__(self, healthy):
+        self.up, self.checks = healthy, 0
+
+    def healthy(self):
+        self.checks += 1
+        return self.up
+
+    def label(self, texts):
+        return RuleLabeler().label(texts)
+
+
+def test_a_labeller_found_down_is_not_asked_again_for_a_while(tmp_path, gallery, monkeypatch):
+    # M6: a negative health check is kept for a short time, so a labeller that is down does not stall every turn
+    now = [1000.0]
+    monkeypatch.setattr(pipeline_module, "_clock", lambda: now[0])
+    probe = _Probe(healthy=False)
+    with TestClient(create_app(engine="tiny", home=str(tmp_path), gallery=gallery, labeler=probe)) as c:
+        assert _ends(_turn(c))["label"]["skipped"] == "labeler_unavailable" and probe.checks == 1
+        now[0] += pipeline_module.LABELER_DOWN_TTL_S - 1
+        assert _ends(_turn(c))["label"]["skipped"] == "labeler_unavailable" and probe.checks == 1   # not asked again yet
+        now[0] += 2
+        probe.up = True
+        assert "detail" in _ends(_turn(c))["label"] and probe.checks == 2   # asked again once the time is up, and it is back
+
+
+def test_a_labeller_found_up_is_asked_again_at_every_turn(tmp_path, gallery, monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(pipeline_module, "_clock", lambda: now[0])
+    probe = _Probe(healthy=True)
+    with TestClient(create_app(engine="tiny", home=str(tmp_path), gallery=gallery, labeler=probe)) as c:
+        _turn(c)
+        _turn(c)
+        assert probe.checks == 2
+        probe.up = False
+        assert _ends(_turn(c))["label"]["skipped"] == "labeler_unavailable" and probe.checks == 3
+
+
+def test_a_labeller_that_fails_a_call_is_left_alone_for_a_while_too(tmp_path, gallery, monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(pipeline_module, "_clock", lambda: now[0])
+    down = _Down(healthy=True)
+    with TestClient(create_app(engine="tiny", home=str(tmp_path), gallery=gallery, labeler=down)) as c:
+        assert _ends(_turn(c))["label"]["skipped"] == "labeler_unavailable" and down.calls == 1
+        assert _ends(_turn(c))["label"]["skipped"] == "labeler_unavailable" and down.calls == 1   # skipped before the stage
+        now[0] += pipeline_module.LABELER_DOWN_TTL_S + 1
+        _turn(c)
+        assert down.calls == 2

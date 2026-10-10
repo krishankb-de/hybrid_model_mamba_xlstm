@@ -136,10 +136,13 @@ export function saveSettings(storage, settings) {
   } catch { return false; }
 }
 
-// Does the server run this stage ('retrieval' or 'labels')? GET /v1/models says in `features`; false means its pipeline skips the stage.
-// A server that does not say (an older one, or before /v1/models has answered) is taken to run it: a control is not disabled on a guess.
-export function serverHas(models, feature) {
-  const features = isObject(models) ? models.features : null;
+// Does the server run this stage ('retrieval' or 'labels') for this model? GET /v1/models says in each card's `features` (P5-E: the
+// gallery serves only the models of its tower) and, for the default model, in its own `features`; false means the stage is skipped.
+// The model is a name; one left out or not listed is the default, as chosenCard has it. A server that does not say (an older one, or
+// before /v1/models has answered) is taken to run it: a control is not disabled on a guess.
+export function serverHas(models, feature, model = '') {
+  const card = chosenCard({ model }, models);
+  const features = isObject(card?.features) ? card.features : isObject(models) ? models.features : null;
   return !(isObject(features) && features[feature] === false);
 }
 
@@ -491,12 +494,13 @@ export function createApp(env) {
 
   // ---- the conversation --------------------------------------------------------------------------------------------------------
 
-  const cardCtx = (n) => ({
+  // model: the one the turn ran on (its options say), whose features decide whether a user turn shows the k it never used.
+  const cardCtx = (n, model) => ({
     loadImage: (url) => api.loadImage(url, auth()),
     copy,
     showModels: () => openDrawer({ models: true }),
     labelNames: Array.isArray(state.models?.label_names) ? state.models.label_names : undefined,
-    retrieval: serverHas(state.models, 'retrieval'),   // false: a user turn shows no k, which this server never uses
+    retrieval: serverHas(state.models, 'retrieval', model),   // false: a user turn shows no k, which that model's turns never use
     ui: state.session.ui,
     turn: n,
   });
@@ -550,7 +554,7 @@ export function createApp(env) {
 
   function refreshUserBubble(turn, options) {
     if (!turn.userEl) return;
-    const next = renderUserTurn({ text: turn.text, image: turn.image, options }, cardCtx(turn.n));
+    const next = renderUserTurn({ text: turn.text, image: turn.image, options }, cardCtx(turn.n, options?.model));
     turn.userEl.replaceWith(next);
     turn.userEl = next;
   }
@@ -719,7 +723,8 @@ export function createApp(env) {
         turn.image = { url, filename: file.name };
       }
       // A note the server will not run (no file, no command) uses no settings, so its turn shows no chips (P4-H).
-      turn.userEl = renderUserTurn({ text: note, image: turn.image, options: runsTheModel(note, file) ? options : null }, cardCtx(turn.n));
+      turn.userEl = renderUserTurn({ text: note, image: turn.image, options: runsTheModel(note, file) ? options : null },
+                                   cardCtx(turn.n, options.model));
       session.turns.push(turn);
       ui.conversation.append(turn.userEl);
       scroller.toEnd(turn.userEl);
@@ -989,7 +994,7 @@ export function createApp(env) {
         const shown = userTurnMessage(u, a);
         turn.text = shown.text;      // a turn that was still queued has no events: its message_start rebuilds this bubble,
         turn.image = shown.image;    // and rebuilds it from these
-        turn.userEl = renderUserTurn(shown, cardCtx(turn.n));
+        turn.userEl = renderUserTurn(shown, cardCtx(turn.n, shown.options?.model));
         nodes.push(turn.userEl);
       }
       if (a) {
@@ -1489,8 +1494,8 @@ export function createApp(env) {
     const s = state.settings;
     const card = chosenCard(s, state.models);
     const cachedOk = !(card && card.cached_decode_available === false);
-    const retrieval = serverHas(state.models, 'retrieval');
-    const labelling = serverHas(state.models, 'labels');
+    const retrieval = serverHas(state.models, 'retrieval', s.model);   // the chosen model's own (P5-E)
+    const labelling = serverHas(state.models, 'labels', s.model);
     fields.model.value = card?.name ?? '';
     fields.decode.value = s.decode;
     fields.beam.disabled = s.decode === 'greedy';
@@ -1520,7 +1525,7 @@ export function createApp(env) {
 
   function renderChips() {
     const options = optionsFromSettings(state.settings, state.models);
-    if (!serverHas(state.models, 'retrieval')) { delete options.k_images; delete options.k_reports; }   // that stage is skipped: no "k 4/3" to show
+    if (!serverHas(state.models, 'retrieval', state.settings.model)) { delete options.k_images; delete options.k_reports; }   // that stage is skipped: no "k 4/3" to show
     ui.chips.replaceChildren(...optionChips(options).map((c) => el('span', {}, c)));
   }
 

@@ -333,13 +333,15 @@ const SCORES = [['ROUGE-L', 'rouge_l'], ['BLEU-1', 'bleu_1'], ['BLEU-4', 'bleu_4
 const REFERENCES = { user: 'your reference', test_split: 'test-split reference' };
 
 // What the chips say once the label stage has ended skipped (P5-E), so the placeholder never outlives the stage: the user's own
-// setting is "labels off" whatever else is true, a gallery whose labels are still being built is that and not a fault, and any
-// other reason is named.
+// setting is "labels off" whatever else is true, and any other reason is named.
 function skippedLabels(why, off) {
   if (off || why === 'label_off') return 'labels off';
-  if (why === 'labels_pending') return 'labels pending: the gallery is still being labelled';
   return `labels unavailable${why ? ` (${why})` : ''}`;
 }
+
+// Said under the chips while the gallery's own labels are still being built (the label detail's neighbor_agreement_pending): the
+// report is labelled, but no similar X-ray has labels to agree with yet. Server state, so public mode says it too.
+const AGREEMENT_PENDING = 'agreement pending: the gallery is still being labelled';
 
 export function renderLabels(view, ctx) {
   const v = whole(view);
@@ -347,9 +349,11 @@ export function renderLabels(view, ctx) {
   const note = (text) => el('p', { class: 'note' }, text);
   const off = isObject(v.options) && v.options.label === false;   // the user's own setting: said as that, never as "unavailable"
   let body = null;
+  let pending = null;
   let marked = false;
   if (isObject(v.labels)) {
     ({ node: body, marked } = chipList(v, cx));
+    if (isObject(v.stages.label?.detail) && v.stages.label.detail.neighbor_agreement_pending === true) pending = note(AGREEMENT_PENDING);
   } else if (labelsPending(v)) {
     body = note(off ? 'labels off' : 'labelling…');   // off: say so now, not at the end
   } else {
@@ -360,7 +364,7 @@ export function renderLabels(view, ctx) {
     else if (st.state === 'done') body = note('labels unavailable');
   }
   const score = isObject(v.score) ? scoreBlock(v.score, marked) : null;
-  return el('div', { class: 'labels', hidden: !body && !score }, body, score);
+  return el('div', { class: 'labels', hidden: !body && !score }, body, pending, score);
 }
 
 // A chip per name, in the order of ctx.labelNames (a label the list lacks follows, so none is dropped). A chip is

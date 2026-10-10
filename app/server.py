@@ -42,7 +42,7 @@ from app.gallery import Gallery, GalleryMismatch
 from app.imaging import (MAX_UPLOAD_BYTES, MIN_SIDE, TOO_LARGE_MSG, UploadError, load_upload, model_input_image,
                          thumbnail_jpeg)
 from app.labels import LabelerClient, LabelerUnavailable, RuleLabeler
-from app.pipeline import Pipeline, PublishedDumps, TurnJob, Worker, named_labels
+from app.pipeline import TEST_IMAGE_MSG, Pipeline, PublishedDumps, TurnJob, Worker, named_labels
 from app.redact import redact_card
 from app.schemas import DISCLAIMER, Options, error_body
 from app.store import Store
@@ -72,8 +72,8 @@ NO_GALLERY_MSG = "Test-split studies need the gallery, which this server has not
 NO_RETRIEVAL_MSG = "Retrieval needs the gallery, which this server has not loaded."
 NO_LABELER_MSG = "Labels need a CheXbert labeller, which this server does not have."
 LABELER_DOWN_MSG = "The CheXbert labeller did not answer; try again shortly."
-TEST_IMAGE_MSG = "Could not read the test-split image."
 BOTH_IMAGES_MSG = "Send an image or a test row, not both."
+RETRIEVE_FAILED_MSG = "The retrieval could not be run."
 MAX_LABEL_CHARS = 20000   # what the labeller service takes in one request (app/labeler.py answers 422 above it)
 TINY_GALLERY_REFERENCE = "phase6_mimic_20260101T000000Z.json"   # the reference result that decides the tiny gallery's gate
 PLACEHOLDER = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>CXR Report Chat</title></head>"
@@ -92,7 +92,7 @@ OPTIONS_EXAMPLE = ('{"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "c
 MODELS_EXAMPLE = {"default_model": "hybrid_150m_m3_rrg", "mode": "private", "allow_compile": False,
                   "features": {"retrieval": False, "labels": False},
                   "models": [{"name": "hybrid_150m_m3_rrg", "prefix_k": 32, "cached_decode_available": True, "eos_trained": False,
-                              "device": "cpu"}]}
+                              "device": "cpu", "features": {"retrieval": False, "labels": False}}]}
 # GET /healthz as /docs shows it (test_app_openapi pins its keys to the real answer). code_version and started_at (P4-H A2) tell a server
 # that runs older code than the checkout: the dev server of 2026-10-09 had, and its turns ended "Internal error (ImportError)".
 HEALTHZ_EXAMPLE = {"status": "ok", "mode": "private", "default_model": "hybrid_150m_m3_rrg", "turns_in_flight": 0, "queue_cap": 4,
@@ -151,7 +151,7 @@ REFUSALS = {   # what a status means in the reference; a route that can answer i
     422: "The request failed validation: a parameter, an option, the model or the image cannot be used, or there is "
          "no image to run.",
     429: "The server is busy: its queue of accepted turns is full.",
-    500: "The server could not store the image, or read a test-split one.",
+    500: "The server could not store the image, read a test-split one, or run the retrieval.",
     503: "What the route needs is not on this server or does not answer: the retrieval gallery or the CheXbert labeller.",
 }
 STREAM_RESPONSE = {200: {   # the turn is Server-Sent Events, not JSON
@@ -409,6 +409,10 @@ def _test_image_sha256(gallery: Gallery, row: int) -> str:
     return _checked_upload(data)[2]
 
 
+def _can_read(path: Path) -> bool:
+    return path.is_file() and os.access(str(path), os.R_OK)
+
+
 def _previous_image(store: Store, session: Dict[str, Any], gallery: Optional[Gallery] = None) -> Optional[Dict[str, Any]]:
     """The newest image of the session that can still run: an upload whose original is on disk, or a test study the gallery
     still has (pass the gallery in private mode only; a public session stores no test row). What a text-only turn reruns."""
@@ -416,8 +420,8 @@ def _previous_image(store: Store, session: Dict[str, Any], gallery: Optional[Gal
         sha256, row = message["image_sha256"], message.get("test_row")
         if message["role"] != "user" or not sha256:
             continue
-        if row is not None:
-            if gallery is not None and row < _test_count(gallery):
+        if row is not None:   # a test image that cannot be read now is no image, as an upload gone from disk is (M1)
+            if gallery is not None and row < _test_count(gallery) and _can_read(Path(gallery.test_study(row)["image"])):
                 return {"sha256": sha256, "filename": message["image_filename"], "test_row": row}
         elif store.upload_path(session["id"], sha256, "original") is not None:
             return {"sha256": sha256, "filename": message["image_filename"]}
@@ -631,14 +635,17 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
                          "settings, whether decoding can be cached, and `eos_trained`: whether it was trained to end its "
                          "reports, in which case decoding stops where it does and the generate stage reports "
                          "`stopped: eos`), and the default model, the mode, whether "
-                         "`compile` is allowed and, in `features`, whether it runs the retrieval and labels stages. "
+                         "`compile` is allowed and, in `features`, whether it runs the retrieval and labels stages for the "
+                         "default model (each card's own `features` says so for that model). "
                          "In public mode a card names its checkpoint by file name only.")
     def list_models():
-        pipeline = worker.pipeline   # a gallery and a labeller are what P5-E gives it: until then it has neither
-        return {"default_model": default_model, "mode": mode, "allow_compile": allow_compile,
-                "features": {"retrieval": getattr(pipeline, "gallery", None) is not None,
-                             "labels": getattr(pipeline, "labeler", None) is not None},
-                "models": [redact_card(e.card(), mode) for e in engines.values()]}
+        pipeline = worker.pipeline   # its gallery serves only the models of its tower; its labeller every model
+
+        def features(name: str) -> Dict[str, bool]:
+            return {"retrieval": pipeline.retrieval_ready(name), "labels": pipeline.labeler is not None}
+
+        return {"default_model": default_model, "mode": mode, "allow_compile": allow_compile, "features": features(default_model),
+                "models": [dict(redact_card(e.card(), mode), features=features(name)) for name, e in engines.items()]}
 
     @app.post("/v1/sessions", summary="Create a session",
               description="Starts an empty session in the server's mode; `title` is optional, and an untitled session "
@@ -810,10 +817,12 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
               description="Runs the X-ray through preprocess and encode on the turn worker and returns what a turn's retrieve stage "
                           "shows: the `k_images` most similar training X-rays and the `k_reports` best-matching report groups, as rank "
                           "and similarity only in public mode. Answers 413 for an image over the limit, 422 for an image that cannot "
-                          "be used or a k out of range, 429 when the queue is full and 503 when the server has no retrieval gallery.",
+                          "be used or a k out of range, 429 when the queue is full, 500 when the retrieval fails and 503 when the "
+                          "server has no retrieval gallery.",
               responses=_refusals({413: TOO_LARGE_MSG,
                                    422: "Invalid request: k_images: Input should be less than or equal to 12",
-                                   429: BUSY_MSG.format(queue_cap), 503: NO_RETRIEVAL_MSG}, client_id=False))
+                                   429: BUSY_MSG.format(queue_cap), 500: RETRIEVE_FAILED_MSG, 503: NO_RETRIEVAL_MSG},
+                                  client_id=False))
     async def retrieve(image: UploadFile = File(..., description=XRAY_DOC),
                        k_images: int = Form(4, ge=0, le=12, description="How many similar training X-rays, 0 to 12."),
                        k_reports: int = Form(3, ge=0, le=10, description="How many matching report groups, 0 to 10.")):
@@ -827,7 +836,11 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         if not worker.reserve():
             raise HTTPException(429, BUSY_MSG.format(queue_cap))
         future = worker.run_task(lambda: pipeline.retrieve_upload(data, k_images, k_reports))
-        return await asyncio.wrap_future(future)
+        try:
+            return await asyncio.wrap_future(future)
+        except Exception as exc:   # its text can hold a path: the class only, in the log; a fixed message in the envelope (M3)
+            log.warning("POST /v1/retrieve failed: %s", type(exc).__name__)
+            raise HTTPException(500, RETRIEVE_FAILED_MSG) from None
 
     @app.post("/v1/label", summary="Label a report",
               description="The 14 CheXbert labels of the text, each 0 or 1, as `chexbert_14`. Answers 422 for a missing, empty or "
