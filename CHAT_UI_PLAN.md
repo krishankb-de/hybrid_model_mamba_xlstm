@@ -3723,6 +3723,18 @@ PYTHONPATH=.chat_deps_chexbert .venv_chexbert/bin/python -c "import app.labeler,
 
 Parity test: CPU directives, ga03 exclusion, both `PYTHONPATH=` overlays, and no `pip install` in the file. Commit `"P7-A: cluster import smoke for the app"`; then `bash scripts/chat_remote.sh sync && bash scripts/chat_remote.sh submit scripts/chat_app_smoke_h100.sh`, and tick with the job id and the printed versions.
 
+*As built (7de8178 for P9-A, 6bf9585 + 4e4bcd0 for P7-A; reviewed, fix round 1 clean):*
+- **Job log (R7).** It carries only these lines:
+  - the sync line;
+  - three `[setup]` probe lines: `server`, `labeler`, and `labels` (`[setup] chexbert label order equal: true|false (f1chexbert <version>)`);
+  - `=== END … ===`.
+
+  Raw probe output goes to `results/chat_app_smoke_<jobid>/*.out`.
+- **The label-order probe** parses f1chexbert's source with `ast`. It needs exactly one `target_names` assignment. It loads no weights and makes no network call.
+- **Safety.** A `results` guard. `HF_HUB_OFFLINE=1`. No installer string anywhere in the wrapper.
+
+**Prediction (R4), recorded before submission:** all three probes pass in about 1 minute (85%). Expected versions: fastapi ≥ 0.115 from the overlay, transformers 4.x below 5 in `.venv_chexbert`. The label order is true with f1chexbert 0.0.2 (92%).
+
 - [ ] **P7-B** `scripts/serve_chat_h100.sh` and the `python -m app.server` CLI: labeller and API, free port, endpoint file, token file, SIGTERM handling, requeue.
 
 CLI: `python -m app.server --engine tiny|real --mode private|public --home DIR [--device cpu|cuda] [--gallery DIR] [--labeler URL|rule|none] [--host 127.0.0.1] [--port 0] [--endpoint-file PATH] [--token-file PATH] [--models m3[,13d]] [--threads 8] [--drift-note TEXT] [--allow-compile]`. It picks a free port when `--port 0`, writes `<hostname>:<port>` to the endpoint file once uvicorn has started, reads the token from `--token-file` (never from the command line or the environment, so it stays out of `scontrol show job` and shell history), and on shutdown marks running turns `error` with `server_restart`.
@@ -3982,7 +3994,7 @@ Record the numbers from P7-D and a laptop tiny run; the static checks already ex
 
 ### P9 — Demo and close
 
-- [ ] **P9-A** `scripts/check_no_restricted_files.sh` and `scripts/install_hooks.sh` (pre-commit): refuse staged `outputs/`, `results/`, `uploads/`, `chat_sessions/`, `*.ckpt`, `*.parquet`, `*.npy`, `*.db`.
+- [x] **P9-A** `scripts/check_no_restricted_files.sh` and `scripts/install_hooks.sh` (pre-commit): refuse staged `outputs/`, `results/`, `uploads/`, `chat_sessions/`, `*.ckpt`, `*.parquet`, `*.npy`, `*.db`.
 
 ```bash
 #!/bin/bash
@@ -3996,6 +4008,16 @@ fi
 ```
 
 Tests: a temporary git repo with a staged `x.npy` → exit 1; a staged `.py` → exit 0. Commit `"P9-A: restricted-file pre-commit check"`.
+
+*As built (7de8178, 4e4bcd0; reviewed, fix round 1 clean):*
+- **What `scripts/check_no_restricted_files.sh` refuses:**
+  - the directories, files or symlinks `outputs`, `results`, `uploads`, `chat_sessions`, `logs` and `hpi_results_logs`, at any depth;
+  - these extensions, including adjacent forms such as `last.ckpt.part`, `emb.npy.gz` and rsync temps: `ckpt parquet npy npz db pt pth safetensors h5 arrow feather jpg jpeg dcm webp zip tar tgz gz 7z pkl pickle db-wal db-shm sqlite sqlite3`;
+  - the DUA basenames `refs.txt`, `hyps.txt`, `chexbert_labels.json` and `report_texts.txt`.
+- **Allowed:** the evidence PNGs and the 3 tracked `hpi_results_logs` files.
+- **Mechanics.** It reads `--diff-filter=ACMRT --no-relative -z` and matches without case. It fails closed: git errors exit 2.
+- **`scripts/install_hooks.sh`.** It never overwrites a foreign hook and warns when `core.hooksPath` is relative. **The hook is not installed on this repo;** installing it is the user's decision (`bash scripts/install_hooks.sh`).
+- **Tests.** An audit test re-stages every tracked path and expects exit 0.
 
 - [ ] **P9-B** (optional) GitHub Pages copy of `app/static/` with a configurable API base; the CORS allow-list gains the Pages origin.
 

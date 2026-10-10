@@ -136,7 +136,8 @@
     "P5-B": "towers identical and no img_proj (85%); test-split R@1/5/10 equal to evaluate_cxr_retrieval.py to every digit (90%); 45-90 min on one H100",
     "P5-C": "0 mismatches vs published y_true and refs.txt on 2,663 test rows (85%); f1chexbert stays on CPU (55%) -> 8 CPU shards of ~1 h (0.16 s/report x ~150-190k groups), else 15-45 min on one H100",
     "P5-F": "50/50 self-retrieval at rank 1; live CPU own-rank == build rank on >=48/50; labeller == published labels 100/100",
-    "P9-G3": "preflight code eos_flag true + module_in_cwd true; recipe ok with changed = the 6 root-derived keys (checkpoint_dir, experiment_name, log_dir, output_dir, trainer.default_root_dir, wandb.name), added = [dataset.report_eos_target], removed = [] (80%); wall 1.1-1.8 h for 12,000 steps on 4 H100 (published ~1.3 h); final val/lm_loss within 0.03 of the published run's last value, slightly higher more likely (one more target per report); DONE written with steps 12000"
+    "P9-G3": "preflight code eos_flag true + module_in_cwd true; recipe ok with changed = the 6 root-derived keys (checkpoint_dir, experiment_name, log_dir, output_dir, trainer.default_root_dir, wandb.name), added = [dataset.report_eos_target], removed = [] (80%); wall 1.1-1.8 h for 12,000 steps on 4 H100 (published ~1.3 h); final val/lm_loss within 0.03 of the published run's last value, slightly higher more likely (one more target per report); DONE written with steps 12000",
+    "P7-A": "all 3 probes pass in ~1 min (85%); fastapi >= 0.115 (overlay), transformers 4.x < 5 (.venv_chexbert); chexbert label order true with f1chexbert 0.0.2 (92%)"
   },
   "decisions": {
     "branch": "chat_ui, cut from h100_efficiency @ 5c45527 (has cached decode, E6/E7 decode verification, ISBI neighbour code, partition rename)",
@@ -537,7 +538,7 @@
       "status": "in_progress",
       "checkboxes": {
         "P9-A": {
-          "done": false,
+          "done": true,
           "desc": "scripts/check_no_restricted_files.sh and scripts/install_hooks.sh (pre-commit): refuse staged outputs/, results/, uploads/, chat_sessions/, *.ckpt, *.parquet..."
         },
         "P9-B": {
@@ -588,7 +589,10 @@
         "p9g2_commits": "1fcae9c,f417165,cc96a6a,6136cf1",
         "p9g2_test": "tests/test_beam_search_eos.py::test_exact_ties_break_as_in_the_published_decoder_ids_and_stream (231 in file)",
         "p9g2_engine": "tests/test_app_engine.py::test_a_report_that_ended_before_the_repeat_is_kept_when_stop_on_repeat_fires",
-        "p9g2_stress": "re-review 1152 quantised-logit runs, 0 mismatches vs published"
+        "p9g2_stress": "re-review 1152 quantised-logit runs, 0 mismatches vs published",
+        "p9a_commits": "7de8178,4e4bcd0",
+        "p9a_tests": "tests/test_restricted_files_hook.py (163; audit re-stages every tracked path)",
+        "p9a_hook": "not installed (user's decision)"
       },
       "verdict": null
     }
@@ -638,9 +642,10 @@
     "2026-10-10: 2026-10-10: P5-B merged (c079ac2, 49830a2); gallery job submitted 2632531 (chat_gallery, BUILD_ID=g13d_m3_v1, sync 49830a2 clean); read via chat_remote.sh state/summary logs/chat_gallery_2632531.log",
     "2026-10-10: 2026-10-10: P4-H merged (5afbf8b..24fda5a, validate All gates passed); dev server restarted on 24fda5a (pid 59835; /healthz code_version 24fda5a)",
     "2026-10-10: P4-H Playwright e2e + 9 UI fixes + stale-server hardening, merged",
-    "2026-10-10: P5-D gallery queries merged (truthful tie protocol, img_proj refusal, facts())"
+    "2026-10-10: P5-D gallery queries merged (truthful tie protocol, img_proj refusal, facts())",
+    "2026-10-10: P9-A restricted-file pre-commit check merged; hook install offered to the user"
   ],
-  "last_updated": "2026-10-10T03:04:03+02:00",
+  "last_updated": "2026-10-10T04:56:12+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
