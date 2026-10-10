@@ -24,6 +24,8 @@ const builder = (name) => (...args) => {
 };
 const renderImages = builder('renderImages');
 const renderNeighbors = builder('renderNeighbors');
+const renderMatches = builder('renderMatches');
+const renderPublished = builder('renderPublished');
 
 installDom();   // this file's process only: the other test files never see a document
 
@@ -894,7 +896,7 @@ function everyBuilder(view, ctx) {
   for (const name of SECTION_BUILDERS) if (typeof render[name] === 'function') built[name] = render[name](view, ctx);   // P6-B..D
   return built;
 }
-const SECTION_BUILDERS = ['renderImages', 'renderNeighbors'];
+const SECTION_BUILDERS = ['renderImages', 'renderNeighbors', 'renderMatches', 'renderPublished'];
 // What a missing field must never print, in the text of a card or in any attribute of it.
 function assertClean(node, name) {
   assert.doesNotMatch(node.textContent, /undefined|NaN|\bnull\b|\[object|\bfalse\b/, `${name}: text`);
@@ -1516,6 +1518,146 @@ test('the card puts the similar X-rays after the images row; a skipped retrieve 
   assert.equal(q(renderAssistantCard(skip, { loadImage }), 'section.neighbors'), null);
   assert.equal(renderNeighbors(viewOf([imageStart(), stageStart('retrieve', 2), retrieved([])]), { loadImage }).hasAttribute('hidden'), true);
   assert.equal(renderNeighbors(viewOf([imageStart(), stageStart('retrieve', 2)]), { loadImage }).hasAttribute('hidden'), true);   // still running
+});
+
+// ---- matching reports, the own-report badge and the published lines (P6-D) ---------------------------------------------------
+
+const LONG_REPORT = `Findings: ${'The lungs are clear without focal consolidation. '.repeat(6)}Impression: No acute cardiopulmonary process.`;   // > 180
+const match = (rank, more = {}) => ({ rank, similarity: Number((0.6 - 0.02 * rank).toFixed(3)), group: 300 + rank, group_size: rank === 1 ? 37 : 1,
+                                      txt_row: 400 + rank, report: rank === 1 ? LONG_REPORT : `Findings: short report ${rank}.`,
+                                      labels: labelled(rank === 1 ? ['Edema', 'Cardiomegaly'] : []), ...more });
+const OWN_RANK = { rank: 3, of: 2663, rank_dedup: 2, n_tied: 1, hit_at_10: true, protocol: 'i2t, official test split, strict pairing' };
+const matchesView = (detail = {}, ...after) => viewOf([imageStart(), PREPROCESSED, stageStart('retrieve', 2),
+  stageEnd('retrieve', 3, { image_neighbors: [], report_matches: [match(1), match(2)], gallery: { images: 200 }, ...detail }), ...after]);
+const matchItems = (section) => qa(section, 'li.match');
+
+test('the matching reports are a ranked list: "#rank · similarity", how many identical reports, the report and its positive labels (P6-D)', () => {
+  const section = renderMatches(matchesView(), { labelNames: LABEL_NAMES, turn: 2 });
+  assert.equal(section.localName, 'section');
+  assert.ok(section.classList.contains('matches'));
+  assert.equal(section.hasAttribute('hidden'), false);
+  assert.equal(section.getAttribute('aria-label'), 'Matching reports, turn 2');
+  assert.equal(q(section, 'h3').textContent, 'Matching reports (13D image and text encoders)');
+  assert.equal(q(section, 'ol').getAttribute('role'), 'list');
+  assert.deepEqual(matchItems(section).map((li) => li.getAttribute('data-rank')), ['1', '2']);
+  assert.deepEqual(matchItems(section).map((li) => q(li, '.match-score').textContent), ['#1 · 0.580', '#2 · 0.560']);
+  assert.deepEqual(matchItems(section).map((li) => q(li, '.group-size')?.textContent ?? null), ['×37 identical reports', null]);   // a group of one says nothing
+  assert.deepEqual(matchItems(section).map((li) => q(li, '.clamp-text').textContent), [LONG_REPORT, 'Findings: short report 2.']);
+  const [long, short] = matchItems(section).map((li) => q(li, '.clamp-text'));
+  assert.ok(long.classList.contains('clamped') && !long.classList.contains('open'));   // three lines until Show all
+  assert.ok(!short.classList.contains('clamped'));                                     // short enough to fit them: no clamp, no button
+  const toggle = q(matchItems(section)[0], 'button[data-action="show"]');
+  assert.deepEqual([toggle.textContent, toggle.getAttribute('aria-expanded'), toggle.getAttribute('aria-label'), toggle.getAttribute('aria-controls')],
+                   ['Show all', 'false', 'Show all of matching report 1, turn 2', long.getAttribute('id')]);
+  assert.equal(q(matchItems(section)[1], 'button'), null);
+  assert.deepEqual(texts(qa(matchItems(section)[0], 'li.chip.finding')), ['Cardiomegaly', 'Edema']);   // the positives, in the labeller's order
+  assert.equal(q(matchItems(section)[0], 'ul').getAttribute('aria-label'), 'Labels of matching report 1');
+  assert.equal(qa(matchItems(section)[1], '.chip').length, 0);
+  assert.equal(qa(section, 'li.chip.label').length, 0);   // not the report's own 14 chips
+  assert.equal(qa(section, 'li > button').length, 0);     // a control sits in its own row, not straight in the list item
+  assert.equal(q(section, '.own-rank'), null);           // an upload: no own report to rank
+});
+
+test('Show all opens a clamped report and Show less closes it; ctx.ui keeps it open through the whole-card replace, and focus comes back', () => {
+  const view = matchesView({}, stageStart('generate', 3), snapshot('Findings: so far'));
+  const ui = new Map();
+  const ctx = { labelNames: LABEL_NAMES, ui, turn: 1 };
+  let card = renderAssistantCard(view, ctx);
+  document.body.replaceChildren(card);
+  const toggle = q(card, 'section.matches button[data-action="show"]');
+  toggle.click();
+  const text = () => q(card, 'section.matches li.match .clamp-text');
+  assert.ok(text().classList.contains('open'));
+  assert.deepEqual([toggle.textContent, toggle.getAttribute('aria-expanded'), toggle.getAttribute('aria-label')],
+                   ['Show less', 'true', 'Show less of matching report 1, turn 1']);
+  toggle.focus();
+  assert.equal(focusKey(document.activeElement), 'show:0');
+  const next = renderAssistantCard(view, ctx);   // the next frame
+  card.replaceWith(next);
+  card = next;
+  assert.ok(text().classList.contains('open'));   // still open
+  assert.equal(restoreFocus(card, 'show:0'), true);
+  assert.equal(document.activeElement, q(card, 'section.matches button[data-action="show"]'));
+  document.activeElement.click();                 // closed again, and the next frame keeps it closed
+  card.replaceWith(renderAssistantCard(view, ctx));
+  assert.ok(!q(document.body, 'section.matches li.match .clamp-text').classList.contains('open'));
+  const fresh = renderAssistantCard(view, { labelNames: LABEL_NAMES });   // without a store a card starts closed
+  assert.ok(!q(fresh, 'section.matches li.match .clamp-text').classList.contains('open'));
+  document.body.replaceChildren();
+});
+
+test('a test study\'s card ranks its own report: "Own report: rank 3 of 2,663 test reports · R@10 hit", the dedup rank and protocol in the tooltip', () => {
+  const badge = (rank, detail = {}) => q(renderMatches(matchesView({ true_report_rank: rank, ...detail }), {}), '.own-rank');
+  const hit = badge(OWN_RANK);
+  assert.equal(visibleText(hit), 'Own report: rank 3 of 2,663 test reports · R@10 hit');
+  const tip = 'Dedup-aware rank 2: every identical report counted once. 1 other report scores exactly the same. '
+            + 'Protocol: i2t, official test split, strict pairing.';
+  assert.equal(hit.getAttribute('title'), tip);
+  assert.equal(q(hit, '.visually-hidden').textContent, ` ${tip}`);   // what a pointer shows, a screen reader hears
+  assert.equal(visibleText(badge({ ...OWN_RANK, rank: 14, hit_at_10: false, n_tied: 0 })), 'Own report: rank 14 of 2,663 test reports · R@10 miss');
+  assert.equal(badge({ ...OWN_RANK, n_tied: 3 }).getAttribute('title').includes('3 other reports score exactly the same.'), true);
+  const alone = renderMatches(matchesView({ true_report_rank: OWN_RANK, report_matches: [] }), {});   // k_reports 0: the badge alone
+  assert.equal(alone.hasAttribute('hidden'), false);
+  assert.deepEqual([q(alone, '.own-rank') !== null, q(alone, 'ol')], [true, null]);
+  for (const odd of [{ rank: '3', of: 2663 }, { rank: 3 }, { of: 40 }, null, 'x']) assert.equal(badge(odd), null, JSON.stringify(odd));
+});
+
+test('public mode: the matching reports keep rank and similarity only, with a note; no text, no labels, no group, no badge (U2)', () => {
+  const pubStart = imageStart({ urls: { thumb: URLS.thumb, model_input: URLS.model_input } }, { mode: 'public' });
+  const pub = viewOf([pubStart, stageStart('retrieve', 2), stageEnd('retrieve', 3, {
+    image_neighbors: [], report_matches: [{ rank: 1, similarity: 0.41 }, { rank: 2, similarity: 0.4 }], gallery: { images: 200 } })]);
+  const section = renderMatches(pub, { labelNames: LABEL_NAMES });
+  assert.deepEqual(matchItems(section).map((li) => q(li, '.match-score').textContent), ['#1 · 0.410', '#2 · 0.400']);
+  assert.equal(q(section, '.section-note').textContent, 'Public mode shows rank and similarity only.');
+  assert.deepEqual([qa(section, '.clamp-text').length, qa(section, '.chip').length, qa(section, 'button').length, q(section, '.own-rank')],
+                   [0, 0, 0, null]);
+  const leaked = viewOf([pubStart, stageStart('retrieve', 2), stageEnd('retrieve', 3, { report_matches: [match(1)] })]);   // defence in depth
+  assert.deepEqual([qa(renderMatches(leaked, {}), '.clamp-text').length, qa(renderMatches(leaked, {}), '.chip').length], [0, 0]);
+  assertClean(section, 'public matches');
+});
+
+test('a test study\'s published lines: the GPU report with identical or differs against the live one, and the retrieval floor (P6-D)', () => {
+  const scored = (published) => viewOf([imageStart({ source: 'test_split', filename: null }), stageStart('generate', 3), snapshot('Findings: live.'),
+                                        stageEnd('generate', 9, GENERATE), stageStart('score', 5),
+                                        stageEnd('score', 1, { ...SCORE, reference_source: 'test_split', published }),
+                                        stopOf('done', { report: 'Findings: live.', display_report: 'Findings: live.' })]);
+  const lines = (section) => qa(section, 'li.published-line');
+  const same = renderPublished(scored({ model_report: LONG_REPORT, floor_report: 'Findings: floor.', live_equals_published: true }), { turn: 4 });
+  assert.equal(same.hasAttribute('hidden'), false);
+  assert.equal(same.getAttribute('aria-label'), 'Published reports, turn 4');
+  assert.equal(q(same, 'h3').textContent, 'Published reports (test split)');
+  assert.deepEqual(lines(same).map((li) => li.getAttribute('data-kind')), ['model', 'floor']);
+  assert.deepEqual(lines(same).map((li) => q(li, '.published-head').textContent), ['Published (GPU) report · identical', 'Retrieval-floor report']);
+  assert.ok(q(same, '.verdict').classList.contains('same'));
+  assert.deepEqual(lines(same).map((li) => q(li, '.clamp-text').textContent), [LONG_REPORT, 'Findings: floor.']);
+  assert.equal(q(lines(same)[0], 'button[data-action="show"]').getAttribute('aria-label'), 'Show all of the published report, turn 4');
+  assert.equal(q(same, 'p.note'), null);   // compared: nothing to explain
+  const differs = renderPublished(scored({ model_report: 'Findings: other.', floor_report: 'Findings: floor.', live_equals_published: false }), {});
+  assert.equal(q(differs, '.published-head').textContent, 'Published (GPU) report · differs');
+  assert.ok(q(differs, '.verdict').classList.contains('differs'));
+  const unsaid = renderPublished(scored({ model_report: 'Findings: other.', floor_report: 'Findings: floor.', live_equals_published: null }), {});
+  assert.equal(q(unsaid, '.published-head').textContent, 'Published (GPU) report');   // not compared: no verdict, and the note says when it is
+  assert.equal(q(unsaid, 'p.note').textContent,
+               'Compared with the live report only when the turn is decoded as the published dump was: beam 3, 100 tokens, the whole budget, not compiled.');
+  const floorOnly = renderPublished(scored({ model_report: null, floor_report: 'Findings: floor.', live_equals_published: null }), {});
+  assert.deepEqual([lines(floorOnly).map((li) => li.getAttribute('data-kind')), q(floorOnly, 'p.note')], [['floor'], null]);   // the dump is another model's
+  assert.equal(renderPublished(scored(undefined), {}).hasAttribute('hidden'), true);   // an upload's score has no published lines
+  assert.equal(renderPublished(finished(), {}).hasAttribute('hidden'), true);
+  assertClean(renderPublished(scored({ model_report: 7, floor_report: null, live_equals_published: 'yes' }), {}), 'odd published');
+});
+
+test('the card: report, labels, the published lines, then the images, the similar X-rays and the matching reports, then provenance', () => {
+  const { loadImage } = loader();
+  const view = viewOf([imageStart({ source: 'test_split', filename: null }), PREPROCESSED, stageStart('retrieve', 2),
+                       stageEnd('retrieve', 3, { image_neighbors: [neighbour(1)], report_matches: [match(1)], true_report_rank: OWN_RANK, gallery: {} }),
+                       stageStart('generate', 3), snapshot('Findings: live.'), stageEnd('generate', 9, GENERATE),
+                       stageStart('label', 4), stageEnd('label', 3, { chexbert_14: labelled([]), positives: [], neighbor_agreement: [agreementOf(1)] }),
+                       stageStart('score', 5), stageEnd('score', 1, { ...SCORE, published: { model_report: 'a', floor_report: 'b', live_equals_published: true } }),
+                       stopOf('done', { report: 'Findings: live.', display_report: 'Findings: live.' })]);
+  const card = renderAssistantCard(view, { loadImage, labelNames: LABEL_NAMES });
+  assert.deepEqual(card.children.map((c) => c.getAttribute('class')),
+                   ['timeline', 'notes', 'report', 'labels', 'published', 'images', 'neighbors', 'matches', 'provenance']);
+  assert.equal(qa(card, 'li.chip.label').length, 14);   // the report's own chips, and only those, carry .label
 });
 
 // ---- UI state that outlives a re-render (ctx.ui) ----------------------------------------------------------------------

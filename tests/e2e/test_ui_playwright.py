@@ -19,6 +19,7 @@ import pytest
 pytest.importorskip("playwright.sync_api", reason="the e2e tests need `pip install -r requirements-e2e.txt`")
 
 from app.commands import NOT_A_QA_BOT  # noqa: E402
+from app.labels import CHEXBERT_14  # noqa: E402
 from app.imaging import FORMATS_MSG, TOO_SMALL_MSG  # noqa: E402
 from tests.e2e.conftest import DESKTOP, FAULT_TOKENS, REPO_ROOT, squeezed, stage_detail  # noqa: E402
 
@@ -896,6 +897,87 @@ def test_in_public_mode_similar_xrays_are_placeholders_and_the_page_asks_for_no_
     stored = ui.server.message(card["id"])
     assert all(set(n) == {"rank", "similarity"} for n in stage_detail(stored, "retrieve")["image_neighbors"])   # U2, as stored and sent
     ui.shot("similar_xrays_public_1280x900_light.png")
+    ui.assert_clean()
+
+
+# ---- 19 (P6-D) --------------------------------------------------------------------------------------------------------------------
+
+# The newest card's matching reports: the title, the own-report badge (its visible text and its tooltip), and per report its rank, score,
+# group size, text (and whether it is clamped), its Show all button and its label chips.
+MATCHES_JS = """() => {
+  const c = [...document.querySelectorAll('#conversation article.card')].pop();
+  const s = c && c.querySelector('section.matches');
+  if (!s) return null;
+  const badge = s.querySelector('.own-rank');
+  return { title: s.querySelector('h3').textContent,
+           badge: badge ? { text: badge.childNodes[0].textContent, title: badge.getAttribute('title') } : null,
+           items: [...s.querySelectorAll('li.match')].map((li) => {
+             const text = li.querySelector('.clamp-text'), more = li.querySelector('button[data-action="show"]'), size = li.querySelector('.group-size');
+             return { rank: li.getAttribute('data-rank'), score: li.querySelector('.match-score').textContent, size: size ? size.textContent : null,
+                      text: text ? text.textContent : null, more: more ? more.textContent : null,
+                      chips: [...li.querySelectorAll('.chip.finding')].map((x) => x.textContent) };
+           }) };
+}"""
+PICKER_JS = """() => {
+  const p = document.querySelector('#picker'), b = document.querySelector('#pick-study');
+  return { button: b ? { hidden: b.hidden, expanded: b.getAttribute('aria-expanded'), disabled: b.disabled } : null, open: !!p && !p.hidden,
+           status: document.querySelector('#picker-status') ? document.querySelector('#picker-status').textContent : null,
+           focus: document.activeElement ? document.activeElement.id : null,
+           studies: [...document.querySelectorAll('#picker-list button')].map((x) => ({ row: x.getAttribute('data-test-row'), text: x.textContent })) };
+}"""
+
+
+@pytest.mark.parametrize("ui", [{"tiny_gallery": True}], indirect=True, ids=["tiny_gallery"])
+def test_the_picker_runs_a_test_study_whose_card_ranks_its_own_report_and_lists_the_matching_reports(ui, images):
+    """P6-D on a tiny_gallery server: the composer's "Test-split study" button opens a list from GET /v1/test-studies that narrows as a study
+    id is typed; choosing one sends a turn with options.test_row and no upload. Its card shows "Own report: rank r of 40 test reports" with the
+    dedup-aware rank and the protocol in the tooltip, and the matching reports (13D image and text encoders) ranked, with group sizes and
+    label chips. A text-only follow-up runs the same study again."""
+    page = ui.open()
+    picker = page.evaluate(PICKER_JS)
+    assert picker["button"] == {"hidden": False, "expanded": "false", "disabled": False} and not picker["open"]
+    page.click("#pick-study")
+    page.wait_for_function("document.querySelectorAll('#picker-list button').length > 0")
+    picker = page.evaluate(PICKER_JS)
+    assert picker["open"] and picker["button"]["expanded"] == "true" and picker["focus"] == "picker-search"
+    assert len(picker["studies"]) == 40 and picker["status"] == "40 studies"   # the tiny test split, all under the page's limit of 50
+    listed = ui.server.get("v1/test-studies?limit=50")["studies"]
+    assert [s["row"] for s in picker["studies"]] == [str(s["test_row"]) for s in listed]
+    study = listed[3]
+    prefix = str(study["study_id"])
+    page.fill("#picker-search", prefix)
+    page.wait_for_function("(row) => [...document.querySelectorAll('#picker-list button')].every((b) => b.getAttribute('data-test-row') === row)",
+                           arg=str(study["test_row"]))
+    page.click('#picker-list button[data-test-row="{}"]'.format(study["test_row"]))
+    card = ui.wait_settled(0)
+    assert card["status"] == "done" and not page.evaluate(PICKER_JS)["open"]
+    sid = ui.session_id()
+    [message] = assistants(ui, sid)
+    start = message["events"][0]["data"]
+    assert start["image"]["source"] == "test_split" and start["options"]["test_row"] == study["test_row"]   # no upload: the study itself
+    retrieve = stage_detail(message, "retrieve")
+    rank = retrieve["true_report_rank"]
+    shown = page.evaluate(MATCHES_JS)
+    assert shown["title"] == "Matching reports (13D image and text encoders)"
+    assert shown["badge"]["text"] == "Own report: rank {} of 40 test reports · R@10 {}".format(rank["rank"], "hit" if rank["hit_at_10"] else "miss")
+    assert "Dedup-aware rank {}".format(rank["rank_dedup"]) in shown["badge"]["title"] and rank["protocol"] in shown["badge"]["title"]
+    assert [i["rank"] for i in shown["items"]] == [str(m["rank"]) for m in retrieve["report_matches"]] == ["1", "2", "3"]
+    for item, m in zip(shown["items"], retrieve["report_matches"]):
+        assert item["score"] == "#{} · {:.3f}".format(m["rank"], m["similarity"]) and item["text"] == m["report"]
+        assert item["size"] == ("×{} identical reports".format(m["group_size"]) if m["group_size"] > 1 else None)
+        assert item["chips"] == [name for name in CHEXBERT_14 if m["labels"][name]]
+        assert item["more"] == ("Show all" if len(m["report"]) > 180 else None)   # a report that fits three lines is not clamped
+    you = bubble(ui)
+    assert you["image"] == "Test-split X-ray" and "test row {}".format(study["test_row"]) in you["chips"]
+    page.wait_for_function(PICTURES_LOADED)   # the study's picture in the user turn and the images row: served from the dataset, private
+    assert ui.composer()["rerun"] == RERUN.format("test row {}".format(study["test_row"]))
+    ui.shot("picker_turn_1280x900_light.png")
+    card = ui.turn(note="beam 2")             # a text-only follow-up runs the same study again (server: _previous_image)
+    assert card["status"] == "done"
+    follow = assistants(ui, sid)[-1]
+    assert follow["events"][0]["data"]["image"]["source"] == "test_split" and follow["options"]["test_row"] == study["test_row"]
+    assert stage_detail(follow, "retrieve")["true_report_rank"] == rank
+    assert page.evaluate(MATCHES_JS)["badge"] == shown["badge"]
     ui.assert_clean()
 
 

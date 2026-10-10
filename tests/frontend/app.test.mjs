@@ -4346,6 +4346,169 @@ test('a running turn on a server with no labeller never says "labelling…": the
   assert.equal(q(cardOf(), '.labels').textContent, 'labelling…');
 });
 
+// ---- P6-D: the test-split picker --------------------------------------------------------------------------------------------
+
+const GALLERY_MODELS = { ...MODELS, features: { retrieval: true, labels: true } };   // a private server with a gallery: the picker's
+const STUDIES = Array.from({ length: 12 }, (_, row) => ({ test_row: row, study_id: 50000000 + row * 7, view: row % 3 ? 'PA' : 'AP' }));
+const studyRoutes = (asked = []) => ({
+  'GET /v1/test-studies': (url) => {
+    const q = new URL(url, 'http://page').searchParams;
+    asked.push({ q: q.get('q'), limit: q.get('limit') });
+    return { studies: STUDIES.filter((s) => String(s.study_id).startsWith(q.get('q') ?? '')).slice(0, Number(q.get('limit') || 50)) };
+  },
+});
+const pickButton = () => $('pick-study');
+const studyButtons = () => qa($('picker-list'), 'button');
+
+test('pickerAvailable: private mode with a gallery (a model whose features say retrieval), else not', () => {
+  assert.equal(typeof appModule.pickerAvailable, 'function', 'app.js exports pickerAvailable');
+  const { pickerAvailable } = appModule;
+  assert.equal(pickerAvailable(GALLERY_MODELS), true);
+  assert.equal(pickerAvailable(PER_MODEL), true);                                       // the default model's tower is the gallery's
+  assert.equal(pickerAvailable({ ...PER_MODEL, features: { retrieval: false, labels: true } }), true);   // another model's card says so
+  assert.equal(pickerAvailable({ ...GALLERY_MODELS, mode: 'public' }), false);          // test-split studies are private data (R1)
+  for (const none of [NO_STAGES, MODELS, null, undefined, {}, []]) assert.equal(pickerAvailable(none), false, JSON.stringify(none));   // not said: no
+});
+
+test('the Test-split study button opens a searchable list, and choosing a study sends a turn with options.test_row and no image (P6-D)', async () => {
+  const asked = [];
+  const h = await ready({ options: { models: GALLERY_MODELS }, routes: studyRoutes(asked) });   // a file is attached: it waits for the next Send
+  const pick = pickButton();
+  assert.deepEqual([pick.hidden, pick.textContent, pick.getAttribute('aria-expanded'), pick.getAttribute('aria-controls')],
+                   [false, 'Test-split study', 'false', 'picker']);
+  const rows = Array.from($('composer').children);
+  assert.ok(rows.indexOf(pick) < rows.indexOf($('settings')), 'the button sits before Settings');
+  assert.equal($('picker').hidden, true);
+  pick.click();
+  await flush();
+  assert.deepEqual([$('picker').hidden, pick.getAttribute('aria-expanded'), document.activeElement.id], [false, 'true', 'picker-search']);
+  assert.equal($('picker').getAttribute('role'), 'dialog');
+  assert.deepEqual(asked, [{ q: null, limit: '50' }]);
+  assert.equal(studyButtons().length, STUDIES.length);
+  assert.deepEqual(studyButtons().slice(0, 2).map((b) => [b.textContent, b.getAttribute('data-test-row'), b.getAttribute('type')]),
+                   [['study 50000000 · AP · test row 0', '0', 'button'], ['study 50000007 · PA · test row 1', '1', 'button']]);
+  assert.equal($('picker-status').textContent, '12 studies');
+  $('picker-search').value = '5000004';
+  $('picker-search').dispatchEvent(new ShimEvent('input', { bubbles: true }));
+  $('picker-search').value = '50000049';   // typed on: one request for the pause, not one per key
+  $('picker-search').dispatchEvent(new ShimEvent('input', { bubbles: true }));
+  h.timers.advance(400);
+  await flush();
+  assert.deepEqual(asked.slice(1), [{ q: '50000049', limit: '50' }]);
+  assert.deepEqual(studyButtons().map((b) => b.getAttribute('data-test-row')), ['7']);
+  assert.equal($('picker-status').textContent, '1 study');
+  $('prompt').value = 'beam 5';   // a note rides with the study, as with an upload
+  studyButtons()[0].click();
+  await flush();
+  assert.equal($('picker').hidden, true);
+  const run = h.api.streams.at(-1);
+  assert.ok(run, 'a turn was sent');
+  assert.equal(run.opts.form.get('image'), null);   // no upload: the server reads the study's image where the dataset keeps it
+  assert.equal(run.opts.form.get('text'), 'beam 5');
+  assert.equal(JSON.parse(run.opts.form.get('options')).test_row, 7);
+  assert.equal(h.app.state.file !== null, true);    // the attached file was not this turn's: it waits for the next Send
+  assert.deepEqual(texts(qa(q($('conversation'), '.turn.user'), '.options .chip')).filter((c) => c.startsWith('test row')), ['test row 7']);
+});
+
+test('the study list closes with Escape and with its close button, back to the Test-split study button; Enter in its search sends nothing', async () => {
+  const h = await ready({ options: { models: GALLERY_MODELS }, routes: studyRoutes() });
+  pickButton().click();
+  await flush();
+  assert.equal(press($('picker-search'), 'Enter').defaultPrevented, true);   // the search sits in the composer's form: Enter must not submit it
+  await flush();
+  assert.equal(h.api.streams.length, 0);
+  assert.equal(document.activeElement.getAttribute('data-test-row'), '0');   // Enter goes to the first study instead
+  const escape = press(document.activeElement, 'Escape');
+  assert.deepEqual([escape.defaultPrevented, $('picker').hidden, document.activeElement.id], [true, true, 'pick-study']);
+  assert.equal($('drawer').hidden, true);
+  pickButton().click();
+  await flush();
+  $('picker-close').click();
+  assert.deepEqual([$('picker').hidden, pickButton().getAttribute('aria-expanded'), document.activeElement.id], [true, 'false', 'pick-study']);
+});
+
+test('the picker is not offered in public mode, on a server with no gallery, or while a turn runs', async () => {
+  for (const models of [{ ...GALLERY_MODELS, mode: 'public' }, NO_STAGES, MODELS]) {
+    const h = harness({ models });
+    await h.app.start();
+    await flush();
+    assert.equal(pickButton().hidden, true, JSON.stringify(models.features));
+  }
+  const h = await ready({ options: { models: GALLERY_MODELS }, routes: studyRoutes() });
+  h.app.send();
+  await flush();
+  assert.equal(pickButton().disabled, true);   // one turn at a time, as Send
+  h.api.streams[0].accept('m_a');
+  await flush();
+  h.api.streams[0].channel.push(...fullTurn());
+  h.api.streams[0].channel.end();
+  await flush();
+  assert.equal(pickButton().disabled, false);
+});
+
+test('a refused study list says why in the panel and sends nothing', async () => {
+  const h = await ready({ options: { models: GALLERY_MODELS },
+                          routes: { 'GET /v1/test-studies': refused(503, 'Test-split studies need the gallery, which this server has not loaded.', 'unavailable_error') } });
+  pickButton().click();
+  await flush();
+  assert.equal($('picker-status').textContent, 'Test-split studies need the gallery, which this server has not loaded.');
+  assert.deepEqual([studyButtons().length, h.api.streams.length], [0, 0]);
+});
+
+test('a study\'s turn shows the study\'s picture in its user turn once message_start names it, and the re-run hint names it by its row', async () => {
+  const h = await ready({ options: { models: GALLERY_MODELS }, routes: studyRoutes() });
+  pickButton().click();
+  await flush();
+  q($('picker-list'), 'button[data-test-row="3"]').click();
+  await flush();
+  const run = h.api.streams.at(-1);
+  run.accept('m_a');
+  await flush();
+  const user = () => q($('conversation'), '.turn.user');
+  assert.equal(q(user(), 'img'), null);   // nothing to show until the server names the study's image
+  resetEvents();
+  const urls = { original: '/v1/messages/u_a/image?variant=original', thumb: '/v1/messages/u_a/image?variant=thumb',
+                 model_input: '/v1/messages/u_a/image?variant=model_input' };
+  run.channel.push(startEv({ options: { ...START_DATA.options, test_row: 3 }, image: { sha256: SHA, filename: null, source: 'test_split', urls } }));
+  await flush();
+  const img = q(user(), 'img');
+  assert.deepEqual([img.getAttribute('data-src'), img.getAttribute('alt')], [urls.thumb, 'Test-split X-ray']);
+  assert.equal(img.getAttribute('src'), `blob:fake/${urls.thumb}`);
+  run.channel.push(stageStartEv('preprocess', 0), stageEndEv('preprocess'), stopEv('done', { report: 'Findings: ok.', display_report: 'Findings: ok.' }));
+  run.channel.end();
+  await flush();
+  h.app.state.file = null;   // what a Send leaves: no new image
+  $('prompt').dispatchEvent(new ShimEvent('input', { bubbles: true }));
+  assert.equal($('rerun-hint').textContent, 'No new image: Send re-runs test row 3 with these settings.');
+});
+
+test('a reloaded chat whose last image was a test study names it in the re-run hint, and shows its picture in the user turn', async () => {
+  resetEvents();
+  const urls = { original: '/v1/messages/u_1/image?variant=original', thumb: '/v1/messages/u_1/image?variant=thumb',
+                 model_input: '/v1/messages/u_1/image?variant=model_input' };
+  const events = [startEv({ message_id: 'm_1', options: { ...START_DATA.options, test_row: 9 },
+                            image: { sha256: SHA, filename: null, source: 'test_split', urls } }), stopEv('done', { message_id: 'm_1' })];
+  const h = harness({ models: GALLERY_MODELS, sessions: [sess('s_a', 'test row 9', 1)], routes: {
+    'GET /v1/sessions/s_a': { ...sess('s_a', 'test row 9', 1), messages: [
+      { ...userMsg('u_1', '', null), test_row: 9, image_urls: urls }, botMsg('m_1', 'done', { ...START_DATA.options, test_row: 9 })] },
+    'GET /v1/messages/m_1': { ...botMsg('m_1'), events: rows(events) } } });
+  await h.app.start();
+  await flush();
+  const img = q(q($('conversation'), '.turn.user'), 'img');
+  assert.deepEqual([img.getAttribute('data-src'), img.getAttribute('alt')], [urls.thumb, 'Test-split X-ray']);
+  assert.equal($('rerun-hint').textContent, 'No new image: Send re-runs test row 9 with these settings.');
+});
+
+test('a turn that starts closes the study list: it is for starting one', async () => {
+  const h = await ready({ options: { models: GALLERY_MODELS }, routes: studyRoutes() });
+  pickButton().click();
+  await flush();
+  assert.equal($('picker').hidden, false);
+  h.app.send();   // the attached file, sent from the composer while the list was open
+  await flush();
+  assert.deepEqual([$('picker').hidden, pickButton().getAttribute('aria-expanded'), pickButton().disabled], [true, 'false', true]);
+});
+
 test('a replayed user turn shows k only if the model it ran on runs retrieval', async () => {
   resetEvents();
   const routes = {

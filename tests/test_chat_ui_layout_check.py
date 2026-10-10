@@ -628,14 +628,32 @@ def _sections(width: int = 1280, sections: Optional[List[str]] = None) -> Dict[s
     inside than it is, its pictures loaded, with a size, inside the card; nothing overflows the page."""
     card = [24.0, 60.0, width - 24.0, 2400.0]
     picture = {"box": [card[0] + 16.0, 320.0, card[0] + 176.0, 480.0], "loaded": True}
-    one = lambda: {"box": [card[0] + 16.0, 300.0, card[2] - 16.0, 520.0], "sw": 300, "cw": 300, "pictures": [dict(picture)]}
+    clamp = {"h": 63, "sh": 210, "line": 21.0}   # three lines of 21 px, and more below them
+
+    def one(name: str) -> Dict[str, Any]:
+        return {"box": [card[0] + 16.0, 300.0, card[2] - 16.0, 520.0], "sw": 300, "cw": 300,
+                "pictures": [dict(picture)] if name in layout.PICTURED else [], "clamped": [dict(clamp)] if name in layout.CLAMPED else []}
+
     return {"doc": [width, width], "conversation": [width, width], "card": card,
-            "sections": {name: one() for name in (layout.SECTIONS if sections is None else sections)}}
+            "sections": {name: one(name) for name in (layout.SECTIONS if sections is None else sections)}}
 
 
 def test_card_sections_in_order_have_no_failures():
     assert layout.check_sections(_sections(), 1280, layout.SECTIONS) == []
-    assert layout.SECTIONS[0] == "section.images" and set(layout.PICTURED) <= set(layout.SECTIONS)
+    assert layout.SECTIONS == ["section.images", "section.neighbors", "section.published", "section.matches"]   # P6-B, P6-C, P6-D
+    assert set(layout.PICTURED) | set(layout.CLAMPED) <= set(layout.SECTIONS)
+
+
+def test_a_clamp_that_shows_more_than_three_lines_or_hides_nothing_fails():   # P6-D
+    tall = _sections()
+    tall["sections"]["section.matches"]["clamped"][0]["h"] = 84   # four lines: the clamp rule is gone
+    assert any("clamped report 1 is 84 px tall, over three lines of 21 px" in f for f in layout.check_sections(tall, 1280, layout.SECTIONS))
+    open_ = _sections()
+    open_["sections"]["section.published"]["clamped"][0].update(h=210, sh=210)   # nothing hidden
+    assert any("hides nothing" in f for f in layout.check_sections(open_, 1280, layout.SECTIONS))
+    none = _sections()
+    none["sections"]["section.matches"]["clamped"] = []
+    assert "section.matches clamps no report" in layout.check_sections(none, 1280, layout.SECTIONS)
 
 
 def test_a_card_section_that_is_missing_wide_or_holds_a_bad_picture_fails():

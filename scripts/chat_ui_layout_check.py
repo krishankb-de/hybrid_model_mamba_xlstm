@@ -19,8 +19,8 @@ page); six chips and a 140-character unbroken word are injected, and Stop is sho
      (it sticks to the bottom of the drawer) and is not covered once it is scrolled to
   i  (P6-B..D, one more case for every viewport in every scheme) the card's own sections (SECTIONS), drawn by render.js in the page from a
      synthetic finished turn with every picture a generated PNG (nothing is fetched): each section is there, lies inside the card's width
-     and does not overflow it, every picture has loaded with a size and lies inside the card, and nothing overflows the page horizontally,
-     with the drawer closed and open
+     and does not overflow it, every picture has loaded with a size and lies inside the card, every clamped report shows at most three
+     lines and hides the rest, and nothing overflows the page horizontally, with the drawer closed and open
 
 On the short viewports, where the page scrolls instead (667x375, 320x256), c and d give way to: the report keeps its
 natural height (no scroller of its own, at least 120 px), the composer is not capped, the banner stays at the top of
@@ -62,7 +62,8 @@ CHIPS = ["beam 3", "100 tok", "cached", "k 4/3", "label on", "repair off"]
 LONG_WORD = "x" * 140
 REPORT_TEXT = ("The lungs are clear. There is no focal consolidation, pleural effusion or pneumothorax. The "
                "cardiomediastinal silhouette is within normal limits. No acute osseous abnormality is seen. ") * 3
-SECTIONS = ["section.images", "section.neighbors"]   # the card's own sections (check i): P6-B's images row, P6-C's similar X-rays; P6-D adds its
+# The card's own sections (check i): P6-B's images row, P6-C's similar X-rays, P6-D's published lines and matching reports.
+SECTIONS = ["section.images", "section.neighbors", "section.published", "section.matches"]
 
 
 def section_events() -> List[Dict[str, Any]]:
@@ -230,7 +231,9 @@ MEASURE_SECTIONS_JS = """(args) => {
   for (const s of args.sections) {
     const el = card ? card.querySelector(s) : null;
     out.sections[s] = !el ? null : { box: box(el), sw: el.scrollWidth, cw: el.clientWidth,
-      pictures: [...el.querySelectorAll('img')].map((i) => ({ box: box(i), loaded: i.complete && i.naturalWidth > 0 })) };
+      pictures: [...el.querySelectorAll('img')].map((i) => ({ box: box(i), loaded: i.complete && i.naturalWidth > 0 })),
+      clamped: [...el.querySelectorAll('.clamp-text.clamped:not(.open)')].map((t) => ({ h: t.clientHeight, sh: t.scrollHeight,
+                                                                                      line: parseFloat(getComputedStyle(t).lineHeight) || 0 })) };
   }
   return out;
 }"""
@@ -260,6 +263,13 @@ def check_sections(m: Dict[str, Any], width: int, sections: List[str]) -> List[s
             failures.append("{} overflows inside: scrollWidth {} > clientWidth {}".format(selector, section["sw"], section["cw"]))
         if not section["pictures"] and selector in PICTURED:
             failures.append("{} shows no picture".format(selector))
+        if not section.get("clamped") and selector in CLAMPED:
+            failures.append("{} clamps no report".format(selector))
+        for n, text in enumerate(section.get("clamped", []), start=1):   # the synthetic reports are all longer than three lines
+            if text["line"] > 0 and text["h"] > 3 * text["line"] + 2:
+                failures.append("{} clamped report {} is {} px tall, over three lines of {:g} px".format(selector, n, text["h"], text["line"]))
+            if text["sh"] <= text["h"]:
+                failures.append("{} clamped report {} hides nothing: scrollHeight {} <= clientHeight {}".format(selector, n, text["sh"], text["h"]))
         for n, picture in enumerate(section["pictures"], start=1):
             p_left, p_top, p_right, p_bottom = picture["box"]
             if not picture["loaded"]:
@@ -272,6 +282,7 @@ def check_sections(m: Dict[str, Any], width: int, sections: List[str]) -> List[s
 
 
 PICTURED = {"section.images", "section.neighbors"}   # the sections that must show pictures in the synthetic turn
+CLAMPED = {"section.published", "section.matches"}   # and those that must clamp a report to three lines
 
 
 def check_save(m: Dict[str, Any], width: int, height: int, scroll: bool, drawer_open: bool) -> List[str]:

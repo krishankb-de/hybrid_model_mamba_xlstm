@@ -135,7 +135,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 #conversation button { min-height: 32px; padding: 4px 10px; font-size: 0.875rem; }   /* Copy, Show raw: compact in a card */
 
 textarea, select, input:not([type]), input[type="text"], input[type="number"], input[type="password"],
-input[type="url"] {
+input[type="url"], input[type="search"] {
   max-width: 100%;
   padding: 8px 12px;
   border: 1px solid var(--control);
@@ -359,8 +359,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 /* ---- the card's sections under the labels (P6-B..D): its images, the similar X-rays, the matching reports ------- */
 
 .section-title { margin: 0 0 6px; color: var(--muted); font-size: 0.8125rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
-.images .image-row { display: flex; flex-wrap: wrap; gap: 12px; }
-.image-tile { flex: 0 1 160px; min-width: 0; margin: 0; }
+.images .image-row { display: grid; grid-template-columns: repeat(2, minmax(0, 160px)); gap: 12px; }   /* side by side, phones too */
+.image-tile { min-width: 0; margin: 0; }
 .image-tile figcaption { margin-top: 4px; color: var(--muted); font-size: 0.75rem; overflow-wrap: anywhere; }
 .picture {   /* an X-ray, whole, on the dark ground it is read against: an aspect that the resize changed is plain to see */
   display: block;
@@ -402,7 +402,53 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .agreement { margin: 0; }
 .agreement:not(.note) { font-weight: 600; }   /* "12/14 labels agree"; a muted note says why there is no count */
 .diff-chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; list-style: none; }
-.chip.diff { max-width: 100%; }
+.chip.diff { max-width: 100%; border-radius: 10px; }   /* a name that wraps onto two lines keeps a tidy box */
+
+/* matching reports and the published lines: a ranked list, each report clamped to three lines until Show all (P6-D) */
+.own-rank {   /* "Own report: rank 3 of 2,663 test reports · R@10 hit": its tooltip has the dedup-aware rank and the protocol */
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 8px;
+  padding: 2px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: help;
+}
+.matches .match-list, .published .published-list { display: flex; flex-direction: column; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.match, .published-line { min-width: 0; }
+.match-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-bottom: 4px; font-size: 0.8125rem; }
+.match-score { font-variant-numeric: tabular-nums; font-weight: 600; }
+.match-head .sim-bar { flex: 0 1 120px; }
+.chip.group-size { color: var(--muted); }
+.clamp-text { margin: 0; font-size: 0.875rem; overflow-wrap: anywhere; }
+.clamp-text.clamped:not(.open) {   /* three lines, then an ellipsis: Show all opens the rest */
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+.clamp-actions { margin-top: 2px; }
+#conversation .show-all {   /* a button that reads as a link, as "show more" in a stage's table */
+  min-height: 24px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--accent);
+  font-size: 0.8125rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.finding-chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 0; padding: 0; list-style: none; }
+.chip.finding { color: var(--muted); }
+.published-head { margin: 0 0 2px; color: var(--muted); font-size: 0.8125rem; font-weight: 600; }
+.verdict { padding: 0 6px; border: 1px solid currentColor; border-radius: 999px; }
+.verdict.same { color: var(--ok); }
+.verdict.differs { color: var(--warn); }
 
 /* ---- composer: pinned under the conversation column ----------------------------------------------------------- */
 
@@ -493,6 +539,25 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 }
 #notice p { flex: 1 1 auto; min-width: 0; margin: 0; }
 #notice button { flex: none; min-height: 32px; padding: 2px 10px; color: var(--fg); }
+
+#picker {   /* the test-split picker's list (P6-D): a row of its own at the top of the composer, scrolling inside when it is long */
+  flex: 1 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+.picker-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 0.875rem; font-weight: 600; }
+#picker-close { flex: none; min-height: 32px; padding: 0 10px; }
+#picker-search { width: 100%; }
+#picker-status { margin: 0; color: var(--muted); font-size: 0.8125rem; }
+#picker-list { display: flex; flex-direction: column; gap: 2px; max-height: 30vh; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+#picker-list .study { width: 100%; min-height: 36px; padding: 4px 10px; border-color: transparent; background: none; font-size: 0.875rem; text-align: left; }
+#picker-list .study:hover:not(:disabled) { background: var(--soft); }
 
 #stop { border-color: var(--bad); color: var(--bad); }
 #send { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; }

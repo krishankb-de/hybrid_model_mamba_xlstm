@@ -71,6 +71,8 @@ const rangeMessage = (key) => `Enter a whole number from ${BOUNDS[key][0]} to ${
 const SAVED_TEXT = 'Settings saved. They apply from your next Send.';
 const QUESTION_TEXT = 'This note is not a command: with no new image, Send gets no report.';   // the re-run hint, for a note the server will not run
 const SAVED_MS = 4000;   // how long the page says so
+const PICK_LIMIT = 50;         // test-split studies per request of the picker (GET /v1/test-studies takes 1 to 200)
+const PICK_DEBOUNCE_MS = 250;  // the pause in typing after which the picker asks for the studies that match
 const STORAGE_TEXT = 'Browser storage is unavailable, so these settings last until the page closes.';
 // The published protocol, as every Options default has it, but for two switches that are on here and off in the server's Options (its
 // API contract). display_repair changes only what is shown: the report is the decoder's own text either way, and Show raw shows that
@@ -154,6 +156,18 @@ export const RETRIEVAL_NOTES = Object.freeze({
   none: 'This server has no retrieval gallery, so similar X-rays and matching reports are skipped.',
   tower: 'The gallery was built with another image tower, so this model skips similar X-rays and matching reports.',
 });
+
+// Does this server offer the test-split picker (P6-D)? Only in private mode (test-split studies are private data, R1) and with a gallery,
+// which /v1/models says by a model's features: the list and the studies come from it. A server that does not say offers none.
+export function pickerAvailable(models) {
+  if (!isObject(models) || models.mode !== 'private') return false;
+  return (isObject(models.features) && models.features.retrieval === true)
+    || cardsOf(models).some((c) => isObject(c.features) && c.features.retrieval === true);
+}
+
+// A study of the picker's list as its button reads: "study 50000007 · PA · test row 1".
+export const studyText = (s) => [s?.study_id != null ? `study ${s.study_id}` : null, typeof s?.view === 'string' && s.view ? s.view : null,
+                                 `test row ${s?.test_row}`].filter(Boolean).join(' · ');
 
 export function retrievalNote(models, model = '') {
   if (serverHas(models, 'retrieval', model)) return null;
@@ -461,6 +475,8 @@ export function createApp(env) {
     noticeRetry: null,
     noticeOwner: null,       // the turn whose failed Stop the notice says, if it is that: the end of the turn takes it down
     savedTimer: null,        // the timer that takes "Settings saved." down again
+    pickTimer: null,         // the picker's pause in typing (P6-D)
+    pickGen: 0,              // bumped by every list request and by closing the picker, so a late list can tell it is stale
     route: null,             // the route handleRoute showed last ('new' or 's/<id>'): a notice belongs to the route it was raised on
     missing: null,           // a session the server said it does not have: home never picks it
   };
@@ -550,7 +566,7 @@ export function createApp(env) {
   function makeTurn(session, n) {
     const turn = { n, id: null, session, view: initialView(null), userEl: null, card: null, text: '', image: null, file: null,
                    controller: null, poller: null, streaming: false, polling: false, stopping: false, left: false, settled: false,
-                   dirty: false, reloading: false };
+                   dirty: false, reloading: false, testRow: null };   // testRow: the test study the turn ran (P6-D)
     turn.draw = () => paint(turn);   // one function per card, so scheduleRender draws it at most once a frame
     return turn;
   }
@@ -590,18 +606,23 @@ export function createApp(env) {
 
   // The state of the controls that depend on whether a turn runs.
   function syncControls() {
-    if (state.busy || state.loading) keepFocusFrom(ui.send);
+    if (state.busy || state.loading) { keepFocusFrom(ui.send); keepFocusFrom(ui.pick); closePicker({ restore: false }); }   // a list for starting a turn
     ui.send.disabled = state.busy || state.loading;
+    ui.pick.disabled = state.busy || state.loading;   // one turn at a time, a picked study's too
     ui.stop.hidden = !state.busy;
     ui.exports.hidden = !state.session.id;
     fields.runningNote.hidden = !state.busy;
     syncRerun();
   }
 
-  // The file name of the newest user turn that had an image: the one a text-only turn runs again (the server's rule, post_message).
+  // The file name of the newest user turn that had an image, or "test row N" for a test study (P6-D): the one a text-only turn runs again
+  // (the server's rule, post_message).
   function newestImage() {
     const turns = state.session.turns;
-    for (let i = turns.length - 1; i >= 0; i--) if (turns[i].image?.filename) return turns[i].image.filename;
+    for (let i = turns.length - 1; i >= 0; i--) {
+      if (turns[i].image?.filename) return turns[i].image.filename;
+      if (Number.isInteger(turns[i].testRow)) return `test row ${turns[i].testRow}`;
+    }
     return '';
   }
 
@@ -679,13 +700,25 @@ export function createApp(env) {
       turn.view = applyEvent(turn.view, event);
       turn.dirty = true;
       // The options the server resolved, commands included; a turn with no image is a question it answers with no model, so none were used.
-      if (event.event === 'message_start') refreshUserBubble(turn, event.data.image ? event.data.options : null);
+      if (event.event === 'message_start') {
+        adoptStudy(turn, event.data);
+        refreshUserBubble(turn, event.data.image ? event.data.options : null);
+      }
       if (turn.view.status !== 'running') settle(turn);
       else scheduleRender(turn.draw);
     } catch (err) {   // a reducer or a builder that threw on this event: say so, log it, and carry on with the next one
       report(err);
       showNotice(GENERIC_ERROR);
     }
+  }
+
+  // A test study's turn (the picker's, or a text-only re-run of one) shows the study's own picture in its user turn once message_start names
+  // it (P6-D): no one attached it, so the page has no preview of its own. Its row is what the re-run hint then names.
+  function adoptStudy(turn, data) {
+    const image = isObject(data?.image) ? data.image : null;
+    if (image?.source !== 'test_split') return;
+    if (Number.isInteger(data.options?.test_row)) turn.testRow = data.options.test_row;
+    if (!turn.image && typeof image.urls?.thumb === 'string') turn.image = { url: image.urls.thumb, filename: null, source: 'test_split' };
   }
 
   // The poll that takes over from the stream: from the last seq the view has, until the turn leaves running. A terminal
@@ -744,7 +777,8 @@ export function createApp(env) {
         turn.image = { url, filename: file.name };
       }
       // A note the server will not run (no file, no command) uses no settings, so its turn shows no chips (P4-H).
-      turn.userEl = renderUserTurn({ text: note, image: turn.image, options: runsTheModel(note, file) ? options : null },
+      const ran = runsTheModel(note, file) || Number.isInteger(options.test_row);   // a picked study runs whatever the note says
+      turn.userEl = renderUserTurn({ text: note, image: turn.image, options: ran ? options : null },
                                    cardCtx(turn.n, options.model));
       session.turns.push(turn);
       ui.conversation.append(turn.userEl);
@@ -837,14 +871,18 @@ export function createApp(env) {
     if (!expected(err)) report(err);
   }
 
-  async function send() {
+  // Send: the attached file and the note, with the drawer's settings. study (P6-D, the picker) is a test row to run instead: the turn has no
+  // upload (the server reads the study's image where the dataset keeps it), and a file attached meanwhile waits for the next Send.
+  async function send(study = null) {
     if (state.busy || state.loading) return;
+    const picked = Number.isInteger(study) ? study : null;
     const note = ui.prompt.value ?? '';
-    const file = state.file;
+    const file = picked === null ? state.file : null;
     const session = state.session;
-    if (!file && !session.turns.length) { showNotice('Attach an X-ray first.'); return; }
+    if (!file && picked === null && !session.turns.length) { showNotice('Attach an X-ray first.'); return; }
     clearNotice();
     const options = optionsFromSettings(state.settings, state.models);
+    if (picked !== null) options.test_row = picked;
     setBusy(true);
     ui.stop.disabled = true;
     const fresh = !session.id;   // this Send makes the chat
@@ -1017,6 +1055,7 @@ export function createApp(env) {
         const shown = userTurnMessage(u, a, start);
         turn.text = shown.text;      // a turn that was still queued has no events: its message_start rebuilds this bubble,
         turn.image = shown.image;    // and rebuilds it from these
+        turn.testRow = Number.isInteger(u.test_row) ? u.test_row : null;   // a test study: what the re-run hint names (P6-D)
         turn.userEl = renderUserTurn(shown, cardCtx(turn.n, shown.options?.model));
         nodes.push(turn.userEl);
       }
@@ -1282,6 +1321,7 @@ export function createApp(env) {
 
   function onKeydown(event) {
     if (event.key !== 'Escape') return;
+    if (closePicker()) { event.preventDefault(); return; }   // the innermost first: the study list, back to its button
     const drawer = closeDrawer();
     const sidebar = closeSidebar({ restore: !drawer });
     if (drawer || sidebar) event.preventDefault();
@@ -1502,6 +1542,62 @@ export function createApp(env) {
     ui.modelsSection.replaceChildren(el('h3', {}, 'Models'),
       ...cards.flatMap((c) => [el('h4', {}, c.name), detailTable(c, `${c.name} details`)]));
     syncDrawer();
+    ui.pick.hidden = !pickerAvailable(state.models);   // private mode with a gallery only (P6-D)
+    if (ui.pick.hidden) closePicker({ restore: false });
+  }
+
+  // ---- the test-split picker (P6-D) ------------------------------------------------------------------------------------------------
+
+  // The list of test studies under the composer's "Test-split study" button: a search by the start of a study id, and a button per study
+  // that sends a turn with that test row and no upload. Private mode only, so the study ids it shows never reach a public page (R1).
+  function openPicker() {
+    if (!ui.picker.hidden || ui.pick.hidden || ui.pick.disabled) return;
+    ui.picker.hidden = false;
+    ui.pick.setAttribute('aria-expanded', 'true');
+    ui.pickSearch.focus();
+    detach(loadStudies());
+  }
+
+  // -> whether it was open. restore gives the focus back to the button that opened it.
+  function closePicker({ restore = true } = {}) {
+    if (ui.picker.hidden) return false;
+    if (state.pickTimer !== null) cancelLater(state.pickTimer);
+    state.pickTimer = null;
+    state.pickGen += 1;   // a list still on its way is not wanted any more
+    if (doc.activeElement && ui.picker.contains(doc.activeElement) && !restore) ui.prompt.focus();
+    ui.picker.hidden = true;
+    ui.pick.setAttribute('aria-expanded', 'false');
+    if (restore) ui.pick.focus();
+    return true;
+  }
+
+  async function loadStudies() {
+    const gen = ++state.pickGen;
+    const query = (ui.pickSearch.value ?? '').trim();
+    ui.pickStatus.textContent = 'Loading…';
+    let body;
+    try {
+      body = await request(`/v1/test-studies?limit=${PICK_LIMIT}${query ? `&q=${encodeURIComponent(query)}` : ''}`);
+    } catch (err) {
+      if (gen !== state.pickGen) return;
+      ui.pickList.replaceChildren();
+      ui.pickStatus.textContent = errorMessage(err);
+      if (!expected(err)) report(err);
+      return;
+    }
+    if (gen !== state.pickGen) return;   // a newer search, or the picker closed
+    const studies = (Array.isArray(body?.studies) ? body.studies : []).filter((s) => isObject(s) && Number.isInteger(s.test_row));
+    ui.pickList.replaceChildren(...studies.map((s) => el('li', {}, el('button', {
+      type: 'button', class: 'study', 'data-test-row': String(s.test_row), onclick: () => chooseStudy(s.test_row),
+    }, studyText(s)))));
+    const more = studies.length === PICK_LIMIT ? ' (the first; type more of an id to narrow them)' : '';
+    ui.pickStatus.textContent = studies.length ? `${studies.length} ${studies.length === 1 ? 'study' : 'studies'}${more}`
+      : query ? `No study id starts with ${query}.` : 'No test-split studies.';
+  }
+
+  function chooseStudy(row) {
+    closePicker();
+    detach(send(row));
   }
 
   // aria-describedby is a list of ids: this adds or takes out one of them, and names a note only while the note is shown (a hidden
@@ -1639,6 +1735,15 @@ export function createApp(env) {
       attach(file);
     });
     ui.stop.addEventListener('click', () => detach(stopTurn()));
+    ui.pickSearch.addEventListener('input', () => {   // one request for a pause in typing, not one per key
+      if (state.pickTimer !== null) cancelLater(state.pickTimer);
+      state.pickTimer = later(() => { state.pickTimer = null; detach(loadStudies()); }, PICK_DEBOUNCE_MS);
+    });
+    ui.pickSearch.addEventListener('keydown', (event) => {   // the search sits in the composer's form: Enter must not send the turn
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      ui.pickList.querySelector('button')?.focus();          // it goes to the first study instead, which Enter then chooses
+    });
   }
 
   // ---- building and starting ----------------------------------------------------------------------------------------------------------
@@ -1659,7 +1764,19 @@ export function createApp(env) {
     const rows = Array.from(ui.composer.children);
     rows.splice(rows.indexOf(ui.well) + 1, 0, ui.rerun);   // next to the image well
     rows.splice(rows.indexOf(ui.chips) + 1, 0, ui.saved);   // and under the chips
-    ui.composer.replaceChildren(ui.notice, ...rows);
+    // P6-D: the test-split picker, a button before Settings and its list, which opens as the composer's first row under the notice
+    ui.pick = el('button', { type: 'button', id: 'pick-study', hidden: true, 'aria-expanded': 'false', 'aria-controls': 'picker',
+                             onclick: () => (ui.picker.hidden ? openPicker() : closePicker()) }, 'Test-split study');
+    rows.splice(rows.indexOf(ui.settings), 0, ui.pick);
+    ui.pickSearch = el('input', { type: 'search', id: 'picker-search', autocomplete: 'off', spellcheck: 'false', maxlength: 64,
+                                  placeholder: 'The start of a study id' });
+    ui.pickStatus = el('p', { id: 'picker-status', role: 'status', 'aria-live': 'polite' });
+    ui.pickList = el('ul', { id: 'picker-list', role: 'list', 'aria-label': 'Test-split studies' });
+    ui.picker = el('div', { id: 'picker', role: 'dialog', 'aria-label': 'Choose a test-split study', hidden: true },
+      el('div', { class: 'picker-head' }, el('label', { for: 'picker-search' }, 'Find a test-split study by its id'),
+        el('button', { type: 'button', id: 'picker-close', 'aria-label': 'Close the study list', onclick: () => closePicker() }, '✕')),
+      ui.pickSearch, ui.pickStatus, ui.pickList);
+    ui.composer.replaceChildren(ui.notice, ui.picker, ...rows);
 
     ui.exports = el('div', { id: 'exports', role: 'group', 'aria-label': 'Export this chat', hidden: true },
       el('button', { type: 'button', 'data-format': 'json', onclick: () => detach(exportSession('json')) }, 'Export JSON'),

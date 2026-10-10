@@ -73,11 +73,12 @@ function whole(view) {
 
 const noticesOf = (v) => (Array.isArray(v.notices) ? v.notices.filter((n) => isObject(n) && (str(n.message) || str(n.code))) : []);
 
-// What outlives a re-render: the stage details that are open, the show-more buttons that are expanded ("<stage>:<n>")
-// and Show raw. ctx.ui keeps it per message id; without a store the record lives and dies with the card.
+// What outlives a re-render: the stage details that are open, the show-more buttons that are expanded ("<stage>:<n>"),
+// Show raw, and the clamped texts a Show all has opened (P6-D: "match:<rank>", "published:<kind>"). ctx.ui keeps it per message
+// id; without a store the record lives and dies with the card.
 function uiOf(view, ctx) {
   const store = ctx?.ui;
-  const fresh = () => ({ open: new Set(), more: new Set(), raw: false });
+  const fresh = () => ({ open: new Set(), more: new Set(), raw: false, reports: new Set() });
   if (!store || typeof store.get !== 'function' || typeof store.set !== 'function') return fresh();
   let record = store.get(view.id);
   if (!record) {
@@ -644,6 +645,124 @@ export function renderNeighbors(view, ctx) {
     el('ol', { class: 'neighbor-grid', role: 'list' }, ...items));
 }
 
+// ---- clamped texts: a matching report, a published line (P6-D) ------------------------------------------------------------
+
+const CLAMP_CHARS = 180;   // a longer text is clamped to three lines (styles.css) until Show all; a shorter one fits them on most screens
+
+// A report as a paragraph clamped to three lines, with a Show all that opens it and a Show less that closes it again. ui.reports keeps the
+// open ones by key, so the next frame builds them open. A text short enough to fit has no clamp and no button. -> nodes.
+function clampedText(text, key, name, v, cx) {
+  const ui = uiOf(v, cx);
+  if (!(ui.reports instanceof Set)) ui.reports = new Set();   // a record made before the field existed
+  if (text.length <= CLAMP_CHARS) return [el('p', { class: 'clamp-text' }, text)];
+  let open = ui.reports.has(key);
+  const id = `clamp-${str(v.id).replace(/[^\w-]/g, '_') || 'turn'}-${key.replace(/[^\w-]/g, '_')}`;
+  const body = el('p', { class: open ? 'clamp-text clamped open' : 'clamp-text clamped', id }, text);
+  const verb = () => (open ? 'Show less' : 'Show all');
+  const toggle = el('button', { type: 'button', class: 'show-all', 'data-action': 'show', 'aria-expanded': String(open), 'aria-controls': id,
+                                'aria-label': named(`${verb()} of ${name}`, cx) }, verb());
+  toggle.addEventListener('click', () => {
+    open = !open;
+    body.classList.toggle('open', open);
+    toggle.textContent = verb();
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.setAttribute('aria-label', named(`${verb()} of ${name}`, cx));
+    if (open) ui.reports.add(key); else ui.reports.delete(key);
+  });
+  return [body, el('div', { class: 'clamp-actions' }, toggle)];
+}
+
+const textOf = (value) => (typeof value === 'string' ? value : '');   // a report text is a string, or there is none
+
+// ---- the published lines of a test study (P6-D) ---------------------------------------------------------------------------
+
+const UNCOMPARED = 'Compared with the live report only when the turn is decoded as the published dump was: beam 3, 100 tokens, the whole '
+  + 'budget, not compiled.';
+
+// From the score detail of a private test-split turn: the published model's own (GPU) report for this study, with whether the live report
+// above is identical to it, and the retrieval floor's report beside it. The server compares the two only for a turn decoded as the dump was
+// (live_equals_published is null otherwise, and a note says when it is). Hidden for any other turn: public mode drops the whole score stage.
+export function renderPublished(view, ctx) {
+  const v = whole(view);
+  const cx = ctx ?? {};
+  const block = isObject(v.score) && isObject(v.score.published) ? v.score.published : {};
+  const model = textOf(block.model_report);
+  const floor = textOf(block.floor_report);
+  const same = block.live_equals_published;
+  const verdict = same === true ? el('span', { class: 'verdict same' }, 'identical')
+                : same === false ? el('span', { class: 'verdict differs' }, 'differs') : null;
+  const lines = [
+    model ? el('li', { class: 'published-line', 'data-kind': 'model' },
+      el('p', { class: 'published-head' }, 'Published (GPU) report', verdict ? ' · ' : null, verdict),
+      ...clampedText(model, 'published:model', 'the published report', v, cx)) : null,
+    floor ? el('li', { class: 'published-line', 'data-kind': 'floor' }, el('p', { class: 'published-head' }, 'Retrieval-floor report'),
+      ...clampedText(floor, 'published:floor', 'the retrieval-floor report', v, cx)) : null,
+  ].filter(Boolean);
+  return el('section', { class: 'published', 'aria-label': named('Published reports', cx), hidden: !lines.length },
+    el('h3', { class: 'section-title' }, 'Published reports (test split)'),
+    model && typeof same !== 'boolean' ? el('p', { class: 'note' }, UNCOMPARED) : null,
+    el('ul', { class: 'published-list', role: 'list' }, ...lines));
+}
+
+// ---- matching reports: the report groups the 13D image and text encoders rank highest for this X-ray (P6-D) ------------------
+
+const count = (n) => n.toLocaleString('en-US');   // 2,663
+
+// "Own report: rank 3 of 2,663 test reports · R@10 hit" for a test study, with the dedup-aware rank and the protocol in its tooltip, which
+// a screen reader is given as text too. null without a rank to show: an upload, or public mode, which never sends one (R1).
+function ownRankBadge(rank) {
+  if (!isObject(rank) || !Number.isInteger(rank.rank) || !Number.isInteger(rank.of)) return null;
+  const hit = rank.hit_at_10 === true ? 'R@10 hit' : rank.hit_at_10 === false ? 'R@10 miss' : null;
+  const tied = Number.isInteger(rank.n_tied) && rank.n_tied > 0 ? rank.n_tied : 0;
+  const tip = [
+    Number.isInteger(rank.rank_dedup) ? `Dedup-aware rank ${count(rank.rank_dedup)}: every identical report counted once.` : null,
+    tied ? `${count(tied)} other ${tied === 1 ? 'report scores' : 'reports score'} exactly the same.` : null,
+    str(rank.protocol) ? `Protocol: ${str(rank.protocol)}.` : null,
+  ].filter(Boolean).join(' ');
+  return el('p', { class: 'own-rank', title: tip || null },
+    [`Own report: rank ${count(rank.rank)} of ${count(rank.of)} test reports`, hit].filter(Boolean).join(' · '),
+    tip ? el('span', { class: 'visually-hidden' }, ` ${tip}`) : null);
+}
+
+// A label row's names in ctx.labelNames order, then any the list lacks, as the report's own chips order them.
+function labelOrder(labels, cx) {
+  const given = Array.isArray(cx.labelNames) ? cx.labelNames.filter((n) => typeof n === 'string') : [];
+  return [...given.filter((n) => Object.hasOwn(labels, n)), ...Object.keys(labels).filter((n) => !given.includes(n))];
+}
+
+function matchItem(m, i, v, cx, pub) {
+  const rank = Number.isInteger(m.rank) ? m.rank : null;
+  const name = `matching report ${rank ?? i + 1}`;
+  const size = !pub && Number.isInteger(m.group_size) && m.group_size > 1 ? el('span', { class: 'chip group-size' }, `×${count(m.group_size)} identical reports`) : null;
+  const text = pub ? '' : textOf(m.report);   // public mode: never a MIMIC report, whatever the detail holds (R1)
+  const positives = !pub && isObject(m.labels) ? labelOrder(m.labels, cx).filter((n) => isOn(m.labels[n])) : [];
+  return el('li', { class: 'match', 'data-rank': rank },
+    el('div', { class: 'match-head' }, el('span', { class: 'match-score' }, scoreText(m.rank, m.similarity)),
+      isNum(m.similarity) ? simBar(m.similarity) : null, size),
+    ...(text ? clampedText(text, `match:${rank ?? i}`, name, v, cx) : []),
+    positives.length ? el('ul', { class: 'finding-chips', role: 'list', 'aria-label': `Labels of ${name}` },
+      ...positives.map((n) => el('li', { class: 'chip finding' }, n))) : null);
+}
+
+// The k_reports report groups the 13D image and text encoders rank highest for this X-ray (image to report): each with its rank, its
+// similarity and a bar, how many reports read the same, the report itself clamped to three lines with Show all, and its positive labels.
+// A test study adds where its own report ranks among the test reports. Public mode keeps rank and similarity only (U2). Hidden until the
+// retrieve stage has ended with a report or a rank to show.
+export function renderMatches(view, ctx) {
+  const v = whole(view);
+  const cx = ctx ?? {};
+  const done = stageState(v, 'retrieve').state === 'done';
+  const matches = done && Array.isArray(v.matches) ? v.matches.filter(isObject) : [];
+  const pub = v.mode === 'public';
+  const badge = done && !pub ? ownRankBadge(v.trueRank) : null;
+  const items = matches.map((m, i) => matchItem(m, i, v, cx, pub));
+  return el('section', { class: 'matches', 'aria-label': named('Matching reports', cx), hidden: !items.length && !badge },
+    el('h3', { class: 'section-title' }, 'Matching reports (13D image and text encoders)'),
+    badge,
+    pub && items.length ? el('p', { class: 'note section-note' }, 'Public mode shows rank and similarity only.') : null,
+    items.length ? el('ol', { class: 'match-list', role: 'list' }, ...items) : null);
+}
+
 // ---- the assistant card and the throttle ---------------------------------------------------------------------------------
 
 export function renderAssistantCard(view, ctx) {
@@ -659,7 +778,8 @@ export function renderAssistantCard(view, ctx) {
   }
   // The sections the P6 tasks add, under the labels: one that has nothing to show is left out of the card, so the card of a turn that
   // has none of them is the card it always was.
-  const sections = [renderImages(v, cx), renderNeighbors(v, cx)].filter((section) => !section.hasAttribute('hidden'));
+  const sections = [renderPublished(v, cx), renderImages(v, cx), renderNeighbors(v, cx), renderMatches(v, cx)]
+    .filter((section) => !section.hasAttribute('hidden'));
   return el('article', { class: 'card', 'aria-label': named('Assistant report', cx), 'data-message-id': str(v.id) || null, 'data-status': str(v.status) || null },
     timeline, renderNotes(v), renderReport(v, cx), renderLabels(v, cx), ...sections, provenance);
 }

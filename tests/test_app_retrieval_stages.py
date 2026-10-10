@@ -737,3 +737,38 @@ def test_a_labeller_that_fails_a_call_is_left_alone_for_a_while_too(tmp_path, ga
         now[0] += pipeline_module.LABELER_DOWN_TTL_S + 1
         _turn(c)
         assert down.calls == 2
+
+
+# ---- P6-D: what the matching reports, the own-rank badge and the picker's turn put on the card ----------------------------------------
+
+def test_a_picked_test_study_ranks_its_own_report_over_the_tiny_test_split_and_carries_the_published_lines(tmp_path, gallery):
+    n_test = gallery.facts()["report_rows"] - gallery.facts()["images"]
+    with TestClient(create_app(engine="tiny", home=str(tmp_path / "home"), gallery=gallery, labeler=RuleLabeler(),
+                               published_dirs=_dumps(tmp_path, n_test))) as c:
+        sid = _session(c)
+        frames = _turn(c, {"max_new_tokens": 16, "test_row": 5}, image=None, sid=sid)   # the picker's turn: options.test_row and no upload
+        ends = _ends(frames)
+        rank = ends["retrieve"]["detail"]["true_report_rank"]
+        assert rank["of"] == n_test == 40                                                # the badge's "of 40 test reports"
+        assert set(rank) == {"rank", "of", "rank_dedup", "n_tied", "hit_at_10", "protocol"}
+        assert 1 <= rank["rank_dedup"] <= rank["rank"] <= n_test and rank["hit_at_10"] == (rank["rank"] <= 10)
+        matches = ends["retrieve"]["detail"]["report_matches"]
+        assert [m["rank"] for m in matches] == [1, 2, 3]                                 # the drawer's default k_reports
+        assert all(m["report"] and m["group_size"] >= 1 and set(m["labels"]) == set(CHEXBERT_14) for m in matches)
+        score = ends["score"]["detail"]
+        assert score["reference_source"] == "test_split"
+        assert score["published"] == {"model_report": None, "floor_report": "SYNTHETIC floor line 5", "live_equals_published": None}
+        follow = _turn(c, {"max_new_tokens": 16}, image=None, text="beam 2", sid=sid)    # a text-only follow-up reruns that study
+        assert follow[0]["data"]["image"]["source"] == "test_split" and follow[0]["data"]["options"]["test_row"] == 5
+        assert _ends(follow)["retrieve"]["detail"]["true_report_rank"] == rank
+        assert _ends(follow)["score"]["detail"]["published"]["floor_report"] == "SYNTHETIC floor line 5"
+
+
+def test_the_picker_list_and_a_picked_turn_are_refused_in_public_mode(tmp_path, gallery):
+    with TestClient(create_app(engine="tiny", home=str(tmp_path), mode="public", token="t", gallery=gallery)) as c:
+        for params in ({}, {"q": "5"}, {"limit": 3}):
+            r = c.get("/v1/test-studies", params=params, headers=PUBLIC)
+            assert r.status_code == 403 and r.json()["error"]["message"] == "Test-split studies are not available in public mode."
+        sid = _session(c, PUBLIC)
+        r = _post(c, sid, {"test_row": 0}, image=None, headers=PUBLIC)
+        assert r.status_code == 403 and c.get("/v1/sessions/{}".format(sid), headers=PUBLIC).json()["messages"] == []
