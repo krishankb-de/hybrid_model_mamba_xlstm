@@ -3456,7 +3456,7 @@ Tests on the tiny gallery: every one of 20 gallery images retrieves itself first
 
 Commit `"P5-D: gallery queries (image→image, image→report, own rank)"`.
 
-- [ ] **P5-E** Pipeline stages `retrieve`, `label`, `score` (and `app/scoring.py`); `POST /v1/retrieve`, `POST /v1/label`, `GET /v1/test-studies`; skipped semantics; redaction of the new fields.
+- [x] **P5-E** Pipeline stages `retrieve`, `label`, `score` (and `app/scoring.py`); `POST /v1/retrieve`, `POST /v1/label`, `GET /v1/test-studies`; skipped semantics; redaction of the new fields.
 
 **Files:** modify `app/pipeline.py`, `app/server.py`; create `app/scoring.py`, `tests/test_app_retrieval_stages.py`.
 
@@ -3490,6 +3490,30 @@ Stage behaviour:
 Tests (tiny engine + tiny gallery + `RuleLabeler`): a turn's `retrieve` detail has `k_images` neighbours and `k_reports` groups with labels; `label` has one agreement per neighbour whose counts match `label_agreement`; a `test_row` turn has `true_report_rank` equal to `Gallery.own_report_rank` and a `score` stage with `reference_source: "test_split"`; `score_pair` equals `bootstrap_compare.per_sample_rouge_l` on the same pair; labeller down → `label` skipped `labeler_unavailable` and status `done`; no gallery → `retrieve` skipped `gallery_unavailable`; public mode: `report_matches[].report` absent, `test_row` option → 403, `reference` → warning and no `score` event.
 
 Commit `"P5-E: retrieve/label/score stages + endpoints"`.
+
+*As built (2317dba, 6e156ae, d8293a2; reviewed, fix round 1 clean):*
+- **Wiring.** `create_app(gallery=None, labeler=None, tiny_gallery=False)`.
+  - `gallery_dir` is opened with the default engine's tower hash and served only to engines with that tower. Any other engine skips retrieve as `gallery_unavailable`.
+  - `tiny_gallery=True` builds a decided gallery under `<home>/gallery/tiny`, sized 16-d to match the tiny engine's pooled vector, and pairs it with `RuleLabeler`.
+  - An injected gallery is for tests only, because it skips the tower guard.
+- **Stages.**
+  - **retrieve** sends `facts()` and adds the own rank for a picked test row or a test-image hash match. `identical_to` goes into preprocess.
+  - **label** skips only for `label_off` or `labeler_unavailable`. While the gallery's labels are pending, the report is still labelled and `neighbor_agreement_pending: true` is set.
+  - **score** compares against a user reference or the test-split reference. It adds `reference_chexbert_14` and, for private test rows, `published` with `live_equals_published`. The latter is computed only under the published settings: beam 3, 100 tokens, `stop_on_repeat` false, not compiled, not eos_trained.
+- **Endpoints.**
+  - `POST /v1/retrieve` runs on the single worker. A cancelled queued task releases its slot, and a failure returns a JSON-envelope 500.
+  - `POST /v1/label` returns 503 when the labeller is down.
+  - `GET /v1/test-studies` is private only.
+  - `/v1/models` carries per-model `features`.
+- **Redaction (R1).** Public mode keeps retrieval as rank and similarity only, drops the whole score stage, and removes the new catch-all keys. Every field has a public and a private test.
+- **Robustness.** Labeller down-state is cached for 30 s (negative results only). A test-split image read logs no path.
+- **Laptop.** Run `create_app(home='/tmp/cxrchat_dev', tiny_step_delay_s=0.05, tiny_gallery=True)`.
+- **Carried to P6:**
+  - the drawer's retrieval note should become per-model;
+  - `state.js` `labelsPending` shows "labelling…" while `features.labels` is false;
+  - decide whether public mode shows "agreement pending";
+  - the browser check's reload step races under load (pre-existing), to be hardened in P6-F or P8-F.
+- **Carried to P7-B:** a serving start must refuse an unopenable gallery unless explicitly allowed.
 
 - [ ] **P5-F** Live-path gates job `scripts/chat_retrieval_gates.py` with `_h100.sh` (CPU): self-retrieval, live own-rank vs the build's rank, labeller service vs the published labels on 50 + 50.
 

@@ -419,7 +419,7 @@
           "desc": "app/gallery.py: load with the tower check, image→image, image→report over groups, own rank (chapter protocol), identical-image lookup, test studies."
         },
         "P5-E": {
-          "done": false,
+          "done": true,
           "desc": "Pipeline stages retrieve, label, score (and app/scoring.py); POST /v1/retrieve, POST /v1/label, GET /v1/test-studies; skipped semantics; redaction of the new..."
         },
         "P5-F": {
@@ -433,7 +433,10 @@
         "p5a_review": "approved, no fix round; reviewer 13 hostile requests 0 leaks, 19/19 mutants",
         "p5d_commits": "7f1fb34,637b39b",
         "p5d_tests": "tests/test_app_gallery.py (244)",
-        "p5d_review": "fix round 1 clean; 120/120 mutants"
+        "p5d_review": "fix round 1 clean; 120/120 mutants",
+        "p5e_commits": "2317dba,6e156ae,d8293a2",
+        "p5e_tests": "tests/test_app_retrieval_stages.py + test_app_redact P5E_FIELDS; e2e 16/16; browser 10/10",
+        "p5e_review": "opus review → fix round 1 clean"
       },
       "verdict": null
     },
@@ -643,9 +646,11 @@
     "2026-10-10: 2026-10-10: P4-H merged (5afbf8b..24fda5a, validate All gates passed); dev server restarted on 24fda5a (pid 59835; /healthz code_version 24fda5a)",
     "2026-10-10: P4-H Playwright e2e + 9 UI fixes + stale-server hardening, merged",
     "2026-10-10: P5-D gallery queries merged (truthful tie protocol, img_proj refusal, facts())",
-    "2026-10-10: P9-A restricted-file pre-commit check merged; hook install offered to the user"
+    "2026-10-10: P9-A restricted-file pre-commit check merged; hook install offered to the user",
+    "2026-10-10: 2026-10-10: P7-A smoke job submitted 2632776 (chat_app_smoke, CPU, sync c516e4e clean); read via chat_remote.sh state/summary logs/chat_app_smoke_2632776.log",
+    "2026-10-10: P5-E retrieve/label/score stages + endpoints + R1 redaction, merged"
   ],
-  "last_updated": "2026-10-10T04:56:12+02:00",
+  "last_updated": "2026-10-10T05:09:22+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -668,11 +673,14 @@
       "tests/test_app_openapi.py pins the full route set: every new route adds an entry plus summary/description/responses"
     ],
     "P6-F": [
-      "as its own first commit 'P4-E follow-up': try/finally in Browser.close; _arm() at the top of WebSocket.send; widen the trap-order test margin; one-shot SIGTERM handler; straggler sweep of the Chrome session after a graceful exit; test that the autouse fixture calls _kill_the_fakes()"
+      "as its own first commit 'P4-E follow-up': try/finally in Browser.close; _arm() at the top of WebSocket.send; widen the trap-order test margin; one-shot SIGTERM handler; straggler sweep of the Chrome session after a graceful exit; test that the autouse fixture calls _kill_the_fakes()",
+      "browser check reload step races under load (mid-turn 150-token turn can finish before the reload): harden"
     ],
     "P7-B": [
       "pass RealEngine cache_dir so the 2.4 GB checkpoint is not re-hashed at every start",
-      "uvicorn timeout_graceful_shutdown"
+      "uvicorn timeout_graceful_shutdown",
+      "serve: refuse to start if --gallery fails to open unless explicitly allowed; pin GALLERY to the real build id",
+      "labeller: python -m uvicorn app.labeler:app in .venv_chexbert + .chat_deps_chexbert (D24 env)"
     ],
     "P7-D": [
       "the live-equals-golden check runs with stop_on_repeat off; a second pass measures the stop on real decoders (see the plan's P7-D note)"
@@ -711,6 +719,11 @@
     ],
     "P5-C": [
       "extract the JobBox wrapper-rehearsal harness from tests/test_build_retrieval_gallery.py into a shared helper when P5-C needs it"
+    ],
+    "P6-C": [
+      "drawer retrieval note per-model (app.js:1426)",
+      "state.js labelsPending shows 'labelling…' while features.labels is false",
+      "decide whether public mode shows 'agreement pending'"
     ]
   }
 }
