@@ -8373,3 +8373,141 @@ def test_serve_chat_wrappers_pass_the_bash_syntax_check():
         for shell in set(shells):
             done = subprocess.run([shell, "-n", str(REPO_ROOT / "scripts" / name)], capture_output=True, text=True)
             assert done.returncode == 0, (name, shell, done.stderr)
+
+
+# ── CHAT_UI_PLAN.md P7-C: the laptop-side tunnel scripts ──────────────────────
+# Static pins on app/tunnel/tunnel.sh (the forward loop that re-reads the node from chat_sessions/endpoint, which the serve job writes as one
+# JSON line) and app/tunnel/public_demo.sh (cloudflared, public mode only). Their behaviour (the endpoint's JSON, hostile content, both
+# paths, a stale endpoint, the busy port, the signals, every refusal) is rehearsed for real under /bin/bash with a fake ssh, curl and
+# cloudflared in tests/test_chat_tunnel.py.
+
+TUNNEL_SCRIPTS = ("tunnel.sh", "public_demo.sh")
+# What a bash older than 4 cannot run (the Mac's /bin/bash is 3.2): `bash -n` parses all of these, the shell fails on them at run time.
+BASH_4_ONLY = [r"\bdeclare\s+-A\b", r"\blocal\s+-A\b", r"\btypeset\s+-A\b", r"\bmapfile\b", r"\breadarray\b", r"\bcoproc\b", r"\bwait\s+-n\b",
+               r"\$\{[^}]*(,,|\^\^)[^}]*\}", r"&>>", r"\|&", r"\[\[\s+-v\b", r"printf\s+'%\(", r"\bread\s+-t\s+[0-9]*\.[0-9]"]
+
+
+def _tunnel_text(name: str = "tunnel.sh") -> str:
+    return (REPO_ROOT / "app" / "tunnel" / name).read_text()
+
+
+def _tunnel_code(name: str = "tunnel.sh") -> List[str]:
+    return _gallery_wrapper_code(_tunnel_text(name))
+
+
+def _only_line(code: List[str], fragment: str) -> int:
+    found = [i for i, line in enumerate(code) if fragment in line]
+    assert len(found) == 1, (fragment, found)
+    return found[0]
+
+
+def test_tunnel_scripts_are_executable_pass_bash_n_and_use_nothing_newer_than_bash_3_2():
+    import shutil
+    import subprocess
+    shells = [s for s in ("/bin/bash", shutil.which("bash")) if s and os.path.exists(s)]
+    assert shells
+    for name in TUNNEL_SCRIPTS:
+        path = REPO_ROOT / "app" / "tunnel" / name
+        assert _tunnel_text(name).startswith("#!/bin/bash\n"), name
+        assert os.access(str(path), os.X_OK), "{} is run as app/tunnel/{} (git keeps mode 755; a stricter umask may narrow the copy)".format(name, name)
+        for shell in set(shells):
+            done = subprocess.run([shell, "-n", str(path)], capture_output=True, text=True)
+            assert done.returncode == 0, (name, shell, done.stderr)
+        code = "\n".join(_tunnel_code(name))
+        for pattern in BASH_4_ONLY:
+            assert not re.search(pattern, code), (name, pattern)
+
+
+def test_tunnel_sh_reads_chat_sessions_endpoint_once_over_ssh_in_batch_mode_and_runs_nothing_else_there():
+    code = _tunnel_code()
+    read = code[_only_line(code, "chat_sessions/endpoint")]
+    assert 'ssh -o BatchMode=yes -o ConnectTimeout=10 "${LOGIN}" cat chat_sessions/endpoint' in read, read
+    # every ssh call is that read or one of the two forwards; `squeue` is only ever text for the person at the laptop
+    ssh_calls = [l for l in code if re.search(r"(^|[\s(])ssh -", l)]
+    assert len(ssh_calls) == 3 and sum(" -N " in l for l in ssh_calls) == 2, ssh_calls
+    assert all(l.startswith('log "') for l in code if "squeue" in l)
+    assert "BatchMode" not in "\n".join(l for l in code if l not in (read,)), "BatchMode is the read's: the forwards may prompt"
+
+
+def test_tunnel_sh_supports_both_paths_and_the_host_key_relaxation_is_on_the_jump_path_only():
+    code = "\n".join(_tunnel_code())
+    match = re.search(r'if \[ "\$\{VIA\}" = "jump" \]; then\n(.*?)\nelse\n(.*?)\nfi\n', code, re.S)
+    assert match, "the forward is `if VIA = jump ... else ... fi`"
+    jump, login = match.group(1), match.group(2)
+    assert '-J "${LOGIN}"' in jump and '-L "${LOCAL_PORT}:127.0.0.1:${PORT}"' in jump and '"${CLUSTER_USER}@${NODE}"' in jump
+    assert "-o StrictHostKeyChecking=accept-new" in jump and '-o UserKnownHostsFile="${HOME}/.ssh/known_hosts_hpi_nodes"' in jump
+    assert login.endswith('-L "${LOCAL_PORT}:${NODE}:${PORT}" "${LOGIN}"'), login
+    for relaxed in ("-J", "StrictHostKeyChecking", "accept-new", "known_hosts", "127.0.0.1", "CLUSTER_USER"):
+        assert relaxed not in login, relaxed
+    assert code.count("accept-new") == 1 and code.count("known_hosts_hpi_nodes") == 1, "nowhere but on the jump path"
+    for branch in (jump, login):
+        assert branch.startswith("run_child ssh -N "), branch
+        for option in ("ExitOnForwardFailure=yes", "ServerAliveInterval=30", "ServerAliveCountMax=3", "ConnectTimeout=10", "GatewayPorts=no"):
+            assert "-o " + option in branch, option
+    assert 'VIA=login needs a server started with a BIND other than 127.0.0.1' in code and "(R6)" in code
+
+
+def test_tunnel_sh_validates_the_endpoint_before_using_it_and_never_echoes_it():
+    text, code = _tunnel_text(), _tunnel_code()
+    joined = "\n".join(code)
+    assert 're.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", host)' in text, "the ruling's host pattern, anchored at both ends"
+    assert "type(port) is int and 1 <= port <= 65535" in text and "json.loads" in text
+    assert 'log "endpoint unreadable; retrying"' in joined
+    assert not re.search(r"\beval\b|\bsource\b|^\. ", joined, re.M), "the content of the file is never run"
+    for line in code:
+        if re.match(r"(log|echo|die|printf)\b", line):
+            assert "${EP}" not in line and "${PARSED}" not in line, line
+
+
+def test_tunnel_sh_tests_the_local_port_by_binding_it_before_every_forward_and_never_connects():
+    text, code = _tunnel_text(), _tunnel_code()
+    assert 's.bind(("127.0.0.1", int(sys.argv[1])))' in text, "the loopback address ssh forwards on"
+    assert "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)" in text, "as ssh binds its own listener"
+    joined = "\n".join(code)
+    for connecting in (r"\.connect\(", r"connect_ex", r"create_connection", r"\bcurl\b", r"\bnc\b", r"/dev/tcp", r"\blsof\b", r"\btelnet\b"):
+        assert not re.search(connecting, joined), connecting
+    assert ('echo "localhost:${LOCAL_PORT} is already in use (a local dev server?); set LOCAL_PORT to a free port"' in joined
+            and "exit 1" in joined)
+    assert joined.count("port_free || busy") == 2, "at the start (fail fast) and before each forward (a dev server may come up later)"
+
+
+def test_tunnel_sh_defaults_are_the_plans_and_its_loop_knobs_and_signals_are_handled_and_documented():
+    code = _tunnel_code()
+    for default in ('LOGIN="${LOGIN:-hpi-hpc}"', 'LOCAL_PORT="${LOCAL_PORT:-8000}"', 'VIA="${VIA:-jump}"',
+                    'CLUSTER_USER="${CLUSTER_USER:-krishankumar.bhushan}"', 'RETRY_SLEEP="${RETRY_SLEEP:-15}"', 'MAX_ATTEMPTS="${MAX_ATTEMPTS:-0}"'):
+        assert any(l.startswith(default) for l in code), default
+    header = "\n".join(l for l in _tunnel_text().splitlines() if l.startswith("#"))
+    for knob in ("LOGIN", "LOCAL_PORT", "VIA", "CLUSTER_USER", "MAX_ATTEMPTS", "RETRY_SLEEP", "chat_sessions/endpoint", "JSON"):
+        assert knob in header, knob
+    joined = "\n".join(code)
+    for signal_name, status in (("INT", 130), ("TERM", 143), ("HUP", 129)):
+        assert "trap 'stop {}' {}".format(status, signal_name) in joined, signal_name
+    assert "jobs -p" in joined
+
+
+def test_public_demo_sh_checks_the_server_is_in_public_mode_before_it_starts_cloudflared():
+    text, code = _tunnel_text("public_demo.sh"), _tunnel_code("public_demo.sh")
+    probe = _only_line(code, 'curl -s --max-time 5 "http://localhost:${LOCAL_PORT}/healthz"')
+    verdict = _only_line(code, 'case "${SEEN}" in')
+    installed = _only_line(code, "command -v cloudflared")
+    start = _only_line(code, 'cloudflared tunnel --url "http://localhost:${LOCAL_PORT}"')
+    assert probe < verdict < installed < start, "mode first, then cloudflared is looked for, then it is started"
+    arms = code[verdict + 1:code.index("esac", verdict)]
+    assert arms[0] == "public) ;;" and all("refuse" in arm for arm in arms[1:]) and len(arms) >= 3, arms
+    assert "json.loads" in text and re.search(r'print\(mode if mode in \("public", "private"\) else "unknown"\)', text)
+    assert not re.search(r"\bgrep\b|\bawk\b|\bsed\b", "\n".join(code)), "the answer is parsed as JSON, never matched as text"
+    assert "ssh" not in "\n".join(code) and code[start].endswith("&"), "no cluster contact; cloudflared runs as a job the signals can stop"
+    joined = "\n".join(code)
+    for signal_name, status in (("INT", 130), ("TERM", 143), ("HUP", 129)):
+        assert "trap 'stop {}' {}".format(status, signal_name) in joined, signal_name
+    header = "\n".join(l for l in text.splitlines() if l.startswith("#"))
+    assert "LOCAL_PORT" in header and "public mode" in header.lower() and "R6" in header
+
+
+def test_tunnel_scripts_run_nothing_on_the_cluster_and_never_touch_the_token():
+    for name in TUNNEL_SCRIPTS:
+        text = _tunnel_text(name)
+        for forbidden in ("sbatch", "scontrol", "rm -rf"):
+            assert forbidden not in text, (name, forbidden)
+        for secret in ("app_token", "Authorization", "Bearer", "X-Client-Id", "--token"):
+            assert secret not in text, (name, secret)
