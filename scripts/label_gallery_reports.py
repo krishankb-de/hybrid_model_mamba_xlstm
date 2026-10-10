@@ -13,7 +13,8 @@ text is the same after lower-casing and collapsing whitespace in one group. The 
 difference between the members of a group, so the labels of a group's first row (its representative) are the labels of every row in
 it, and a report that repeats an earlier one is never labelled on its own. That is an argument, and the cross-check at the end
 measures it: for the test split's 2,663 reports (some of which take their labels from a train row's text) labels.npy must equal the
-y_true of the published dump, to the last label.
+y_true of the published dump, to the last label. A zero is evidence for the argument only as far as the reports that take their labels
+from another row reach, so the log says how many they are (`test_rows_sharing_a_text`).
 
 Speed is why it is built this way. F1CheXbert on a CPU takes about 0.16 s a report (job 2525606), so the groups are hours of CPU. f1chexbert 0.0.2
 (read from its source) takes the GPU itself when torch sees one: `F1CheXbert(refs_filename=None, hyps_filename=None, device=None, **kwargs)`
@@ -31,8 +32,10 @@ What it writes, all in the gallery directory and nothing outside it:
   --shard I --of N      labels_shard_I_rows.npy (the gallery rows of reps[I::N], int64) and labels_shard_I.npy (their labels, uint8): the
                         second is written last and is the marker of a finished shard, which a later run keeps rather than labelling again.
 Before any of it, the gallery must be built and verified (manifest.json, gate_rk.equal true in the manifest and in gate_rk.json) and not
-already labelled: a finished labelling is never overwritten (R8). Before the labeller is even built, the 2,663 test reports of the gallery
-are compared with the published refs.txt: if they differ the job stops at once, instead of finding out after the hours of labelling.
+already labelled: a finished labelling is never overwritten (R8), and that is checked again at the end, before anything is written, from a
+fresh read of the manifest (a GPU job and a CPU merge can both start on a pending gallery; the one that ends second refuses). Before the
+labeller is even built, the 2,663 test reports of the gallery are compared with the published refs.txt: if they differ the job stops at once,
+instead of finding out after the hours of labelling.
 
 Exit codes: 0 done, 1 refused or failed (a cross-check with a difference too), 2 the canary projects past the budget, 64 a bad command line
 (argparse's own 2 would read as the canary's).
@@ -240,6 +243,16 @@ def check_gallery(gallery: Path) -> Dict[str, Any]:
     return manifest
 
 
+def refuse_if_done(gallery: Path) -> Dict[str, Any]:
+    """The manifest as it is on disk NOW, or already_labelled if the gallery was finished since this run began: a GPU job and a CPU merge, or
+    a resubmission, can both pass the guards of a pending gallery, and a finished labelling is never overwritten (R8). What a run writes
+    into the manifest is its own fields on a read taken here, never on the copy it took at its start."""
+    manifest = read_json_object(gallery / "manifest.json", "manifest_unreadable")
+    if manifest.get("labels_status") == "done":
+        raise Refused("already_labelled")
+    return manifest
+
+
 def load_inputs(gallery: Path, manifest: Dict[str, Any]) -> Dict[str, Any]:
     """The texts, the duplicate groups, their representatives and the gallery rows of the test reports; every count checked against the manifest's."""
     try:
@@ -247,7 +260,7 @@ def load_inputs(gallery: Path, manifest: Dict[str, Any]) -> Dict[str, Any]:
         groups = np.load(str(gallery / "txt_groups.npy"), allow_pickle=False)
         split = np.load(str(gallery / "txt_split.npy"), allow_pickle=False)
         split_row = np.load(str(gallery / "txt_split_row.npy"), allow_pickle=False)
-    except (OSError, ValueError):
+    except (OSError, ValueError, EOFError):          # np.load answers a file of 0 bytes with EOFError, which is neither of the others
         raise Refused("inputs_unreadable") from None
     if groups.ndim != 1 or split.ndim != 1 or split_row.ndim != 1:
         raise Refused("inputs_unreadable")
@@ -368,7 +381,7 @@ def read_shard(gallery: Path, index: int, expected_rows: np.ndarray) -> Tuple[st
     try:
         rows = np.load(str(rows_path), allow_pickle=False)
         labels = np.load(str(labels_path), allow_pickle=False)
-    except (OSError, ValueError):
+    except (OSError, ValueError, EOFError):          # a shard cut to 0 bytes is damaged like any other: labelled again, never a crash
         return "invalid", None
     good = (rows.dtype == np.int64 and np.array_equal(rows, expected_rows) and labels.dtype == np.uint8
             and labels.shape == (len(expected_rows), N_LABELS) and bool((labels <= 1).all()))
@@ -421,17 +434,22 @@ def package_version(name: str) -> Optional[str]:
         return None
 
 
-def finish(gallery: Path, manifest: Dict[str, Any], data: Dict[str, Any], rep_labels: np.ndarray, reference: Dict[str, Any],
+def finish(gallery: Path, data: Dict[str, Any], rep_labels: np.ndarray, reference: Dict[str, Any],
            mode: str, shards: Optional[int], device: Optional[str], labelling_s: Optional[int]) -> int:
     """Broadcast the groups' labels to every row, run the cross-check, write labels_check.json, and only if the check found no difference
     write labels.npy and label_names.json and flip the manifest's labels_status to done. Otherwise the labels are kept as
-    labels_unverified.npy, labels_status stays pending, and the exit code is 1."""
+    labels_unverified.npy, labels_status stays pending, and the exit code is 1. R8 is checked again here, before anything is written: if
+    the gallery was finished while this run labelled, it refuses (already_labelled) and replaces nothing. The manifest is written from a
+    fresh read (see refuse_if_done), so that nothing added to it since this run began is lost. A window of milliseconds remains between that
+    read and the write; closing it would take a lock file, which a job killed in the middle would leave behind for the next one."""
+    refuse_if_done(gallery)
     texts, groups, reps, test_rows = data["texts"], data["groups"], data["reps"], data["test_rows"]
     labels = broadcast(rep_labels, groups, reps)
     shared = reps[np.searchsorted(groups[reps], groups)][test_rows] != test_rows        # labelled from another row's text
     check = cross_check(texts, test_rows, labels, shared, reference)
     write_json_atomic(gallery / "labels_check.json", check)
     say("wrote labels_check.json")
+    say("test_rows_sharing_a_text={}".format(check["test_rows_sharing_a_text"]))      # how much of a zero below is evidence for the group argument
     emit_result({"refs_mismatch": check["refs_mismatch"], "labels_mismatch": check["labels_mismatch"]})
     if check["refs_mismatch"] or check["labels_mismatch"]:
         if check["labels_mismatch"]:
@@ -444,7 +462,7 @@ def finish(gallery: Path, manifest: Dict[str, Any], data: Dict[str, Any], rep_la
     say("wrote labels.npy")
     write_json_atomic(gallery / "label_names.json", CHEXBERT_14, indent=None)      # equal to labeler.target_names: every labelling run asserts it
     say("wrote label_names.json")
-    done = dict(manifest)
+    done = dict(refuse_if_done(gallery))
     done["labels_status"] = "done"
     done["labels_info"] = {
         "labeler": "f1chexbert", "f1chexbert_version": package_version("f1chexbert"), "mode": mode, "shards": shards, "device": device,
@@ -512,7 +530,7 @@ def run(args: argparse.Namespace) -> int:
     if args.merge:
         rep_labels = merge_shards(gallery, data["reps"], args.of)
         emit_result({"merged": args.of, "groups": int(len(data["reps"])), "rows": int(len(data["texts"]))})
-        return finish(gallery, manifest, data, rep_labels, reference, "sharded", args.of, None, None)
+        return finish(gallery, data, rep_labels, reference, "sharded", args.of, None, None)
     labeler = make_labeler(args.device)
     check_label_names(labeler)
     device = model_device(labeler)
@@ -520,7 +538,7 @@ def run(args: argparse.Namespace) -> int:
     rep_labels = label_rows(labeler, data["texts"], data["reps"], args.budget_s, args.canary, args.progress)
     labelling_s = int(round(time.perf_counter() - started))
     emit_result({"groups": int(len(data["reps"])), "rows": int(len(data["texts"])), "labelling_s": labelling_s})
-    return finish(gallery, manifest, data, rep_labels, reference, "single", None, device, labelling_s)
+    return finish(gallery, data, rep_labels, reference, "single", None, device, labelling_s)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

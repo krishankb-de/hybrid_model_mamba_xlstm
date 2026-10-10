@@ -17,6 +17,7 @@ Tested in layers:
 """
 import ast
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -24,7 +25,7 @@ import sys
 import time
 import types
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pytest
@@ -375,6 +376,46 @@ def test_the_f1chexbert_api_the_script_and_the_wrappers_are_built_on_is_what_its
     assert "v = [1 if (isinstance(l, int) and l > 0) else 0 for l in v]" in reply and "return v" in reply, "a list of ints, 1 or 0, one per head"
 
 
+def check_the_group_premise(source: str) -> None:
+    """The two facts of the library that the group broadcast stands on, read from its own source: every report is tokenised with
+    BertTokenizer from the checkpoint 'bert-base-uncased' (an uncased vocabulary, whose tokenizer lower-cases: two reports that differ in
+    case have the same tokens), after its whitespace has been collapsed (so two that differ in spacing do too). AssertionError names
+    the one that is gone. (That the checkpoint lower-cases is what its name says; its tokenizer_config.json is on the hub, not here.)"""
+    tree = parse_quietly(source)
+    assert "\nfrom transformers import BertTokenizer\n" in source, "the tokenizer is no longer transformers' BertTokenizer"
+    cls = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "F1CheXbert")
+    methods = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
+    init = ast.get_source_segment(source, methods["__init__"])
+    assert "self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')" in init, "the tokenizer is no longer the uncased BERT one"
+    tokenize = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "tokenize")
+    body = ast.get_source_segment(source, tokenize)
+    for needle, what in (("imp = impressions.str.strip()", "strip first"), ("imp = imp.replace('\\n', ' ', regex=True)", "newlines to spaces"),
+                         ("imp = imp.replace('\\s+', ' ', regex=True)", "runs of whitespace to one space"),
+                         ("impressions = imp.str.strip()", "strip last"), ("tokenizer.tokenize(impressions.iloc[i])", "the tokenizer is what tokenises")):
+        assert needle in body, "tokenize() no longer does this: " + what
+    assert "out = tokenize(impressions, self.tokenizer)" in ast.get_source_segment(source, methods["get_label"]), "get_label no longer goes through tokenize()"
+
+
+def test_the_group_premise_is_in_f1chexberts_source_the_uncased_tokenizer_and_the_whitespace_collapse():
+    """A library update that breaks the case or the whitespace argument fails here, loudly, before a labelling of 190k groups rests on it."""
+    check_the_group_premise(f1chexbert_source())
+
+
+@pytest.mark.parametrize("old, new", [
+    ("BertTokenizer.from_pretrained('bert-base-uncased')", "BertTokenizer.from_pretrained('bert-base-cased')"),
+    ("imp = imp.replace('\\s+', ' ', regex=True)", "imp = imp"),
+    ("imp = imp.replace('\\n', ' ', regex=True)", "imp = imp"),
+    ("imp = impressions.str.strip()", "imp = impressions"),
+    ("tokenizer.tokenize(impressions.iloc[i])", "impressions.iloc[i].split()"),
+    ("out = tokenize(impressions, self.tokenizer)", "out = [[0]]"),
+    ("\nfrom transformers import BertTokenizer\n", "\nfrom transformers import BertTokenizerFast\n")])
+def test_the_group_premise_pin_fails_when_the_library_stops_lowercasing_or_collapsing_whitespace(old, new):
+    source = f1chexbert_source()
+    assert old in source, "the text this test breaks is no longer in the library: re-read check_the_group_premise"
+    with pytest.raises(AssertionError):
+        check_the_group_premise(source.replace(old, new))
+
+
 # ── label_rows and its canary ─────────────────────────────────────────────────
 
 NO_REPLY = object()
@@ -539,6 +580,96 @@ def test_a_partial_run_may_be_completed(lg, fake, world, capsys):
     assert (world.gallery / "labels.npy").is_file() and world.manifest()["labels_status"] == "done"
 
 
+def mark_done_by_another_run(gallery: Path) -> bytes:
+    """The manifest a run that finished the gallery first leaves: done, with its own labels_info. Returns its bytes."""
+    manifest = json.loads((gallery / "manifest.json").read_text())
+    manifest["labels_status"] = "done"
+    manifest["labels_info"] = {"job_id": "the other run"}
+    (gallery / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return (gallery / "manifest.json").read_bytes()
+
+
+def simulate_another_run_finishing(gallery: Path) -> Dict[str, bytes]:
+    """What a run that began later and ended first leaves: its labels, its names, its check, and a manifest that says done. The bytes
+    are sentinels for its files: what matters is that this run replaces none of them. Returns every file with its bytes."""
+    left = {"labels.npy": b"the other run's labels", "label_names.json": b'["the other run"]', "labels_check.json": b'{"the other run": true}'}
+    for name, blob in left.items():
+        (gallery / name).write_bytes(blob)
+    left["manifest.json"] = mark_done_by_another_run(gallery)
+    return left
+
+
+@pytest.mark.parametrize("mode", ["single", "merge"])
+def test_a_run_that_finds_the_gallery_finished_meanwhile_refuses_and_replaces_nothing(lg, fake, world, capsys, monkeypatch, mode):
+    """R8 again at the end of the run, not only at its start: a GPU job and a CPU merge, or a resubmission, can both pass the guards of a
+    pending gallery, and the one that finishes second must not replace what the first left."""
+    argv, target = world.argv(), "label_rows"
+    if mode == "merge":
+        for i in range(2):
+            assert run_main(lg, capsys, world.argv("--shard", str(i), "--of", "2")).rc == 0
+        argv, target = world.argv("--merge", "--of", "2"), "merge_shards"
+    real, left = getattr(lg, target), {}
+
+    def overtaken(*args, **kwargs):
+        result = real(*args, **kwargs)                          # the slow part is done; meanwhile the other run has finished
+        left.update(simulate_another_run_finishing(world.gallery))
+        return result
+    monkeypatch.setattr(lg, target, overtaken)
+    ran = run_main(lg, capsys, argv)
+    assert ran.rc == 1 and ran.lines[-1] == "ERROR already_labelled", ran.out
+    assert left, "the other run did finish in the middle of this one"
+    for name, blob in left.items():
+        assert (world.gallery / name).read_bytes() == blob, name + " was replaced"
+    assert not (world.gallery / "labels_unverified.npy").exists() and "[labels] wrote labels.npy" not in ran.lines
+
+
+def test_a_run_overtaken_in_the_last_moment_leaves_the_other_runs_manifest_as_it_is(lg, fake, world, capsys, monkeypatch):
+    """The window between the end-of-run check and the manifest write is small but not nothing: the manifest is read once more for the write,
+    so a gallery that turned done in that window keeps the other run's manifest (its labels_info is not replaced by this run's)."""
+    real, left = lg.write_json_atomic, {}
+
+    def interleaved(path, obj, indent=2):
+        real(path, obj, indent)
+        if Path(path).name == "label_names.json":               # this run's last file before the manifest
+            left["manifest.json"] = mark_done_by_another_run(world.gallery)
+    monkeypatch.setattr(lg, "write_json_atomic", interleaved)
+    ran = run_main(lg, capsys, world.argv())
+    assert ran.rc == 1 and ran.lines[-1] == "ERROR already_labelled", ran.out
+    assert left and (world.gallery / "manifest.json").read_bytes() == left["manifest.json"]
+    assert world.manifest()["labels_info"] == {"job_id": "the other run"}
+
+
+def test_the_manifest_is_written_from_a_fresh_read_and_not_from_the_copy_taken_at_the_start(lg, fake, world, capsys, monkeypatch):
+    """Something else (a note, a field another tool added) changes manifest.json while the labelling runs; the run's own fields are put on
+    what is there when it finishes, so that nothing the start-of-run copy lacked is lost."""
+    real = lg.label_rows
+
+    def meanwhile(*args, **kwargs):
+        result = real(*args, **kwargs)
+        manifest = world.manifest()
+        manifest["noted_meanwhile"] = {"by": "someone else"}
+        (world.gallery / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        return result
+    monkeypatch.setattr(lg, "label_rows", meanwhile)
+    ran = run_main(lg, capsys, world.argv())
+    assert ran.rc == 0, ran.out
+    manifest = world.manifest()
+    assert manifest["noted_meanwhile"] == {"by": "someone else"}, "the start-of-run copy was written back over it"
+    assert manifest["labels_status"] == "done" and manifest["labels_info"]["mode"] == "single"
+
+
+def test_a_manifest_that_disappears_during_the_run_is_a_refusal_at_the_end(lg, fake, world, capsys, monkeypatch):
+    real = lg.label_rows
+
+    def meanwhile(*args, **kwargs):
+        result = real(*args, **kwargs)
+        (world.gallery / "manifest.json").unlink()
+        return result
+    monkeypatch.setattr(lg, "label_rows", meanwhile)
+    ran = run_main(lg, capsys, world.argv())
+    assert ran.rc == 1 and ran.lines[-1] == "ERROR manifest_unreadable" and not (world.gallery / "labels.npy").exists(), ran.out
+
+
 def test_rows_that_disagree_with_the_manifest_are_refused_by_count(lg, fake, world, capsys):
     texts = read_texts(world.gallery)
     (world.gallery / "report_texts.txt").write_text("\n".join(texts[:-1]) + "\n")
@@ -563,6 +694,27 @@ def test_a_missing_input_file_is_a_refusal_not_a_traceback(lg, fake, world, caps
     assert ran.rc == 1 and ran.lines[-1] == "ERROR inputs_unreadable" and ran.err == "" and fake.CONSTRUCTED == []
 
 
+@pytest.mark.parametrize("damage", ["empty", "cut_in_the_header", "cut_in_the_data", "garbage"])
+@pytest.mark.parametrize("name", ["txt_groups.npy", "txt_split.npy", "txt_split_row.npy"])
+def test_a_damaged_input_array_is_a_refusal_and_not_a_traceback(lg, fake, world, capsys, name, damage):
+    """np.load answers a 0-byte file with EOFError, which is neither an OSError nor a ValueError: the one damage that used to be a crash."""
+    path = world.gallery / name
+    blob = path.read_bytes()
+    path.write_bytes({"empty": b"", "cut_in_the_header": blob[:20], "cut_in_the_data": blob[:-30], "garbage": b"not an array"}[damage])
+    before = snapshot(world.gallery)
+    ran = run_main(lg, capsys, world.argv())
+    assert ran.rc == 1 and ran.lines[-1] == "ERROR inputs_unreadable", ran.out + ran.err
+    assert ran.err == "" and fake.CONSTRUCTED == [] and snapshot(world.gallery) == before
+
+
+def test_an_empty_report_texts_file_is_refused_by_count(lg, fake, world, capsys):
+    (world.gallery / "report_texts.txt").write_bytes(b"")
+    ran = run_main(lg, capsys, world.argv())
+    n = len(world.groups())
+    assert ran.rc == 1 and ran.lines[-1] == "ERROR rows_disagree texts=0 groups={} manifest={}".format(n, n), ran.out
+    assert ran.err == "" and fake.CONSTRUCTED == []
+
+
 def test_test_rows_that_are_not_a_permutation_are_refused(lg, fake, world, capsys):
     split_row = load_array(world.gallery, "txt_split_row.npy")
     split_row[-1] = split_row[-2]                                      # two test studies with one row in test.parquet
@@ -573,6 +725,9 @@ def test_test_rows_that_are_not_a_permutation_are_refused(lg, fake, world, capsy
 
 def test_an_unreadable_reference_is_refused_before_anything_is_labelled(lg, fake, world, capsys):
     (world.reference / "chexbert_labels.json").write_text("{not json")
+    ran = run_main(lg, capsys, world.argv())
+    assert ran.rc == 1 and ran.lines[-1] == "ERROR reference_unreadable" and fake.CONSTRUCTED == [] and ran.err == ""
+    (world.reference / "chexbert_labels.json").write_bytes(b"")                  # an empty file is not a JSON document either
     ran = run_main(lg, capsys, world.argv())
     assert ran.rc == 1 and ran.lines[-1] == "ERROR reference_unreadable" and fake.CONSTRUCTED == [] and ran.err == ""
     shutil.rmtree(str(world.reference))
@@ -654,9 +809,57 @@ def test_a_single_job_says_what_it_did_in_lines_of_known_shapes(lg, fake, world,
     assert "[labels] progress: 30 of {} rows".format(groups) in lines
     summary = [r for r in results(lines) if "groups" in r]
     assert len(summary) == 1 and summary[0]["groups"] == groups and summary[0]["rows"] == 240 and isinstance(summary[0]["labelling_s"], int)
-    assert lines[-5:] == ["[labels] wrote labels_check.json", 'RESULT {"refs_mismatch":0,"labels_mismatch":0}', "[labels] wrote labels.npy",
+    sharing = count_test_reports_sharing_a_text(world.gallery)
+    assert lines[-6:] == ["[labels] wrote labels_check.json", "[labels] test_rows_sharing_a_text={}".format(sharing),
+                          'RESULT {"refs_mismatch":0,"labels_mismatch":0}', "[labels] wrote labels.npy",
                           "[labels] wrote label_names.json", "[labels] labels_status=done"]
     assert ran.err == ""
+
+
+def count_test_reports_sharing_a_text(gallery: Path) -> int:
+    """How many of the test reports are not the first row of their duplicate group, so that their labels are another row's: computed from
+    the groups alone, apart from the script."""
+    groups = load_array(gallery, "txt_groups.npy").tolist()
+    first = {}
+    for row, group in enumerate(groups):
+        first.setdefault(group, row)
+    return sum(first[groups[r]] != r for r in gallery_rows_of_test_reports(gallery).tolist())
+
+
+@pytest.mark.parametrize("mode", ["single", "merge"])
+def test_the_log_says_how_many_test_reports_share_a_text_so_that_the_zero_has_a_weight(lg, fake, world, capsys, mode):
+    """The cross-check's zero is informative only for the test reports that take their labels from another row: the line says how many,
+    in numbers only, just before the verdict, and labels_check.json holds the same number."""
+    argv = world.argv()
+    if mode == "merge":
+        for i in range(3):
+            assert run_main(lg, capsys, world.argv("--shard", str(i), "--of", "3")).rc == 0
+        argv = world.argv("--merge", "--of", "3")
+    ran = run_main(lg, capsys, argv)
+    assert ran.rc == 0, ran.out
+    sharing = count_test_reports_sharing_a_text(world.gallery)
+    assert 0 < sharing < 40, "the tiny gallery has test reports that share a text and test reports that do not"
+    line = "[labels] test_rows_sharing_a_text={}".format(sharing)
+    assert ran.lines.count(line) == 1
+    assert ran.lines.index(line) == ran.lines.index('RESULT {"refs_mismatch":0,"labels_mismatch":0}') - 1, "right before the verdict"
+    assert json.loads((world.gallery / "labels_check.json").read_text())["test_rows_sharing_a_text"] == sharing
+
+
+def test_a_failed_cross_check_also_says_how_many_test_reports_share_a_text(lg, fake, world, capsys):
+    payload = read_reference(world.reference)
+    payload["y_true"][5][3] ^= 1
+    write_reference_payload(world.reference, payload)
+    ran = run_main(lg, capsys, world.argv())
+    assert ran.rc == 1 and "[labels] test_rows_sharing_a_text={}".format(count_test_reports_sharing_a_text(world.gallery)) in ran.lines
+
+
+def test_a_shard_and_a_refusal_print_no_such_line(lg, fake, world, capsys):
+    """It belongs to the cross-check, which a shard does not run and a refusal never reaches."""
+    shard = run_main(lg, capsys, world.argv("--shard", "0", "--of", "2"))
+    assert shard.rc == 0 and not [l for l in shard.lines if "test_rows_sharing_a_text" in l]
+    break_gate(world.gallery, "false")
+    refused = run_main(lg, capsys, world.argv())
+    assert refused.rc == 1 and not [l for l in refused.lines if "test_rows_sharing_a_text" in l]
 
 
 @pytest.mark.parametrize("device, passed", [("auto", None), ("cpu", "cpu"), ("cuda", "cuda")])
@@ -735,18 +938,35 @@ def test_a_bad_row_from_the_labeller_is_refused_by_its_place_in_the_job(lg, inst
     assert ran.rc == 1 and ran.lines[-1] == "ERROR bad_label_row row=3" and not (world.gallery / "labels.npy").exists()
 
 
-def test_the_group_broadcast_gives_the_labels_per_row_labelling_would(lg, fake, world, capsys):
-    """The assumption the whole job rests on: members of a duplicate group differ at most in case and spacing, which the uncased
-    tokenizer does not see. The tiny gallery has groups spelt two ways, with whitespace, and one shared by train and test rows."""
-    assert run_main(lg, capsys, world.argv()).rc == 0
-    texts, groups = read_texts(world.gallery), world.groups()
-    labels = load_array(world.gallery, "labels.npy")
-    spellings = {}
-    for text, group in zip(texts, groups.tolist()):
-        spellings.setdefault(group, set()).add(text)
-    assert any(len(s) > 1 for s in spellings.values()), "the gallery has a group whose members are spelt differently"
-    labelled_one_by_one = [FAKE.label_of(t) for t in texts]
-    assert labels.tolist() == labelled_one_by_one
+@pytest.mark.parametrize("case_sensitive", [False, True])
+def test_a_representative_in_capitals_is_the_same_report_only_to_a_labeller_that_does_not_see_case(
+        lg, install_fake, tmp_path, template, capsys, monkeypatch, case_sensitive):
+    """The premise the whole job rests on, tried against a labeller that has it and one that does not (FAKE_F1_CASE_SENSITIVE). The text
+    of a train report that a test report shares its group with is put in capitals: the group is still the group (its key is lower-cased).
+    A labeller that does not see case gives the broadcast what labelling row by row would give; one that does gives the group's test
+    reports labels unlike their own, and the cross-check says so, as text shared with another row."""
+    if case_sensitive:
+        monkeypatch.setenv("FAKE_F1_CASE_SENSITIVE", "1")
+    world = World(tmp_path / "w", template)                       # its reference is labelled by the labeller as it is set now
+    victim, differing = change_a_shared_representative(world, str.upper)
+    fake = install_fake()
+    ran = run_main(lg, capsys, world.argv())
+    check = json.loads((world.gallery / "labels_check.json").read_text())
+    assert check["test_rows_sharing_a_text"] > 0, "what follows is about test reports that really share a text with another row"
+    per_row = np.array([[int(v) for v in fake.F1CheXbert().get_label(t)] for t in read_texts(world.gallery)], dtype=np.uint8)
+    if not case_sensitive:
+        assert differing == 0 and ran.rc == 0 and check["labels_mismatch"] == 0, ran.out
+        assert np.array_equal(load_array(world.gallery, "labels.npy"), per_row), "the broadcast is labelling row by row, capitals and all"
+    else:
+        assert differing >= 1 and ran.rc == 1, ran.out
+        assert check["labels_mismatch"] == check["labels_mismatch_shared_text"] == differing and check["labels_mismatch_own_text"] == 0
+        groups, reps = world.groups(), world.reps()
+        unverified = load_array(world.gallery, "labels_unverified.npy")
+        assert np.array_equal(unverified, per_row[reps[np.searchsorted(groups[reps], groups)]]), "every row got its representative's labels"
+        wrong = set(np.flatnonzero((unverified != per_row).any(axis=1)).tolist())
+        assert victim not in wrong, "the representative itself was labelled from its own text"
+        assert wrong & set(np.flatnonzero(groups == groups[victim]).tolist()), "the members of its group are off"
+        # (other rows are off too: the tiny gallery has a train group spelt two ways. The cross-check only sees the test reports.)
 
 
 # ── shards and merge ──────────────────────────────────────────────────────────
@@ -796,8 +1016,10 @@ def test_a_finished_shard_is_kept_and_not_labelled_again(lg, install_fake, world
     assert fake.CONSTRUCTED == [] and fake.CALLS == [] and snapshot(world.gallery) == before
 
 
-@pytest.mark.parametrize("damage", ["short_labels", "other_rows", "garbage", "values", "dtype", "no_rows_file"])
+@pytest.mark.parametrize("damage", ["short_labels", "other_rows", "garbage", "values", "dtype", "no_rows_file", "empty_labels", "empty_rows"])
 def test_a_shard_that_is_not_the_shard_asked_for_is_labelled_again(lg, fake, world, capsys, damage):
+    """An empty file is the case np.load answers with EOFError, not ValueError: a shard cut to 0 bytes (a full disk, a killed copy) must be
+    labelled again like any other damage, since nothing here may delete it (R8)."""
     assert run_main(lg, capsys, world.argv("--shard", "2", "--of", "4")).rc == 0
     good = load_array(world.gallery, "labels_shard_2.npy").copy()
     labels_path, rows_path = world.gallery / "labels_shard_2.npy", world.gallery / "labels_shard_2_rows.npy"
@@ -807,6 +1029,10 @@ def test_a_shard_that_is_not_the_shard_asked_for_is_labelled_again(lg, fake, wor
         np.save(str(rows_path), load_array(world.gallery, "labels_shard_2_rows.npy") + 1)
     elif damage == "garbage":
         labels_path.write_bytes(b"not an array")
+    elif damage == "empty_labels":
+        labels_path.write_bytes(b"")
+    elif damage == "empty_rows":
+        rows_path.write_bytes(b"")
     elif damage == "values":
         bad = good.copy()
         bad[0, 0] = 2
@@ -839,7 +1065,7 @@ def test_the_merge_names_the_shards_that_are_missing_and_writes_nothing(lg, inst
     assert snapshot(world.gallery) == before and fake.CONSTRUCTED == []
 
 
-@pytest.mark.parametrize("damage", ["other_rows", "short_labels", "values", "garbage"])
+@pytest.mark.parametrize("damage", ["other_rows", "short_labels", "values", "garbage", "empty_labels", "empty_rows"])
 def test_the_merge_refuses_a_shard_that_is_not_the_one_it_should_be(lg, fake, world, capsys, damage):
     for i in range(4):
         assert run_main(lg, capsys, world.argv("--shard", str(i), "--of", "4")).rc == 0
@@ -854,12 +1080,16 @@ def test_the_merge_refuses_a_shard_that_is_not_the_one_it_should_be(lg, fake, wo
     elif damage == "values":
         good[0, 0] = 7
         np.save(str(labels_path), good)
+    elif damage == "empty_labels":
+        labels_path.write_bytes(b"")
+    elif damage == "empty_rows":
+        rows_path.write_bytes(b"")
     else:
         labels_path.write_bytes(b"not an array")
     before = snapshot(world.gallery)
     ran = run_main(lg, capsys, world.argv("--merge", "--of", "4"))
     assert ran.rc == 1 and ran.lines[-1] == "ERROR shard_invalid shard=1", ran.out
-    assert snapshot(world.gallery) == before
+    assert ran.err == "" and snapshot(world.gallery) == before
 
 
 def test_the_merge_does_not_build_the_labeller(lg, install_fake, world, capsys):
@@ -973,9 +1203,11 @@ def test_a_rerun_after_a_failed_cross_check_may_try_again(lg, fake, world, capsy
 OTHER_REPORT = "Findings: a different report altogether. Impression: it is not the same."
 
 
-def doctor_a_shared_representative(world: World) -> int:
-    """Replace the text of a TRAIN row that is the representative of a group a test report belongs to (so that report is labelled from that
-    row's text, not its own), and say how many test reports' labels that changes. The tiny gallery has such a group on purpose."""
+def change_a_shared_representative(world: World, new_text: Callable[[str], str]) -> Tuple[int, int]:
+    """Change the text of a TRAIN row that is the representative of a group a test report belongs to (so that report is labelled from that
+    row's text, not its own): new_text(old) is the new one. Returns (that row, how many of the group's test reports then have labels that
+    differ from the labels of their own text, under the labeller as FAKE_F1_CASE_SENSITIVE sets it now). The tiny gallery has such a group
+    on purpose."""
     reps, groups, texts = world.reps(), world.groups(), read_texts(world.gallery)
     rows = gallery_rows_of_test_reports(world.gallery)
     n_train = world.manifest()["counts"]["images"]
@@ -983,10 +1215,16 @@ def doctor_a_shared_representative(world: World) -> int:
     shared = [j for j, r in enumerate(rows) if rep_row_of[r] != r and rep_row_of[r] < n_train]
     assert shared, "the tiny gallery has a test report that a train report repeats"
     victim = int(rep_row_of[rows[shared[0]]])
-    texts[victim] = OTHER_REPORT
+    texts[victim] = new_text(texts[victim])
     (world.gallery / "report_texts.txt").write_text("\n".join(texts) + "\n")
     own = (world.reference / "refs.txt").read_text().splitlines()
-    return sum(FAKE.label_of(OTHER_REPORT) != FAKE.label_of(own[j]) for j, r in enumerate(rows) if groups[r] == groups[victim])
+    differing = sum(FAKE.label_of(texts[victim]) != FAKE.label_of(own[j]) for j, r in enumerate(rows) if groups[r] == groups[victim])
+    return victim, differing
+
+
+def doctor_a_shared_representative(world: World) -> int:
+    """Put another report altogether in place of that representative's: how many test reports' labels that changes."""
+    return change_a_shared_representative(world, lambda old: OTHER_REPORT)[1]
 
 
 def test_the_cross_check_catches_a_group_whose_representative_is_not_its_members_text(lg, fake, world, capsys):
@@ -1088,6 +1326,7 @@ LABEL_SHAPE_LIST = [
     r"\[labels\] shard [0-9]{1,3} of [0-9]{1,3} kept: already labelled",
     r"\[labels\] wrote (labels\.npy|labels_unverified\.npy|label_names\.json|labels_check\.json|labels_shard_[0-9]{1,3}\.npy|labels_shard_[0-9]{1,3}_rows\.npy)",
     r"\[labels\] mismatch split: own_text=[0-9]{1,7} shared_text=[0-9]{1,7}",
+    r"\[labels\] test_rows_sharing_a_text=[0-9]{1,7}",
     r"\[labels\] labels_status=(done|pending)",
     r'RESULT \{"refs_mismatch":[0-9]{1,7},"labels_mismatch":[0-9]{1,7}\}',
     r'RESULT \{"groups":[0-9]{1,7},"rows":[0-9]{1,7},"labelling_s":[0-9]{1,7}\}',
@@ -1124,6 +1363,7 @@ LABEL_PASS = [
     "[labels] wrote labels.npy", "[labels] wrote labels_unverified.npy", "[labels] wrote label_names.json", "[labels] wrote labels_check.json",
     "[labels] wrote labels_shard_3.npy", "[labels] wrote labels_shard_3_rows.npy", "[labels] wrote labels_shard_12.npy",
     "[labels] mismatch split: own_text=0 shared_text=2", "[labels] labels_status=done", "[labels] labels_status=pending",
+    "[labels] test_rows_sharing_a_text=312", "[labels] test_rows_sharing_a_text=0", "[labels] test_rows_sharing_a_text=2663",
     'RESULT {"refs_mismatch":0,"labels_mismatch":0}', 'RESULT {"refs_mismatch":3,"labels_mismatch":12}',
     'RESULT {"groups":163021,"rows":194125,"labelling_s":2345}', 'RESULT {"shard":3,"of":8,"groups":20378,"labelling_s":3401}',
     'RESULT {"merged":8,"groups":163021,"rows":194125}',
@@ -1145,6 +1385,8 @@ LABEL_WITHHELD = [
     "[labels] wrote /sc/home/someone/chat_sessions/gallery/g/labels.npy", "[labels] wrote report_texts.txt", "[labels] wrote labels_shard_x.npy",
     "[labels] wrote labels.npy and the report", "[labels] labels_status=done, study 50000001", "[labels] labels_status=partial",
     "[labels] mismatch split: own_text=0", "[labels] shard 3 of 8 kept",
+    "[labels] test_rows_sharing_a_text=12345678", "[labels] test_rows_sharing_a_text=-1", "[labels] test_rows_sharing_a_text=",
+    "[labels] test_rows_sharing_a_text=x", "[labels] test_rows_sharing_a_text=2663 study_id=1", "[labels] test_rows_sharing_a_text=26.63",
     'RESULT {"refs_mismatch":0}', 'RESULT {"refs_mismatch":0,"labels_mismatch":0,"study_id":50000001}', 'RESULT {"study_id":50000001}',
     'RESULT {"refs_mismatch":-1,"labels_mismatch":0}', 'RESULT {"refs_mismatch":0.5,"labels_mismatch":0}',
     'RESULT {"refs_mismatch": 0,"labels_mismatch":0}', 'RESULT {"refs_mismatch":0,"labels_mismatch":0} ',
@@ -1580,6 +1822,70 @@ def test_a_missing_chat_home_gallery_manifest_venv_or_reference_stops_the_job_be
             assert box.ran_nothing(), path.name
             assert [l for l in job_lines(done) if not LINE_OK.match(l)] == [], "no bash complaint"
         moved.rename(path)
+
+
+@pytest.mark.parametrize("kind", ["gpu", "cpu"])
+def test_a_tree_without_the_labelling_script_is_refused_before_anything_runs(box, kind):
+    """A sync that never happened, or a tree of another branch. Python would say `can't open file` and exit 2, which is also the code
+    the wrappers read as a hand-over to the CPU path: the guard names the cause, before anything is opened."""
+    (box.repo / "scripts" / "label_gallery_reports.py").unlink()
+    before = snapshot(box.gallery)
+    done = box.run() if kind == "gpu" else box.run_cpu(SLURM_ARRAY_TASK_ID="0")
+    errors = [l for l in job_lines(done) if l.startswith("ERROR")]
+    assert done.returncode == 1 and len(errors) == 1, job_lines(done)
+    assert "label_gallery_reports.py is missing" in errors[0] and "sync" in errors[0]
+    assert box.ran_nothing() and snapshot(box.gallery) == before
+    assert [l for l in job_lines(done) if not LINE_OK.match(l)] == []
+
+
+def replace_the_script(box: LabelBox, body: str) -> None:
+    """Put a script of the test's own where the job finds scripts/label_gallery_reports.py (the box's copy of the real one)."""
+    (box.repo / "scripts" / "label_gallery_reports.py").write_text(body)
+
+
+CANARY_BEFORE_EXIT_2 = [
+    # what the raw log holds when the script exits 2, and whether that is the script's canary line
+    ("[labels] canary: 0.123 s/report, projected 99999 s for 78 rows\n", True),
+    ("Loading weights:  50%|#####     | 1/2\r[labels] canary: 0.123 s/report, projected 99999 s for 78 rows\n", True),      # glued behind a bar
+    ("[labels] canary: study_id=12345678\n", False),                                    # not the shape of the line
+    ("[labels] canary: 0.123 s/report, projected 99999 s for 78 rows and some text\n", False),
+    ("canary: 0.123 s/report, projected 99999 s for 78 rows\n", False),                # not a [labels] line
+    ("", False)]
+
+
+@pytest.mark.parametrize("kind", ["gpu", "cpu"])
+@pytest.mark.parametrize("printed, is_the_canary", CANARY_BEFORE_EXIT_2)
+def test_exit_2_is_the_canarys_only_when_the_raw_log_holds_the_canary_line(box, kind, printed, is_the_canary):
+    """Python itself exits 2 when it cannot open a script, and a library may exit 2: only the script's own canary line, of its known shape,
+    in the raw log makes exit 2 a hand-over to the CPU path. Anything else is a failure, `ERROR labels exit=2`, and the wrapper itself
+    exits 1, so that an exit 2 of this wrapper always means 'submit the CPU path'."""
+    replace_the_script(box, "import sys\nsys.stdout.write({!r})\nsys.exit(2)\n".format(printed))
+    done = box.run() if kind == "gpu" else box.run_cpu(SLURM_ARRAY_TASK_ID="0")
+    lines = job_lines(done)
+    assert [l for l in lines if not LINE_OK.match(l)] == [], lines
+    handed_over = [l for l in lines if "sharded CPU path" in l or "use more shards" in l or l.startswith(("=== 1. ", "=== 2. "))]
+    if is_the_canary:
+        assert done.returncode == 2 and handed_over and "ERROR labels exit=2" not in lines, done.stdout
+    else:
+        assert done.returncode == 1 and "ERROR labels exit=2" in lines and not handed_over, done.stdout
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can read a file whatever its mode")
+@pytest.mark.parametrize("kind", ["gpu", "cpu"])
+def test_python_unable_to_open_the_script_exits_2_and_that_is_a_failure_not_a_hand_over(box, kind):
+    """The real collision: a script that is there (so the guard passes) and that python cannot open, which it answers with exit 2."""
+    script = box.repo / "scripts" / "label_gallery_reports.py"
+    script.chmod(0)
+    try:
+        done = box.run() if kind == "gpu" else box.run_cpu(SLURM_ARRAY_TASK_ID="0")
+    finally:
+        script.chmod(0o644)
+    lines = job_lines(done)
+    assert done.returncode == 1 and "ERROR labels exit=2" in lines, done.stdout
+    assert not [l for l in lines if "sharded CPU path" in l or "use more shards" in l or "canary projects" in l]
+    assert [l for l in lines if not LINE_OK.match(l)] == [] and not [l for l in lines if "Errno" in l or "can't open" in l]
+    log = box.gallery / ("labels.log" if kind == "gpu" else "labels_shard_0.log")
+    assert "can't open file" in log.read_text(), "python's own message is in the raw log"
 
 
 def test_when_the_venvs_torch_sees_no_gpu_the_gpu_job_hands_over_the_cpu_path_at_once_and_labels_nothing(box):

@@ -7559,7 +7559,16 @@ def test_label_gallery_wrappers_run_the_script_with_one_command_each_and_send_it
                 .format(log)) in text, kind
         assert "case \"${WITHHELD}\" in ''|*[!0-9]*) WITHHELD=unknown ;; esac" in text, "a count that could not be made is not a zero"
         assert 'echo "=== label lines withheld: ${WITHHELD} ==="' in text
-        assert 'if [ "${rc}" -ne 0 ]; then echo "ERROR labels exit=${rc}"; exit "${rc}"; fi' in text, kind
+        # Exit 2 is the canary's only with the script's own canary line (of a known shape) in the raw log: python exits 2 itself when it
+        # cannot open the script. Without the line it is a failure, printed as such, and the wrapper's own exit is 1: its exit 2 is the hand-over.
+        seen = "CANARY_SEEN=\"$(tr '\\r' '\\n' < {} | grep -aE \"${{LABEL_SHAPES}}\" | grep -c '^\\[labels\\] canary: ' || true)\"".format(log)
+        assert seen in text, kind
+        assert "case \"${CANARY_SEEN}\" in ''|*[!0-9]*) CANARY_SEEN=0 ;; esac" in text, "a count that could not be made is no canary"
+        hand_over = 'if [ "${rc}" -eq 2 ] && [ "${CANARY_SEEN}" -ge 1 ]; then'
+        failure = 'if [ "${rc}" -ne 0 ]; then\n  echo "ERROR labels exit=${rc}"\n  if [ "${rc}" -eq 2 ]; then exit 1; fi\n  exit "${rc}"\nfi'
+        assert hand_over in text and failure in text, kind
+        assert text.index(seen) < text.index(hand_over) < text.index(failure), kind
+        assert text.count('if [ "${rc}" -eq 2 ]') == 2, "the hand-over test and the one that keeps exit 2 for it, and no other"
 
 
 def test_label_gallery_wrappers_print_only_wrapper_authored_lines_that_name_no_path():
@@ -7623,13 +7632,16 @@ def test_label_gallery_wrappers_print_their_sync_stamp_first_and_with_the_p9_g3_
 
 def test_label_gallery_wrappers_check_everything_before_the_script_runs_and_never_delete():
     """R8. No raw log is opened and no step started before every guard has passed: one plain build name, whole numbers, CHAT_HOME, the manifest,
-    the venv, the gallery's place (not in an outputs directory, not under the thesis checkout), a finished labelling (never overwritten: refused
-    before its job's raw log is replaced), the reference dump's two files."""
+    the venv, the labelling script itself (python answers a script it cannot find with exit 2, which is also the hand-over code), the gallery's
+    place (not in an outputs directory, not under the thesis checkout), a finished labelling (never overwritten: refused before its job's raw
+    log is replaced), the reference dump's two files."""
     guards = ['fail "BUILD_ID must be one plain name: letters, digits, dot, dash, underscore"',
               'fail "BUDGET_S must be a whole number of seconds, at most 6 digits"', 'fail "CANARY must be a whole number of groups, at most 7 digits"',
               'fail "CHAT_HOME does not exist: run chat_cluster_setup_h100.sh first"',
               'fail "the gallery has no manifest.json: build it first (build_retrieval_gallery_h100.sh)"',
-              'fail "the CheXbert venv is missing: run setup_chexbert_venv_h100.sh first"', 'fail "the gallery is inside an outputs directory"',
+              'fail "the CheXbert venv is missing: run setup_chexbert_venv_h100.sh first"',
+              '[ -f scripts/label_gallery_reports.py ] || fail "label_gallery_reports.py is missing from this tree: run chat_remote.sh sync first"',
+              'fail "the gallery is inside an outputs directory"',
               'fail "the gallery resolves into an outputs directory"', 'fail "the gallery is under the thesis checkout (R8)"',
               'fail "the gallery is already labelled (labels_status done): a finished labelling is never overwritten (R8)"',
               'fail "the reference dump has no refs.txt"', 'fail "the reference dump has no chexbert_labels.json"',
@@ -7658,7 +7670,7 @@ def test_label_gallery_gpu_wrapper_asks_the_venvs_torch_and_hands_over_the_cpu_p
     assert "python -c 'import torch; n = torch.cuda.device_count(); print(n, torch.cuda.get_device_name(0) if n else \"none\")'" in gpu
     assert gpu.index("use_the_cpu_path\n  exit 2") > gpu.index("torch.cuda.device_count()"), "the probe's own exit 2"
     assert gpu.count("use_the_cpu_path\n  exit 2") == 2, "one for no GPU, one for the canary"
-    assert gpu.index('if [ "${rc}" -eq 2 ]; then') > gpu.index(_LABEL_SCRIPT_CALL)
+    assert gpu.index('if [ "${rc}" -eq 2 ] && [ "${CANARY_SEEN}" -ge 1 ]; then') > gpu.index(_LABEL_SCRIPT_CALL), "the canary's, with its line"
     assert "--device auto" in gpu and "--device cpu" not in gpu
     cpu = "\n".join(_eos_wrapper_code(_label_text("cpu")))
     assert "torch" not in cpu and "--device cpu" in cpu and "--device auto" not in cpu

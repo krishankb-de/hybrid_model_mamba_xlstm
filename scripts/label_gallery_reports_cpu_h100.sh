@@ -16,7 +16,9 @@
 #   The gallery is named by BUILD_ID, default g13d_m3_v1; the published dump by REFERENCE_DIR; the seconds a shard's canary may project, default
 #   6000, by BUDGET_S; how many groups it labels first by CANARY, default 1000.)
 #
-# A shard whose canary projects past BUDGET_S exits 2 and says to use more shards: it could not finish in its 2 h. A shard that is already labelled
+# A shard whose canary projects past BUDGET_S exits 2 and says to use more shards: it could not finish in its 2 h. It does so only with the script's
+# canary line in the raw log: an exit 2 without it (python itself exits 2 for a script it cannot open) is a failure like any other, printed
+# `ERROR labels exit=2`, and this wrapper's own exit is then 1, so that its exit 2 always means "use more shards". A shard that is already labelled
 # (both of its files there, and exactly the rows it should hold: they are compared with the gallery's own groups) is kept and costs a second, so a
 # requeue or a resubmission never labels twice. The merge names the shards that are missing, then any that is not the one it should be, and writes
 # nothing; the cross-check is the script's, as in the GPU job: on any difference the job fails (exit 1), labels_status stays pending, and the labels
@@ -27,9 +29,10 @@
 #
 # It refuses (an `ERROR ...` line, exit 1) when: BUILD_ID is not one plain name; BUDGET_S, CANARY or SHARDS is not a whole number, or MERGE is not 0 or 1; a shard job
 # is not an array task or its task id is not below SHARDS; CHAT_HOME, the gallery or its manifest.json is missing; the gallery resolves into an outputs
-# directory or under the thesis checkout (R8); the gallery is already labelled (labels_status done, checked before any raw log is opened); the CheXbert venv or the
-# reference dump's refs.txt or chexbert_labels.json is missing. The script then refuses a gallery whose gate_rk.equal is not true, and a reference that does not
-# match the gallery, before the labeller is built.
+# directory or under the thesis checkout (R8); the gallery is already labelled (labels_status done, checked before any raw log is opened); the CheXbert venv, the
+# labelling script (a sync that did not happen) or the reference dump's refs.txt or chexbert_labels.json is missing. The script then refuses a gallery whose
+# gate_rk.equal is not true, and a reference that does not match the gallery, before the labeller is built; and the merge checks R8 again before it writes
+# anything, from a fresh read of the manifest (a GPU job and a merge can both start on a pending gallery; the one that ends second refuses).
 # R7: as in the GPU wrapper. The job log carries only === lines, [labels], RESULT and ERROR lines of the shapes in LABEL_SHAPES below (the same list; the two
 # submit lines the GPU wrapper prints name this wrapper, which is repo code), and `=== label lines withheld: N ===`. The raw stdout and stderr go to
 # ${GALLERY}/labels_shard_<i>.log and ${GALLERY}/labels_merge.log and are never printed. Read a job with
@@ -111,6 +114,7 @@ LABEL_SHAPES='^\[labels\] mode=single$
 ^\[labels\] shard [0-9]{1,3} of [0-9]{1,3} kept: already labelled$
 ^\[labels\] wrote (labels\.npy|labels_unverified\.npy|label_names\.json|labels_check\.json|labels_shard_[0-9]{1,3}\.npy|labels_shard_[0-9]{1,3}_rows\.npy)$
 ^\[labels\] mismatch split: own_text=[0-9]{1,7} shared_text=[0-9]{1,7}$
+^\[labels\] test_rows_sharing_a_text=[0-9]{1,7}$
 ^\[labels\] labels_status=(done|pending)$
 ^RESULT \{"refs_mismatch":[0-9]{1,7},"labels_mismatch":[0-9]{1,7}\}$
 ^RESULT \{"groups":[0-9]{1,7},"rows":[0-9]{1,7},"labelling_s":[0-9]{1,7}\}$
@@ -134,6 +138,8 @@ fi
 [ -d "${CHAT_HOME}" ] || fail "CHAT_HOME does not exist: run chat_cluster_setup_h100.sh first"
 [ -f "${GALLERY}/manifest.json" ] || fail "the gallery has no manifest.json: build it first (build_retrieval_gallery_h100.sh)"
 [ -f "${VENV_ACTIVATE}" ] || fail "the CheXbert venv is missing: run setup_chexbert_venv_h100.sh first"
+# Python answers a script it cannot find with exit 2, the code this wrapper reads as "use more shards": say what is wrong instead.
+[ -f scripts/label_gallery_reports.py ] || fail "label_gallery_reports.py is missing from this tree: run chat_remote.sh sync first"
 
 # The CheXbert environment of score_chexbert_h100.sh (D24, see the header): HF_HOME is left alone.
 source "${VENV_ACTIVATE}"
@@ -173,11 +179,20 @@ tr '\r' '\n' < "${LOG}" | grep -aE "${LABEL_SHAPES}" | tail -n 60 || true
 WITHHELD="$(tr '\r' '\n' < "${LOG}" | grep -aE '^(\[labels\] |RESULT |ERROR|=== )' | grep -avcE "${LABEL_SHAPES}" || true)"
 case "${WITHHELD}" in ''|*[!0-9]*) WITHHELD=unknown ;; esac
 echo "=== label lines withheld: ${WITHHELD} ==="
-if [ "${rc}" -eq 2 ]; then
+# Exit 2 is the canary's only if the script's own canary line, of its known shape, is in the raw log: python itself exits 2 when it cannot
+# open the script, and a library may too. Without the line it is a failure like any other, and the wrapper's own exit is 1, so that an exit
+# 2 of this wrapper always means "this shard needs more shards". (The merge has no canary: for it exit 2 is always a failure.)
+CANARY_SEEN="$(tr '\r' '\n' < "${LOG}" | grep -aE "${LABEL_SHAPES}" | grep -c '^\[labels\] canary: ' || true)"
+case "${CANARY_SEEN}" in ''|*[!0-9]*) CANARY_SEEN=0 ;; esac
+if [ "${rc}" -eq 2 ] && [ "${CANARY_SEEN}" -ge 1 ]; then
   echo "=== the canary projects past the ${BUDGET_S} s budget: this shard cannot finish in its time limit, use more shards (SHARDS=16, --array=0-15) ==="
   exit 2
 fi
-if [ "${rc}" -ne 0 ]; then echo "ERROR labels exit=${rc}"; exit "${rc}"; fi
+if [ "${rc}" -ne 0 ]; then
+  echo "ERROR labels exit=${rc}"
+  if [ "${rc}" -eq 2 ]; then exit 1; fi
+  exit "${rc}"
+fi
 if [ "${MODE}" = shard ]; then
   echo "=== END labels shard ${SLURM_ARRAY_TASK_ID} of ${SHARDS}: labelled or kept, wall_s=${SECONDS} ==="
 else

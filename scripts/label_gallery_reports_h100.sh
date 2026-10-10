@@ -25,11 +25,15 @@
 # It refuses (an `ERROR ...` line, exit 1) when: BUILD_ID is not one plain name, or BUDGET_S or CANARY is not a whole number; CHAT_HOME, the gallery or its
 # manifest.json is missing; the gallery resolves into an outputs directory or under the thesis checkout (R8); the gallery is already labelled
 # (labels_status done: a finished labelling is never overwritten, and this is checked before the raw log is opened, so a finished job's log is not
-# replaced); the CheXbert venv, or the reference dump's refs.txt or chexbert_labels.json, is missing. The script itself then refuses a gallery whose
-# gate_rk.equal is not true in both manifest.json and gate_rk.json, and a reference that does not match the gallery, before the labeller is built; and
-# its cross-check, run last, fails the job (exit 1, labels_status stays pending, the labels kept as labels_unverified.npy) on any difference. A partial run
-# (shards of the CPU path, an earlier cross-check that failed) may be completed: labels_status is then still pending. A requeue starts the labelling
-# again and replaces the raw log.
+# replaced); the CheXbert venv, the labelling script (a sync that did not happen) or the reference dump's refs.txt or chexbert_labels.json is
+# missing. The script itself then refuses a gallery whose gate_rk.equal is not true in both manifest.json and gate_rk.json, and a reference that does
+# not match the gallery, before the labeller is built; it checks R8 again at the end, before it writes anything, from a fresh read of the manifest (a
+# GPU job and a CPU merge can both start on a pending gallery; the one that ends second refuses); and its cross-check, run last, fails the job (exit 1,
+# labels_status stays pending, the labels kept as labels_unverified.npy) on any difference. A partial run (shards of the CPU path, an earlier
+# cross-check that failed) may be completed: labels_status is then still pending. A requeue starts the labelling again and replaces the raw log.
+# Exit codes of this wrapper: 0 labelled; 2 only ever the hand-over to the CPU path (the venv's torch sees no GPU, or the script exited 2 and its
+# canary line, which says it projected past the budget, is in the raw log); 1 any refusal or failure, an exit 2 of the script without its canary
+# line included (python itself exits 2 for a script it cannot open): that one is printed `ERROR labels exit=2`, and nothing hands over.
 # R7: the job log carries only === lines that name no path (the two submit lines of an exit 2 name the CPU wrapper, which is repo code),
 # [labels], RESULT and ERROR lines of the shapes in LABEL_SHAPES below (an allowlist: an id or a piece of a report on a [labels] line is no known shape,
 # whatever the script or the libraries print, and `=== label lines withheld: N ===` counts what was not shown), and ERROR lines with a class name or
@@ -100,6 +104,7 @@ LABEL_SHAPES='^\[labels\] mode=single$
 ^\[labels\] shard [0-9]{1,3} of [0-9]{1,3} kept: already labelled$
 ^\[labels\] wrote (labels\.npy|labels_unverified\.npy|label_names\.json|labels_check\.json|labels_shard_[0-9]{1,3}\.npy|labels_shard_[0-9]{1,3}_rows\.npy)$
 ^\[labels\] mismatch split: own_text=[0-9]{1,7} shared_text=[0-9]{1,7}$
+^\[labels\] test_rows_sharing_a_text=[0-9]{1,7}$
 ^\[labels\] labels_status=(done|pending)$
 ^RESULT \{"refs_mismatch":[0-9]{1,7},"labels_mismatch":[0-9]{1,7}\}$
 ^RESULT \{"groups":[0-9]{1,7},"rows":[0-9]{1,7},"labelling_s":[0-9]{1,7}\}$
@@ -118,6 +123,8 @@ echo "=== job=${SLURM_JOB_ID:-local} restart=${SLURM_RESTART_COUNT:-0} node=$(ho
 [ -d "${CHAT_HOME}" ] || fail "CHAT_HOME does not exist: run chat_cluster_setup_h100.sh first"
 [ -f "${GALLERY}/manifest.json" ] || fail "the gallery has no manifest.json: build it first (build_retrieval_gallery_h100.sh)"
 [ -f "${VENV_ACTIVATE}" ] || fail "the CheXbert venv is missing: run setup_chexbert_venv_h100.sh first"
+# Python answers a script it cannot find with exit 2, the code this wrapper reads as the hand-over to the CPU path: say what is wrong instead.
+[ -f scripts/label_gallery_reports.py ] || fail "label_gallery_reports.py is missing from this tree: run chat_remote.sh sync first"
 
 # The CheXbert environment of score_chexbert_h100.sh (D24, see the header): HF_HOME is left alone.
 source "${VENV_ACTIVATE}"
@@ -169,10 +176,19 @@ tr '\r' '\n' < "${GALLERY}/labels.log" | grep -aE "${LABEL_SHAPES}" | tail -n 60
 WITHHELD="$(tr '\r' '\n' < "${GALLERY}/labels.log" | grep -aE '^(\[labels\] |RESULT |ERROR|=== )' | grep -avcE "${LABEL_SHAPES}" || true)"
 case "${WITHHELD}" in ''|*[!0-9]*) WITHHELD=unknown ;; esac
 echo "=== label lines withheld: ${WITHHELD} ==="
-if [ "${rc}" -eq 2 ]; then
+# Exit 2 is the canary's only if the script's own canary line, of its known shape, is in the raw log: python itself exits 2 when it cannot
+# open the script, and a library may too. Without the line it is a failure like any other, and the wrapper's own exit is 1, so that an exit
+# 2 of this wrapper always means "submit the CPU path".
+CANARY_SEEN="$(tr '\r' '\n' < "${GALLERY}/labels.log" | grep -aE "${LABEL_SHAPES}" | grep -c '^\[labels\] canary: ' || true)"
+case "${CANARY_SEEN}" in ''|*[!0-9]*) CANARY_SEEN=0 ;; esac
+if [ "${rc}" -eq 2 ] && [ "${CANARY_SEEN}" -ge 1 ]; then
   echo "=== the canary projects past the ${BUDGET_S} s budget: F1CheXbert is too slow here for one job ==="
   use_the_cpu_path
   exit 2
 fi
-if [ "${rc}" -ne 0 ]; then echo "ERROR labels exit=${rc}"; exit "${rc}"; fi
+if [ "${rc}" -ne 0 ]; then
+  echo "ERROR labels exit=${rc}"
+  if [ "${rc}" -eq 2 ]; then exit 1; fi
+  exit "${rc}"
+fi
 echo "=== END labels ${BUILD_ID}: labelled and cross-checked, wall_s=${SECONDS} ==="
