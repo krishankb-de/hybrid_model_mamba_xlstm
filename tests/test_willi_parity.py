@@ -7858,3 +7858,255 @@ def test_chat_app_smoke_wrapper_passes_the_bash_syntax_check():
     for shell in set(shells):
         done = subprocess.run([shell, "-n", str(REPO_ROOT / "scripts" / "chat_app_smoke_h100.sh")], capture_output=True, text=True)
         assert done.returncode == 0, (shell, done.stderr)
+
+
+# ── CHAT_UI_PLAN.md P5-F: the live-path gates job ─────────────────────────────
+# Static pins on scripts/chat_retrieval_gates_h100.sh and scripts/chat_retrieval_gates.py. Their behaviour (the three checks, every
+# refusal, R7 output, the labeller's life and death, the guards) is rehearsed for real in tests/test_chat_retrieval_gates.py: the real
+# script, on the tiny stack, inside the real wrapper, over the real app.labeler.
+
+_GATES_SH = "chat_retrieval_gates_h100.sh"
+# The labeller, started as the P7-B serve wrapper starts it (D24: the CheXbert environment of score_chexbert_h100.sh, its web overlay, no
+# HF_HOME), on a free port of the loopback interface, in the background, its raw output in a file.
+_GATES_LABELLER = ('env -u HF_HOME HF_HUB_OFFLINE="${CHEXBERT_HF_HUB_OFFLINE:-0}" PYTHONPATH=.chat_deps_chexbert .venv_chexbert/bin/python '
+                   '-m uvicorn app.labeler:app --host 127.0.0.1 --port "${LABELER_PORT}" > "${OUT}/labeler.log" 2>&1 &')
+# The driver, in the main venv with its own overlay: the published protocol is the script's, so the wrapper passes paths and the thread count.
+_GATES_DRIVER = ('PYTHONPATH=.chat_deps python scripts/chat_retrieval_gates.py --checkpoint "${CHECKPOINT}" --model-config "${MODEL_CONFIG}" '
+                 '--gallery "${GALLERY}" --data "${DATA}" --published-labels "${REFERENCE_DIR}/chexbert_labels.json" '
+                 '--published-hyps "${REFERENCE_DIR}/hyps.txt" --published-refs "${REFERENCE_DIR}/refs.txt" --labeler-url "${LABELER_URL}" '
+                 '--out "${OUT}" --threads "${THREADS}" > "${OUT}/gates.log" 2>&1 || rc=$?')
+_GATES_FIRST_STEP = 'LABELER_PORT="$(python -c'
+
+
+def _gates_text() -> str:
+    return (REPO_ROOT / "scripts" / _GATES_SH).read_text()
+
+
+def test_chat_gates_wrapper_is_cpu_only_on_the_renamed_partition_and_leaves_the_arm_node_out():
+    """P5-F. The proven CPU-only combination (--qos=aisc, no GPU) on the renamed partition, the three nodes that cannot run it excluded (ga03
+    is ARM and the venvs are x86), 8 CPUs and 32 GB for a CPU engine, an hour, logs where every other wrapper puts them, the standard cd
+    line. No requeue: a job of minutes with a results directory of its own."""
+    src = _gates_text()
+    options, flags = _sbatch_options(src)
+    assert options == {"--partition": "pot-hpi-aisc-batch", "--account": "aisc", "--qos": "aisc", "--exclude": "ga03,gx17v1,gx13v1",
+                       "--cpus-per-task": "8", "--mem": "32G", "--time": "01:00:00", "--job-name": "chat_gates",
+                       "--output": "logs/%x_%j.log", "--error": "logs/%x_%j.log"}, options
+    assert flags == [], flags
+    code = _eos_wrapper_code(src)
+    assert not [l for l in code if "--gpus" in l or "--gres" in l], "CPU-only job"
+    assert not [l for l in src.splitlines() if l.startswith("#SBATCH") and "--array" in l]
+    assert 'cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"' in code
+    assert "set -euo pipefail" in code and "mkdir -p logs" in code
+
+
+def test_chat_gates_wrapper_starts_the_labeller_as_the_serve_wrapper_does_on_loopback_only():
+    """P5-F, D24. Exactly the command of the brief: the CheXbert venv and its overlay, no HF_HOME (the weights are in the default Hugging Face
+    cache), HF_HUB_OFFLINE defaulting to 0 as in score_chexbert_h100.sh, the loopback interface, a free port, in the background, its raw
+    output in a file. Never a non-loopback address: nothing here is behind a token."""
+    src = _gates_text()
+    lines = _logical_lines(src)
+    assert [l for l in lines if "uvicorn" in l] == [_GATES_LABELLER]
+    assert "0.0.0.0" not in src and "--host 127.0.0.1" in _GATES_LABELLER
+    thesis = (REPO_ROOT / "scripts" / "score_chexbert_h100.sh").read_text()
+    assert 'export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"' in thesis and "HF_HOME" not in "\n".join(_eos_wrapper_code(thesis))
+    assert 'LABELER_PORT="$(python -c \'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])\')" || fail "no free loopback port"' in lines
+    assert "case \"${LABELER_PORT}\" in ''|*[!0-9]*) fail \"no free loopback port\" ;; esac" in lines
+    assert 'LABELER_URL="http://127.0.0.1:${LABELER_PORT}"' in lines
+    assert "LABELER_PID=$!" in lines and lines.index("LABELER_PID=$!") == lines.index(_GATES_LABELLER) + 1
+
+
+def test_chat_gates_wrapper_waits_for_healthz_with_a_bound_and_stops_the_labeller_on_every_exit_path():
+    """P5-F. The first model load can take minutes, so the wait is one request at a time (a probe the shell can be interrupted in: it runs in
+    the background and is waited for), bounded by LABELER_WAIT_S, and it notices a labeller that died. The labeller is stopped by a trap on
+    EXIT (every `fail`, every `exit`, a failed command under set -e, the normal end) and on TERM and INT; the stop asks, waits a few
+    seconds, and then insists (a uvicorn waiting for a model to load does not leave on SIGTERM)."""
+    code = "\n".join(_logical_lines(_gates_text()))              # continuations joined: the two long commands are one line each
+    assert "trap stop_labeller EXIT" in code
+    assert "trap 'stop_labeller; exit 143' TERM" in code and "trap 'stop_labeller; exit 130' INT" in code
+    stop = code[code.index("stop_labeller() {"):code.index("trap stop_labeller EXIT")]
+    assert stop.index('kill "${LABELER_PID}"') < stop.index("kill -0") < stop.index("kill -KILL") < stop.index('wait "${LABELER_PID}"')
+    assert 'LABELER_PID=""' in stop and "for _ in 1 2 3; do" in stop, "bounded: three seconds of grace"
+    assert code.index("trap stop_labeller EXIT") < code.index(_GATES_LABELLER)
+    assert 'DEADLINE=$((SECONDS + LABELER_WAIT_S))' in code and 'while [ "${SECONDS}" -lt "${DEADLINE}" ]; do' in code
+    assert 'kill -0 "${LABELER_PID}" 2>/dev/null || break' in code, "a labeller that died is not waited for"
+    assert "/healthz" in code and 'python -c "${HEALTH_PROBE}" "${LABELER_URL}" "${LEFT}" > /dev/null 2>&1 &' in code
+    assert 'if wait "${PROBE_PID}"; then READY=1; break; fi' in code
+    assert 'fail "labeller not ready after ${LABELER_WAIT_S} s"' in code and 'fail "labeller exit=${LABELER_RC}"' in code
+    assert code.index("stop_labeller\n", code.index(_GATES_DRIVER)) > code.index(_GATES_DRIVER), "stopped as soon as the driver is done, before the report"
+
+
+def test_chat_gates_wrapper_runs_the_driver_in_the_main_venv_with_its_own_overlay_and_the_published_defaults():
+    """P5-F. `.venv` with .chat_deps (the labeller's overlay is on the labeller's command only: no PYTHONPATH is ever exported), one
+    command with every argument the driver needs and none it does not (--engine is for the laptop tests), the engine offline from the scratch
+    Hugging Face cache, one thread per CPU of the allocation, and the loopback address kept off any proxy."""
+    src = _gates_text()
+    lines = _logical_lines(src)
+    assert [l for l in lines if "scripts/chat_retrieval_gates.py" in l and "python" in l] == [_GATES_DRIVER]
+    assert "--engine" not in _GATES_DRIVER
+    code = "\n".join(lines)
+    assert not re.search(r"export\s+[^\n]*PYTHONPATH", code), "an overlay is put on one command, never on the shell"
+    assert 'export HF_HOME="${SCRATCH_ROOT}/.hf" HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1' in code
+    assert 'export OMP_NUM_THREADS="${THREADS}" MKL_NUM_THREADS="${THREADS}"' in code
+    assert 'THREADS="${SLURM_CPUS_PER_TASK:-8}"' in code
+    assert 'export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,${NO_PROXY}}" no_proxy="127.0.0.1,localhost${no_proxy:+,${no_proxy}}"' in code
+    assert code.index('source "${VENV_ACTIVATE}"') < code.index("export HF_HOME=") < code.index(_GATES_FIRST_STEP) < code.index(_GATES_DRIVER)
+    assert code.index(_GATES_LABELLER) < code.index(_GATES_DRIVER), "the labeller is up before the driver asks it anything"
+
+
+def test_chat_gates_wrapper_defaults_are_the_plans_and_agree_with_the_other_chat_wrappers_and_only_the_documented_names_are_levers():
+    """P5-F. The default report model and its checkpoint, the dataset, the scratch cache and CHAT_HOME as the gallery build has them; the
+    gallery's build id and the published dump as the labelling has them. GALLERY, OUT and THREADS are derived and never levers of their own
+    (sbatch exports the submitting shell, and OUT is a likely name)."""
+    src = _gates_text()
+    code = "\n".join(_eos_wrapper_code(src))
+    build = (REPO_ROOT / "scripts" / "build_retrieval_gallery_h100.sh").read_text()
+    label = (REPO_ROOT / "scripts" / "label_gallery_reports_cpu_h100.sh").read_text()
+    for line in ('SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"', 'VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"',
+                 'CHAT_HOME="${CHAT_HOME:-/sc/home/$USER/chat_sessions}"', 'DATA="${DATA:-/sc/home/$USER/dataset/mimic_full}"',
+                 'CHECKPOINT="${CHECKPOINT:-./outputs/h100_report_gen_m3_tower13d_s42/checkpoints/last.ckpt}"',
+                 'MODEL_CONFIG="${MODEL_CONFIG:-hybrid_150m_m3_rrg}"'):
+        assert line in code and line in build, line
+    for line in ('BUILD_ID="${BUILD_ID:-g13d_m3_v1}"', 'REFERENCE_DIR="${REFERENCE_DIR:-results/report_gen_m3_test_split_s42}"'):
+        assert line in code and line in label, line
+    assert 'LABELER_WAIT_S="${LABELER_WAIT_S:-600}"' in code
+    assert set(re.findall(r'(?m)^([A-Z][A-Z0-9_]*)="\$\{\1:-', src)) == {
+        "SCRATCH_ROOT", "VENV_ACTIVATE", "CHAT_HOME", "DATA", "CHECKPOINT", "MODEL_CONFIG", "BUILD_ID", "REFERENCE_DIR", "LABELER_WAIT_S"}
+    assert 'GALLERY="${CHAT_HOME}/gallery/${BUILD_ID}"' in code and 'OUT="results/chat_retrieval_gates_${SLURM_JOB_ID:-local}"' in code
+    assert code.count("CHEXBERT_HF_HUB_OFFLINE") == 1, "the labeller's own offline switch, named in its command and nowhere else"
+    header = "\n".join(l for l in src.splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))
+    for name in ("BUILD_ID", "CHECKPOINT", "MODEL_CONFIG", "DATA", "REFERENCE_DIR", "LABELER_WAIT_S", "CHEXBERT_HF_HUB_OFFLINE"):
+        assert name in header, name + " is a lever the header documents"
+
+
+def test_chat_gates_wrapper_keeps_the_raw_output_of_both_processes_in_files_and_prints_only_what_may_be_printed():
+    """P5-F, R7. The driver's stdout and stderr (a traceback can hold a report or a path) and the labeller's go to files in the results
+    directory, never to the log; the job log gets the driver's lines of a known shape, a count of the others, and wrapper-authored lines
+    that start with === or ERROR and name no path."""
+    src = _gates_text()
+    code = _eos_wrapper_code(src)
+    text = "\n".join(code)
+    assert text.count('> "${OUT}/gates.log" 2>&1') == 1 and text.count('> "${OUT}/labeler.log" 2>&1') == 1
+    assert "tr '\\r' '\\n' < \"${OUT}/gates.log\" | grep -aE \"${GATES_SHAPES}\" | tail -n 60 || true" in text
+    assert ("WITHHELD=\"$(tr '\\r' '\\n' < \"${OUT}/gates.log\" | grep -aE '^(\\[gates\\] |RESULT |ERROR|=== )' | grep -avcE \"${GATES_SHAPES}\" || true)\""
+            in text)
+    assert "case \"${WITHHELD}\" in ''|*[!0-9]*) WITHHELD=unknown ;; esac" in text, "a count that could not be made is not a zero"
+    assert 'echo "=== gates lines withheld: ${WITHHELD} ==="' in text
+    assert "RESULTS=\"$(tr '\\r' '\\n' < \"${OUT}/gates.log\" | grep -aE \"${GATES_SHAPES}\" | grep -c '^RESULT ' || true)\"" in text
+    assert 'fail "gates printed no RESULT line"' in text, "exit 0 without its result is a failure, not a pass"
+    echoed, failed = re.findall(r'echo "([^"]*)"', text), re.findall(r'\bfail "([^"]*)"', text)
+    assert len(echoed) + len(failed) >= 20, (echoed, failed)
+    for line in echoed:
+        assert re.match(r"(=== |ERROR )", line), line
+    for line in echoed + failed:
+        assert "/" not in line, line                                          # a repo-relative path is a path too
+        for var in ("GALLERY", "OUT", "CHAT_HOME", "DATA", "CHECKPOINT", "REFERENCE_DIR", "SCRATCH_ROOT", "VENV_ACTIVATE", "SLURM_SUBMIT_DIR"):
+            assert "${" + var + "}" not in line, (var, line)
+    assert 'fail() { echo "ERROR $*"; exit 1; }' in src
+    for line in _logical_lines(src):
+        if line != _GATES_LABELLER:                               # the one command that starts with env: the labeller's own environment
+            assert not re.match(r"\s*(date|nvidia-smi|env|printenv|cat|tail|head|less)\b", line), line
+    assert "set -x" not in src and "set -o xtrace" not in src
+    assert "grep -av '/'" not in src, "the blacklist is not the filter"
+
+
+def test_chat_gates_wrapper_holds_one_allowlist_and_it_is_not_a_blacklist():
+    """P5-F. The shapes of the lines the driver prints, anchored, one per line (tests/test_chat_retrieval_gates.py runs them through grep
+    over everything the driver prints and over ids, text and paths); no pattern is a wildcard."""
+    found = re.search(r"^GATES_SHAPES='(.*?)'$", _gates_text(), re.M | re.S)
+    assert found
+    patterns = found.group(1).split("\n")
+    assert "" not in patterns and all(p.startswith("^") and p.endswith("$") for p in patterns)
+    assert not [p for p in patterns if re.search(r"(\.\*|\.\+|\\S|\\w|\\d)", p)], "a wildcard in an allowlist"
+    assert {p.split(" ")[0] for p in patterns} == {"^\\[gates\\]", "^RESULT", "^ERROR", "^==="}
+    summary = (REPO_ROOT / "scripts" / "chat_remote.sh").read_text()
+    assert "\\[(probe|golden|gallery|labels|gates|server|setup|compile)\\]" in summary, "`summary` shows [gates] lines"
+
+
+def test_chat_gates_wrapper_prints_its_sync_stamp_first_and_with_the_p9_g3_snippet_verbatim():
+    """P5-F provenance: the commit and cleanliness `chat_remote.sh sync` last shipped, read from .sync_stamp, as the very first line, by the
+    snippet scripts/train_report_eos_h100.sh (P9-G3) carries, copied exactly."""
+    train = _eos_wrapper_text()
+    start = train.index('SYNC="unknown"')
+    snippet = train[start:train.index('echo "=== sync ${SYNC} ==="', start) + len('echo "=== sync ${SYNC} ==="')]
+    assert ".sync_stamp" in snippet and snippet.count("\n") >= 6
+    src = _gates_text()
+    assert snippet in src
+    code = "\n".join(_eos_wrapper_code(src))
+    sync = code.index('echo "=== sync ${SYNC} ==="')
+    assert code.index('echo "') == sync, "something is printed before the sync line"
+    assert code.index("python ") > sync and code.index("source ") > sync and ".sync_stamp" in code[:sync]
+
+
+def test_chat_gates_wrapper_checks_everything_before_a_process_starts_and_never_deletes_or_installs():
+    """P5-F, R8. Every guard sits before the first process (the free-port probe is the first python), one plain name for the build and the
+    model, a whole number for the wait, CHAT_HOME, the gallery and its decided gate and the build's own test embeddings, results, both venvs
+    and overlays (their sentinels), the script itself (python answers a script it cannot find with exit 2), and every input. The one
+    directory the job makes is its own, under results/ through the symlink, after the guards; nothing is removed, linked or installed."""
+    src = _gates_text()
+    code_lines = _eos_wrapper_code(src)
+    code = "\n".join(code_lines)
+    guards = ['[[ "${BUILD_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "BUILD_ID must be one plain name: letters, digits, dot, dash, underscore"',
+              '[[ "${MODEL_CONFIG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "MODEL_CONFIG must be one plain name: letters, digits, dot, dash, underscore"',
+              '[[ "${LABELER_WAIT_S}" =~ ^[0-9]{1,5}$ ]] || fail "LABELER_WAIT_S must be a whole number of seconds, at most 5 digits"',
+              '[ -d "${CHAT_HOME}" ] || fail "CHAT_HOME does not exist: run chat_cluster_setup_h100.sh first"',
+              '[ -f "${GALLERY}/manifest.json" ] || fail "the gallery has no manifest.json: build it first (build_retrieval_gallery_h100.sh)"',
+              """grep -Eq '"equal":[[:space:]]*true' "${GALLERY}/manifest.json" || fail "the gallery's R@k gate is not decided equal: it cannot be used" """.strip(),
+              '[ -f "${GALLERY}/test_img_emb.npy" ] || fail "the gallery has no test_img_emb.npy: it is the build\'s own embedding of the test images"',
+              '[ -d results ] || fail "results is missing: run chat_cluster_setup_h100.sh first"',
+              '[ -f "${VENV_ACTIVATE}" ] || fail "the main venv is missing: run chat_cluster_setup_h100.sh first"',
+              '[ -x .venv_chexbert/bin/python ] || fail "the CheXbert venv is missing: run setup_chexbert_venv_h100.sh first"',
+              '[ -f .chat_deps/.setup_ok ] && [ -f .chat_deps_chexbert/.setup_ok ] || fail "the web overlays are not set up: run chat_cluster_setup_h100.sh first"',
+              '[ -f scripts/chat_retrieval_gates.py ] || fail "chat_retrieval_gates.py is missing from this tree: run chat_remote.sh sync first"',
+              '[ -f "${CHECKPOINT}" ] || fail "the report model\'s checkpoint was not found"',
+              '[ -f "${DATA}/train.parquet" ] || fail "train.parquet was not found in DATA"',
+              '[ -f "${DATA}/test.parquet" ] || fail "test.parquet was not found in DATA"',
+              '[ -f "${REFERENCE_DIR}/hyps.txt" ] || fail "the published dump has no hyps.txt"',
+              '[ -f "${REFERENCE_DIR}/refs.txt" ] || fail "the published dump has no refs.txt"',
+              '[ -f "${REFERENCE_DIR}/chexbert_labels.json" ] || fail "the published dump has no chexbert_labels.json"']
+    first = code.index(_GATES_FIRST_STEP)
+    for guard in guards:
+        assert 0 <= code.index(guard) < first, guard
+    mkdir = 'mkdir -p "${OUT}" 2>/dev/null || fail "the results directory cannot be made"'
+    assert [l for l in code_lines if "mkdir" in l] == ["mkdir -p logs", mkdir]
+    assert max(code.index(g) for g in guards) < code.index(mkdir) < first
+    assert not re.search(r"(^|[\s;&|(])rm(\s|$)", code, re.M) and "--delete" not in code and not re.search(r"\bln\s", code), "additive only"
+    for needle in ("pip install", "pip3 install", "uv pip", "uv add", "-m pip", "conda install", "--target", "easy_install"):
+        assert needle not in src, needle
+    for line in code_lines:
+        assert not re.match(r"\s*(mv|cp|chmod|touch)\b", line), line
+
+
+def test_chat_gates_header_documents_the_submit_and_summary_lines_and_the_expected_job_log():
+    header = "\n".join(l for l in _gates_text().splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))
+    assert "bash scripts/chat_remote.sh sync && bash scripts/chat_remote.sh submit scripts/chat_retrieval_gates_h100.sh" in header
+    assert "bash scripts/chat_remote.sh summary logs/chat_gates_<jobid>.log" in header
+    for needle in ("self-retrieval", "own-rank", "labeller", "RESULT", "[gates]", "gates.json", "gates.log", "labeler.log", "exit 1"):
+        assert needle in header, needle
+
+
+def test_chat_gates_wrapper_passes_the_bash_syntax_check():
+    import shutil
+    import subprocess
+    shells = [s for s in ("/bin/bash", shutil.which("bash")) if s and os.path.exists(s)]
+    assert shells
+    for shell in set(shells):
+        done = subprocess.run([shell, "-n", str(REPO_ROOT / "scripts" / _GATES_SH)], capture_output=True, text=True)
+        assert done.returncode == 0, (shell, done.stderr)
+
+
+def test_chat_retrieval_gates_imports_only_the_standard_library_numpy_pandas_and_the_app():
+    """P5-F. The driver runs in `.venv` with the .chat_deps overlay beside the engine it drives: everything it needs of the engine, the
+    gallery and the labeller client it takes from app/ (the code a turn runs, none of it re-implemented), and it brings no heavy import of its
+    own (no torch, no scripts.*: app.engine has loaded what it needs)."""
+    if not hasattr(sys, "stdlib_module_names"):
+        pytest.skip("sys.stdlib_module_names needs Python 3.10")
+    path = REPO_ROOT / "scripts" / "chat_retrieval_gates.py"
+    roots = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):       # walk reaches the function-level imports too
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            roots.add("." if node.level else (node.module or "").split(".")[0])
+    allowed = set(sys.stdlib_module_names) | {"numpy", "pandas", "app"}
+    assert {"numpy", "pandas", "app"} <= roots, roots
+    assert roots <= allowed, sorted(roots - allowed)
