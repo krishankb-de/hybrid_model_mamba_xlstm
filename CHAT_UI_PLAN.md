@@ -3379,11 +3379,34 @@ Laptop tests use a fake `f1chexbert` module and a tiny gallery: representatives 
 
 Commit `"P5-C: CheXbert labels for the gallery, cross-checked"`. Then `sbatch scripts/label_gallery_reports_h100.sh`; tick with job id, mismatches (expected 0), groups labelled, wall time.
 
-- [ ] **P5-D** `app/gallery.py`: load with the tower check, image→image, image→report over groups, own rank (chapter protocol), identical-image lookup, test studies.
+- [x] **P5-D** `app/gallery.py`: load with the tower check, image→image, image→report over groups, own rank (chapter protocol), identical-image lookup, test studies.
 
 *Carried (controller, 2026-10-10):*
 - **From the P5-B review.** `Gallery.open` refuses a gallery whose `manifest.json` lacks `gate_rk.equal == true` (a build whose gate failed or never ran), as well as one whose tower hash differs.
 - **Tiny sizes.** P5-B's tiny gallery has 200 images, 40 test rows and 240 report rows. Read every size from `manifest["counts"]`, never from this plan's numbers.
+
+*As built (7f1fb34, 637b39b; reviewed, fix round 1 clean):*
+- **`Gallery.open(root, expect_tower_sha256=None)` refusals** (`GalleryMismatch`), checked cheapest first:
+  - a wrong tower hash;
+  - `gate_rk.equal is not True`;
+  - `img_proj_present is not False`;
+  - counts or missing files, named by basename only;
+  - layout violations.
+
+  Arrays load read-only, floats as float32 and ints as int64. Labels load only when `labels_status == "done"`.
+- **Queries.** `_query` validates the input and normalises it to unit length. k is clamped (images 0–12, reports 0–10).
+- **`own_report_rank`** returns `rank`, `rank_dedup`, `n_tied`, `hit_at_10` and the truthful protocol string.
+- **`facts()`** returns exactly `build_id`, `images`, `report_rows`, `report_groups` and `towers_identical`. The manifest itself is private (`_manifest`).
+- **Missing values.** Missing `view` and `study_id` become None.
+- **`nbytes`** counts arrays only. RSS runs about 1.2–1.5× higher.
+- **Tests.** `tests/test_app_gallery.py` has 244 tests. `tests/app_helpers.decide_gate` decides the tiny gallery's gate for later tests.
+- **Carried to P5-E:**
+  - pass the engine's tower hash to `open()`;
+  - send `facts()` only;
+  - `str()` the `test_study` image path.
+- **Carried to P5-F:**
+  - compare ranks from the same formula (or `rank_dedup` against the dedup-aware chapter numbers);
+  - add a numbers-only `Gallery.open` smoke job on the real gallery, which also reports the real `img_proj_present`.
 
 **Files:** create `app/gallery.py`, `tests/test_app_gallery.py`.
 
@@ -3422,6 +3445,9 @@ class Gallery:
         return {"rank": rank, "of": int(sims.shape[0]), "rank_dedup": 1 + int((sims > sims[same].max()).sum()),
                 "hit_at_10": rank <= 10,
                 "protocol": "i2t, official test split, strict pairing (compute_retrieval_metrics, groups=None)"}
+        # As built (P5-D fix 1): the string reads "i2t, official test split, strict pairing: a tied copy counts in this
+        # report's favour, while compute_retrieval_metrics(groups=None) breaks such ties by array position", and the
+        # result gains n_tied = #(sims == own) - 1 (rank is the all-ties-won end; rank + n_tied the all-ties-lost end).
 ```
 
 `image_neighbors` returns `rank, similarity, gallery_row, study_id, txt_row, image_url` (`/v1/gallery/images/<row>`) and `labels` (from `img_txt_row`). `find_identical(sha)` checks the train and test `file_sha256` maps. `test_study(row)` returns the image path, study id and the reference (`report_texts[n_train + row]`). `list_test_studies(query, limit)` filters on the study-id prefix.

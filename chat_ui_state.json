@@ -414,7 +414,7 @@
           "desc": "scripts/label_gallery_reports.py and _h100.sh (.venv_chexbert): labels.npy via group representatives; canary and projection; a 0-mismatch cross-check on the ..."
         },
         "P5-D": {
-          "done": false,
+          "done": true,
           "desc": "app/gallery.py: load with the tower check, image→image, image→report over groups, own rank (chapter protocol), identical-image lookup, test studies."
         },
         "P5-E": {
@@ -429,7 +429,10 @@
       "evidence": {
         "p5a_commit": "6bac709 (cherry-pick of 761def2)",
         "p5a_tests": "tests/test_app_labels.py (67) + tests/test_willi_parity.py::test_chexbert_service_imports_nothing_from_hybrid_xmamba",
-        "p5a_review": "approved, no fix round; reviewer 13 hostile requests 0 leaks, 19/19 mutants"
+        "p5a_review": "approved, no fix round; reviewer 13 hostile requests 0 leaks, 19/19 mutants",
+        "p5d_commits": "7f1fb34,637b39b",
+        "p5d_tests": "tests/test_app_gallery.py (244)",
+        "p5d_review": "fix round 1 clean; 120/120 mutants"
       },
       "verdict": null
     },
@@ -634,9 +637,10 @@
     "2026-10-10: 2026-10-10: P5-A merged (6bac709) and ticked; P9-G4 laptop part done (070390d, d8857d7, 8618316) with as-built + R4 prediction in the plan; P5-D/P5-C/P5-E carries recorded",
     "2026-10-10: 2026-10-10: P5-B merged (c079ac2, 49830a2); gallery job submitted 2632531 (chat_gallery, BUILD_ID=g13d_m3_v1, sync 49830a2 clean); read via chat_remote.sh state/summary logs/chat_gallery_2632531.log",
     "2026-10-10: 2026-10-10: P4-H merged (5afbf8b..24fda5a, validate All gates passed); dev server restarted on 24fda5a (pid 59835; /healthz code_version 24fda5a)",
-    "2026-10-10: P4-H Playwright e2e + 9 UI fixes + stale-server hardening, merged"
+    "2026-10-10: P4-H Playwright e2e + 9 UI fixes + stale-server hardening, merged",
+    "2026-10-10: P5-D gallery queries merged (truthful tie protocol, img_proj refusal, facts())"
   ],
-  "last_updated": "2026-10-10T02:06:24+02:00",
+  "last_updated": "2026-10-10T03:04:03+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
