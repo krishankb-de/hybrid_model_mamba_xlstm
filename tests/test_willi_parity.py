@@ -8122,3 +8122,218 @@ def test_chat_retrieval_gates_imports_only_the_standard_library_numpy_pandas_and
     allowed = set(sys.stdlib_module_names) | {"numpy", "pandas", "app"}
     assert {"numpy", "pandas", "app"} <= roots, roots
     assert roots <= allowed, sorted(roots - allowed)
+
+
+# ── CHAT_UI_PLAN.md P7-B: the serving wrappers ────────────────────────────────
+# Static pins on scripts/serve_chat_h100.sh (CPU) and its GPU twin scripts/serve_chat_gpu_h100.sh. Their behaviour (the line shapes, the token
+# and gallery refusals, the labeller fallback, the trap on TERM, the real CLI behind the real wrapper) is rehearsed for real in
+# tests/test_chat_server_job.py; the CLI they run is in tests/test_chat_server_cli.py. P7-F extends these pins.
+
+SERVE_WRAPPERS = ("serve_chat_h100.sh", "serve_chat_gpu_h100.sh")
+
+
+def _serve_text(name: str = "serve_chat_h100.sh") -> str:
+    return (REPO_ROOT / "scripts" / name).read_text()
+
+
+def _serve_code(name: str = "serve_chat_h100.sh") -> str:
+    return "\n".join(_gallery_wrapper_code(_serve_text(name)))
+
+
+def _sbatch_options(src: str):
+    options, flags = {}, []
+    for line in src.splitlines():
+        if line.startswith("#SBATCH"):
+            token = line.split()[1]
+            if "=" in token:
+                options[token.split("=", 1)[0]] = token.split("=", 1)[1]
+            else:
+                flags.append(token)
+    return options, flags
+
+
+def test_serve_chat_wrappers_follow_the_cluster_invariants():
+    """P7-B. The CPU job is the proven CPU-only combination (--qos=aisc); the GPU twin asks for one GPU through --gpus=1 and, as every GPU
+    wrapper, has no --qos and never a typed --gres. Both: the renamed partition, the three nodes that cannot run it excluded, a requeue
+    that appends to the SLURM log (without append a requeue truncates it), and logs where every other wrapper puts them."""
+    cpu_options, cpu_flags = _sbatch_options(_serve_text("serve_chat_h100.sh"))
+    assert cpu_options == {
+        "--partition": "pot-hpi-aisc-batch", "--account": "aisc", "--qos": "aisc", "--exclude": "ga03,gx17v1,gx13v1",
+        "--cpus-per-task": "8", "--mem": "32G", "--time": "24:00:00", "--job-name": "chat_server",
+        "--output": "logs/%x_%j.log", "--error": "logs/%x_%j.log", "--open-mode": "append"}, cpu_options
+    assert cpu_flags == ["--requeue"], cpu_flags
+    gpu_options, gpu_flags = _sbatch_options(_serve_text("serve_chat_gpu_h100.sh"))
+    expected = {k: v for k, v in cpu_options.items() if k != "--qos"}
+    expected.update({"--gpus": "1", "--mem": "48G", "--job-name": "chat_server_gpu"})
+    assert gpu_options == expected, gpu_options
+    assert gpu_flags == ["--requeue"], gpu_flags
+    for name in SERVE_WRAPPERS:
+        assert "--gres" not in _serve_text(name), "an untyped --gpus and a typed --gres do not mix"
+
+
+def test_the_gpu_serve_wrapper_is_the_cpu_wrapper_with_only_the_device_changed():
+    cpu = _gallery_wrapper_code(_serve_text("serve_chat_h100.sh"))
+    gpu = _gallery_wrapper_code(_serve_text("serve_chat_gpu_h100.sh"))
+    assert 'DEVICE="${DEVICE:-cpu}"' in cpu and 'DEVICE="${DEVICE:-cuda}"' in gpu
+    assert [l.replace('DEVICE="${DEVICE:-cpu}"', 'DEVICE="${DEVICE:-cuda}"') for l in cpu] == gpu, "the twins differ in more than the device"
+    assert "DEVICE=cuda" in _serve_text("serve_chat_gpu_h100.sh") and "--gpus=1" in _serve_text("serve_chat_gpu_h100.sh")
+
+
+def test_serve_chat_wrappers_prepare_like_the_other_chat_wrappers():
+    for name in SERVE_WRAPPERS:
+        code = _serve_code(name)
+        for needle in ('cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"', "set -euo pipefail",
+                       'SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"',
+                       'VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"', 'CHAT_HOME="${CHAT_HOME:-$HOME/chat_sessions}"',
+                       'export HF_HOME="${SCRATCH_ROOT}/.hf" HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1',
+                       'export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}" MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"',
+                       'mkdir -p "${CHAT_HOME}" && chmod 700 "${CHAT_HOME}"', 'source "${VENV_ACTIVATE}"'):
+            assert needle in code, (name, needle)
+
+
+def test_serve_chat_wrappers_print_the_sync_stamp_first_with_the_p9_g3_snippet_verbatim():
+    """Provenance, as in every chat wrapper: the snippet scripts/train_report_eos_h100.sh carries, copied exactly, as the very first line."""
+    train = _eos_wrapper_text()
+    start = train.index('SYNC="unknown"')
+    snippet = train[start:train.index('echo "=== sync ${SYNC} ==="', start) + len('echo "=== sync ${SYNC} ==="')]
+    for name in SERVE_WRAPPERS:
+        assert snippet in _serve_text(name), name
+        code = _serve_code(name)
+        sync = code.index('echo "=== sync ${SYNC} ==="')
+        assert code.index('echo "') == sync, "something is printed before the sync line"
+        assert code.index("python") > sync and code.index("source ") > sync and ".sync_stamp" in code[:sync]
+
+
+def test_serve_chat_wrappers_default_to_the_real_gallery_and_name_the_published_dumps():
+    for name in SERVE_WRAPPERS:
+        code = _serve_code(name)
+        for needle in ('MODE="${MODE:-private}"', 'BIND="${BIND:-127.0.0.1}"', 'GALLERY="${GALLERY:-${CHAT_HOME}/gallery/g13d_m3_v1}"',
+                       'TOKEN_FILE="${CHAT_HOME}/app_token"', 'LABELER_WAIT_S="${LABELER_WAIT_S:-180}"',
+                       'PUBLISHED_MODEL="${PUBLISHED_MODEL:-results/report_gen_m3_test_split_s42}"',
+                       'PUBLISHED_FLOOR="${PUBLISHED_FLOOR:-results/retrieval_floor_test_split}"'):
+            assert needle in code, (name, needle)
+        assert "ls -d" not in code and "sort | tail" not in code, "the gallery is the named build, never the newest directory"
+
+
+def test_serve_chat_wrappers_start_the_labeller_on_loopback_in_the_chexbert_environment():
+    """D24: CheXbert's weights live in the default HF cache and it runs with HF_HUB_OFFLINE=0 (scripts/score_chexbert_h100.sh), so the
+    job's own HF_HOME and offline mode must not reach it; and it listens on loopback only, on a free port (nodes are shared)."""
+    for name in SERVE_WRAPPERS:
+        src, code = _serve_text(name), _serve_code(name)
+        launch = ('env -u HF_HOME HF_HUB_OFFLINE="${CHEXBERT_HF_HUB_OFFLINE:-0}" PYTHONPATH=.chat_deps_chexbert .venv_chexbert/bin/python '
+                  '-m uvicorn app.labeler:app --host 127.0.0.1 --port "${LABELER_PORT}" >> "${LABELER_LOG}" 2>&1 &')
+        assert code.count(launch) == 1, name
+        assert code.count("-m uvicorn") == 1 and "0.0.0.0" not in code, "the only uvicorn the wrapper starts is the loopback labeller"
+        assert ('LABELER_PORT="${LABELER_PORT:-$(python3 -c \'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); '
+                'print(s.getsockname()[1])\')}"') in code
+        assert "--host 127.0.0.1 --port" in src and "env -u HF_HOME" in src and "HF_HUB_OFFLINE=1" in src
+
+
+def test_serve_chat_wrappers_use_the_web_overlay_and_install_or_delete_nothing():
+    """R8. The web dependencies are an overlay on PYTHONPATH (P0-G), the shared venvs stay byte-identical; a stray PYTHONPATH of the
+    submitting shell is replaced, not appended to; and nothing is installed, deleted or replaced."""
+    for name in SERVE_WRAPPERS:
+        code = _serve_code(name)
+        assert "export PYTHONPATH=.chat_deps\n" in code + "\n" and 'PYTHONPATH=.chat_deps_chexbert' in code
+        assert code.index("export PYTHONPATH=.chat_deps") < code.index("python -m app.server")
+        assert not re.search(r"\b(pip|uv|conda)\b", code), "an installer string"
+        assert not re.search(r"(^|[\s;&|(])(rm|mv|ln)(\s|$)", code, re.M), "additive only: no deletion, move or link"
+        assert "chmod 700" in code and "chmod -R" not in code
+
+
+def test_serve_chat_wrappers_refuse_before_they_start_anything():
+    """R6 and the gallery gate: every refusal comes before the first background process, and each is one ERROR line."""
+    for name in SERVE_WRAPPERS:
+        lines = _gallery_wrapper_code(_serve_text(name))
+        first_start = min(i for i, l in enumerate(lines) if l.endswith(" &"))
+        guards = [i for i, l in enumerate(lines) if re.search(r'\bfail "', l)]
+        assert len(guards) >= 6 and max(guards) < first_start, (name, guards, first_start)
+        text = "\n".join(lines)
+        for needle in ('fail "MODE must be private or public"', "needs a token", 'fail "the token file must be a regular file of mode 0600 that you own (R6)"',
+                       "needs a token: put one in app_token under CHAT_HOME, mode 0600 (R6)", "the gallery has no manifest.json",
+                       "R@k gate is not equal", 'fail "the venv\'s activate script is missing'):
+            assert needle in text, (name, needle)
+        assert text.index("needs a token") < text.index("LABELER_PORT="), "the token is checked before a port is chosen"
+        public = [l for l in lines if "needs a token" in l]
+        assert any('"${MODE}" = "public"' in l and '"${BIND}" != "127.0.0.1"' in l for l in lines if "HAVE_TOKEN" in l or "MODE" in l), public
+        assert "--token-file" in text and '--token ' not in text and "--token=" not in text, "the token is read from a file, never given"
+
+
+def test_serve_chat_wrappers_print_only_three_shapes_and_never_a_path_a_token_or_an_endpoint():
+    """R7. The job log carries === lines, ERROR lines and what the CLI prints on stdout ([server] lines). The wrapper's own stderr (bash's
+    own complaints, a `Terminated` notice for a child) and the API's stderr go to the server log under CHAT_HOME, both streams of the
+    labeller to its own file, so that nothing but those shapes can reach the job log. No message names a path variable or the token, and the
+    wrapper never reads the token's text."""
+    for name in SERVE_WRAPPERS:
+        code_lines = _gallery_wrapper_code(_serve_text(name))
+        text = "\n".join(code_lines)
+        echoed = re.findall(r'echo "([^"]*)"', text)
+        failed = re.findall(r'\b(?:fail|say_error) "([^"]*)"', text)
+        assert len(echoed) >= 9 and len(failed) >= 6, (echoed, failed)
+        for message in echoed:
+            assert re.match(r"(=== |ERROR )", message), message
+        paths = ("${CHAT_HOME}", "${GALLERY}", "${TOKEN_FILE}", "${SERVER_LOG}", "${LABELER_LOG}", "${LABELER_PORT}", "${SCRATCH_ROOT}",
+                 "${SLURM_SUBMIT_DIR}", "${PUBLISHED_MODEL}", "${PUBLISHED_FLOOR}", "${CHAT_HOME}/endpoint")
+        leaking = [m for m in echoed + failed if any(p in m for p in paths) or "/" in m]
+        assert not leaking, "a printed message names a path or a port: {}".format(leaking)
+        assert not re.search(r"(cat|read|head|tail)\b[^\n]*TOKEN_FILE|\$\(<", text), "the token's text is never read by the wrapper"
+        assert 'exec 2>> "${SERVER_LOG}"' in text
+        first_start = min(i for i, l in enumerate(code_lines) if l.endswith(" &"))
+        assert code_lines.index('exec 2>> "${SERVER_LOG}"') < first_start
+        assert 'SERVER_LOG="${CHAT_HOME}/logs/server_${SLURM_JOB_ID:-local}.log"' in text
+        assert 'LABELER_LOG="${CHAT_HOME}/logs/labeler_${SLURM_JOB_ID:-local}.log"' in text
+        assert "set -x" not in text and "xtrace" not in text
+        assert "=== labeller unavailable: labels skipped ===" in text, "the ruling's own words"
+        for line in code_lines:
+            assert not re.match(r"\s*(date|nvidia-smi|printenv|env\s*$|cat|tail|head|less)\b", line), line
+
+
+def test_serve_chat_wrappers_trap_term_and_int_and_stop_both_children():
+    """P7-B. A requeue, a cancel and the time limit all arrive as SIGTERM (then SIGKILL after KillWait): the wrapper forwards it to the API,
+    which stops its turns as a server restart and clears its endpoint file, and to the labeller, waits for both, and ends the job. An EXIT
+    trap does the same for any other end, so that a failed `set -e` command leaves no child behind and one ERROR line behind."""
+    for name in SERVE_WRAPPERS:
+        text = _serve_code(name)
+        for needle in ("trap 'STOPPING=1; echo \"=== signal received: stopping ===\"; stop_children' TERM INT", "trap finish EXIT",
+                       'kill -TERM "${pid}" 2>/dev/null || true', '{ wait "${pid}"; } 2>/dev/null || true',
+                       '{ wait "${API_PID}"; } 2>/dev/null || API_RC=$?', 'while kill -0 "${API_PID}" 2>/dev/null; do'):
+            assert needle in text, (name, needle)
+        assert text.index("trap 'STOPPING=1") < text.index("LABELER_PORT="), "the trap is in place before the first child starts"
+        assert 'echo "=== chat server stopped ==="' in text and 'echo "=== chat server ended ==="' in text
+        # a signal is looked for after the labeller wait, after the venv is activated (just before the API starts: no API is started after a
+        # signal), and after the API ends. There is no re-check after the launch: bash loses a signal sent to a child it has just forked
+        # (tests/test_chat_server_job.py proves the check before the launch with a slow activate script)
+        stop = '[ "${STOPPING}" -eq 0 ] || stopped'
+        activate, launch = text.index('source "${VENV_ACTIVATE}"'), text.index("python -m app.server")
+        assert text.count(stop) == 3 and activate < text.index(stop, activate) < launch, name
+        assert '|| stop_children' not in text, "a TERM right after a launch is lost by bash: forwarding there guarantees nothing"
+
+
+def test_every_flag_the_serve_wrappers_give_the_cli_is_one_of_its_own():
+    from app import cli
+    known = set(cli.build_parser()._option_string_actions)
+    required = {"--engine", "--device", "--mode", "--home", "--host", "--port", "--endpoint-file", "--threads", "--models", "--drift-note",
+                "--gallery", "--labeler", "--token-file", "--published-model", "--published-floor"}
+    for name in SERVE_WRAPPERS:
+        given = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]*)", "\n".join(l for l in _serve_code(name).splitlines() if "API_ARGS" in l)))
+        assert required <= given, (name, required - given)
+        assert given <= known, (name, given - known)
+
+
+def test_serve_chat_wrapper_headers_document_the_submit_and_summary_lines():
+    for name in SERVE_WRAPPERS:
+        header = "\n".join(l for l in _serve_text(name).splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))
+        assert "bash scripts/chat_remote.sh sync && bash scripts/chat_remote.sh submit scripts/" + name in header
+        assert "bash scripts/chat_remote.sh summary logs/chat_server" in header
+        assert "app/tunnel/tunnel.sh" in header and "app_token" in header
+
+
+def test_serve_chat_wrappers_pass_the_bash_syntax_check():
+    import shutil
+    import subprocess
+    shells = [s for s in ("/bin/bash", shutil.which("bash")) if s and os.path.exists(s)]
+    assert shells
+    for name in SERVE_WRAPPERS:
+        for shell in set(shells):
+            done = subprocess.run([shell, "-n", str(REPO_ROOT / "scripts" / name)], capture_output=True, text=True)
+            assert done.returncode == 0, (name, shell, done.stderr)

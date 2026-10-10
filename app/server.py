@@ -7,7 +7,8 @@ running and storing its events, and GET /v1/messages/{id}?after=<seq> picks them
 
 Every route carries its own OpenAPI summary, description and refusals (P3-E), so /docs is the API reference.
 
-Development server until P7-B adds the CLI: venv/bin/uvicorn --factory app.server:create_app
+Serving: `python -m app.server` (P7-B; the command line is app/cli.py, the cluster jobs are scripts/serve_chat_h100.sh and its GPU twin).
+Development: venv/bin/uvicorn --factory app.server:create_app
 """
 import asyncio
 import hashlib
@@ -361,12 +362,15 @@ def _chat_home(home: Optional[str]) -> Path:
     return path
 
 
-def _engines(kind: str, models: Sequence[str], tiny_step_delay_s: float, drift_note: str) -> Dict[str, Engine]:
-    """Ruling 1: tiny is one engine and ignores models; real is one CPU engine per model, the first the default."""
+def _engines(kind: str, models: Sequence[str], tiny_step_delay_s: float, drift_note: str, device: str = "cpu",
+             threads: Optional[int] = None) -> Dict[str, Engine]:
+    """Ruling 1: tiny is one engine and ignores models, device and threads; real is one engine per model on `device` (a CPU one by
+    default), the first the default. Without a thread count the engine keeps its own default."""
     if kind == "tiny":
         return {"tiny": build_engine("tiny", step_delay_s=tiny_step_delay_s)}
+    extra = {} if threads is None else {"threads": threads}
     return {name: build_engine("real", checkpoint=str(REPO_ROOT / MODEL_CHECKPOINTS[name]), model_config=name,
-                               device="cpu", drift_note=drift_note) for name in models}
+                               device=device, drift_note=drift_note, **extra) for name in models}
 
 
 def _readable(errors: Sequence[Any]) -> str:
@@ -541,7 +545,7 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
                allow_compile: bool = False, cors_origins: Sequence[str] = (),
                published_dirs: Optional[Dict[str, str]] = None, tiny_step_delay_s: float = 0.0,
                drift_note: str = "", gallery: Optional[Gallery] = None, labeler: Any = None,
-               tiny_gallery: bool = False) -> FastAPI:
+               tiny_gallery: bool = False, device: str = "cpu", threads: Optional[int] = None) -> FastAPI:
     """The app. It refuses to exist without a token on a non-loopback address or in public mode (R6, D9).
 
     The retrieve, label and score stages (P5-E) get their gallery from `gallery` (an opened Gallery), else from gallery_dir
@@ -549,10 +553,15 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     else from labeler_url (a LabelerClient). tiny_gallery is a laptop convenience: with neither given, a synthetic gallery is
     built under <home>/gallery/tiny and the keyword RuleLabeler labels, so the tiny server runs every stage. published_dirs
     ({"model": dir, "floor": dir}, each holding a hyps.txt) puts the published lines beside a test study's score. All of them
-    are on app.state, with gallery_dir, labeler_url and published_dirs as given.
+    are on app.state, with gallery_dir, labeler_url and published_dirs as given. device ("cpu" or "cuda") and threads are for the
+    real engines (P7-B: the serving command line, app/cli.py, passes them); the tiny engine ignores both.
     """
     if mode not in ("private", "public"):
         raise ValueError("mode must be 'private' or 'public', got {!r}".format(mode))
+    if device not in ("cpu", "cuda"):
+        raise ValueError("device must be 'cpu' or 'cuda', got {!r}".format(device))
+    if threads is not None and threads < 1:
+        raise ValueError("threads must be at least 1, got {}".format(threads))
     if not token and not _is_loopback(host):
         raise RuntimeError("Refusing to serve on {} without a token (R6).".format(host))
     if not token and mode == "public":
@@ -567,7 +576,7 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     print("[server] sqlite journal_mode={}".format(store.journal_mode), flush=True)
     print("[server] recovered {} running turn(s)".format(store.recover_after_restart()), flush=True)
     try:
-        engines = _engines(engine, models, tiny_step_delay_s, drift_note)
+        engines = _engines(engine, models, tiny_step_delay_s, drift_note, device, threads)
         default_model = next(iter(engines))
         gallery, retrieval_models = _wire_gallery(gallery, gallery_dir, tiny_gallery, store.home, engines, default_model)
         labeler = _wire_labeler(labeler, labeler_url, tiny_gallery)
@@ -592,8 +601,8 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
         # Queued and running turns stop at their next step and end as a server restart. The wait runs off the event
-        # loop. uvicorn reaches this only once open connections close: the serving wrapper sets
-        # timeout_graceful_shutdown (P7-B).
+        # loop. uvicorn reaches this only once open connections close: the serving command line (app/cli.py, P7-B)
+        # stops the turns as the shutdown begins, so their streams end, and sets timeout_graceful_shutdown.
         await run_in_threadpool(worker.shutdown)
         store.close()
 
@@ -1006,3 +1015,8 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         return {"studies": gallery.list_test_studies(q, limit)}
 
     return app
+
+
+if __name__ == "__main__":   # python -m app.server: the serving command line (P7-B) lives in app/cli.py
+    from app.cli import main
+    raise SystemExit(main())
