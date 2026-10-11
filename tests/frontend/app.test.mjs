@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { ShimEvent, installDom, serialize } from './dom_shim.mjs';
 import {
   BOUNDS, CLIENT_KEY, COMMANDS, DEFAULT_SETTINGS, HEALTH_MS, HEALTH_SLOW_MS, SETTINGS_KEY, STALL_MS, browserStorage,
-  checkImageFile, chosenCard, clientId, createApp, createWatchdog, errorMessage, exportFilename, healthText, isCommand, loadSettings,
+  chosenCard, clientId, createApp, createWatchdog, errorMessage, exportFilename, healthText, isCommand, loadSettings,
   nearBottom, nextHealthDelay, optionsFromSettings, parseRoute, saveSettings, serverHas, sessionDate, sessionMeta, sessionTitle,
   userTurnMessage,
 } from '../../app/static/app.js';
@@ -383,7 +383,7 @@ test('an export is saved under the name the server gave it, or one made from the
 test('a stored user message becomes the user turn: its text, its file name and the options the assistant row carries', () => {
   const options = { beam_size: 3 };
   assert.deepEqual(userTurnMessage({ text: 'beam 5', image_filename: 'chest.png' }, { options }),
-                   { text: 'beam 5', image: { url: null, filename: 'chest.png' }, options });   // no image URL until P6-B
+                   { text: 'beam 5', image: { url: null, filename: 'chest.png' }, options });   // this message lists no image_urls (as one stored before P6-B): its file name, and no URL
   assert.deepEqual(userTurnMessage({ text: '', image_filename: null }, { options: null }), { text: '', image: null, options: null });
   assert.deepEqual(userTurnMessage({ text: 'a' }, null), { text: 'a', image: null, options: null });
   assert.deepEqual(userTurnMessage(null, undefined), { text: '', image: null, options: null });
@@ -397,16 +397,6 @@ test('nearBottom is true within 80 px of the end and when nothing has been measu
   assert.equal(nearBottom({ scrollTop: 0, clientHeight: 400, scrollHeight: 400 }), true);       // nothing to scroll
   assert.equal(nearBottom({ scrollTop: 100, clientHeight: 400, scrollHeight: 1400 }, 2000), true);
   for (const unmeasured of [{}, null, undefined, { scrollTop: NaN, clientHeight: 1, scrollHeight: 9 }]) assert.equal(nearBottom(unmeasured), true);
-});
-
-test('checkImageFile lets through PNG, JPEG, WEBP and a file with no type, and says why it refuses the rest', () => {
-  const file = (type, size = 1000) => ({ type, size, name: 'x' });
-  for (const type of ['image/png', 'image/jpeg', 'image/webp', '']) assert.equal(checkImageFile(file(type)), null, type);
-  for (const type of ['image/gif', 'image/svg+xml', 'application/pdf', 'text/html']) assert.equal(checkImageFile(file(type)), 'Choose a PNG, JPEG or WEBP image.', type);
-  assert.equal(checkImageFile(file('image/png', 20 * 1024 * 1024)), null);                         // the limit itself is fine
-  assert.equal(checkImageFile(file('image/png', 20 * 1024 * 1024 + 1)), 'The image is over the 20 MB limit.');
-  assert.equal(checkImageFile(null), 'Choose an image.');
-  assert.equal(checkImageFile({ type: 'image/png' }), null);   // no size known: the server decides
 });
 
 test('isCommand tells a command from a note as the server does: the notes of fixtures/commands.json, which the server is held to too (P4-H)', () => {
@@ -423,6 +413,27 @@ test('every command rule of the page has an example in fixtures/commands.json, s
   assert.ok(COMMANDS.length >= 6 && Object.isFrozen(COMMANDS));
   assert.deepEqual(uncovered(COMMANDS), []);
   assert.deepEqual(uncovered([...COMMANDS, /^stop (?:on|off)$/i]).map(String), ['/^stop (?:on|off)$/i']);   // the guard bites
+});
+
+// P6-A (f): the one definition of whitespace that the page and the server split a note on. tests/test_app_commands.py reads the same file.
+const WHITESPACE = JSON.parse(readFileSync(new URL('../fixtures/whitespace.json', import.meta.url)));
+
+test('the page splits a note on the server\'s whitespace, U+001C..U+001F, U+0085 and U+FEFF included: the notes of tests/fixtures/whitespace.json (P6-A f)', () => {
+  const { collapse } = appModule;
+  assert.equal(typeof collapse, 'function', 'app.js exports collapse');
+  for (const ch of WHITESPACE.whitespace) assert.equal(collapse(`a${ch}b${ch}`), 'a b', JSON.stringify(ch));
+  for (const ch of WHITESPACE.not_whitespace) assert.equal(collapse(`a${ch}b`), `a${ch}b`, JSON.stringify(ch));
+  for (const { note, collapsed, command } of WHITESPACE.notes) {
+    assert.equal(collapse(note), collapsed, JSON.stringify(note));
+    assert.equal(isCommand(note), command, JSON.stringify(note));
+  }
+  const listed = new Set(WHITESPACE.whitespace);
+  for (let code = 0; code <= 0xffff; code += 1) {   // JavaScript's \s is in the list, and the page splits on the list and nothing else
+    const ch = String.fromCharCode(code);
+    if (/\s/.test(ch)) assert.ok(listed.has(ch), `U+${code.toString(16)} is JavaScript whitespace`);
+    assert.equal(collapse(`a${ch}b`) === 'a b', listed.has(ch), `U+${code.toString(16)}`);
+  }
+  for (const odd of [null, undefined, 5, {}]) assert.equal(collapse(odd), '');
 });
 
 test('a stored user message with its image URLs becomes a user turn that shows the server\'s thumbnail; a re-run keeps its file name (P6-B)', () => {
@@ -860,7 +871,7 @@ test('Send streams a turn: Send is off and Stop is on while it runs, the card fi
   attach(imageFile('chest.png', 'image/png', 2048));
   assert.equal($('preview').hidden, false);
   assert.match(q($('preview'), 'span').textContent, /^chest\.png · 2 KB$/);
-  assert.equal(q($('preview'), 'img').getAttribute('alt'), '');
+  assert.equal(q($('preview'), 'img').getAttribute('alt'), 'Preview of chest.png');   // P6-A: composer.js's preview
   $('prompt').value = 'beam 5';
   const events = fullTurn();
   const turn = h.app.send();
@@ -882,7 +893,7 @@ test('Send streams a turn: Send is off and Stop is on while it runs, the card fi
   assert.equal(run.opts.token, '');
   assert.equal($('send').disabled, true);
   assert.equal($('stop').hidden, false);
-  assert.equal($('stop').disabled, true);   // the server has not said the turn's id yet: nothing to cancel
+  assert.deepEqual([$('stop').disabled, $('stop').textContent], [false, 'Cancel upload']);   // no id yet: Stop aborts the upload (P6-A c)
   assert.equal($('conversation').getAttribute('aria-busy'), 'true');
   const [user] = $('conversation').children;
   assert.equal(user.getAttribute('class'), 'turn user');   // drawn at once, from the local file
@@ -894,7 +905,7 @@ test('Send streams a turn: Send is off and Stop is on while it runs, the card fi
   run.accept('m_a');
   await flush();
   assert.equal(cardOf().getAttribute('data-message-id'), 'm_a');
-  assert.equal($('stop').disabled, false);
+  assert.deepEqual([$('stop').disabled, $('stop').textContent], [false, 'Stop']);   // the server has the turn: Stop cancels it there
   assert.equal($('prompt').value, '');   // accepted: the text and the file are spent
   assert.equal($('preview').hidden, true);
   for (const e of events.slice(0, 4)) run.channel.push(e);   // message_start .. encode running
@@ -942,11 +953,11 @@ test('the status region says a thing only when it changes', async () => {
   run([snapEv('Findings: a b', 1)]);
   await flush();
   nextFrame();
-  assert.deepEqual(spoken, ['Queued', 'encode running']);   // accepted, then the stage; three more frames said nothing new
+  assert.deepEqual(spoken, ['Uploading…', 'Queued', 'encode running']);   // sent (P6-A c), accepted, then the stage; three more frames said nothing new
   run([stageEndEv('encode'), stopEv('done', { report: 'Findings: a b' })]);
   h.api.streams[0].channel.end();
   await turn;
-  assert.deepEqual(spoken, ['Queued', 'encode running', 'Report ready']);
+  assert.deepEqual(spoken, ['Uploading…', 'Queued', 'encode running', 'Report ready']);
 });
 
 const NEW_SESSION = { id: 's_new', title: '', mode: 'private', turns: 0, created_at: iso(3), updated_at: iso(3) };
@@ -1090,6 +1101,154 @@ test('a Send right after a refused first turn makes a new chat, and does not sen
   assert.equal(h.win.location.hash, '#/s/s_two');
 });
 
+// P6-A (c): "Uploading…" and "Cancel upload" between Send and the accept ---------------------------------------------------------------
+
+test('between Send and the accept a status says "Uploading…" and Stop reads "Cancel upload": it aborts the request with no call to the server, and the preview and the note stay (P6-A c)', async (t) => {
+  const logged = captureErrors(t);
+  const h = await ready();   // an open chat with chest.png attached
+  $('prompt').value = 'beam 4';
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  assert.deepEqual([$('stop').hidden, $('stop').disabled, $('stop').textContent], [false, false, 'Cancel upload']);
+  assert.equal($('status').textContent, 'Uploading…');
+  $('stop').click();
+  await turn;
+  await flush();
+  assert.equal(run.opts.signal.aborted, true);     // the request is aborted ...
+  assert.deepEqual(h.api.cancels, []);             // ... and the server is asked nothing: it has no turn to cancel yet
+  assert.deepEqual([$('preview').hidden, h.app.state.file?.name, $('prompt').value], [false, 'chest.png', 'beam 4']);   // nothing was spent
+  assert.equal($('conversation').children.length, 0);   // the user turn is taken back out
+  assert.deepEqual([$('stop').hidden, $('stop').textContent, $('send').disabled], [true, 'Stop', false]);
+  assert.equal($('notice').hidden, true);          // the user's own doing: no alert
+  assert.equal($('status').textContent, 'Upload cancelled.');
+  assert.deepEqual(h.fetch.to('DELETE', '/v1/sessions/'), []);   // a chat that was there before is kept
+  assert.deepEqual(logged, []);
+  const again = h.app.send();                      // and Send sends it again
+  await flush();
+  h.api.streams[1].accept('m_a');
+  await flush();
+  assert.deepEqual([$('stop').textContent, $('stop').disabled], ['Stop', false]);   // the server has the turn: Stop stops it
+  assert.equal(h.api.streams[1].opts.form.get('image').name, 'chest.png');
+  h.api.streams[1].channel.push(...fullTurn());
+  h.api.streams[1].channel.end();
+  await again;
+});
+
+test('Cancel upload from the keyboard hands the focus to the note; while the chat itself is still being made it waits, switched off (P6-A c)', async () => {
+  let release;
+  const made = new Promise((resolve) => { release = resolve; });
+  const h = harness({ routes: { 'POST /v1/sessions': async () => { await made; return NEW_SESSION; },
+                                'DELETE /v1/sessions/s_new': () => new Response(null, { status: 204 }) } });
+  await h.app.start();
+  await flush();
+  attach(imageFile('chest.png'));
+  const turn = h.app.send();
+  await flush();
+  assert.deepEqual([$('stop').hidden, $('stop').disabled, $('stop').textContent], [false, true, 'Cancel upload']);   // no request to cancel yet
+  release();
+  await flush();
+  assert.equal($('stop').disabled, false);
+  press($('stop'), 'Tab');   // a keyboard user
+  $('stop').focus();
+  $('stop').click();
+  await turn;
+  await flush();
+  assert.equal(document.activeElement, $('prompt'));   // the Stop that had the focus is gone
+});
+
+test('a first upload cancelled before the accept leaves no empty chat behind: the chat made for it is deleted and nothing else is opened (P6-A c, d)', async () => {
+  const h = harness({ sessions: [], routes: { 'POST /v1/sessions': NEW_SESSION, 'DELETE /v1/sessions/s_new': () => new Response(null, { status: 204 }) } });
+  await h.app.start();
+  await flush();
+  attach(imageFile('chest.png'));
+  const turn = h.app.send();
+  await flush();
+  $('stop').click();
+  await turn;
+  await flush();
+  assert.deepEqual(h.fetch.to('DELETE', '/v1/sessions/').map((c) => c.url), ['/v1/sessions/s_new']);
+  assert.equal(h.win.location.hash, '#/new');   // the empty chat it was on: no other chat is selected
+  assert.deepEqual(qa($('session-list'), 'li'), []);
+  assert.deepEqual([$('preview').hidden, $('exports').hidden], [false, true]);
+});
+
+test('a Cancel upload pressed as the server accepted the turn cancels that turn on the server, now that it has an id (P6-A c)', async () => {
+  const h = await ready();
+  h.api.holdAbort = true;   // the abort does not end the request at once: the server's answer is already on its way
+  const turn = h.app.send();
+  await flush();
+  $('stop').click();
+  h.api.streams[0].accept('m_a');
+  await flush();
+  assert.deepEqual(h.api.cancels.map((c) => c.messageId), ['m_a']);
+  h.api.streams[0].fail(abortError());
+  await flush();
+  h.api.polls.at(-1).channel.push(stopEv('aborted'));
+  h.api.polls.at(-1).channel.end();
+  await turn;
+  await flush();
+  assert.equal(cardOf().getAttribute('data-status'), 'aborted');
+  assert.deepEqual([$('send').disabled, $('stop').hidden], [false, true]);
+});
+
+// P6-A (d): the health strip follows a turn ----------------------------------------------------------------------------------------------
+
+test('the health strip asks /healthz again when a turn is accepted and when it settles, and keeps one schedule (P6-A d)', async () => {
+  let load = 0;
+  const h = await ready({ routes: { 'GET /healthz': () => ({ status: 'ok', mode: 'private', turns_in_flight: load, queue_cap: 4 }) } });
+  const asked = () => h.fetch.to('GET', '/healthz').length;
+  const before = asked();
+  assert.equal($('health').textContent, 'private · 0 of 4 turns in flight');
+  const turn = h.app.send();
+  await flush();
+  assert.equal(asked(), before);   // not at Send: the server has no turn yet
+  load = 1;
+  h.api.streams[0].accept('m_a');
+  await flush();
+  assert.equal(asked(), before + 1);
+  assert.equal($('health').textContent, 'private · 1 of 4 turns in flight');
+  load = 0;
+  h.api.streams[0].channel.push(...fullTurn());
+  h.api.streams[0].channel.end();
+  await turn;
+  await flush();
+  assert.equal(asked(), before + 2);
+  assert.equal($('health').textContent, 'private · 0 of 4 turns in flight');
+  assert.equal(h.timers.timeouts.filter((x) => x.ms === HEALTH_MS).length, 1);   // one schedule, not one more per refresh
+  h.timers.advance(HEALTH_MS);
+  await flush();
+  assert.equal(asked(), before + 3);
+});
+
+// P6-A (e): no phone keyboard after a tapped Retry or Dismiss ---------------------------------------------------------------------------
+
+test('a Dismiss or a Retry that was tapped does not put the focus in the note, which would open a phone\'s keyboard; one pressed from the keyboard does (P6-A e)', async () => {
+  const h = harness();
+  await h.app.start();
+  await flush();
+  const tap = (button) => { button.dispatchEvent(new ShimEvent('pointerdown', { bubbles: true })); button.focus(); button.click(); };
+  const key = (button) => { button.dispatchEvent(new ShimEvent('keydown', { key: 'Tab', bubbles: true })); button.focus(); button.click(); };
+  await h.app.send();   // no image: the notice
+  tap(buttonOf($('notice'), '✕'));
+  assert.equal($('notice').hidden, true);
+  assert.notEqual(document.activeElement, $('prompt'));
+  await h.app.send();
+  key(buttonOf($('notice'), '✕'));
+  assert.equal(document.activeElement, $('prompt'));   // the keyboard's place is kept
+
+  let calls = 0;
+  const failing = harness({ hash: '#/s/s_a', sessions: [sess('s_a', 'A', 0)], routes: {
+    'GET /v1/sessions/s_a': () => (++calls === 1 ? refused(500, 'Could not read the chat.') : { ...sess('s_a', 'A', 0), messages: [] }) } });
+  await failing.app.start();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Could not read the chat.');
+  tap(buttonOf($('notice'), 'Retry'));
+  await flush();
+  assert.equal($('notice').hidden, true);
+  assert.notEqual(document.activeElement, $('prompt'));
+});
+
 test('a refused turn in a chat that was there before deletes nothing, even when the chat has no turn yet', async () => {
   const h = await ready();   // s_a: an existing chat with no turns
   h.api.refuse = refusal(422, 'Use a PNG, JPEG or WEBP image.');
@@ -1226,9 +1385,7 @@ test('Stop sends the cancel first and drops the stream second; the AbortError is
   const turn = h.app.send();
   await flush();
   const run = h.api.streams[0];
-  assert.equal($('stop').disabled, true);
-  $('stop').click();   // before the id is known: nothing happens
-  await flush();
+  assert.equal($('stop').textContent, 'Cancel upload');   // before the id is known Stop cancels the upload, with no call (P6-A c: its own tests)
   assert.deepEqual(h.api.cancels, []);
   run.accept('m_a');
   await flush();
@@ -1377,12 +1534,12 @@ test('a server that sends no X-Message-Id still gets its card, from message_star
   const turn = h.app.send();
   await flush();
   assert.equal(cardOf(), null);   // nothing to draw yet
-  assert.equal($('stop').disabled, true);
+  assert.deepEqual([$('stop').disabled, $('stop').textContent], [false, 'Cancel upload']);   // no id: Stop can only abort the upload (P6-A c)
   h.api.streams[0].channel.push(events[0], events[1]);
   await flush();
   nextFrame();
   assert.equal(cardOf().getAttribute('data-message-id'), 'm_s');
-  assert.equal($('stop').disabled, false);
+  assert.deepEqual([$('stop').disabled, $('stop').textContent], [false, 'Stop']);
   assert.equal($('prompt').value, '');
   $('stop').click();
   await flush();
@@ -2502,7 +2659,30 @@ test('Copy in a card writes the report to the clipboard; with no clipboard it sa
   assert.equal(document.activeElement, $('drawer-close'));
 });
 
-// ---- the composer (minimal) -----------------------------------------------------------------------------------------------------------------
+// ---- the composer: composer.js's intake, as the page uses it (P6-A) ------------------------------------------------------------------------------
+
+test('Send clears the preview only once the server has accepted the turn; a refused upload keeps it and the note, and says the server\'s words (P6-A ruling 4)', async () => {
+  const h = await ready();   // an open chat with chest.png attached
+  $('prompt').value = 'beam 4';
+  const message = 'Image is too small: 32×32 px; it must be at least 64×64 px.';
+  h.api.refuse = Object.assign(new Error('turn refused'), { status: 422, body: { type: 'error', error: { type: 'validation_error', message } } });
+  await h.app.send();
+  assert.equal(q($('notice'), 'p').textContent, message);   // the server's own words
+  assert.deepEqual([$('preview').hidden, q($('preview'), 'span').textContent.startsWith('chest.png'), h.app.state.file?.name], [false, true, 'chest.png']);
+  assert.equal($('prompt').value, 'beam 4');
+  assert.equal($('conversation').children.length, 0);
+  h.api.refuse = null;
+  const turn = h.app.send();   // and the same composer sends again
+  await flush();
+  assert.deepEqual([$('preview').hidden, $('prompt').value], [false, 'beam 4']);   // on its way, not yet accepted: still the composer's
+  h.api.streams.at(-1).accept('m_a');   // the server's 200, with the turn's id
+  await flush();
+  assert.deepEqual([$('preview').hidden, $('prompt').value, h.app.state.file], [true, '', null]);   // spent
+  h.api.streams.at(-1).channel.push(...fullTurn());
+  h.api.streams.at(-1).channel.end();
+  await turn;
+});
+
 
 test('the image well opens the picker from a click, Enter and Space; a chosen file is previewed, replaceable and removable', async () => {
   const made = [];
@@ -2526,13 +2706,13 @@ test('the image well opens the picker from a click, Enter and Space; a chosen fi
   assert.equal($('preview').hidden, false);
   assert.equal(q($('preview'), 'img').getAttribute('src'), 'blob:fake/1');
   assert.equal(q($('preview'), 'span').textContent, 'x-ray.png · 50 KB');
-  assert.equal(buttonOf($('preview'), 'Remove').getAttribute('aria-label'), 'Remove attached image');
+  assert.equal(buttonOf($('preview'), '×').getAttribute('aria-label'), 'Remove image');
   assert.equal($('file').value, '');   // so choosing the same file again fires change again
   attach(imageFile('second.jpg', 'image/jpeg', 100));
   assert.equal(qa($('preview'), 'img').length, 1);   // replaced, not added
   assert.equal(q($('preview'), 'span').textContent, 'second.jpg · 1 KB');
   assert.deepEqual(revoked, ['blob:fake/1']);   // the first preview's object URL went with it
-  buttonOf($('preview'), 'Remove').click();
+  buttonOf($('preview'), '×').click();
   assert.equal($('preview').hidden, true);
   assert.equal($('preview').children.length, 0);
   assert.deepEqual(revoked, ['blob:fake/1', 'blob:fake/2']);
@@ -2545,8 +2725,9 @@ test('a file that cannot work is refused with a notice and not attached', async 
   const h = harness();
   await h.app.start();
   await flush();
-  for (const [file, why] of [[imageFile('doc.pdf', 'application/pdf'), 'Choose a PNG, JPEG or WEBP image.'],
-                             [{ name: 'big.png', type: 'image/png', size: 21 * 1024 * 1024 }, 'The image is over the 20 MB limit.']]) {
+  for (const [file, why] of [[imageFile('doc.pdf', 'application/pdf'), 'Use a PNG, JPEG or WEBP image.'],
+                             [{ name: 'big.png', type: 'image/png', size: 21 * 1024 * 1024 }, 'Image is larger than 20 MB.'],
+                             [imageFile('chest.dcm', ''), 'DICOM is not supported. Export the image as PNG or JPEG first.']]) {
     attach(file);
     assert.equal(q($('notice'), 'p').textContent, why);
     assert.equal($('preview').hidden, true);
@@ -2556,7 +2737,7 @@ test('a file that cannot work is refused with a notice and not attached', async 
   assert.equal($('preview').hidden, false);
 });
 
-test('a file dropped on the well or pasted into the note is attached; a file dropped elsewhere does not navigate the page; text is left alone', async () => {
+test('a file dropped on the well or pasted anywhere is attached; a file dropped elsewhere does not navigate the page; text is left alone', async () => {
   const h = harness();
   await h.app.start();
   await flush();
@@ -2583,13 +2764,19 @@ test('a file dropped on the well or pasted into the note is attached; a file dro
   assert.equal(fire($('prompt'), 'drop', { dataTransfer: { types: ['text/plain'], files: [] } }).defaultPrevented, false);   // text may be dropped into the note
   assert.equal(fire($('prompt'), 'dragover', { dataTransfer: { types: ['text/plain'], files: [] } }).defaultPrevented, false);
 
-  buttonOf($('preview'), 'Remove').click();
-  const pasted = fire($('prompt'), 'paste', { clipboardData: { files: [imageFile('shot.png')] } });
+  buttonOf($('preview'), '×').click();
+  // P6-A: the clipboard's items, as a browser hands them over; the paste is the document's, wherever the focus is (ruling 3)
+  const items = (...files) => ({ items: files.map((f) => (typeof f === 'string' ? { kind: 'string', type: f, getAsFile: () => null }
+                                                                           : { kind: 'file', type: f.type, getAsFile: () => f })) });
+  const pasted = fire($('prompt'), 'paste', { clipboardData: items('text/plain', imageFile('shot.png')) });
   assert.equal(pasted.defaultPrevented, true);
   assert.match(q($('preview'), 'span').textContent, /^shot\.png/);
-  buttonOf($('preview'), 'Remove').click();
-  assert.equal(fire($('prompt'), 'paste', { clipboardData: { files: [] } }).defaultPrevented, false);   // text pastes as text
-  assert.equal(fire($('prompt'), 'paste', { clipboardData: { files: [imageFile('x.gif', 'image/gif')] } }).defaultPrevented, false);
+  buttonOf($('preview'), '×').click();
+  assert.equal(fire($('conversation'), 'paste', { clipboardData: items(imageFile('card.png')) }).defaultPrevented, true);   // not only into the note
+  assert.match(q($('preview'), 'span').textContent, /^card\.png/);
+  buttonOf($('preview'), '×').click();
+  assert.equal(fire($('prompt'), 'paste', { clipboardData: items('text/plain') }).defaultPrevented, false);   // text pastes as text
+  assert.equal(fire($('prompt'), 'paste', { clipboardData: items(imageFile('x.gif', 'image/gif')) }).defaultPrevented, false);
   assert.equal(fire($('prompt'), 'paste', {}).defaultPrevented, false);
   assert.equal($('preview').hidden, true);
 });
@@ -2702,14 +2889,14 @@ test('dismissing a notice or removing the attached image does not leave focus on
   assert.equal(document.activeElement, $('prompt'));
 
   attach(imageFile());
-  const remove = buttonOf($('preview'), 'Remove');
+  const remove = buttonOf($('preview'), '×');
   remove.focus();
   remove.click();
   assert.equal($('preview').hidden, true);
   assert.equal(document.activeElement, $('image-well'));   // the control that brought the image in
   $('prompt').focus();
   attach(imageFile());
-  buttonOf($('preview'), 'Remove').click();
+  buttonOf($('preview'), '×').click();
   assert.equal(document.activeElement, $('prompt'));   // focus that was elsewhere stays there
 });
 
@@ -2745,7 +2932,7 @@ test('a slow upload is not silence: nothing is dropped while the server has not 
   assert.deepEqual(h.api.order, []);                   // not aborted
   assert.equal($('notice').hidden, true);              // and nothing said
   assert.equal($('send').disabled, true);              // the turn is simply pending
-  assert.equal($('stop').disabled, true);
+  assert.deepEqual([$('stop').disabled, $('stop').textContent], [false, 'Cancel upload']);   // the user may cancel it (P6-A c); nothing else does
   assert.equal(h.timers.intervals, 0);                 // no stall check: there is nothing to be silent about yet
   assert.equal(qa($('conversation'), '.turn.user').length, 1);   // and the user turn stays
   assert.equal($('prompt').value, 'beam 5');           // the composer keeps its content while the upload is on its way
@@ -4153,8 +4340,22 @@ test('with no new image the hint follows the note as it is typed: a command or n
   type('what is this?');
   attach(imageFile('new.png'));
   assert.equal(hint.hidden, true);   // a note with a new image goes with it
-  buttonOf($('preview'), 'Remove').click();
+  buttonOf($('preview'), '×').click();
   assert.equal(hint.textContent, 'This note is not a command: with no new image, Send gets no report.');
+});
+
+test('with no new image the re-run hint follows the server\'s rule for every note of tests/fixtures/whitespace.json: it never promises a re-run Send will not do (P6-A b)', async () => {
+  const h = harness({ sessions: [sess('s_a', 'A')], routes: doneSession('s_a', 'A', 'm_a') });
+  await h.app.start();
+  await flush();
+  const RERUN = 'No new image: Send re-runs s_a.png with these settings.';
+  const QUESTION = 'This note is not a command: with no new image, Send gets no report.';
+  for (const { note, runs } of WHITESPACE.notes) {
+    $('prompt').value = note;
+    $('prompt').dispatchEvent(new ShimEvent('input', { bubbles: true }));
+    assert.deepEqual([$('rerun-hint').hidden, $('rerun-hint').textContent], [false, runs ? RERUN : QUESTION], JSON.stringify(note));
+  }
+  assert.ok(WHITESPACE.notes.some((n) => !n.runs) && WHITESPACE.notes.some((n) => n.runs && n.collapsed === ''));
 });
 
 test('with no new image and an earlier one in the chat, the composer says that Send re-runs it; not in an empty chat, with a new image, or while a turn runs', async () => {
@@ -4175,7 +4376,7 @@ test('with no new image and an earlier one in the chat, the composer says that S
   attach(imageFile('new.png'));
   assert.equal(hint.hidden, true);   // Send sends this one
   assert.equal($('send').hasAttribute('aria-describedby'), false);   // a hidden note is still read out if it is named
-  buttonOf($('preview'), 'Remove').click();
+  buttonOf($('preview'), '×').click();
   assert.equal(hint.hidden, false);   // removed: Send re-runs again
   assert.equal($('send').getAttribute('aria-describedby'), 'rerun-hint');
   attach(imageFile('second.png'));

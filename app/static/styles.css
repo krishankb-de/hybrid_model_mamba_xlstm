@@ -468,6 +468,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   border-radius: 16px;
   background: var(--card);
   box-shadow: var(--shadow);
+  container: composer / inline-size;   /* its rows ask how wide it is (P6-A), whatever made it narrow */
 }
 #image-well, #preview, #prompt, #chips { flex: 1 0 100%; min-width: 0; }   /* each has a row of its own, at every width */
 #composer > button { flex: none; white-space: nowrap; }   /* never narrower than its label: the row wraps instead */
@@ -484,9 +485,20 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 }
 #image-well:hover, #image-well.dragging { border-color: var(--accent); background: var(--soft); color: var(--fg); }
 
-#preview { display: flex; align-items: center; gap: 8px; }
+#preview { display: flex; align-items: center; gap: 8px; }   /* composer.js (P6-A): the thumbnail, the file's line, Remove */
 #preview img { flex: none; width: 56px; height: 56px; object-fit: cover; border: 1px solid var(--border); border-radius: 8px; }
-#preview span { flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 0.8125rem; overflow-wrap: anywhere; }
+#preview > span {   /* the name, then what the file is: "2544×3056 px · 2.4 MB", each a line of its own */
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+#preview > span > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }   /* a long name is cut short: the title has it whole */
+#preview .preview-name { color: var(--fg); }
+#preview .preview-sep { display: none; }   /* the two lines part the name from the sizes; the text keeps it, for a copy */
+#preview > button { flex: none; }
 
 #prompt { min-height: 3.25rem; max-height: 40vh; resize: vertical; }
 
@@ -562,6 +574,18 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 #stop { border-color: var(--bad); color: var(--bad); }
 #send { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; }
 #send:hover:not(:disabled) { background: var(--accent); filter: brightness(1.1); }
+
+/* A page 720 px tall or less, or a composer 260 px wide or less (P6-A: 801 to about 890 px with the sidebar and the drawer open): the image
+   well and the re-run hint take one line each, cut short, so that Send stays in sight without the composer being scrolled. The hint's whole
+   text is still what Send says it does (aria-describedby), and the well's whole text is its name. */
+@media (max-height: 720px) {
+  #image-well, #rerun-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #image-well { padding-block: 6px; }
+}
+@container composer (max-width: 260px) {
+  #image-well, #rerun-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #image-well { padding-block: 6px; }
+}
 
 /* ---- drawer: settings, on the right --------------------------------------------------------------------------- */
 

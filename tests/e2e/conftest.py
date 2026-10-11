@@ -13,7 +13,7 @@ Each test gets a tiny server of its own and pages of its own in one headless Goo
     provokes a refusal says so first (UI.expect_refusal), and so does one that takes the server down (UI.server_down); anything else
     is a failure, said in plain words by UI.assert_clean. Every test ends with it, and teardown asks again, after a short settle, for
     every test that passed: a problem that arrives after the test's last assertion fails it too.
-The images are synthetic (noise, a renamed text file, a GIF, a 32 px PNG, a padded 21 MB file). CHAT_UI_E2E_EVIDENCE=<dir> also saves
+The images are synthetic (noise, a renamed text file, a GIF, a 32 px PNG, a padded 21 MB file, a file named .dcm). CHAT_UI_E2E_EVIDENCE=<dir> also saves
 screenshots of the key states there (UI.shot), each under 400 KB. Without the playwright package or without Google Chrome every test
 here is skipped; `pip install -r requirements-e2e.txt` provides the first.
 
@@ -184,7 +184,7 @@ def noise_png(w: int, h: int) -> bytes:
 
 @pytest.fixture(scope="session")
 def images(tmp_path_factory) -> Dict[str, str]:
-    """name -> path: three usable X-rays (noise) and the four uploads the page or the server must refuse."""
+    """name -> path: three usable X-rays (noise) and the five uploads the page or the server must refuse."""
     d = tmp_path_factory.mktemp("images")
     jpeg = io.BytesIO()
     Image.open(io.BytesIO(noise_png(300, 300))).convert("RGB").save(jpeg, "JPEG", quality=90)
@@ -192,7 +192,8 @@ def images(tmp_path_factory) -> Dict[str, str]:
     Image.new("L", (128, 128), 128).save(gif, "GIF")
     files = {"xray_a.png": noise_png(320, 320), "xray_b.png": noise_png(288, 256), "xray_c.jpg": jpeg.getvalue(),
              "notes.png": b"This is a text file that was renamed to .png.\n" * 20, "scan.gif": gif.getvalue(),
-             "tiny_32.png": noise_png(32, 32), "huge.png": noise_png(64, 64) + b"\0" * (21 * 1024 * 1024)}
+             "tiny_32.png": noise_png(32, 32), "huge.png": noise_png(64, 64) + b"\0" * (21 * 1024 * 1024),
+             "scan.dcm": b"\0" * 128 + b"DICM" + b"\0" * 64}   # a DICOM preamble and magic only: the page refuses it by its name (P6-A)
     paths = {}
     for name, data in files.items():
         (d / name).write_bytes(data)

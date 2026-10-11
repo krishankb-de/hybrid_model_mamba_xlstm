@@ -18,7 +18,8 @@
 // Enter in a text-like input that no handler took presses the form's first submit button. Nothing is ever navigated.
 // It follows the DOM where a test could tell: append turns a string into a text node and never parses it (so a report
 // that contains markup stays text), and a value that is not a node is made a string, so an `undefined` or `false`
-// that slips into a card shows up as that word.
+// that slips into a card shows up as that word. An event that bubbles out of the body reaches the document's own
+// listeners (P6-A: a paste is the document's, wherever the focus is).
 //
 // The HTML-string APIs are tripwires: reading or writing them throws, so a renderer that reached for one fails its
 // test instead of passing on a shim that quietly accepts it. serialize(node) is the test's own way to look at markup:
@@ -31,6 +32,7 @@ const FOCUSABLE_TAGS = new Set(['button', 'input', 'select', 'textarea']);
 const TEXT_LIKE = new Set(['text', 'search', 'url', 'tel', 'email', 'password', 'number']);   // the inputs whose Enter submits their form
 const isSubmitButton = (node) => node.localName === 'button' && (node.getAttribute('type') ?? 'submit') === 'submit';
 let documentBody = null;   // the body of the document installed last: focus works inside it only
+let documentNode = null;   // and that document: an event that bubbles out of its body reaches its listeners
 let focused = null;        // the element that has focus, if it is still in that body
 let focusVisible = false;  // and whether that focus came by the keyboard, so that it matches :focus-visible (P4-H)
 let modality = 'keyboard'; // what moved the focus last: a key ('keyboard', also a page nobody has touched yet) or a pointer
@@ -274,11 +276,14 @@ class ShimElement extends ShimNode {
     if (!event.target) event.target = this;
     if (event.type === 'keydown') modality = 'keyboard';
     else if (POINTER_EVENTS.has(event.type)) modality = 'pointer';
+    let top = this;
     for (let node = this; node && node.nodeType === 1; node = node.parentNode) {
+      top = node;
       event.currentTarget = node;
       for (const listener of [...(node.listeners.get(event.type) ?? [])]) listener.call(node, event);
       if (!event.bubbles || event.cancelBubble) break;
     }
+    if (top === documentBody && documentNode && event.bubbles && !event.cancelBubble) documentNode.deliver(event);   // out of the body: the document
     if (!event.defaultPrevented && event.type === 'keydown' && event.key === 'Enter') this.implicitSubmission();
     return !event.defaultPrevented;
   }
@@ -329,11 +334,12 @@ class ShimElement extends ShimNode {
 
 export function createDocument() {
   const body = new ShimElement('body');
+  const listeners = new Map();
   documentBody = body;
   focused = null;
   focusVisible = false;
   modality = 'keyboard';
-  return {
+  const doc = {
     get activeElement() { return currentFocus() ?? body; },
     createElement: (tag) => new ShimElement(tag),
     createTextNode: (data) => new ShimText(data),
@@ -342,7 +348,24 @@ export function createDocument() {
     querySelector: (selector) => body.querySelector(selector),
     querySelectorAll: (selector) => body.querySelectorAll(selector),
     write: () => tripwire('document.write'),
+    addEventListener(type, listener) {
+      if (typeof listener !== 'function') throw new TypeError(`the listener for "${type}" is not a function`);
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(listener);
+    },
+    removeEventListener(type, listener) { listeners.set(type, (listeners.get(type) ?? []).filter((l) => l !== listener)); },
+    deliver(event) {   // the document's own listeners, for an event that bubbled out of the body or was sent to the document
+      event.currentTarget = doc;
+      for (const listener of [...(listeners.get(event.type) ?? [])]) listener.call(doc, event);
+    },
+    dispatchEvent(event) {
+      if (!event.target) event.target = doc;
+      doc.deliver(event);
+      return !event.defaultPrevented;
+    },
   };
+  documentNode = doc;
+  return doc;
 }
 
 export function installDom() {

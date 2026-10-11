@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+from app.commands import collapse, parse_command
 from app.ids import new_id
 from app.schemas import DISCLAIMER   # the one copy of the message_stop.disclaimer text
 
@@ -100,7 +101,13 @@ def _check_mode(mode: str) -> None:
 
 
 def _clean_title(text: Optional[str]) -> str:
-    return " ".join((text or "").split())[:MAX_TITLE]
+    return collapse(text)[:MAX_TITLE]   # on the whitespace the page splits a note on (P6-A f)
+
+
+def _note_title(text: Optional[str]) -> str:
+    """What a turn's note gives the session as its title (P6-A d): the note minus its command tokens. A command is the whole note
+    (app/commands.py), so a note that is one gives nothing, and the image's file name titles the session instead."""
+    return "" if parse_command(text or "") is not None else _clean_title(text)
 
 
 def _text_or_none(value: Any) -> Optional[str]:
@@ -243,7 +250,8 @@ class Store:
         """Store the user message (done) and the assistant message (running); -> (user_message_id, message_id).
 
         The user message carries the text and the image; the assistant message carries the options and, later, the
-        result. The first turn also titles the session: the text, else the filename, else the test row. ``mode`` must
+        result. The first turn also titles the session: the note unless it is a command, else the filename, else the test row (P6-A d:
+        "beam 5" is no title, the X-ray's name is). ``mode`` must
         be the session's own (ValueError otherwise). A test row and a reference are private-mode data (R1): a public
         session stores neither, not as a column and not inside the options JSON, and titles itself with neither.
         """
@@ -261,7 +269,7 @@ class Store:
             if row["mode"] != "private":
                 test_row = None
                 options = {k: v for k, v in (options or {}).items() if k not in PRIVATE_OPTION_KEYS}
-            title = (row["title"] or _clean_title(text) or _clean_title(image_filename)
+            title = (row["title"] or _note_title(text) or _clean_title(image_filename)
                      or ("test row {}".format(test_row) if test_row is not None else ""))
             last = con.execute("SELECT COALESCE(MAX(seq_in_session), 0) FROM messages WHERE session_id = ?",
                                (session_id,)).fetchone()[0]

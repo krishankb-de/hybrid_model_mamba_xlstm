@@ -726,6 +726,61 @@ def test_the_picker_case_fails_on_overflow_a_covered_header_or_a_picker_that_is_
     assert any("#pick-study cannot be reached by scrolling: its centre hits #composer" in f for f in layout.check_picker(low, 375, 568))
 
 
+def _composer(width: int = 801, height: int = 568, state: str = "hint") -> Dict[str, Any]:
+    """What MEASURE_COMPOSER_JS reports for a composer in order (check k, P6-A): the row the case shows (the re-run hint or the preview) is
+    rendered inside the composer, the other is not, nothing overflows, and Send lies inside the composer's box and the viewport, hit at its
+    centre, with nothing scrolled."""
+    left, right = (16.0, width - 16.0) if width <= 800 else (276.0, width - 336.0)
+    composer = [left, height - 330.0, right, height - 16.0]
+    row = [left + 10, height - 280.0, right - 10, height - 260.0]
+    return {"doc": [width, width], "composer": {"box": composer, "sw": right - left - 2, "cw": right - left - 2}, "conversation": 150,
+            "rows": {"#rerun-hint": row if state == "hint" else None, "#preview": row if state == "preview" else None},
+            "send": [right - 90.0, height - 66.0, right - 10.0, height - 26.0], "hit": {"ok": True, "got": "#send"}}
+
+
+def test_a_composer_whose_rows_keep_send_in_sight_has_no_failures():   # P6-A (5a)
+    for width, height, _drawer in layout.COMPOSER_CASES:
+        for state in layout.COMPOSER_STATES:
+            assert layout.check_composer(_composer(width, height, state), width, height, state) == [], (width, height, state)
+
+
+def test_send_below_the_composers_fold_or_covered_fails_the_composer_case():   # P6-A (5a): the carried defect, 801-820 x 568-650, drawer open
+    low = _composer()
+    low["send"] = [631.0, 560.0, 711.0, 600.0]   # under the composer's bottom (552): only scrolling the composer would show it
+    assert any("#send is below the composer's fold" in f for f in layout.check_composer(low, 801, 568, "hint"))
+    covered = _composer()
+    covered["hit"] = {"ok": False, "got": "#chips"}
+    assert any("#send is covered: its centre hits #chips" in f for f in layout.check_composer(covered, 801, 568, "hint"))
+    gone = _composer()
+    gone["send"], gone["hit"] = None, None
+    assert "#send is not rendered" in layout.check_composer(gone, 801, 568, "hint")
+
+
+def test_the_composer_case_fails_on_a_missing_or_stray_row_overflow_or_a_lost_report_floor():   # P6-A (5a)
+    hidden = _composer(state="preview")
+    hidden["rows"]["#preview"] = None
+    assert "#preview is not rendered, but the case shows it" in layout.check_composer(hidden, 801, 568, "preview")
+    both = _composer(state="hint")
+    both["rows"]["#preview"] = list(both["rows"]["#rerun-hint"])
+    assert any("#preview is rendered with #rerun-hint" in f for f in layout.check_composer(both, 801, 568, "hint"))
+    wide = _composer(320, 568, "hint")
+    wide["composer"]["sw"] = 400   # a long file name that does not wrap or ellipsize widens the composer
+    assert any("#composer overflows horizontally" in f for f in layout.check_composer(wide, 320, 568, "hint"))
+    spill = _composer(320, 568, "preview")
+    spill["rows"]["#preview"][2] = 330.0
+    assert any("#preview leaves the composer's width" in f for f in layout.check_composer(spill, 320, 568, "preview"))
+    floor = _composer()
+    floor["conversation"] = 90
+    assert any("the report area is 90 px tall, under 120" in f for f in layout.check_composer(floor, 801, 568, "hint"))
+
+
+def test_the_composer_cases_are_the_carried_widths_with_the_drawer_open_and_320_px():   # P6-A (5a)
+    open_ = {(w, h) for w, h, drawer in layout.COMPOSER_CASES if drawer}
+    assert {(801, 568), (820, 568), (834, 568), (801, 650), (820, 650)} <= open_
+    assert (320, 568) in {(w, h) for w, h, _ in layout.COMPOSER_CASES}
+    assert layout.COMPOSER_STATES == ["hint", "preview"] and len(layout.LONG_FILE) > 100 and " " not in layout.LONG_FILE
+
+
 def test_a_card_section_that_is_missing_wide_or_holds_a_bad_picture_fails():
     first = layout.SECTIONS[0]
     gone = _sections()
@@ -783,6 +838,7 @@ class FakePage:
         self.drawer, self.stop = False, False
         self.opened = 0
         self.sections_drawn, self.sections_measured, self.picker_measured = 0, 0, 0
+        self.composer_set_up, self.composer_measured = [], 0
 
     def open(self, url: str, width: int, height: int, scheme: str) -> None:
         self.width, self.height, self.drawer, self.stop = width, height, False, False
@@ -821,6 +877,12 @@ class FakePage:
             return _picker(self.width, self.height)
         if function == layout.INJECT_SECTIONS_JS:
             self.sections_drawn += 1
+        if function == layout.INJECT_COMPOSER_JS:
+            self.composer_set_up.append((self.width, self.height, argument["drawer"], argument["state"], argument["name"]))
+            self.state = argument["state"]
+        if function == layout.MEASURE_COMPOSER_JS:
+            self.composer_measured += 1
+            return _composer(self.width, self.height, self.state)
         return True
 
 
@@ -832,25 +894,31 @@ def test_the_loop_runs_every_case_and_passes_on_a_page_in_order():
                 + len(layout.SHORT_VIEWPORTS) * len(layout.SCHEMES) * 2 + len(layout.TALL_WIDTHS) * len(layout.SCHEMES)
                 + viewports * len(layout.SCHEMES)    # P4-G: one more case for each viewport in each scheme, for the Save button
                 + viewports * len(layout.SCHEMES)    # P6-B: and one for the card's own sections
-                + viewports * len(layout.SCHEMES))   # P6 fix 1: and one with the test-split picker open
-    assert cases == expected == 226
+                + viewports * len(layout.SCHEMES)    # P6 fix 1: and one with the test-split picker open
+                + len(layout.COMPOSER_CASES) * len(layout.SCHEMES) * len(layout.COMPOSER_STATES))   # P6-A: the composer's rows
+    assert cases == expected == 254
     assert failures == []
     assert page.opened == ((len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)) * len(layout.SCHEMES)
-                           + len(layout.TALL_WIDTHS) * len(layout.SCHEMES))   # one load per viewport and scheme, the drawer and Stop are toggled in it
+                           + len(layout.TALL_WIDTHS) * len(layout.SCHEMES)
+                           + len(layout.COMPOSER_CASES) * len(layout.SCHEMES))   # one load per viewport and scheme, the drawer and Stop are toggled in it
     assert page.sections_drawn == viewports * len(layout.SCHEMES)                  # the card drawn once per viewport and scheme,
     assert page.sections_measured == viewports * len(layout.SCHEMES) * 2           # and measured with the drawer closed and open
     assert page.picker_measured == viewports * len(layout.SCHEMES)
+    assert page.composer_measured == len(layout.COMPOSER_CASES) * len(layout.SCHEMES) * len(layout.COMPOSER_STATES)
+    assert {(w, h, drawer, state) for w, h, drawer, state, _ in page.composer_set_up} == {
+        (w, h, drawer, state) for w, h, drawer in layout.COMPOSER_CASES for state in layout.COMPOSER_STATES}
+    assert {name for *_, name in page.composer_set_up} == {layout.LONG_FILE}   # every case with the long file name
 
 
 def test_the_loop_reports_a_stop_button_that_never_renders_in_the_cases_that_show_it():
     cases, failures = layout.run_checks(FakePage(stop_renders=False), "http://x/")
     assert failures and all("#stop is not rendered, but the case shows it" in f and "stop=shown" in f for f in failures)
-    assert cases == 226
+    assert cases == 254
 
 
 def test_the_loop_reports_a_save_button_that_never_renders_in_the_save_cases_only():
     cases, failures = layout.run_checks(FakePage(save_renders=False), "http://x/")
-    assert cases == 226 and len(failures) == len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)   # once per viewport: both schemes fail alike
+    assert cases == 254 and len(failures) == len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)   # once per viewport: both schemes fail alike
     assert all("light+dark" in f and "save" in f and "#drawer-save is not rendered" in f for f in failures), failures
 
 

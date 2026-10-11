@@ -264,6 +264,30 @@ def test_the_rerun_hint_is_a_row_of_the_composer_that_wraps_a_long_file_name():
     assert re.search(r"margin:\s*0", rule)   # a gap, not a margin: nothing is left when it is hidden
 
 
+def test_a_short_page_or_a_narrow_composer_puts_the_well_and_the_rerun_hint_on_one_line_each():
+    """P6-A (5a): at 801-834 x 568-650 px with the drawer open the composer is about 170 px wide, and a hint with a long file name (or the
+    well's own text) wrapped into many lines and pushed Send under the composer's fold. Under 720 px of height, and in a composer 260 px wide
+    or less (a container query: whatever made it narrow), each is one line cut short with an ellipsis. scripts/chat_ui_layout_check.py
+    (check k) measures Send in sight at those sizes; this pins the rules it depends on."""
+    composer = " ".join(b for h, b in _stylesheet() if h == "#composer")
+    assert re.search(r"container:\s*composer\s*/\s*inline-size", composer)
+    for query in (r"@media\s*\(\s*max-height:\s*720px\s*\)", r"@container\s+composer\s*\(\s*max-width:\s*260px\s*\)"):
+        rules = _media(query)
+        assert rules, query
+        one_line = " ".join(b for h, b in rules if h == "#image-well, #rerun-hint")
+        for declaration in (r"white-space:\s*nowrap", r"text-overflow:\s*ellipsis", r"overflow:\s*hidden"):
+            assert re.search(declaration, one_line), (query, declaration)
+
+
+def test_the_preview_puts_a_long_name_on_a_line_of_its_own_cut_short_and_keeps_the_sizes_in_sight():
+    """P6-A (5a): composer.js writes the preview's line as the name, a separator and the sizes, each a span; the name and the sizes are a line
+    each, cut short where the composer is narrow (the title has the line whole), and the separator is left to the text."""
+    rules = {h: b for _, h, b in _walk(_stylesheet())}
+    assert re.search(r"flex-direction:\s*column", rules["#preview > span"]) and re.search(r"min-width:\s*0", rules["#preview > span"])
+    assert re.search(r"white-space:\s*nowrap", rules["#preview > span > span"]) and re.search(r"text-overflow:\s*ellipsis", rules["#preview > span > span"])
+    assert re.search(r"display:\s*none", rules["#preview .preview-sep"])
+
+
 def test_the_hidden_attribute_beats_display_rules():
     hidden = [b for h, b in _stylesheet() if h == "[hidden]"]   # else `#drawer { display: ... }` would show it
     assert hidden and re.search(r"display:\s*none\s*!important", hidden[0])

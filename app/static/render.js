@@ -652,7 +652,9 @@ export function renderNeighbors(view, ctx) {
 // A report as a paragraph clamped to three lines (styles.css), with a Show all that opens it and a Show less that closes it again. Whether
 // the three lines hide anything depends on the width the text is drawn at, so the button's row starts hidden and the page shows it once the
 // card is in it and the text is measured (settleClamps, P6 fix 1). ui.reports keeps the open ones by key, so the next frame builds them open,
-// and an open report keeps its Show less. key also names the button for focusKey. -> nodes.
+// and an open report keeps its Show less. A report closed again is measured as it closes (P6-A g): the page may have grown wider while it
+// was open, and three lines may hold it all now, so no Show all is left that would reveal nothing; the focus its button had goes to the
+// report itself. key also names the button for focusKey. -> nodes.
 function clampedText(text, key, name, v, cx) {
   const ui = uiOf(v, cx);
   if (!(ui.reports instanceof Set)) ui.reports = new Set();   // a record made before the field existed
@@ -662,6 +664,7 @@ function clampedText(text, key, name, v, cx) {
   const verb = () => (open ? 'Show less' : 'Show all');
   const toggle = el('button', { type: 'button', class: 'show-all', 'data-action': 'show', 'data-key': key, 'aria-expanded': String(open),
                                 'aria-controls': id, 'aria-label': named(`${verb()} of ${name}`, cx) }, verb());
+  const row = el('div', { class: 'clamp-actions', hidden: !open }, toggle);
   toggle.addEventListener('click', () => {
     open = !open;
     body.classList.toggle('open', open);
@@ -669,8 +672,14 @@ function clampedText(text, key, name, v, cx) {
     toggle.setAttribute('aria-expanded', String(open));
     toggle.setAttribute('aria-label', named(`${verb()} of ${name}`, cx));
     if (open) ui.reports.add(key); else ui.reports.delete(key);
+    if (open || overflowing(body)) return;
+    if (toggle.matches?.(':focus')) {   // the button is going: its focus goes to the report it was about, not to the page
+      body.setAttribute('tabindex', '-1');
+      body.focus({ preventScroll: true });
+    }
+    row.hidden = true;
   });
-  return [body, el('div', { class: 'clamp-actions', hidden: !open }, toggle)];
+  return [body, row];
 }
 
 // Does a clamped report hide anything? Its text is taller than the three lines it is given. Read off the layout: a text that has none to read

@@ -17,7 +17,8 @@ one `CHECK <name> PASS|FAIL <detail>` line each:
   narrow    375 x 812: a full turn, its details open, the sidebar and the drawer, with no horizontal overflow
   a11y      the accessibility tree: stage buttons named from their text with their expanded state, label chips that say
             positive or negative (and whether each agrees with the reference), a status region that says "Report ready"
-  error     a server 422 shows the dismissible notice and keeps the composer as it was
+  error     a server 422 shows the dismissible notice and keeps the composer as it was; a clicked Dismiss leaves the focus where the
+            click put it (a tap must not open a phone's keyboard), and one pressed from the keyboard hands it to the note field (P6-A)
   settings  (P4-F, P4-G) the drawer is a form that ends in Save, and says what it took. A click into a field that holds a value selects
             all of it (the first click after a Tab places the caret), and a budget typed with real keys replaces it (it is not appended)
             and shows in the composer chips before any blur; Enter saves, closes the drawer to Settings and says "Settings saved." for
@@ -1108,17 +1109,27 @@ def check_error(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     expect(notice["turns"] == 0, "the refused turn is still on the page ({} nodes)".format(notice["turns"]))
     expect(notice["send"] and notice["stop"], "the composer is locked after the refusal")
     ctx.shot("error_notice", "error_notice", "the dismissible notice above the composer, with the refused note and the image still in it", DESKTOP)
-    b.click('#notice button[aria-label="Dismiss"]')
+    b.click('#notice button[aria-label="Dismiss"]')   # a click, as a tap on a phone: the focus is left to the browser (P6-A e)
     dismissed = b.evaluate("({ hidden: document.querySelector('#notice').hidden, prompt: document.querySelector('#prompt').value,"
                            " preview: !document.querySelector('#preview').hidden, focus: document.activeElement.id })")
     expect(dismissed["hidden"] and dismissed["prompt"] == "tokens 500" and dismissed["preview"], "Dismiss changed the composer: {}".format(dismissed))
-    expect(dismissed["focus"] == "prompt", "focus is on {!r} after Dismiss, not the note field".format(dismissed["focus"]))
+    expect(dismissed["focus"] != "prompt", "a clicked Dismiss put the focus in the note field, which opens a phone's keyboard")
+    # The keyboard's Dismiss hands the focus to the note field, where the next note is typed: the same refusal again, dismissed with Enter.
+    b.click("#send")
+    b.wait_for("!document.querySelector('#notice').hidden", 15, "the notice again")
+    b.key("Shift", "ShiftLeft", 16)   # the keyboard's modality: a focus() now shows its ring, as a Tab to the button would
+    b.evaluate("document.querySelector('#notice button[aria-label=\"Dismiss\"]').focus()")
+    b.key("Enter", "Enter", 13, text="\r")
+    keyed = b.evaluate("({ hidden: document.querySelector('#notice').hidden, focus: document.activeElement.id })")
+    expect(keyed == {"hidden": True, "focus": "prompt"}, "a Dismiss pressed from the keyboard left {}".format(keyed))
+    dismissed["keyboard"] = keyed
     # and the same composer sends once the note is fixed
     b.evaluate("(() => { const p = document.querySelector('#prompt'); p.value = ''; p.dispatchEvent(new Event('input', { bubbles: true })); })()")
     b.click("#send")
     card = b.wait_for("(() => { const c = (%s)(); return c && c.status !== 'running' ? c : null; })()" % CARD_JS, 30, "the retried turn")
     expect(card["status"] == "done", "the retried turn ended {}".format(card["status"]))
-    return ("a server {} showed the alert '{}', kept the note and the image, dismissed to the note field; the same composer then sent".format(
+    return ("a server {} showed the alert '{}', kept the note and the image; a clicked Dismiss left the focus alone and a keyed one handed it to "
+            "the note field; the same composer then sent".format(
         statuses[-1][1], one_line(notice["text"], 60)),
             {"http_status": statuses[-1][1], "notice": notice["text"], "composer_kept": True, "dismissed": dismissed})
 

@@ -37,8 +37,9 @@ QUESTION_HINT = "This note is not a command: with no new image, Send gets no rep
 INTERNAL_ERROR = "Error: Internal error (ImportError)"
 INTERNAL_HINT = "The server hit an internal error. If you just updated the code, restart the server."
 RESTART_ERROR = "Error: The server restarted while this turn was running."
-NOT_AN_IMAGE = "Choose a PNG, JPEG or WEBP image."   # the page's own refusal, before anything is sent
-TOO_BIG = "The image is over the 20 MB limit."
+NOT_AN_IMAGE = "Use a PNG, JPEG or WEBP image."   # the page's own refusals (app/static/composer.js), before anything is sent
+TOO_BIG = "Image is larger than 20 MB."
+DICOM = "DICOM is not supported. Export the image as PNG or JPEG first."
 SETTLED_STAGES = {"preprocess": "done", "encode": "done", "retrieve": "skipped", "generate": "done", "label": "skipped",
                   "score": "skipped"}
 STAGE_RANK = {"pending": 0, "running": 1, "done": 2, "skipped": 2, "error": 2}
@@ -177,10 +178,12 @@ def test_upload_by_file_chooser_and_drag_and_drop_and_the_image_can_be_removed_a
     with page.expect_file_chooser() as chooser:
         page.click("#image-well")
     chooser.value.set_files(images["xray_a.png"])
-    page.wait_for_function("!document.querySelector('#preview').hidden")
-    assert re.fullmatch(r"xray_a\.png · \d+ KB", ui.composer()["preview"])
+    page.wait_for_function("!document.querySelector('#preview').hidden && document.querySelector('#preview span').textContent.includes(' px ')")
+    assert re.fullmatch(r"xray_a\.png · 320×320 px · \d+ KB", ui.composer()["preview"])   # P6-A: the pixel size once the picture decodes
     assert page.get_attribute("#preview img", "src").startswith("blob:")
-    page.click("#preview button")   # Remove
+    assert page.get_attribute("#preview img", "alt") == "Preview of xray_a.png"
+    assert page.get_attribute("#preview span", "title") == ui.composer()["preview"]   # whole, where a narrow composer cuts the line short
+    page.click("#preview button[aria-label='Remove image']")   # Remove (×)
     composer = ui.composer()
     assert composer["preview"] is None and composer["focus"] == "image-well"   # the focus is not lost with the button
     assert ui.drop(images["xray_b.png"]) is True   # dropped from the desktop onto the well: taken, and the page stays
@@ -191,6 +194,8 @@ def test_upload_by_file_chooser_and_drag_and_drop_and_the_image_can_be_removed_a
     assert page.url.endswith("#/new") and ui.composer()["preview"].startswith("xray_c.jpg")
     ui.drop(images["xray_a.png"], target="#prompt", kind="paste")   # pasted into the note field: attached
     assert ui.composer()["preview"].startswith("xray_a.png · ")
+    assert ui.drop(images["xray_b.png"], target="#conversation", kind="paste") is True   # P6-A: a paste is the page's, wherever the focus is
+    page.wait_for_function("document.querySelector('#preview span').textContent.startsWith('xray_b.png')")
     assert ui.server.sessions() == []   # nothing was sent
     ui.assert_clean()
 
@@ -562,6 +567,11 @@ def test_errors_are_refused_visibly_and_leave_the_composer_usable(ui, images):
     page.set_input_files("#file", images["huge.png"])   # over 20 MB: refused by the page, nothing uploaded
     page.wait_for_function("(m) => document.querySelector('#notice p').textContent === m", arg=TOO_BIG)
     _refused_and_usable(ui, TOO_BIG)
+    assert ui.composer()["preview"] is None and len(ui.refusals) == 2
+
+    page.set_input_files("#file", images["scan.dcm"])   # a DICOM file: refused by the page, by its name (P6-A)
+    page.wait_for_function("(m) => document.querySelector('#notice p').textContent === m", arg=DICOM)
+    _refused_and_usable(ui, DICOM)
     assert ui.composer()["preview"] is None and len(ui.refusals) == 2
 
     card = ui.turn(images["xray_a.png"], note="tokens {}".format(FAULT_TOKENS))   # an internal error inside the engine

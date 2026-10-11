@@ -199,6 +199,19 @@ def test_question_without_image_gets_the_fixed_answer(client):
     assert any(f["event"] == "warning" and f["data"]["code"] == "not_a_command" for f in frames)
 
 
+def test_a_text_only_turn_tells_a_question_by_the_whitespace_the_page_uses(client):
+    """P6-A (f): a note of U+FEFF alone is no note (JavaScript's whitespace, which the server now takes too), so it re-runs the last X-ray as
+    the page's hint says; a question whose words a U+0085 splits is still a question, and gets the fixed answer."""
+    sid = client.post("/v1/sessions", json={}).json()["id"]
+    _turn(client, sid)
+    rerun = _turn(client, sid, image=False, text="﻿")
+    assert rerun[0]["data"]["image"]["source"] == "previous" and not [f for f in rerun if f["event"] == "warning"]
+    asked = _turn(client, sid, image=False, text="is it\x85pneumonia?")
+    assert [f["data"]["code"] for f in asked if f["event"] == "warning"] == ["not_a_command"] and asked[0]["data"]["image"] is None
+    command = _turn(client, sid, image=False, text="beam\x1c2")
+    assert command[0]["data"]["image"]["source"] == "previous" and command[0]["data"]["options"]["beam_size"] == 2
+
+
 def test_first_turn_without_image_is_a_422(client):
     sid = client.post("/v1/sessions", json={}).json()["id"]
     r = client.post("/v1/sessions/{}/messages".format(sid), data={"text": "beam 2", "options": "{}"})
@@ -782,7 +795,8 @@ def test_a_public_turn_is_redacted_before_it_is_stored_and_sent(tmp_path):
         everything += c.get("/v1/sessions/{}/export?format=md".format(sid), headers=PUBLIC).text
         assert "from the drawer" not in everything   # never typed, so nowhere at all
         user = sessions[1]["messages"][0]
-        assert user["text"] == sessions[1]["title"] == "reference: Findings: typed by the visitor."
+        assert user["text"] == "reference: Findings: typed by the visitor."
+        assert sessions[1]["title"] == "x.png"   # P6-A (d): a command, a reference too, titles no chat; the X-ray's name does
 
 
 def test_public_cards_and_provenance_carry_the_checkpoint_file_name_only(tmp_path, monkeypatch):

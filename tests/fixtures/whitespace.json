@@ -1,0 +1,156 @@
+{
+ "_comment": "CHAT_UI_PLAN.md P6-A (f): the one definition of whitespace that the server (app/commands.py WHITESPACE) and the page (app/static/app.js SPACE) split a note on: Python's str.split() whitespace and JavaScript's \\s together, so U+001C..U+001F and U+0085 (Python's only) and U+FEFF (JavaScript's only) are whitespace on both sides. tests/test_app_commands.py and tests/frontend/app.test.mjs read this file. For a note: `collapsed` is its words joined by single spaces, `command` whether it is one of the server's text commands, and `runs` whether a Send of it with no new image runs the model (a command, or no note at all) rather than getting the fixed answer for a question.",
+ "whitespace": [
+  "\t",
+  "\n",
+  "\u000b",
+  "\f",
+  "\r",
+  "\u001c",
+  "\u001d",
+  "\u001e",
+  "\u001f",
+  " ",
+  "\u0085",
+  "\u00a0",
+  "\u1680",
+  "\u2000",
+  "\u2001",
+  "\u2002",
+  "\u2003",
+  "\u2004",
+  "\u2005",
+  "\u2006",
+  "\u2007",
+  "\u2008",
+  "\u2009",
+  "\u200a",
+  "\u2028",
+  "\u2029",
+  "\u202f",
+  "\u205f",
+  "\u3000",
+  "\ufeff"
+ ],
+ "not_whitespace": [
+  "\u200b",
+  "\u180e",
+  "\u2060",
+  "\u00ad",
+  "\u0000",
+  "\b",
+  "\u007f",
+  "_",
+  "a"
+ ],
+ "notes": [
+  {
+   "note": "beam\u001c5",
+   "collapsed": "beam 5",
+   "command": true,
+   "runs": true
+  },
+  {
+   "note": "\u001d\u001egreedy\u001f",
+   "collapsed": "greedy",
+   "command": true,
+   "runs": true
+  },
+  {
+   "note": "tokens\u008530",
+   "collapsed": "tokens 30",
+   "command": true,
+   "runs": true
+  },
+  {
+   "note": "\ufeffbeam 5",
+   "collapsed": "beam 5",
+   "command": true,
+   "runs": true
+  },
+  {
+   "note": "repair\u00a0on",
+   "collapsed": "repair on",
+   "command": true,
+   "runs": true
+  },
+  {
+   "note": "retrieve\u30006",
+   "collapsed": "retrieve 6",
+   "command": true,
+   "runs": true
+  },
+  {
+   "note": "reference:\u0085Findings:\ufeffclear lungs.",
+   "collapsed": "reference: Findings: clear lungs.",
+   "command": true,
+   "runs": true
+  },
+  {
+   "note": "Beam\t\n 2",
+   "collapsed": "Beam 2",
+   "command": true,
+   "runs": true
+  },
+  {
+   "note": "\u0085",
+   "collapsed": "",
+   "command": false,
+   "runs": true
+  },
+  {
+   "note": "\ufeff",
+   "collapsed": "",
+   "command": false,
+   "runs": true
+  },
+  {
+   "note": "\u001c\u001d\u001e\u001f",
+   "collapsed": "",
+   "command": false,
+   "runs": true
+  },
+  {
+   "note": " \t\n\u2028 ",
+   "collapsed": "",
+   "command": false,
+   "runs": true
+  },
+  {
+   "note": "",
+   "collapsed": "",
+   "command": false,
+   "runs": true
+  },
+  {
+   "note": "is it\u0085pneumonia?",
+   "collapsed": "is it pneumonia?",
+   "command": false,
+   "runs": false
+  },
+  {
+   "note": "what\ufeffabout this",
+   "collapsed": "what about this",
+   "command": false,
+   "runs": false
+  },
+  {
+   "note": "beam\u200b5",
+   "collapsed": "beam\u200b5",
+   "command": false,
+   "runs": false
+  },
+  {
+   "note": "greedy\u180e",
+   "collapsed": "greedy\u180e",
+   "command": false,
+   "runs": false
+  },
+  {
+   "note": "tokens\u206030",
+   "collapsed": "tokens\u206030",
+   "command": false,
+   "runs": false
+  }
+ ]
+}

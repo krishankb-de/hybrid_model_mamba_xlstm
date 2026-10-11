@@ -217,6 +217,24 @@ def test_session_title_is_the_first_text_else_the_filename_else_the_test_row(tmp
     assert s.create_session("private", title="  Mine ")["title"] == "Mine"
 
 
+def test_a_command_never_titles_a_session_its_image_does(tmp_path):
+    """P6-A (d): the title is the note minus its command tokens when that is not empty, else the image's file name (else the test row).
+    A command is the whole note (app/commands.py), so a note that is one titles nothing; it is told by the same parse, on the whitespace the
+    page splits a note on (P6-A f)."""
+    s = Store(tmp_path)
+    cases = [("beam 5", "chest.png", None, "chest.png"),
+             ("  reference: Findings: clear lungs. ", "chest.png", None, "chest.png"),   # nor does a reference's text become the title
+             ("greedy", None, 7, "test row 7"),
+             ("beam\x1c5", "chest.png", None, "chest.png"),
+             ("﻿", "chest.png", None, "chest.png"),            # no note at all
+             ("beam 5 please", "chest.png", None, "beam 5 please"),  # no command: a note, which titles the chat
+             ("is it\x85pneumonia?", "chest.png", None, "is it pneumonia?")]
+    for note, filename, row, title in cases:
+        sess = s.create_session("private")
+        s.start_turn(sess["id"], note, "private", {}, "ab" * 32 if filename else None, filename, test_row=row)
+        assert s.get_session(sess["id"], None)["title"] == title, note
+
+
 def test_last_image_is_the_latest_turn_that_carried_one(tmp_path):
     s = Store(tmp_path)
     sess = s.create_session("private")

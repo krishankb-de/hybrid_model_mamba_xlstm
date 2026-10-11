@@ -13,6 +13,9 @@
 // cancel first and then drops the stream, and the poll brings the turn's own message_stop. Leaving a session drops the
 // stream and does not poll: coming back finds the turn running and polls it from its last seq.
 //
+// The image intake (click, drag-drop, paste, the preview) is composer.js's (P6-A): this file attaches it and spends what it holds once the
+// server has accepted the turn it went with.
+//
 // The settings drawer is a form that ends in Save (P4-G). A number applies as it is typed while it is a whole number inside its
 // bounds; anything else is left as typed, with a line under the field that says what it takes, and is never clamped, applied or stored.
 // Save (or Enter in a field) checks every field, then stores, closes the drawer and says so; closing it any other way puts the saved
@@ -21,6 +24,7 @@
 // Every control is shown or hidden with the hidden attribute and every string reaches the page as a text node (el() and
 // textContent), never as markup. Nothing is stored but the settings and the client id, both inside try/catch.
 import * as realApi from './api.js';
+import { attachComposer } from './composer.js';
 import { applyEvent, initialView } from './state.js';
 import {
   detailTable, el, focusKey, optionChips, renderAssistantCard, renderUserTurn, restoreFocus, scheduleRender, settleClamps, statusText,
@@ -39,8 +43,6 @@ export const HEALTH_TIMEOUT_MS = 5000;  // a /healthz that has not answered by t
 const PAGE = 50;                       // sessions per request of the sidebar
 const NEAR_PX = 80;                    // "at the bottom" for auto-scroll: within this many pixels of it
 const REVOKE_MS = 1000;                // an export's object URL is revoked this long after its link was clicked
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;   // the server's upload limit
-const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 const SESSION_ID = /^[A-Za-z0-9_-]{1,64}$/;   // what the server's new_id produces
 const CLIENT_ID = /^[\x21-\x7e]{1,128}$/;     // what the server accepts as X-Client-Id: visible ASCII
 const SHORT_VIEWPORT = '(max-height: 480px)'; // the page scrolls instead of #conversation (styles.css)
@@ -71,6 +73,8 @@ const rangeMessage = (key) => `Enter a whole number from ${BOUNDS[key][0]} to ${
 const SAVED_TEXT = 'Settings saved. They apply from your next Send.';
 const QUESTION_TEXT = 'This note is not a command: with no new image, Send gets no report.';   // the re-run hint, for a note the server will not run
 const SAVED_MS = 4000;   // how long the page says so
+const UPLOADING_TEXT = 'Uploading…';          // the status between Send and the accept (P6-A c)
+const CANCEL_UPLOAD = 'Cancel upload';        // and what Stop reads then: the server has no turn yet, so it aborts the request
 const PICK_LIMIT = 50;         // test-split studies per request of the picker (GET /v1/test-studies takes 1 to 200)
 const PICK_DEBOUNCE_MS = 250;  // the pause in typing after which the picker asks for the studies that match
 const STORAGE_TEXT = 'Browser storage is unavailable, so these settings last until the page closes.';
@@ -396,15 +400,6 @@ export function nearBottom(m, slack = NEAR_PX) {
   return scrollHeight - scrollTop - clientHeight <= slack;
 }
 
-// null when the file may be attached; else why not. The server decides on the content: this only saves an upload that
-// cannot work (a type the picker would not offer, a file over the limit). A file with no type is let through.
-export function checkImageFile(file) {
-  if (!file) return 'Choose an image.';
-  if (file.type && !IMAGE_TYPES.includes(file.type)) return 'Choose a PNG, JPEG or WEBP image.';
-  if (Number.isFinite(file.size) && file.size > MAX_IMAGE_BYTES) return 'The image is over the 20 MB limit.';
-  return null;
-}
-
 // The server's text commands (app/commands.py), each the whole note once its whitespace is collapsed, case aside, ASCII only on both sides.
 // The page reads them only to say what Send will do: with no new image, a command or an empty note runs the chat's last X-ray again, and
 // any other note gets the server's fixed answer and no report (post_message). The server decides; tests/frontend/fixtures/commands.json
@@ -412,13 +407,22 @@ export function checkImageFile(file) {
 export const COMMANDS = Object.freeze([/^beam \d+$/i, /^greedy$/i, /^tokens \d+$/i, /^retrieve \d+$/i, /^reference:\s*.+$/i,
                                        /^repair (?:on|off)$/i]);
 
+// The whitespace a note is split on: the server's (app/commands.py WHITESPACE), Python's and JavaScript's together, so U+001C..U+001F and
+// U+0085 (Python's alone) and U+FEFF (JavaScript's alone) are whitespace on both sides (P6-A f). tests/fixtures/whitespace.json lists it,
+// and both test suites read that file.
+const SPACE = /[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/;
+
+// A note's words joined by single spaces, as the server collapses it; '' for what is not a string.
+export const collapse = (note) => (typeof note === 'string' ? note.split(SPACE).filter(Boolean).join(' ') : '');
+
 export function isCommand(note) {
-  const t = typeof note === 'string' ? note.split(/\s+/).filter(Boolean).join(' ') : '';
+  const t = collapse(note);
   return COMMANDS.some((command) => command.test(t));
 }
 
-// Does a turn of this note and this file run the model? With a file it does; with none, only an empty note or a command does.
-const runsTheModel = (note, file) => !!file || !text(note) || isCommand(note);
+// Does a turn of this note and this file run the model? With a file it does; with none, only an empty note or a command does: the server's
+// rule (app/commands.py is_question), on the same whitespace.
+const runsTheModel = (note, file) => !!file || !collapse(note) || isCommand(note);
 
 // Does the element show the keyboard's focus ring (:focus-visible), which a browser draws for a focus the keyboard brought and not for a
 // click or a tap? A browser that cannot tell is taken not to.
@@ -470,13 +474,16 @@ export function createApp(env) {
     turn: null,              // the turn this view is following, if one is running
     busy: false,             // a turn runs here: Send is off and Stop is on
     loading: false,          // a session is being fetched
-    file: null,              // the attached image, not yet sent
-    previewUrl: null,
+    file: null,              // the attached image, not yet sent (composer.js says which)
+    composer: null,          // composer.js's intake: { get, clear }
     said: '',                // the last text written to the status region
     gen: 0,                  // bumped by every route change, so a late answer can tell it is stale
     ticker: null,
     drawerOpener: null,
     healthFailures: 0,
+    healthTimer: null,       // the next /healthz check (P6-A d: a turn's accept and its end ask at once, and the schedule starts over)
+    healthBusy: false,       // a check is on its way
+    healthAgain: false,      // and another was asked for meanwhile: it runs when that one ends
     loadingMore: false,      // a page of the sidebar is being fetched: More is off, so it cannot be asked twice
     noticeRetry: null,
     noticeOwner: null,       // the turn whose failed Stop the notice says, if it is that: the end of the turn takes it down
@@ -520,7 +527,10 @@ export function createApp(env) {
   }
 
   function clearNotice() {
-    if (doc.activeElement && ui.notice.contains(doc.activeElement)) ui.prompt.focus();   // its Retry or Dismiss is about to go
+    // Its Retry or Dismiss is about to go. One pressed from the keyboard (:focus-visible) hands the focus to the note field, where the next
+    // note is typed; one tapped or clicked leaves it to the browser (P6-A e): the note field would open a phone's keyboard over the page.
+    const active = doc.activeElement;
+    if (active && ui.notice.contains(active) && focusVisible(active)) ui.prompt.focus();
     ui.notice.hidden = true;
     ui.noticeText.textContent = '';
     ui.noticeRetry.hidden = true;
@@ -575,7 +585,8 @@ export function createApp(env) {
   function makeTurn(session, n) {
     const turn = { n, id: null, session, view: initialView(null), userEl: null, card: null, text: '', image: null, file: null,
                    controller: null, poller: null, streaming: false, polling: false, stopping: false, left: false, settled: false,
-                   dirty: false, reloading: false, testRow: null };   // testRow: the test study the turn ran (P6-D)
+                   dirty: false, reloading: false, testRow: null, cancelled: false };   // testRow: the test study the turn ran (P6-D);
+                                                                                    // cancelled: its upload, before the accept (P6-A c)
     turn.draw = () => paint(turn);   // one function per card, so scheduleRender draws it at most once a frame
     return turn;
   }
@@ -700,6 +711,7 @@ export function createApp(env) {
       }
       if (state.noticeOwner === turn) clearNotice();   // "couldn't stop": the turn ended by itself
       detach(refreshSessions());
+      detach(checkHealth());   // the load it took is given back: the strip says so now, not at its next check (P6-A d)
     }
   }
 
@@ -802,7 +814,7 @@ export function createApp(env) {
       form.append('options', JSON.stringify(options));
 
       turn.controller = new AbortController();
-      ui.stop.disabled = true;   // until the server has the turn and has said its id: that is what Stop cancels
+      ui.stop.disabled = false;   // "Cancel upload" until the server has the turn and has said its id, which is what Stop then cancels (P6-A c)
       turn.streaming = true;
       // No stall clock yet: accept() starts it when the server has the turn. Until then the request is an upload, and the server
       // decoding and saving it, which can take longer than 3 s on a slow tunnel, and is not silence.
@@ -840,7 +852,7 @@ export function createApp(env) {
   function spendComposer(turn) {
     const typed = ui.prompt.value ?? '';
     ui.prompt.value = typed.startsWith(turn.text) ? typed.slice(turn.text.length) : typed;
-    if (state.file === turn.file) clearFile();
+    if (state.file === turn.file) state.composer.clear();
   }
 
   // The server has the turn: Stop works, and the 3 s of silence that mean "poll instead" are counted from here. Stop, the clock, the
@@ -851,6 +863,7 @@ export function createApp(env) {
     turn.id = id;
     turn.view = initialView(id);
     ui.stop.disabled = false;
+    ui.stop.textContent = 'Stop';   // the server has the turn: Stop cancels it there
     watchdog.arm();
     startTicker(turn);
     attempt(() => spendComposer(turn));
@@ -862,12 +875,15 @@ export function createApp(env) {
       announce(statusText(turn.view));
     });
     // The server has stored the turn, which counts it and, in a new chat, titles the chat: the sidebar says so now, not only when the
-    // turn ends (P4-H; a new chat was listed as an empty "New chat" for as long as its first turn ran).
+    // turn ends (P4-H; a new chat was listed as an empty "New chat" for as long as its first turn ran), and so does the strip (P6-A d).
     detach(refreshSessions());
+    detach(checkHealth());
+    if (turn.cancelled) detach(stopTurn());   // Cancel upload was pressed as the server took the turn: it has an id now, so cancel it there
   }
 
-  // The turn never started (the request was refused, or the network was down): take its user turn back out, show why,
-  // and leave the composer as the user had it, so Send tries again with nothing to re-enter.
+  // The turn never started (the request was refused, the network was down, or the user cancelled the upload): take its user turn back out,
+  // show why, and leave the composer as the user had it, so Send tries again with nothing to re-enter. A cancel is the user's own doing:
+  // the status says so, and no alert does.
   function refuse(turn, err) {
     if (turn.left) return;   // the user left this chat: nothing here to undo, and the ticker is now another turn's
     stopTicker();
@@ -878,8 +894,18 @@ export function createApp(env) {
     if (turn.image) { urls.revokeObjectURL(turn.image.url); turn.session.blobUrls.delete(turn.image.url); }
     if (state.turn === turn) state.turn = null;
     setBusy(false);
+    if (turn.cancelled && isAbort(err)) {
+      announce('Upload cancelled.', true);
+      return;
+    }
+    doneUploading();
     showNotice(errorMessage(err));
     if (!expected(err)) report(err);
+  }
+
+  // The status still says "Uploading…" about a request that is over: it is taken down.
+  function doneUploading() {
+    if (state.said === UPLOADING_TEXT) announce('');
   }
 
   // Send: the attached file and the note, with the drawer's settings. study (P6-D, the picker) is a test row to run instead: the turn has no
@@ -895,7 +921,9 @@ export function createApp(env) {
     const options = optionsFromSettings(state.settings, state.models);
     if (picked !== null) options.test_row = picked;
     setBusy(true);
-    ui.stop.disabled = true;
+    ui.stop.disabled = true;               // until the request is on its way (the chat may still be being made): there is nothing to cancel
+    ui.stop.textContent = CANCEL_UPLOAD;   // until the server has the turn, Stop aborts the request (P6-A c)
+    announce(UPLOADING_TEXT);
     const fresh = !session.id;   // this Send makes the chat
     try {
       if (fresh) await createSession(session);
@@ -909,6 +937,7 @@ export function createApp(env) {
       }
     } finally {
       if (state.busy && !state.turn && state.session === session) setBusy(false);   // nothing is following a turn: the composer is not locked
+      if (!state.turn && state.session === session) doneUploading();
     }
   }
 
@@ -944,7 +973,8 @@ export function createApp(env) {
   // the poll that follows the dropped stream is what brings it.
   async function stopTurn() {
     const turn = state.turn;
-    if (!turn || !turn.id || turn.stopping || turn.settled) return;
+    if (!turn || turn.stopping || turn.settled) return;
+    if (!turn.id) { cancelUpload(turn); return; }   // no turn on the server yet (P6-A c)
     turn.stopping = true;
     keepFocusFrom(ui.stop);
     ui.stop.disabled = true;
@@ -963,6 +993,16 @@ export function createApp(env) {
     if (state.noticeOwner === turn) clearNotice();   // an earlier Stop failed and this one did not
     if (turn.streaming) turn.controller?.abort();   // the poll that brings the turn's own message_stop starts as the stream unwinds
     else follow(turn);                              // nothing is following it (its poll failed for good): follow it again
+  }
+
+  // "Cancel upload" (P6-A c): the server has no turn yet, so there is nothing to ask it to cancel, and nothing is: the request is aborted, and
+  // refuse() takes the user turn back out. The note and the image were not spent (the accept spends them), so Send sends them again.
+  function cancelUpload(turn) {
+    if (turn.cancelled || !turn.controller) return;   // while the chat is still being made there is no request yet: Stop is off then
+    turn.cancelled = true;
+    keepFocusFrom(ui.stop);
+    ui.stop.disabled = true;
+    turn.controller.abort();
   }
 
   // Leaving a session (or a token change): the stream and the poll are dropped, the turn is not cancelled and is not
@@ -1133,7 +1173,7 @@ export function createApp(env) {
     ++state.gen;
     resetView(null);
     ui.prompt.value = '';
-    clearFile();
+    state.composer.clear();
     state.loading = false;
     syncControls();
     renderSessions();
@@ -1284,7 +1324,13 @@ export function createApp(env) {
     retention.hidden = sentence === '';
   }
 
+  // Asks /healthz now and schedules the next check: 10 s on, 30 s after three failures. A turn's accept and its end ask too (P6-A d), which
+  // starts the schedule over: there is one next check at any time, and one check on its way at most.
   async function checkHealth() {
+    if (state.healthBusy) { state.healthAgain = true; return; }
+    state.healthBusy = true;
+    if (state.healthTimer !== null) cancelLater(state.healthTimer);
+    state.healthTimer = null;
     const controller = new AbortController();
     const timer = later(() => controller.abort(), HEALTH_TIMEOUT_MS);   // a half-open tunnel never answers and never fails by itself
     try {
@@ -1300,8 +1346,14 @@ export function createApp(env) {
       setHealth('server restarting…', true);
     } finally {
       cancelLater(timer);
+      state.healthBusy = false;
     }
-    later(() => detach(checkHealth()), nextHealthDelay(state.healthFailures));
+    if (state.healthAgain) {   // asked for while this one was on its way: the answer it wants is a fresh one
+      state.healthAgain = false;
+      await checkHealth();
+      return;
+    }
+    state.healthTimer = later(() => { state.healthTimer = null; detach(checkHealth()); }, nextHealthDelay(state.healthFailures));
   }
 
   // ---- the shell: sidebar and drawer ---------------------------------------------------------------------------------------------
@@ -1740,69 +1792,26 @@ export function createApp(env) {
     if (id) await openSession(id); else await handleRoute();
   }
 
-  // ---- the composer (minimal: P6-A replaces it with composer.js) ----------------------------------------------------------------------
-
-  function clearFile() {
-    if (doc.activeElement && ui.preview.contains(doc.activeElement)) ui.well.focus();   // its Remove is about to go
-    if (state.previewUrl) urls.revokeObjectURL(state.previewUrl);
-    state.previewUrl = null;
-    state.file = null;
-    ui.preview.replaceChildren();
-    ui.preview.hidden = true;
-    syncControls();   // with no file attached, Send may be a re-run
-  }
-
-  function attach(file) {
-    const problem = checkImageFile(file);
-    if (problem) { showNotice(problem); return; }
-    clearNotice();
-    clearFile();
-    state.file = file;
-    state.previewUrl = urls.createObjectURL(file);
-    const kb = Number.isFinite(file.size) ? ` · ${Math.max(1, Math.round(file.size / 1024))} KB` : '';
-    ui.preview.replaceChildren(
-      el('img', { src: state.previewUrl, alt: '' }),
-      el('span', {}, `${file.name || 'image'}${kb}`),
-      el('button', { type: 'button', 'aria-label': 'Remove attached image', onclick: () => clearFile() }, 'Remove'));
-    ui.preview.hidden = false;
-    syncControls();   // a new image: Send sends it
-  }
+  // ---- the composer -----------------------------------------------------------------------------------------------------------------
 
   function wireComposer() {
+    // The one intake path (P6-A): composer.js takes the image from the well, a drop or a paste, shows the preview, and says what is attached.
+    // A refused file is said in the notice; a good one clears it.
+    state.composer = attachComposer({
+      well: ui.well, input: ui.file, preview: ui.preview, doc, urls,
+      onChange: (file) => {
+        state.file = file;
+        if (file) clearNotice();
+        syncControls();   // a new image: Send sends it; none: Send may be a re-run
+      },
+      onError: (message) => showNotice(message),
+    });
     ui.composer.addEventListener('submit', (event) => { event.preventDefault(); detach(send()); });
     ui.prompt.addEventListener('input', () => syncRerun());   // the re-run hint follows the note: a command, or a note the server will not run
     ui.prompt.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;   // Shift+Enter is a newline; an IME's Enter is not a send
       event.preventDefault();
       detach(send());
-    });
-    ui.well.addEventListener('click', () => ui.file.click());
-    ui.well.addEventListener('keydown', (event) => {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      event.preventDefault();
-      ui.file.click();
-    });
-    ui.file.addEventListener('change', () => {
-      const file = ui.file.files?.[0];
-      if (file) attach(file);
-      ui.file.value = '';   // choosing the same file again must fire change again
-    });
-    ui.well.addEventListener('dragover', (event) => { event.preventDefault(); ui.well.classList.add('dragging'); });
-    ui.well.addEventListener('dragleave', () => ui.well.classList.remove('dragging'));
-    ui.well.addEventListener('drop', (event) => {
-      event.preventDefault();
-      ui.well.classList.remove('dragging');
-      const file = event.dataTransfer?.files?.[0];
-      if (file) attach(file);
-    });
-    for (const type of ['dragover', 'drop']) {   // a file dropped anywhere else must not navigate the page away from the chat
-      doc.body.addEventListener(type, (event) => { if (Array.from(event.dataTransfer?.types ?? []).includes('Files')) event.preventDefault(); });
-    }
-    ui.prompt.addEventListener('paste', (event) => {
-      const file = Array.from(event.clipboardData?.files ?? []).find((f) => IMAGE_TYPES.includes(f.type));
-      if (!file) return;
-      event.preventDefault();
-      attach(file);
     });
     ui.stop.addEventListener('click', () => detach(stopTurn()));
     ui.pickSearch.addEventListener('input', () => {   // one request for a pause in typing, not one per key

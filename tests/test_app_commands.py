@@ -3,9 +3,10 @@ import json
 import re
 from pathlib import Path
 
-from app.commands import _RULES, COMMAND_HELP, NOT_A_QA_BOT, parse_command
+from app.commands import _RULES, COMMAND_HELP, NOT_A_QA_BOT, WHITESPACE, collapse, is_question, parse_command
 
 COMMANDS_FIXTURE = Path(__file__).resolve().parent / "frontend" / "fixtures" / "commands.json"
+WHITESPACE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "whitespace.json"   # P6-A (f): the page's node test reads it too
 
 
 def _cases():
@@ -69,3 +70,35 @@ def test_the_fixed_answer_names_every_command():
     assert NOT_A_QA_BOT.endswith(COMMAND_HELP)
     for word in ("beam N", "greedy", "tokens N", "retrieve N", "reference:", "repair on|off"):
         assert word in COMMAND_HELP
+
+
+# ---- P6-A (f): one definition of whitespace, the page's and the server's -------------------------------------------------------------
+
+def _whitespace():
+    return json.loads(WHITESPACE_FIXTURE.read_text(encoding="utf-8"))
+
+
+def test_a_note_is_split_on_the_one_whitespace_the_page_splits_it_on():
+    """Python's str.split() took U+001C..U+001F and U+0085 for whitespace and JavaScript's \\s did not, and JavaScript took U+FEFF and
+    Python did not: "beam<U+001C>5" was a command to the server and a question to the page's hint, "<U+FEFF>" a question to the server and no
+    note at all to the page. Both now split on the same characters, listed in tests/fixtures/whitespace.json, which the node test reads too."""
+    data = _whitespace()
+    for ch in data["whitespace"]:
+        assert collapse("a" + ch + "b" + ch) == "a b", repr(ch)
+    for ch in data["not_whitespace"]:
+        assert collapse("a" + ch + "b") == "a" + ch + "b", repr(ch)
+    assert len(data["notes"]) >= 15 and {c["runs"] for c in data["notes"]} == {True, False}
+    for case in data["notes"]:
+        assert collapse(case["note"]) == case["collapsed"], case
+        assert (parse_command(case["note"]) is not None) is case["command"], case
+        assert is_question(case["note"]) is (not case["runs"]), case   # what post_message does with it when no image comes with it
+
+
+def test_the_shared_whitespace_is_pythons_and_javascripts_together_and_no_more():
+    python = {chr(c) for c in range(0x110000) if chr(c).isspace()}
+    javascript = set("\t\n\x0b\x0c\r \xa0\u1680\u2028\u2029\u202f\u205f\u3000\ufeff") | {chr(c) for c in range(0x2000, 0x200b)}   # what JavaScript's \s matches
+    shared = set(_whitespace()["whitespace"])
+    assert shared == python | javascript
+    assert shared - javascript == {"\x1c", "\x1d", "\x1e", "\x1f", "\x85"} and shared - python == {"\ufeff"}   # the drift this closes
+    everything = "".join(chr(c) for c in range(0x110000))
+    assert set(re.findall("[" + WHITESPACE + "]", everything)) == shared   # the class the server splits on is that list exactly

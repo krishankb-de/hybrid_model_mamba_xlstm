@@ -39,7 +39,7 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 
 from app import retention
-from app.commands import COMMAND_HELP, parse_command
+from app.commands import COMMAND_HELP, is_question, parse_command
 from app.engine import REPO_ROOT, Engine, build_engine
 from app.gallery import Gallery, GalleryMismatch
 from app.hardening import (RATE_CAPACITY, RATE_LIMITED, RATE_WINDOW_S, REQUEST_ID_HEADER, RequestLog, TurnLimiter, TurnRateLimit,
@@ -930,7 +930,7 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
             previous = await run_in_threadpool(_previous_image, store, session, gallery if private else None)
             if previous is None:
                 raise HTTPException(422, NO_IMAGE_MSG)
-            question = bool(text.strip()) and parse_command(text) is None
+            question = is_question(text)   # split on the page's whitespace too (P6-A f)
             if not question:   # a question gets the fixed answer: no model runs, so no image is used or recorded
                 sha256, filename = previous["sha256"], previous["filename"]
                 if previous.get("test_row") is not None:   # the turn runs that study again, as its resolved options say

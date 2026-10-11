@@ -1591,6 +1591,35 @@ test('Show all opens a clamped report and Show less closes it; ctx.ui keeps it o
   document.body.replaceChildren();
 });
 
+test('Show less on a report that fits its three lines by now (widened while open) takes its row away: no Show all is left that reveals nothing (P6-A g)', () => {
+  const layout = (text, lines) => {   // what the page would measure: three lines of 21 px shown, `lines` needed
+    Object.defineProperty(text, 'scrollHeight', { configurable: true, value: 21 * lines });
+    Object.defineProperty(text, 'clientHeight', { configurable: true, value: 21 * Math.min(3, lines) });
+  };
+  const open = (lines) => {
+    const card = renderAssistantCard(matchesView(), { labelNames: LABEL_NAMES, ui: new Map(), turn: 1 });
+    document.body.replaceChildren(card);
+    settleClamps(card, () => true);   // narrow when it was drawn: the report overflowed its three lines
+    const parts = { card, text: q(card, 'section.matches li.match .clamp-text'), toggle: q(card, 'section.matches button[data-action="show"]') };
+    parts.row = parts.toggle.parentNode;
+    parts.toggle.click();   // Show all
+    layout(parts.text, lines);   // the window changes while it is open
+    parts.toggle.focus();
+    parts.toggle.click();   // Show less
+    return parts;
+  };
+  const fits = open(2);   // wider now: two lines hold it
+  assert.equal(fits.text.classList.contains('open'), false);
+  assert.equal(fits.row.hidden, true);   // measured as it closed, not at the next paint or resize
+  assert.equal(document.activeElement, fits.text);   // the focus is not lost with its button: it is on the report the button was for
+  assert.equal(fits.text.getAttribute('tabindex'), '-1');
+  const still = open(5);   // still too long for three lines: its Show all stays
+  assert.deepEqual([still.text.classList.contains('open'), still.row.hidden, still.toggle.textContent], [false, false, 'Show all']);
+  assert.equal(document.activeElement, still.toggle);
+  assert.equal(still.text.hasAttribute('tabindex'), false);
+  document.body.replaceChildren();
+});
+
 test('every clamped report shows Show all only when it really overflows its three lines: measured in the page, never counted (P6 fix 1)', () => {
   const section = renderMatches(matchesView({ report_matches: [match(1), match(2), match(3, { report: 'x'.repeat(170) })] }), { turn: 2 });
   const rows = () => matchItems(section).map((li) => q(li, '.clamp-actions').hidden);
