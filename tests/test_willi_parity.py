@@ -7328,7 +7328,8 @@ def test_eval_report_eos_decode_header_documents_the_length_penalty_and_the_subm
     assert lines.index(decode) < lines.index(chexbert) < lines.index(compare)
     assert lines.index("bash scripts/chat_remote.sh sync") < lines.index(decode), "sync first, as in the G4 chain"
     for needle in ("LENGTH_PENALTY", "0.5 to 3.0", "two decimals", "default 1.0", "results/chat_report_eos_lp<NNN>_test_split_s42",
-                   "never overwritten", "chat_remote.sh summary logs/chat_eos_eval_", "Length penalty: x", "length_penalty"):
+                   "never overwritten", "chat_remote.sh summary logs/chat_eos_eval_", "Length penalty: x", "length_penalty",
+                   "refusing a directory whose name and log disagree"):   # the comparison's name check (fix 1), said where the arms are submitted
         assert needle in header, needle
     assert arm == "results/chat_report_eos_lp{:03d}_test_split_s42".format(round(2.0 * 100)), "the header's directory is the rule's for 2.0"
     compare_header = "\n".join(l for l in _eval_text("compare").splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))

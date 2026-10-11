@@ -2,9 +2,10 @@
 
 In this order: the registry (the two published models unchanged; the EOS model beside them with its own name, the config it was trained
 with and a checkpoint that is resolved against CHAT_HOME; a missing checkpoint is a one-line refusal that names no path), the CLI alias and
-the defaults (nothing here makes the EOS model the default: that is the user's decision), and the card (eos_trained and the training's
-name are read from the run's own metadata, never written into the registry). The loaders are stubbed and the checkpoints are made-up bytes:
-synthetic data only (R7).
+the defaults (nothing here makes the EOS model the default: that is the user's decision), the card (eos_trained and the training's name
+are read from the run's own metadata, never written into the registry; the note's text is pinned), and the two ways an EOS entry is
+refused rather than served without its stop (fix 1): its run's metadata does not say it was trained to end its reports, or its run has
+no DONE marker. The loaders are stubbed and the checkpoints are made-up bytes: synthetic data only (R7).
 """
 import inspect
 import json
@@ -310,25 +311,45 @@ def test_the_cli_turns_an_eos_entry_that_is_not_marked_eos_trained_into_one_erro
     assert str(tmp_path) not in captured.out and "last.ckpt" not in captured.out
 
 
-def test_the_eos_entry_that_is_the_second_model_is_refused_too_so_a_deployment_never_serves_it_without_its_stop(tmp_path, monkeypatch,
-                                                                                                             keep_threads):
-    """MODELS=m3,m3eos: the published model first and the default, the EOS entry beside it. A mis-provisioned EOS entry still stops the
-    start, whichever place it holds, and the published model is not judged by the guard."""
-    home = tmp_path / "home"
-    mis_provisioned_run(home, "unflagged")
+def unmarked_eos_builder(monkeypatch):
+    """fake_builder with the EOS entry's engine saying what a run whose metadata does not mark it would: eos_trained False. -> the build calls."""
     calls = fake_builder(monkeypatch)
     build = server.build_engine
 
-    def unmarked(kind, **kw):          # the run's metadata says nothing of the EOS target, so the engine's card says eos_trained False
+    def unmarked(kind, **kw):
         engine = build(kind, **kw)
         if kw.get("name") == EOS_MODEL:
             engine._card["eos_trained"] = False
         return engine
 
     monkeypatch.setattr(server, "build_engine", unmarked)
+    return calls
+
+
+@pytest.mark.parametrize("order", ["m3eos,m3", "m3,m3eos"])
+def test_a_mis_provisioned_eos_entry_is_refused_in_either_place_of_the_models_list_so_no_deployment_serves_it_without_its_stop(
+        tmp_path, monkeypatch, order):
+    """MODELS=m3eos,m3 makes the EOS entry the deployment's default, the case this guard is for; MODELS=m3,m3eos puts it beside the published
+    model. Either way it stops the start, and the published model is not judged by the guard."""
+    home = tmp_path / "home"
+    mis_provisioned_run(home, "unflagged")
+    calls = unmarked_eos_builder(monkeypatch)
+    models = tuple(cli.MODEL_ALIASES[alias] for alias in order.split(","))
     with pytest.raises(server.ModelUnavailable) as stop:
-        create_app(engine="real", home=str(home), models=(PUBLISHED[0], EOS_MODEL))
+        create_app(engine="real", home=str(home), models=models)
     assert str(stop.value) == NOT_MARKED and len(calls) == 2, "both were built, and the one that is not what its entry says stops the start"
+
+
+@pytest.mark.parametrize("order", ["m3eos,m3", "m3,m3eos"])
+def test_the_cli_refuses_a_mis_provisioned_eos_entry_in_either_place_of_models_with_one_error_line(tmp_path, monkeypatch, capsys, order):
+    home = tmp_path / "home"
+    mis_provisioned_run(home, "missing")
+    unmarked_eos_builder(monkeypatch)
+    never_serve(monkeypatch)
+    code = cli.main(["--engine", "real", "--mode", "private", "--home", str(home), "--models", order])
+    captured = capsys.readouterr()
+    assert code == 1 and [l for l in captured.out.splitlines() if l.startswith("ERROR")] == ["ERROR " + NOT_MARKED], captured.out
+    assert str(tmp_path) not in captured.out
 
 
 def test_the_guard_judges_the_entries_marked_eos_and_no_other_entry_of_the_home_registry(tmp_path, monkeypatch):

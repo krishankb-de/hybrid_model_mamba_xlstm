@@ -35,8 +35,9 @@
 #   CHX=$(bash scripts/chat_remote.sh submit scripts/eval_report_eos_chexbert_h100.sh DUMP_DIR=results/chat_report_eos_lp200_test_split_s42 -- --dependency=afterok:${DEC%%;*})
 #   CMP=$(bash scripts/chat_remote.sh submit scripts/eval_report_eos_compare_h100.sh DUMP_DIR=results/chat_report_eos_lp200_test_split_s42 PUBLISHED_DIR=results/report_gen_m3_test_split_s42 -- --dependency=afterok:${CHX%%;*})
 # Jobs 2 and 3 need no lever of their own: the scoring takes the arm's directory, and the comparison reads the penalty from the
-# dump's own log and names system A for it (eos_lp200_s42; plain eos_s42 for 1.0). Read the jobs as the G4 ones are read:
-# `bash scripts/chat_remote.sh summary logs/chat_eos_eval_<jobid>.log` (and chat_eos_chexbert_, chat_eos_compare_ for the others).
+# dump's own log and names system A for it (eos_lp200_s42; plain eos_s42 for 1.0), refusing a directory whose name and log disagree.
+# Read the jobs as the G4 ones are read: `bash scripts/chat_remote.sh summary logs/chat_eos_eval_<jobid>.log` (and chat_eos_chexbert_,
+# chat_eos_compare_ for the others).
 #
 # TIME. --time=02:00:00 is enough for the expected decode and thin at the full budget. The cached step costs 6.35 ms per token on
 # an H100 (analysis/mamba3_results.md, section 6: batch 1; the beams here ride the batch axis of one cache). Allow the same again
