@@ -42,21 +42,9 @@ def client(tmp_path):
 def live(tmp_path):
     """A real uvicorn on an ephemeral port: TestClient buffers whole responses, so streaming and
     disconnect behaviour are tested over real sockets."""
-    import uvicorn
-    app = create_app(engine="tiny", home=str(tmp_path), tiny_step_delay_s=0.02, queue_cap=2)
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    t = threading.Thread(target=server.run, daemon=True)
-    t.start()
-    deadline = time.time() + 10
-    while not server.started and time.time() < deadline:
-        time.sleep(0.02)
-    yield "http://127.0.0.1:{}".format(port)
-    server.should_exit = True
-    t.join(5)
+    base, stop = start_live_server(create_app(engine="tiny", home=str(tmp_path), tiny_step_delay_s=0.02, queue_cap=2))
+    yield base
+    stop()
 
 
 def _turn(c, sid, options=None, image=True, text=""):

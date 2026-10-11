@@ -8621,3 +8621,168 @@ def test_public_demo_sh_checks_the_mode_again_while_the_link_is_up_and_closes_it
     words = _header_words("public_demo.sh")
     for fragment in ("DEMO_RECHECK_S", "default 10", "private mode", "R6", "DUA", "fails closed", "refusing:", "Exit status"):
         assert fragment in words, fragment
+
+
+# ── CHAT_UI_PLAN.md P8-C: the load drill ──────────────────────────────────────
+# Static pins on scripts/chat_load_drill.py, the drill the laptop runs against the cluster's server through the tunnel. Its behaviour (the
+# RESULT line, the exit statuses, the refusals, the token, the one session it makes and deletes, what it does not print) is run for real
+# against a live tiny server in tests/test_chat_load_drill.py. These pins hold what a later edit could break without a test noticing: which
+# libraries it imports, where its token comes from, and what can reach its two output streams (R7: a private server streams MIMIC-derived text).
+
+_DRILL = REPO_ROOT / "scripts" / "chat_load_drill.py"
+
+
+def _drill_tree():
+    """-> (the script's syntax tree, a map from each node to its parent)."""
+    tree = ast.parse(_DRILL.read_text(encoding="utf-8"))
+    return tree, {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+
+def _drill_constants(tree):
+    """The module-level NAME = "text" constants: the keys and sentences the script spells once."""
+    found = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            found.update({t.id: node.value.value for t in node.targets if isinstance(t, ast.Name)})
+    return found
+
+
+def _drill_function(node, parents):
+    """The name of the function a node is in, or None at module level."""
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return node.name
+    return None
+
+
+def _drill_calls(tree, name):
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == name]
+
+
+def _normalized(source):
+    """A line of Python as ast.unparse writes it: what a shape in a pin is compared with."""
+    return ast.unparse(ast.parse(source, mode="eval"))
+
+
+def test_the_load_drill_imports_httpx_and_no_other_http_library():
+    """P8-C. The drill runs on the laptop, in the venv, beside the tunnel: httpx and the standard library, no other HTTP client, none of the
+    standard library's own (urllib, http, socket ...), and nothing of the app or the model stack (it must start with the server's code absent).
+    It makes one httpx client, which goes straight to the URL it was given (no proxy named in the environment, no redirect), because the
+    token and the stream travel on it; httpx's module-level functions build a client of their own with the defaults, so none is called."""
+    if not hasattr(sys, "stdlib_module_names"):
+        pytest.skip("sys.stdlib_module_names needs Python 3.10")
+    roots, first_party = _imports_of(_DRILL)
+    assert "httpx" in roots, roots
+    assert roots <= set(sys.stdlib_module_names) | {"httpx"}, sorted(roots - set(sys.stdlib_module_names) - {"httpx"})
+    assert not first_party and not roots & {"app", "scripts", "tests", "hybrid_xmamba", "torch", "numpy", "PIL"}, sorted(roots)
+    stdlib_http = {"urllib", "http", "socket", "ssl", "ftplib", "smtplib", "xmlrpc", "asyncio", "selectors", "socketserver", "wsgiref"}
+    assert not roots & stdlib_http, sorted(roots & stdlib_http)
+    tree, _ = _drill_tree()
+    clients = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == "httpx.Client"]
+    assert len(clients) == 1, "one client, for everything it sends"
+    settings = {k.arg: getattr(k.value, "value", None) for k in clients[0].keywords}
+    assert settings.get("trust_env") is False and settings.get("follow_redirects") is False, settings
+    functions = {"httpx." + name for name in ("get", "post", "put", "patch", "delete", "head", "options", "request", "stream")}
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) in functions]
+
+
+def test_the_load_drill_reads_its_token_only_from_chat_token_or_a_token_file():
+    """P8-C. A token on the command line shows in `ps` and in the shell history. The one environment read is CHAT_TOKEN, the one option that
+    names a token is --token-file, the one positional is the URL, the parser takes no abbreviation (`--token abc` must not become
+    `--token-file abc`), and the file is read in one place, from that option."""
+    tree, parents = _drill_tree()
+    consts = _drill_constants(tree)
+    assert consts.get("TOKEN_ENV") == "CHAT_TOKEN"
+    environment = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "os"
+                   and n.attr in ("environ", "environb", "getenv")]
+    assert len(environment) == 1, "the environment is read in one place"
+    getter = parents[environment[0]]                      # os.environ.get(...)
+    assert isinstance(getter, ast.Attribute) and getter.attr == "get" and isinstance(parents[getter], ast.Call)
+    key = parents[getter].args[0]
+    assert (consts.get(key.id) if isinstance(key, ast.Name) else getattr(key, "value", None)) == "CHAT_TOKEN", "the key is CHAT_TOKEN and nothing else"
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "os"
+                and any(a.name in ("environ", "environb", "getenv") for a in n.names)]
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "argv"], "arguments reach it through main(argv) only"
+    added = [[a.value for a in n.args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+             for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "add_argument"]
+    assert [names[0] for names in added if not names[0].startswith("-")] == ["url"], "no positional but the URL"
+    assert sorted(name for names in added for name in names if name.startswith("-")) == sorted(
+        ["--token-file", "--turns", "--queue-cap", "--max-new-tokens", "--timeout", "-h", "--help"]), "the only option that takes a token is --token-file"
+    for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "add_argument"):
+        assert not [k for k in call.keywords if k.arg == "dest"], "no option under another name"
+    parsers = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and any(k.arg == "allow_abbrev" for k in n.keywords)]
+    assert len(parsers) == 1 and [k.value.value for k in parsers[0].keywords if k.arg == "allow_abbrev"] == [False]
+    reads = _drill_calls(tree, "read_token")
+    assert len(reads) == 1 and _drill_function(reads[0], parents) == "find_token"
+    assert isinstance(reads[0].args[0], ast.Name) and reads[0].args[0].id == "token_file"
+    finds = _drill_calls(tree, "find_token")
+    assert len(finds) == 1 and ast.unparse(finds[0].args[0]) == "args.token_file"
+
+
+def test_the_load_drill_prints_and_writes_nothing_but_the_result_line_help_and_its_fixed_refusals():
+    """P8-C, R7. No print, no logging, no traceback, no file opened for writing: every write is the one `_write`, and it has three callers, the
+    help text, a refusal (`ERROR ` and the text of a Refused, which is fixed) and the RESULT line (the payload result_payload built)."""
+    tree, parents = _drill_tree()
+    assert not _drill_calls(tree, "print") and not _drill_calls(tree, "open") and not _drill_calls(tree, "breakpoint")
+    roots, _ = _imports_of(_DRILL)
+    allowed = {"argparse", "json", "os", "re", "stat", "struct", "sys", "threading", "time", "zlib", "collections", "dataclasses", "typing", "httpx"}
+    assert roots <= allowed, sorted(roots - allowed)   # no logging, traceback, pprint, tempfile, shutil, pathlib, io, pickle, subprocess ...
+    writers = {"write", "writelines", "write_text", "write_bytes", "dump", "flush"}
+    writes = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in writers]
+    assert writes and {_drill_function(n, parents) for n in writes} == {"_write"}, "every write, and flush, is in _write"
+    changes = {"write", "rename", "replace", "makedirs", "mkdir", "remove", "unlink", "truncate", "ftruncate", "fsync", "symlink", "link", "chmod"}
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "os"
+                and n.attr in changes], "it changes nothing on disk"
+    opens = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == "os.open"]
+    assert [ast.unparse(n.args[1]) for n in opens] == ["os.O_RDONLY | os.O_NONBLOCK"], "the one file it opens is opened for reading"
+    sinks = _drill_calls(tree, "_write")
+    assert sorted(ast.unparse(s.args[1]) for s in sinks) == sorted(_normalized(shape) for shape in (
+        '"ERROR " + str(exc)', '"RESULT " + json.dumps(payload, separators=(",", ":"))', 'parser.format_help().rstrip("\\n")'))
+    assert {_drill_function(s, parents) for s in sinks} == {"main"}
+    refusal = next(s for s in sinks if ast.unparse(s.args[1]) == _normalized('"ERROR " + str(exc)'))
+    handler = parents[refusal]
+    while not isinstance(handler, ast.ExceptHandler):
+        handler = parents[handler]
+    assert ast.unparse(handler.type) == "Refused" and handler.name == "exc", "the text of a refusal is that of a Refused"
+    payloads = [n for n in ast.walk(tree) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "payload" for t in n.targets)
+                and _drill_function(n, parents) == "main"]
+    assert [ast.unparse(n.value).split("(")[0] for n in payloads] == ["result_payload"], "main's payload is result_payload's and nothing else"
+
+
+def test_the_load_drill_keeps_nothing_of_a_frame_but_its_seq_event_and_status_and_names_exceptions_by_class():
+    """P8-C, R7. What can reach the output is built from counts, booleans and fixed words: the turn's outcome has no field for a frame's content,
+    a stream is read down to (seqs, last_event, final) and a frame to (seq, status), the text of a Refused or a DrillError is written in the
+    script (a literal, a constant, a status code or a class name), and every other exception is named by its class and never by its text."""
+    tree, parents = _drill_tree()
+    consts = _drill_constants(tree)
+    outcome = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Outcome")
+    assert [s.target.id for s in outcome.body if isinstance(s, ast.AnnAssign)] == ["status", "refusal", "seqs", "last_event", "final", "error"]
+    functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    assert [ast.unparse(r.value) for r in ast.walk(functions["read_stream"]) if isinstance(r, ast.Return)] == [_normalized("(seqs, last_event, final)")]
+    names = {n.id for r in ast.walk(functions["_shape"]) if isinstance(r, ast.Return) for n in ast.walk(r) if isinstance(n, ast.Name)}
+    assert names <= {"seq", "status", "type", "int", "STATUSES"}, "a frame leaves _shape as its seq and its status word: " + str(sorted(names))
+
+    def fixed(node):
+        if isinstance(node, ast.Constant):
+            return isinstance(node.value, str)
+        if isinstance(node, ast.Name):
+            return node.id in consts
+        return isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add) and fixed(node.left) and fixed(node.right)
+
+    argparse_text = _normalized('re.sub(r"\'.*$", "", message).rstrip(" :")')   # argparse's own message with whatever it quoted cut off
+    for call in _drill_calls(tree, "Refused"):
+        text = call.args[0]
+        assert fixed(text) or (ast.unparse(text) == argparse_text and _drill_function(call, parents) == "error"), ast.unparse(call)
+    codes = {_normalized(s) for s in ('"session_create_" + type(exc).__name__', '"session_create_http_{}".format(response.status_code)')}
+    for call in _drill_calls(tree, "DrillError"):
+        assert fixed(call.args[0]) or ast.unparse(call.args[0]) in codes, ast.unparse(call)
+    handlers = [n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler) and n.name]
+    assert handlers, "the pin looks at something"
+    for handler in handlers:
+        if ast.unparse(handler.type) in ("Refused", "DrillError"):
+            continue   # their text is pinned above
+        uses = [n for stmt in handler.body for n in ast.walk(stmt) if isinstance(n, ast.Name) and n.id == handler.name]
+        for use in uses:   # `type(exc)`: the class, never the text
+            parent = parents[use]
+            assert isinstance(parent, ast.Call) and ast.unparse(parent.func) == "type", ast.unparse(handler) + " uses " + handler.name
