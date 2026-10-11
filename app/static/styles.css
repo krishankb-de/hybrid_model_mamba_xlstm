@@ -177,6 +177,19 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
+/* "test model": the server's default is the tiny engine, whose text is no report (app.js, render.js TEST_NOTICE; P9-G5b). It follows the toggle in the
+   markup: on a phone the disclaimer takes a row of its own, and the rest of the toggle's row is empty, whereas after the mode the badge would push the
+   health strip onto another row and take 24 px from the composer at 320 x 568. */
+#test-badge {
+  padding: 0 8px;
+  border: 1px solid var(--warn);
+  border-radius: 999px;
+  color: var(--warn);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
 #health { margin-left: auto; color: var(--muted); font-weight: 400; }
 #health[data-state="down"] { color: var(--warn); font-weight: 500; }   /* "server restarting…" */
 #mode-badge:empty, #health:empty { display: none; }
@@ -316,6 +329,17 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .note { margin: 0; color: var(--muted); font-size: 0.8125rem; }
 .note.error { color: var(--bad); }
 .note.truncated { color: var(--warn); }
+.test-notice {   /* above the report of every card of the tiny engine: the text below it is no report (render.js renderTestNotice, P9-G5b) */
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--warn);
+  border-left-width: 4px;
+  border-radius: 10px;
+  background: var(--soft);
+  background: color-mix(in srgb, var(--warn) 10%, var(--card));
+  font-size: 0.875rem;
+  font-weight: 600;
+}
 
 .report-section + .report-section { margin-top: 12px; }
 .report-section h3 { margin: 0 0 2px; color: var(--muted); font-size: 0.8125rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
@@ -595,6 +619,14 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   /* Settings and Send share a row, and a busy composer adds Stop ("Cancel upload") on a row of its own: the rows above give up some 25 px
      between them (P6 fix 2), so that Stop and Send stay in sight at 801 x 568 with the drawer open (layout check k, busy). */
   #composer > button { padding-block: 7px; padding-inline: 8px; }
+}
+/* A busy composer on a phone (P9-G5b): Stop is shown, and Settings, Send and Stop share one row. Between 261 and 319 px (a 320 px phone: 271 to 286 px,
+   by whether the composer scrolls) the three do not fit at their usual padding, so Stop, whose label is the longest ("Cancel upload"), wrapped onto
+   a row of its own, the composer's last, and at 320 x 568 it showed 9 px above the composer's fold (the re-review of P6 fix 2). With 6 px of padding
+   each side they fit with room to spare. Below 261 px (801 px with the drawer open) the rule above takes over, and Stop keeps the row it has always had.
+   Above 319 px the three fit as they are. Checked at 320 x 568 by layout check k (busy). */
+@container composer (min-width: 261px) and (max-width: 319px) {
+  #composer:has(#stop:not([hidden])) > button { padding-inline: 6px; }
 }
 
 /* ---- drawer: settings, on the right --------------------------------------------------------------------------- */

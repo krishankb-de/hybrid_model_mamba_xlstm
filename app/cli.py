@@ -112,7 +112,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--token-file", metavar="PATH", help="the token: a file of mode 0600 that you own, never an argument or a variable")
     p.add_argument("--models", default="m3", metavar="m3[,13d,m3eos]", help="the models served, the first is the default (m3, 13d, m3eos)")
     p.add_argument("--threads", type=int, default=8, help="CPU threads of the real engine")
-    p.add_argument("--drift-note", default="", metavar="TEXT", help="the CPU-versus-GPU drift sentence every card carries")
+    p.add_argument("--drift-note", default="", metavar="TEXT",
+                   help="the CPU-versus-GPU drift sentence the cards of the published models carry (measured for them only; m3eos has its own)")
     p.add_argument("--allow-compile", action="store_true", help="accept the compile option")
     p.add_argument("--published-model", metavar="DIR", help="the published dump of the default model (hyps.txt), with --published-floor")
     p.add_argument("--published-floor", metavar="DIR", help="the published dump of the retrieval floor (hyps.txt)")

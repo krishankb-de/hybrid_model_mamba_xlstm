@@ -13,9 +13,9 @@ from app.server import create_app
 STATIC = Path(__file__).resolve().parents[1] / "app" / "static"
 BANNER = "Research prototype — not for clinical use."
 TOKENS = ["--bg", "--fg", "--muted", "--accent", "--card", "--border", "--ok", "--warn", "--bad"]
-IDS = ["mode-badge", "health", "sidebar", "new-session", "session-list", "conversation", "drawer", "composer",
+IDS = ["mode-badge", "test-badge", "health", "sidebar", "new-session", "session-list", "conversation", "drawer", "composer",
        "image-well", "preview", "prompt", "chips", "settings", "send", "stop", "file", "viewer", "sidebar-toggle"]
-HIDDEN_AT_START = ["drawer", "preview", "stop", "file", "viewer"]   # the scripts show these by clearing `hidden`
+HIDDEN_AT_START = ["drawer", "preview", "stop", "file", "viewer", "test-badge"]   # the scripts show these by clearing `hidden`
 DARK = r"@media\s*\(\s*prefers-color-scheme:\s*dark\s*\)"
 NARROW = r"@media\s*\(\s*max-width:\s*800px\s*\)"
 
@@ -187,6 +187,34 @@ def test_banner_is_a_landmark_with_the_disclaimer_in_a_paragraph_and_the_toggle_
     assert _by_id()["sidebar-toggle"][1] == {"id": "sidebar-toggle", "type": "button", "aria-controls": "sidebar",
                                               "aria-expanded": "false", "aria-label": "Sessions"}
     assert re.search(r'id="sidebar-toggle"[^>]*>☰</button>', html)   # a Unicode glyph, never an SVG
+
+
+def test_the_test_model_badge_follows_the_toggle_in_the_banner_and_says_test_model_and_the_notice_style_is_in_the_sheet():   # P9-G5b
+    html = _html()
+    banner = re.search(r"<header([^>]*)>(.*?)</header>", html, re.S).group(2)
+    assert re.search(r'>☰</button>\s*<span id="test-badge" hidden>test model</span>\s*<p class="disclaimer">', banner)   # in the toggle's row on a phone
+    css = re.sub(r"/\*.*?\*/", "", (STATIC / "styles.css").read_text(encoding="utf-8"), flags=re.S)
+    assert re.search(r"#test-badge\s*\{[^}]*var\(--warn\)", css), "the badge has its own rule, in the warning colour"
+    assert re.search(r"\.test-notice\s*\{[^}]*var\(--warn\)", css), "the card's notice has its own rule, in the warning colour"
+    assert "test-notice" in (STATIC / "render.js").read_text(encoding="utf-8")
+
+
+def test_the_page_calls_the_random_weights_engine_what_the_server_names_it_and_no_real_model_has_that_name():   # P9-G5b
+    from app.engine import build_engine
+    name = build_engine("tiny").card()["name"]
+    assert re.search(r"export const TEST_MODEL = '{}';".format(re.escape(name)), (STATIC / "render.js").read_text(encoding="utf-8"))
+    assert name not in server.MODEL_NAMES and name not in server.HOME_MODELS   # the name that marks a test model is no real model's
+
+
+def test_a_busy_composer_on_a_phone_tightens_its_buttons_so_that_settings_send_and_stop_share_one_row():   # P9-G5b (2c)
+    """Layout check k (busy, 320 x 568) is the proof in a browser; this keeps the rule from going unnoticed. It applies between the widths where
+    the three buttons do not fit as they are (319 px and under) and where the drawer-open rule takes over (260 px and under), only while Stop is
+    shown, and takes nothing but the sides' padding."""
+    css = re.sub(r"/\*.*?\*/", "", (STATIC / "styles.css").read_text(encoding="utf-8"), flags=re.S)
+    rule = re.search(r"@container composer \(min-width: 261px\) and \(max-width: 319px\)\s*\{(.*?)\}\s*\}", css, re.S)
+    assert rule, "the container rule for the phone's busy composer is in the sheet"
+    assert re.fullmatch(r"\s*#composer:has\(#stop:not\(\[hidden\]\)\) > button\s*\{\s*padding-inline:\s*6px;\s*", rule.group(1)), rule.group(1)
+    assert "@container composer (max-width: 260px)" in css and css.index("max-width: 260px") < css.index("min-width: 261px")
 
 
 def test_composer_controls_have_names_and_states():

@@ -459,11 +459,26 @@ export function renderProvenance(view, ctx) {
 const IMAGE_URL = /^(?:blob:|data:image\/(?:png|jpeg|webp|gif);base64,)/;
 const usable = (url) => typeof url === 'string' && IMAGE_URL.test(url);
 
+// What the chip of the stop switch says (P9-G5b). With the switch on the page says nothing: that is what it does. Off is "full budget", the
+// published protocol, which always decodes every token it is given. A model trained to end its reports (its card says eos_trained) ends
+// at its own end of report whatever the switch says, so "full budget" is wrong for a report that ended there: the chip is then the stop
+// reason, "ended the report". It stays "full budget" for such a model's report that did reach the budget, and says nothing for a turn
+// that has not ended yet (or has not run: the composer's chips), since the model may well end it. outcome = { stopped, eosTrained }: the
+// `stopped` of the generate stage ('eos', 'budget' or 'repeat'; '' while the turn runs) and the model card's eos_trained. A turn whose
+// options do not say (a log from before the switch) makes no claim.
+function stopChip(o, outcome) {
+  if (o.stop_on_repeat !== false) return null;
+  const { stopped, eosTrained } = isObject(outcome) ? outcome : {};
+  if (stopped === 'eos') return 'ended the report';
+  if (stopped === 'repeat') return null;   // the switch was off, so the server did not stop it there; it is no budget either way
+  if (eosTrained === true && stopped !== 'budget') return null;
+  return 'full budget';
+}
+
 // The resolved options as small chips: beam 3 · 100 tok · cached · k 4/3, and what else deviates from the defaults. Display repair is
 // on by default in the page, so only its being off is said: "raw text", the report as the decoder wrote it. So is stopping when the
-// report starts repeating: off is "full budget", the published protocol, which always decodes every token it is given. A turn whose
-// options do not say (a log from before the switch) makes no claim.
-export function optionChips(options) {
+// report starts repeating (stopChip, which takes the outcome of the turn when it has one).
+export function optionChips(options, outcome) {
   if (!isObject(options)) return [];
   const o = options;
   return [
@@ -473,7 +488,7 @@ export function optionChips(options) {
     str(o.k_images) || str(o.k_reports) ? `k ${str(o.k_images) || NONE}/${str(o.k_reports) || NONE}` : null,
     o.label === false ? 'labels off' : null,
     o.display_repair === false ? 'raw text' : null,
-    o.stop_on_repeat === false ? 'full budget' : null,
+    stopChip(o, outcome),
     o.compile === true ? 'compiled' : null,
     typeof o.reference === 'string' && o.reference ? 'reference' : null,
     Number.isInteger(o.test_row) ? `test row ${o.test_row}` : null,
@@ -494,14 +509,15 @@ function loadedImage(path, cx, attrs) {
   return img;
 }
 
-// msg = { text, image: { url, filename, source? }, options }. image.url is either a URL the page can show as it is (the local
+// msg = { text, image: { url, filename, source? }, options, outcome? }. image.url is either a URL the page can show as it is (the local
 // preview: a blob: or data: image) or a path on the server ("/v1/..."), which ctx.loadImage fetches with the token. source
-// 'test_split' marks a test study's picture (P6-D), which no one uploaded.
+// 'test_split' marks a test study's picture (P6-D), which no one uploaded. outcome = { stopped, eosTrained } is what optionChips takes
+// of how the turn went (P9-G5b): the page gives it once it knows, and a message with none is drawn as it always was.
 export function renderUserTurn(msg, ctx) {
   const m = isObject(msg) ? msg : {};
   const cx = ctx ?? {};
   const text = str(m.text).trim();
-  const chips = optionChips(cx.retrieval === false && isObject(m.options) ? { ...m.options, k_images: null, k_reports: null } : m.options);
+  const chips = optionChips(cx.retrieval === false && isObject(m.options) ? { ...m.options, k_images: null, k_reports: null } : m.options, m.outcome);
   const picture = isObject(m.image) ? thumbnail(m.image, cx) : null;
   return el('article', { class: 'turn user', 'aria-label': named('Your message', cx), hidden: !picture && !text && !chips.length },
     el('div', { class: 'bubble' }, picture, text ? el('p', { class: 'user-text' }, text) : null,
@@ -799,6 +815,25 @@ export function renderMatches(view, ctx) {
     items.length ? el('ol', { class: 'match-list', role: 'list' }, ...items) : null);
 }
 
+// ---- the tiny engine's notice (P9-G5b) -------------------------------------------------------------------------------------
+
+// The server's name for its random-weights engine (app/engine.py TinyEngine.name, a seeded random-init model that writes words of a toy
+// vocabulary: the laptop's dev server and the tests). What it writes has the shape of a report and is none, and it was once read as a broken
+// one. Every card it answers says so above the report, and the banner has a badge while it is the default model (app.js). A real engine
+// is named for its model, never this.
+export const TEST_MODEL = 'tiny';
+export const TEST_NOTICE = 'Test model with random weights: this text is not a report. Real reports come from the cluster server.';
+export const isTestModel = (card) => isObject(card) && card.name === TEST_MODEL;
+
+// The notice, above the report: a note about the whole card, so a paragraph of its own and not one of the notes of a turn (they are
+// warnings and errors). It comes with the turn's first stage, and is null when there is none to say: another model, or a turn that ran no
+// model (a question the server answered with a warning has no stage, as the card hides its timeline and provenance, and never shows the
+// notice for the moment it takes), so that every other card is the card it always was.
+export function renderTestNotice(view) {
+  const v = whole(view);
+  return isTestModel(v.provenance) && Object.keys(v.stages).length ? el('p', { class: 'test-notice', role: 'note' }, TEST_NOTICE) : null;
+}
+
 // ---- the assistant card and the throttle ---------------------------------------------------------------------------------
 
 export function renderAssistantCard(view, ctx) {
@@ -817,7 +852,7 @@ export function renderAssistantCard(view, ctx) {
   const sections = [renderPublished(v, cx), renderImages(v, cx), renderNeighbors(v, cx), renderMatches(v, cx)]
     .filter((section) => !section.hasAttribute('hidden'));
   return el('article', { class: 'card', 'aria-label': named('Assistant report', cx), 'data-message-id': str(v.id) || null, 'data-status': str(v.status) || null },
-    timeline, renderNotes(v), renderReport(v, cx), renderLabels(v, cx), ...sections, provenance);
+    timeline, renderNotes(v), renderTestNotice(v), renderReport(v, cx), renderLabels(v, cx), ...sections, provenance);
 }
 
 // ---- keeping focus through the whole-card replace -------------------------------------------------------------------------

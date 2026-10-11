@@ -22,7 +22,9 @@ page); six chips and a 140-character unbroken word are injected, and Stop is sho
      and does not overflow it, every picture has loaded with a size and lies inside the card, every clamped report shows at most three
      lines and offers Show all exactly when it overflows them (render.js settleClamps, measured as the page measures it: P6 fix 1), and
      nothing overflows the page horizontally, with the drawer closed and open. The clamp is proven at both ends with the drawer closed: at
-     375 px and narrower a ~170-character report has Show all, and at 1024 px and wider no report that short has one
+     375 px and narrower a ~170-character report has Show all, and at 1024 px and wider no report that short has one. P9-G5b: the card
+     is the tiny engine's, as every card of this app is, so it carries the notice above its report (NOTICE), held to the same: there, inside
+     the card's width and not wider inside than it is
   j  (P6 fix 1, one more case for every viewport in every scheme) the test-split picker open, its list full: the page does not overflow
      horizontally, the button and the list are rendered inside the viewport's width, and the transcript's last card header, scrolled
      into view, is not covered (a point just inside its top hits the card, not the composer, the picker or the banner)
@@ -32,7 +34,8 @@ page); six chips and a 140-character unbroken word are injected, and Stop is sho
      inside the composer, the other is not, nothing overflows horizontally, the report keeps its 120 px, and Send lies inside the
      composer's box and the viewport with nothing scrolled (never below the composer's fold), its centre hitting it. P6 fix 2 adds a third
      case at the drawer-open sizes (COMPOSER_BUSY_CASES): an upload on its way, the preview still shown, Send off and Stop reading "Cancel
-     upload", its longest label; Stop is held to what Send is
+     upload", its longest label; Stop is held to what Send is. P9-G5b adds that case at 320 x 568 (both drawer states), where Stop must also
+     share Send's row: on a row of its own it lay 9 px above the composer's fold (the re-review of P6 fix 2)
   l  (P6-E, two more cases for every viewport in every scheme) the image viewer open, with one picture and with two: neither the page nor
      the viewer overflows horizontally, the viewer lies inside the viewport's width, each pane's picture has loaded and is drawn whole
      inside its stage, each stage is at least 40 px each way, each footer gives its picture's pixel size, two panes are side by side from
@@ -83,6 +86,8 @@ REPORT_TEXT = ("The lungs are clear. There is no focal consolidation, pleural ef
                "cardiomediastinal silhouette is within normal limits. No acute osseous abnormality is seen. ") * 3
 # The card's own sections (check i): P6-B's images row, P6-C's similar X-rays, P6-D's published lines and matching reports.
 SECTIONS = ["section.images", "section.neighbors", "section.published", "section.matches"]
+NOTICE = "p.test-notice"   # P9-G5b: the tiny engine's notice above the report (render.js renderTestNotice): the synthetic turn's card is the tiny engine's
+CARD_PARTS = SECTIONS + [NOTICE]   # what check i measures in the card
 # P6 fix 1: the clamp's proof. Three lines of a matching report hold about 130 characters at 375 px and about 280 on a wide page.
 MID_REPORT = ("Findings: The heart is normal in size. The lungs are clear, with no focal consolidation, pleural effusion or pneumothorax. "
               "Impression: No acute cardiopulmonary process.")   # 168 characters: over three lines at phone width, two lines on a wide page
@@ -94,8 +99,12 @@ PICKER_STUDIES = 60        # check j's list: more studies than the list shows, s
 COMPOSER_CASES = [(801, 568, True), (801, 650, True), (820, 568, True), (820, 650, True), (834, 568, True), (320, 568, False), (320, 568, True)]
 COMPOSER_STATES = ["hint", "preview"]   # the page shows the re-run hint only with no image attached, and the preview only with one
 # P6 fix 2: the composer busy with an upload (Stop beside Send, the preview still up), at the drawer-open sizes where its column is narrowest.
-COMPOSER_BUSY_CASES = [case for case in COMPOSER_CASES if case[2] and case[0] > 800]
+# P9-G5b: and at 320 x 568, the phone, where the rows stacked above them left Stop ("Cancel upload") 9 px above the composer's fold (the re-review
+# of P6 fix 2): with the drawer closed and open, which is the same composer, as the page's drawer covers the conversation only below 800 px.
+COMPOSER_BUSY_CASES = [case for case in COMPOSER_CASES if (case[2] and case[0] > 800) or case[:2] == (320, 568)]
 BUSY_STOP_LABEL = "Cancel upload"   # what Stop reads while an image goes up: the longest of its labels
+PHONE_MAX_PX = 800                  # the page is one column up to here (styles.css): the composer is as wide as the page, and Stop shares Send's row
+ROW_SLACK_PX = 2                    # two buttons whose tops are this close lie in the same row
 LONG_FILE = "chest_xray_" + "a1b2c3d4" * 11 + ".png"   # 103 characters with no space: the widest name a row must take
 VIEWER_STATES = ["single", "pair"]   # check l (P6-E): the viewer with one picture, and with the turn's X-ray beside a similar one
 MIN_STAGE_PX = 40                    # a pane's picture area, each way: something to look at
@@ -480,7 +489,9 @@ def check_composer(m: Dict[str, Any], width: int, height: int, state: str) -> Li
     """The failures in one measurement of the composer's rows (check k): the row the case shows is rendered inside the composer and the other
     is not; nothing overflows horizontally; the report keeps its floor; and Send lies inside the composer's box (its fold: the composer
     scrolls inside, and a Send under its bottom is out of sight until it is scrolled) and inside the viewport, its centre hitting it. A busy
-    composer (P6 fix 2) shows the preview, and its Stop is held to the same."""
+    composer (P6 fix 2) shows the preview, and its Stop is held to the same. On a phone (800 px and narrower: one column, the composer as
+    wide as the page) Stop also shares Send's row (P9-G5b): the longest label, "Cancel upload", on a row of its own was the composer's last,
+    which at 320 x 568 lay under its fold."""
     failures = []
     for name, (sw, cw) in (("documentElement", m["doc"]), ("#composer", (m["composer"]["sw"], m["composer"]["cw"]))):
         if sw > cw:
@@ -502,6 +513,8 @@ def check_composer(m: Dict[str, Any], width: int, height: int, state: str) -> Li
             failures.append("#stop is not rendered, but the case shows it")
         else:
             failures += _in_sight("#stop", "Stop", m["stop"], m.get("stop_hit"), composer, width, height)
+            if width <= PHONE_MAX_PX and m["send"] is not None and abs(m["stop"][1] - m["send"][1]) > ROW_SLACK_PX:
+                failures.append("#stop is not on Send's row at {} px: Stop starts at {:.0f}, Send at {:.0f}".format(width, m["stop"][1], m["send"][1]))
     send = m["send"]
     if send is None:
         return failures + ["#send is not rendered"]
@@ -783,7 +796,7 @@ def run_checks(browser: Browser, url: str) -> Tuple[int, List[str]]:
             browser.run(INJECT_SECTIONS_JS, {"events": section_events(), "names": CHEXBERT_14})
             for drawer in ("closed", "open"):
                 browser.evaluate("document.querySelector('#drawer').hidden = {}".format("false" if drawer == "open" else "true"))
-                for failure in check_sections(browser.run(MEASURE_SECTIONS_JS, {"sections": SECTIONS}), width, SECTIONS, drawer == "open"):
+                for failure in check_sections(browser.run(MEASURE_SECTIONS_JS, {"sections": CARD_PARTS}), width, CARD_PARTS, drawer == "open"):
                     seen.setdefault(("{}x{}".format(width, height), "drawer={} card sections".format(drawer), failure), []).append(scheme)
             cases += 1   # the test-split picker open, with the drawer closed (P6 fix 1)
             browser.evaluate("document.querySelector('#drawer').hidden = true")

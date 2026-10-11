@@ -21,6 +21,7 @@ from app import cli, server
 from app.engine import REPO_ROOT, build_engine
 from app.server import create_app
 from app.tiny import TinyTokenizer, TinyTower, tiny_decoder, tiny_prefix_mapper
+from tests.app_helpers import iter_sse, png_bytes
 
 EOS_MODEL = "hybrid_150m_m3_rrg_eos"
 PUBLISHED = ("hybrid_150m_m3_rrg", "hybrid_150m_v2_rrg")
@@ -123,7 +124,7 @@ def test_the_published_models_are_built_exactly_as_before_and_the_eos_model_from
                                     "drift_note": "CPU vs GPU: 0/20 differ"}) for m in PUBLISHED]   # no name, no note: nothing new reaches them
     assert calls[2] == ("real", {"checkpoint": str(home.resolve() / EOS_CHECKPOINT), "model_config": "hybrid_150m_m3_rrg",
                                  "name": EOS_MODEL, "evaluation_note": server.EOS_MODEL_NOTE, "device": "cpu",
-                                 "drift_note": "CPU vs GPU: 0/20 differ"})
+                                 "drift_note": "This model's CPU decode was not probed against a GPU decode."})   # P9-G5b: its own, not the flag's
     assert len(calls) == 3
 
 
@@ -429,3 +430,87 @@ def test_the_note_is_aggregate_numbers_only_so_a_public_card_keeps_it_and_shorte
     public = redact_card(card, "public")
     assert public["evaluation_note"] == card["evaluation_note"] and public["checkpoint"] == "last.ckpt"
     assert "study" not in card["evaluation_note"].lower() and not re.search(r"\d{8,}", card["evaluation_note"])
+
+
+# ---- the drift note belongs to the model it was measured for (P9-G5b, ruling 2b) --------------------------------------------------------
+
+FLAG = "CPU decode matched the published GPU decode on 20/20 probe studies"   # the P1-D sentence as --drift-note carries it (made up here)
+EOS_DRIFT = "This model's CPU decode was not probed against a GPU decode."
+
+
+def published_run(root: Path, name: str) -> Path:
+    """<root>/<name>/{run_metadata.json, checkpoints/last.ckpt}: a published model's files where RealEngine reads them, with no EOS flag in its
+    metadata, as the real ones have none. -> the checkpoint's path. Made-up bytes: nothing here is a model."""
+    run = root / name
+    (run / "checkpoints").mkdir(parents=True)
+    ckpt = run / "checkpoints" / "last.ckpt"
+    ckpt.write_bytes(b"not a real checkpoint" * 50)
+    (run / "run_metadata.json").write_text(json.dumps({"resolved_config": {"experiment_name": name, "model": {"prefix_k": 4}}}))
+    return ckpt
+
+
+def three_models(tmp_path, monkeypatch):
+    """The two published models and the EOS one on RealEngine itself, its loader and tokenizer stubbed: -> the home the EOS run is in. The
+    published checkpoints are pointed at made-up files (an absolute path replaces the repo root in REPO_ROOT / path)."""
+    home = tmp_path / "home"
+    eos_run(home, dataset={"report_eos_target": True})
+    monkeypatch.setattr(server, "MODEL_CHECKPOINTS", {name: str(published_run(tmp_path / "published", name)) for name in PUBLISHED})
+    stub_loader(monkeypatch)
+    return home
+
+
+def generate_detail(client, session_id: str, model: str) -> dict:
+    """The generate stage's detail of one tiny turn on `model`, read from its stream."""
+    r = client.post("/v1/sessions/{}/messages".format(session_id), files={"image": ("x.png", png_bytes(), "image/png")},
+                    data={"text": "", "options": json.dumps({"model": model, "max_new_tokens": 16})})
+    assert r.status_code == 200, r.text
+    ends = [f["data"] for f in iter_sse([r.text]) if f["event"] == "stage_end" and f["data"].get("stage") == "generate"]
+    assert len(ends) == 1
+    return ends[0]["detail"]
+
+
+def test_the_registry_gives_the_eos_model_its_own_drift_sentence_and_the_published_models_none():
+    assert server.HOME_MODELS[EOS_MODEL]["drift_note"] == EOS_DRIFT == server.EOS_DRIFT_NOTE
+    assert not set(PUBLISHED) & set(server.HOME_MODELS), "the published models take the flag's sentence, so the registry has none for them"
+
+
+def test_the_flags_drift_note_is_built_into_the_published_models_only_and_the_eos_model_gets_its_own(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    eos_run(home)
+    calls = fake_builder(monkeypatch)
+    for flag in (FLAG, ""):   # the flag given, and left out: the EOS sentence is the model's, not the flag's
+        calls.clear()
+        with TestClient(create_app(engine="real", home=str(home), models=PUBLISHED + (EOS_MODEL,), drift_note=flag)):
+            pass
+        notes = {kw.get("name") or kw["model_config"]: kw["drift_note"] for _, kw in calls}
+        assert notes == {PUBLISHED[0]: flag, PUBLISHED[1]: flag, EOS_MODEL: EOS_DRIFT}, flag
+
+
+def test_a_card_and_a_generate_stage_carry_the_drift_note_of_their_own_model(tmp_path, monkeypatch, keep_threads):
+    """Through RealEngine itself, so what is checked is what a page receives: the card of each model in /v1/models, and the detail of the
+    generate stage of a turn on it. The sentence the flag carries was measured for the published models; the EOS model says it was not probed."""
+    home = three_models(tmp_path, monkeypatch)
+    with TestClient(create_app(engine="real", home=str(home), models=PUBLISHED + (EOS_MODEL,), drift_note=FLAG)) as c:
+        cards = {m["name"]: m for m in c.get("/v1/models").json()["models"]}
+        assert [cards[m]["drift_note"] for m in PUBLISHED] == [FLAG, FLAG] and cards[EOS_MODEL]["drift_note"] == EOS_DRIFT
+        assert FLAG not in json.dumps(cards[EOS_MODEL]), "the P1-D sentence is nowhere on the card of a model it does not describe"
+        assert [cards[m]["eos_trained"] for m in PUBLISHED] == [False, False] and cards[EOS_MODEL]["eos_trained"] is True
+        sid = c.post("/v1/sessions", json={}).json()["id"]
+        assert [generate_detail(c, sid, m)["drift_note"] for m in PUBLISHED] == [FLAG, FLAG]
+        assert generate_detail(c, sid, EOS_MODEL)["drift_note"] == EOS_DRIFT
+
+
+def test_without_the_flag_the_published_cards_have_no_drift_note_as_before_and_the_eos_card_still_says_it_was_not_probed(
+        tmp_path, monkeypatch, keep_threads):
+    home = three_models(tmp_path, monkeypatch)
+    cards = {m["name"]: m for m in listing(create_app(engine="real", home=str(home), models=PUBLISHED + (EOS_MODEL,)))["models"]}
+    assert [cards[m]["drift_note"] for m in PUBLISHED] == ["", ""] and cards[EOS_MODEL]["drift_note"] == EOS_DRIFT
+
+
+def test_the_flag_and_the_wrappers_lever_are_kept_and_say_whose_cards_carry_the_sentence():
+    help_text = " ".join(cli.build_parser().format_help().split())
+    assert "--drift-note" in help_text and "every card carries" not in help_text and "published models" in help_text
+    for wrapper in ("serve_chat_h100.sh", "serve_chat_gpu_h100.sh"):
+        text = (REPO_ROOT / "scripts" / wrapper).read_text()
+        assert '--drift-note="${DRIFT_NOTE:-}"' in text, wrapper                      # the lever, as it was
+        assert "the P1-D sentence every" not in text.replace("\n# ", " "), wrapper   # and its header no longer says every card

@@ -4,7 +4,8 @@ Each test gets a tiny server of its own and pages of its own in one headless Goo
   * The server is app.server.create_app(engine="tiny") (random weights, a toy vocabulary: no checkpoint and no data) on a free
     loopback port with a temporary CHAT_HOME; a test that parametrizes `ui` with {"tiny_gallery": True} gets one with the synthetic
     gallery and the keyword labeller too (P5-E), so every stage runs, and one that adds "public_token": "t" gets a public-mode server
-    with that token (P6-C), whose pages load PUBLIC_SETUP_JS first (TinyServer.setup_script). It runs from this checkout with PYTHONPATH set to it, because the venv's editable
+    with that token (P6-C), whose pages load PUBLIC_SETUP_JS first (TinyServer.setup_script); {"eos": True} gives it a card that says it was
+    trained to end its reports, and a report that ends at its first full stop (P9-G5b). It runs from this checkout with PYTHONPATH set to it, because the venv's editable
     install maps `scripts` and `hybrid_xmamba` to wherever it was installed from, and in a process group of its own, so that
     stopping it reaches everything it started. A test can kill it (SIGKILL: a crash) and start it again on the same port and home.
   * The browser is Playwright's chromium with channel="chrome": the Google Chrome installed on the machine, nothing downloaded. One
@@ -55,7 +56,8 @@ PUBLIC_SETUP_JS = ("try { localStorage.setItem('cxrchat.settings', JSON.stringif
 # planted, and only here: a turn whose budget is FAULT_TOKENS raises ImportError inside the engine, the class the stale dev server of
 # 2026-10-09 raised at every turn, so that the card for an internal error is seen end to end. The server must send the class name and
 # never the exception's text, which goes to its log. argv: home, step delay in seconds, port, then the flags: "tiny_gallery" for the P5-E
-# stages, and "public:<token>" for a public-mode server with that token (P6-C: what public mode shows, and never asks for).
+# stages, "public:<token>" for a public-mode server with that token (P6-C: what public mode shows, and never asks for), and "eos" for the
+# tiny engine as a model trained to end its reports (P9-G5b).
 LAUNCH = """\
 import sys
 import uvicorn
@@ -74,6 +76,21 @@ def generate(self, enc, opts, on_snapshot, cancel):
 
 engine.Engine.generate = generate
 flags = sys.argv[4:]
+if "eos" in flags:
+    # P9-G5b, test-only: the tiny engine as a model trained to end its reports. Its card says so (eos_trained, and the note a trained model's card
+    # has), so the page words its stop switch for it, and the engine's real EOS search runs on it with the full stop of the toy vocabulary as its
+    # end of report: a report ends where the model first writes one, and the generate stage says `stopped: eos`. The tiny model never writes an
+    # end-of-report token of its own, which is why this is a flag of the harness and not of the engine.
+    from app.tiny import TINY_VOCAB
+    _init = engine.TinyEngine.__init__
+
+    def init(self, *args, **kwargs):
+        _init(self, *args, **kwargs)
+        self._card["eos_trained"] = True
+        self._card["evaluation_note"] = "EOS-trained test model: a report ends at the first full stop it writes."
+        self.eos_token_id = TINY_VOCAB.index(".")
+
+    engine.TinyEngine.__init__ = init
 public = [flag.split(":", 1)[1] for flag in flags if flag.startswith("public:")]
 uvicorn.run(server.create_app(engine="tiny", home=sys.argv[1], tiny_step_delay_s=float(sys.argv[2]),
                               tiny_gallery="tiny_gallery" in flags, mode="public" if public else "private",
@@ -208,9 +225,10 @@ class TinyServer:
     home, and stopped (SIGTERM, then SIGKILL for what is left)."""
 
     def __init__(self, home: str, step_delay_s: float = STEP_DELAY_S, tiny_gallery: bool = False,
-                 public_token: Optional[str] = None) -> None:
+                 public_token: Optional[str] = None, eos: bool = False) -> None:
         self.home, self.step_delay_s, self.tiny_gallery = home, float(step_delay_s), bool(tiny_gallery)
         self.public_token = public_token   # a public-mode server with this token (P6-C); None: private, no token
+        self.eos = bool(eos)               # the tiny engine as a model trained to end its reports (P9-G5b, LAUNCH's "eos")
         self.port = free_port()
         self.url = "http://127.0.0.1:{}/".format(self.port)
         self.log_path = os.path.join(home, "server.log")
@@ -221,7 +239,8 @@ class TinyServer:
         with open(self.log_path, "a") as log:
             self.proc = subprocess.Popen(
                 [sys.executable, "-c", LAUNCH, self.home, repr(self.step_delay_s), str(self.port)]
-                + (["tiny_gallery"] if self.tiny_gallery else []) + (["public:" + self.public_token] if self.public_token else []),
+                + (["tiny_gallery"] if self.tiny_gallery else []) + (["public:" + self.public_token] if self.public_token else [])
+                + (["eos"] if self.eos else []),
                 cwd=REPO_ROOT,
                 env=dict(os.environ, PYTHONPATH=REPO_ROOT), stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         deadline = time.time() + timeout

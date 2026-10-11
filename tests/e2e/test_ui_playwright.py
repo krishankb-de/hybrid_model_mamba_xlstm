@@ -90,7 +90,8 @@ COLOURS_JS = """() => {
   return { body: pair('body'), card: pair('#conversation article.card'), report: pair('#conversation article.card .report-body p'),
            note: pair('#conversation article.card .note'), provenance: pair('#conversation article.card .provenance p'),
            banner: pair('.banner .disclaimer'), prompt: pair('#prompt'), chip: pair('#chips span'), send: pair('#send'),
-           hint: pair('#rerun-hint'), session: pair('#session-list .session-title') };
+           hint: pair('#rerun-hint'), session: pair('#session-list .session-title'),
+           notice: pair('#conversation article.card .test-notice'), badge: pair('#test-badge') };   // P9-G5b: the tiny engine's notice and badge
 }"""
 
 
@@ -1076,6 +1077,108 @@ def test_the_viewer_opens_a_similar_xray_beside_yours_zooms_in_and_escape_gives_
     closed = page.evaluate(VIEWER_JS)
     assert closed["hidden"] and not closed["held"] and closed["inert"] == [False, False, False] and closed["panes"] == []
     assert closed["focus"] == key   # back on the similar X-ray that opened it
+    ui.assert_clean()
+
+
+# ---- P9-G5b: what the page says about the model ------------------------------------------------------------------------------------
+
+TEST_NOTICE = "Test model with random weights: this text is not a report. Real reports come from the cluster server."
+STOP_HINT_EOS = "Off: this model still ends its report where it was trained to; the token budget is the limit."
+EOS_NOTE = "EOS-trained test model: a report ends at the first full stop it writes."   # tests/e2e/conftest.py LAUNCH's "eos" flag
+
+
+def test_the_tiny_model_is_announced_by_a_badge_in_the_banner_and_a_notice_above_the_report_of_every_card(ui, images):
+    """The laptop's dev server runs the random-weights engine, and its output was once read as a broken report. The banner says "test model"
+    while it is the default model, and every card it answers says, above the report, that the text is no report: while the turn runs, once it
+    is done, after a reload, and not on the answer to a question, where no model ran."""
+    page = ui.open()
+    page.wait_for_function("!document.querySelector('#test-badge').hidden")
+    assert page.text_content("#test-badge") == "test model"
+    assert page.evaluate("document.querySelector('.banner').contains(document.querySelector('#test-badge'))")
+    assert page.is_visible("#test-badge") and page.evaluate("document.querySelector('.banner').getBoundingClientRect().height") < 160
+    ui.attach(images["xray_a.png"])
+    page.click("#send")
+    ui.wait_running(page)
+    assert page.inner_text("#conversation article.card .test-notice") == TEST_NOTICE   # while the report is still being written
+    card = ui.wait_settled(0)
+    assert card["status"] == "done" and card["notes"] == [] and card["report_notes"] == [REPEAT_NOTE]   # the notice is none of a card's notes
+    notice = page.locator("#conversation article.card .test-notice")
+    assert notice.count() == 1 and notice.inner_text() == TEST_NOTICE and notice.is_visible()
+    assert page.evaluate("(() => { const c = document.querySelector('#conversation article.card');"
+                         " return c.querySelector('.test-notice').getBoundingClientRect().bottom <= c.querySelector('.report').getBoundingClientRect().top; })()")
+    assert contrast(*page.evaluate("(() => { const s = getComputedStyle(document.querySelector('.test-notice'));"
+                                   " return [s.color, s.backgroundColor]; })()")) >= 4.5   # legible on its own ground, which is tinted
+    ui.shot("tiny_notice_1280x900_light.png")
+    ui.reload()   # the stored card has it too
+    assert page.inner_text("#conversation article.card .test-notice") == TEST_NOTICE
+    ui.type_note("Is there pneumonia?")   # no model runs for a question: nothing to call a report
+    page.click("#send")
+    answer = ui.wait_settled(1)
+    assert answer["timeline_hidden"] and answer["notes"] == [NOT_A_QA_BOT]
+    assert page.locator("#conversation article.card").nth(1).locator(".test-notice").count() == 0
+    assert page.locator("#conversation article.card").nth(0).locator(".test-notice").count() == 1
+    ui.assert_clean()
+
+
+@pytest.mark.parametrize("ui", [{"eos": True}], indirect=True, ids=["eos"])
+def test_a_model_trained_to_end_its_reports_words_its_stop_switch_for_it_shows_its_note_and_its_chip_says_the_report_ended(ui, images):
+    """The harness's "eos" flag makes the tiny engine a model whose card says eos_trained, with the real EOS search ending its report at its
+    first full stop. The drawer then words the stop switch for it and lists its evaluation note under the model's name; with the switch off the
+    chips never say "full budget", not in the composer and not on the turn, whose chip says the report ended, as the generate stage does."""
+    page = ui.open()
+    page.click("#settings")
+    assert page.inner_text("#stop-hint") == STOP_HINT_EOS
+    assert page.locator("#models-section p.model-note").count() == 1 and page.inner_text("#models-section p.model-note") == EOS_NOTE
+    assert "evaluation_note" not in page.inner_text("#models-section table")   # said once, as a paragraph: not again in the card's table
+    ui.shot("drawer_eos_model_1280x900_light.png")
+    page.click("#drawer-close")
+    ui.apply_settings(stop_on_repeat=False, max_new_tokens=40)
+    assert ui.composer()["chips"] == ["beam 3", "40 tok", "cached"]   # off, and for this model nothing is claimed of the next turn
+    card = ui.turn(images["xray_a.png"])
+    assert card["status"] == "done" and card["report_notes"] == []   # it ended where the model meant it to: no budget to blame
+    assert bubble(ui)["chips"] == ["beam 3", "40 tok", "cached", "ended the report"]
+    sid = ui.session_id()
+    [message] = assistants(ui, sid)
+    detail = stage_detail(message, "generate")
+    assert detail["stopped"] == "eos" and 0 < detail["tokens"] < 40 and message["options"]["stop_on_repeat"] is False
+    ui.reload()   # the replayed turn says the same, from its stored log
+    assert bubble(ui)["chips"] == ["beam 3", "40 tok", "cached", "ended the report"]
+    ui.assert_clean()
+
+
+COMPOSER_BOXES_JS = """() => {
+  const q = (s) => document.querySelector(s);
+  const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+  const c = q('#composer');
+  return { composer: box(c), scrolled: c.scrollTop, overflow: c.scrollHeight > c.clientHeight, viewport: [innerWidth, innerHeight],
+           settings: box(q('#settings')), send: box(q('#send')), stop: q('#stop').hidden ? null : box(q('#stop')),
+           stop_text: q('#stop').textContent, send_disabled: q('#send').disabled };
+}"""
+
+
+def test_a_phone_keeps_cancel_upload_on_the_row_of_send_and_settings_and_in_sight_while_an_upload_goes_up(ui, images):
+    """P9-G5b (2c): at 320 x 568 Stop, reading "Cancel upload" while the image goes up, wrapped onto a row of its own, the composer's last, and
+    9 px of it showed above the composer's fold. The page itself is held at that moment (its upload is not answered), and Settings, Send and Stop
+    are measured on one row, inside the composer and the viewport, with the composer not scrolled. Layout check k (busy) is the sweep; this is the
+    page as app.js builds it."""
+    page = ui.new_page(viewport=(320, 568))
+    ui.open(page)
+    held = []
+    page.route("**/v1/sessions/*/messages", lambda route: held.append(route))   # the turn's upload is on its way and nothing answers it
+    ui.attach(images["xray_a.png"], page)
+    page.click("#send")
+    page.wait_for_function("document.querySelector('#stop').textContent === 'Cancel upload' && !document.querySelector('#stop').hidden")
+    seen = page.evaluate(COMPOSER_BOXES_JS)
+    left, top, right, bottom = seen["composer"]
+    assert seen["send_disabled"] and seen["scrolled"] == 0 and not seen["overflow"], seen   # the whole composer shows: nothing to scroll to
+    assert abs(seen["stop"][1] - seen["send"][1]) <= 2 and abs(seen["settings"][1] - seen["send"][1]) <= 2, seen   # one row, left to right
+    assert seen["settings"][2] <= seen["send"][0] <= seen["send"][2] <= seen["stop"][0] and seen["stop"][2] <= right, seen
+    assert top <= seen["stop"][1] and seen["stop"][3] <= bottom + 0.5 and seen["stop"][3] <= seen["viewport"][1], seen
+    ui.shot("busy_composer_320x568_light.png", page)
+    while not held:
+        page.wait_for_timeout(20)
+    held[0].continue_()   # let the upload through: the turn runs and ends as any turn does
+    assert ui.wait_settled(0, page)["status"] == "done"
     ui.assert_clean()
 
 

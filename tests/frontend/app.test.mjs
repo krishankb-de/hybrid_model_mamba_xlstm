@@ -475,6 +475,7 @@ function buildPage() {
   document.body.replaceChildren(
     el('header', { class: 'banner' },
       el('button', { id: 'sidebar-toggle', type: 'button', 'aria-controls': 'sidebar', 'aria-expanded': 'false', 'aria-label': 'Sessions' }, '☰'),
+      el('span', { id: 'test-badge', hidden: true }, 'test model'),
       el('p', { class: 'disclaimer' }, 'Research prototype — not for clinical use.'),
       el('span', { id: 'mode-badge' }), el('span', { id: 'health', 'aria-live': 'polite' })),
     el('div', { class: 'layout' },
@@ -2639,7 +2640,7 @@ test('the banner has the retention sentence in an element of its own after the s
   assert.equal($('retention').hidden, false);
   assert.equal($('retention').getAttribute('class'), 'note');   // the muted note style the page already has: no new rule
   assert.equal($('health').textContent, 'private · 0 of 4 turns in flight');   // the strip says what it said
-  assert.deepEqual(Array.from(banner.children).map((n) => n.id || n.getAttribute('class')), ['sidebar-toggle', 'disclaimer', 'mode-badge', 'health', 'retention']);
+  assert.deepEqual(Array.from(banner.children).map((n) => n.id || n.getAttribute('class')), ['sidebar-toggle', 'test-badge', 'disclaimer', 'mode-badge', 'health', 'retention']);
 
   payload = { ...payload, retention_days: 7 };
   h.timers.advance(10000);
@@ -2649,6 +2650,94 @@ test('the banner has the retention sentence in an element of its own after the s
   h.timers.advance(10000);
   await flush();
   assert.equal($('retention').textContent, 'Sessions are deleted after 1 day');
+});
+
+// ---- the tiny engine is announced: a badge in the banner and a notice on every card (P9-G5b) -------------------------------------------
+
+const TINY_MODELS = { default_model: 'tiny', mode: 'private', allow_compile: false, models: [{ name: 'tiny', cached_decode_available: true, prefix_k: 4 }] };
+const NOTICE_TEXT = 'Test model with random weights: this text is not a report. Real reports come from the cluster server.';
+
+test('the banner has a "test model" badge after the toggle while the server\'s default model is the tiny engine, and never for a real model', async () => {
+  const tiny = harness({ models: TINY_MODELS });
+  assert.deepEqual([$('test-badge').hidden, $('test-badge').textContent], [true, 'test model']);   // not shown until the server has said which model it runs
+  await tiny.app.start();
+  await flush();
+  assert.equal($('test-badge').hidden, false);
+  assert.equal($('test-badge').textContent, 'test model');
+  const banner = Array.from($('health').parentNode.children).map((n) => n.id || n.getAttribute('class'));
+  assert.deepEqual(banner.slice(0, 4), ['sidebar-toggle', 'test-badge', 'disclaimer', 'mode-badge']);   // a small badge, first after the toggle
+  for (const models of [MODELS, MODELS_EOS, MODELS_EOS_DEFAULT, { ...MODELS, default_model: 'tiny2' }, { ...MODELS, default_model: 'Tiny' }]) {
+    const real = harness({ models });
+    await real.app.start();
+    await flush();
+    assert.equal($('test-badge').hidden, true, String(models.default_model));   // a real engine never shows it
+  }
+  const down = harness({ routes: { 'GET /v1/models': refused(500, 'down') } });   // models that cannot be read: nothing is claimed
+  await down.app.start();
+  await flush();
+  assert.equal($('test-badge').hidden, true);
+});
+
+test('the badge follows the default model when the models are read again, as after a new token', async () => {
+  let models = TINY_MODELS;
+  const h = harness({ routes: { 'GET /v1/models': () => models } });
+  await h.app.start();
+  await flush();
+  assert.equal($('test-badge').hidden, false);
+  models = MODELS;   // the server now runs a real model
+  await h.app.reloadAll();
+  await flush();
+  assert.equal($('test-badge').hidden, true);
+  models = TINY_MODELS;
+  await h.app.reloadAll();
+  await flush();
+  assert.equal($('test-badge').hidden, false);
+});
+
+test('the card of a turn on the tiny model says it is no report above the report, live and replayed; a real model\'s card does not', async () => {
+  const h = await ready();
+  const turn = h.app.send();
+  await flush();
+  h.api.streams[0].accept('m_a');
+  await flush();
+  h.api.streams[0].channel.push(...fullTurn());   // START_DATA's card is the tiny engine's
+  h.api.streams[0].channel.end();
+  await turn;
+  const notice = q(cardOf(), '.test-notice');
+  assert.equal(notice.textContent, NOTICE_TEXT);
+  const card = cardOf();
+  assert.ok(card.children.indexOf(notice) < card.children.indexOf(q(card, '.report')));   // above the report
+
+  const real = { ...TINY_CARD, name: 'hybrid_150m_m3_rrg' };
+  resetEvents();
+  const events = [startEv({ message_id: 'm_real', model: real }), stageStartEv('generate', 3), snapEv('Findings: clear.'), stageEndEv('generate', 9),
+                  stopEv('done', { message_id: 'm_real', report: 'Findings: clear.', display_report: 'Findings: clear.' })];
+  const replay = harness({
+    sessions: [sess('s_r', 'chest.png', 1)],
+    routes: {
+      'GET /v1/sessions/s_r': { ...sess('s_r', 'chest.png', 1), messages: [userMsg('u_r', '', 'chest.png'), botMsg('m_real', 'done', START_DATA.options)] },
+      'GET /v1/messages/m_real': { ...botMsg('m_real', 'done', START_DATA.options), events: rows(events) },
+    },
+  });
+  await replay.app.start();
+  await flush();
+  assert.equal(q(cardOf(), '.test-notice'), null);   // a real engine's card has none
+  assert.equal(cardOf().textContent.includes('random weights'), false);
+});
+
+test('the notice is on a replayed card of the tiny model too: it is in the stored card, not in the page\'s memory', async () => {
+  resetEvents();
+  const events = fullTurn('m_tiny');
+  const h = harness({
+    sessions: [sess('s_t', 'chest.png', 1)],
+    routes: {
+      'GET /v1/sessions/s_t': { ...sess('s_t', 'chest.png', 1), messages: [userMsg('u_t', '', 'chest.png'), botMsg('m_tiny', 'done', START_DATA.options)] },
+      'GET /v1/messages/m_tiny': { ...botMsg('m_tiny', 'done', START_DATA.options), events: rows(events) },
+    },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal(q(cardOf(), '.test-notice').textContent, NOTICE_TEXT);
 });
 
 test('the retention sentence is hidden for a server that does not say it, and stays while the server restarts', async () => {
@@ -5176,6 +5265,187 @@ test('the drawer has the stop switch, on, with its hint; its chip reads "full bu
   change(stop);
   assert.equal(chipsText().includes('full budget'), false);
   assert.equal(saved(h).stop_on_repeat, true);
+});
+
+// ---- P9-G5b: a model trained to end its reports (eos_trained) ---------------------------------------------------------------------
+
+const EOS_NOTE = ('EOS-trained: at a 200-token budget, 2,662 of 2,663 test reports end by themselves (44.2 words on average). Against the published '
+                  + 'model: ROUGE-L 0.1948 vs 0.1920; BLEU and all four CheXbert F1 scores are significantly lower.');
+const CARD_EOS = { name: 'hybrid_150m_m3_rrg_eos', cached_decode_available: true, eos_trained: true, evaluation_note: EOS_NOTE, device: 'cpu', prefix_k: 32 };
+const MODELS_EOS = { ...MODELS, models: [CARD_CACHED, CARD_PLAIN, CARD_EOS] };   // the default is still a published model
+const MODELS_EOS_DEFAULT = { ...MODELS_EOS, default_model: CARD_EOS.name };      // as MODELS=m3eos,m3 serves them
+const HINT_BUDGET = 'Off: the published protocol, which always decodes the whole token budget.';
+const HINT_EOS = 'Off: this model still ends its report where it was trained to; the token budget is the limit.';
+const STOP_SWITCH = 'Stop when the report starts repeating';
+
+test('the stop switch\'s hint is worded for the model that is chosen: a model trained to end its reports still ends there with the switch off', async () => {
+  await withDrawerOpen({ models: MODELS_EOS });
+  const model = control('Model');
+  assert.equal($('stop-hint').textContent, HINT_BUDGET);   // the default model is a published one: the words it always had
+  model.value = CARD_EOS.name;
+  change(model);
+  assert.equal($('stop-hint').textContent, HINT_EOS);
+  assert.doesNotMatch($('stop-hint').textContent, /whole token budget|published protocol/);   // neither is true of it
+  assert.equal(control(STOP_SWITCH).getAttribute('aria-describedby'), 'stop-hint');   // and the switch still reads whichever words are there
+  model.value = CARD_PLAIN.name;
+  change(model);
+  assert.equal($('stop-hint').textContent, HINT_BUDGET);
+});
+
+test('with the EOS model the server\'s default its hint is the first one the drawer shows, and a server that lists no models keeps the published words', async () => {
+  await withDrawerOpen({ models: MODELS_EOS_DEFAULT });
+  assert.equal($('stop-hint').textContent, HINT_EOS);
+  assert.equal(control('Model').value, CARD_EOS.name);
+  await withDrawerOpen({ routes: { 'GET /v1/models': refused(500, 'down') } });   // no card to say it: not a model that ends by itself
+  assert.equal($('stop-hint').textContent, HINT_BUDGET);
+  await withDrawerOpen({ models: { ...MODELS, models: [{ ...CARD_CACHED, eos_trained: 'yes' }] } });   // only a real true is a claim
+  assert.equal($('stop-hint').textContent, HINT_BUDGET);
+});
+
+test('the composer\'s chips never call the next turn "full budget" when the chosen model ends its reports by itself', async () => {
+  const h = await withDrawerOpen({ models: MODELS_EOS });
+  const stop = control(STOP_SWITCH);
+  stop.checked = false;
+  change(stop);
+  assert.equal(chipsText().includes('full budget'), true);   // a published model decodes the whole budget with the switch off
+  const model = control('Model');
+  model.value = CARD_EOS.name;
+  change(model);
+  assert.deepEqual(chipsText(), ['beam 3', '100 tok', 'cached', 'k 4/3']);   // nothing is claimed of a turn that has not run
+  assert.equal(saved(h).stop_on_repeat, false);   // the switch is still the user's, and still off
+  model.value = CARD_PLAIN.name;
+  change(model);
+  assert.equal(chipsText().includes('full budget'), true);
+});
+
+const eosOptions = (over = {}) => ({ ...START_DATA.options, model: CARD_EOS.name, stop_on_repeat: false, ...over });
+const eosCard = { ...TINY_CARD, name: CARD_EOS.name, eos_trained: true };
+const userChips = (index = 0) => texts(qa(qa($('conversation'), 'article.turn.user')[index], '.options .chip'));
+
+test('the user turn of an EOS model\'s turn never says "full budget": it says nothing while the turn runs, and "ended the report" once the generate stage says it did', async () => {
+  const h = harness({ sessions: [sess('s_a', 'earlier', 0)], routes: EXISTING, models: MODELS_EOS_DEFAULT });
+  await h.app.start();
+  await flush();
+  attach(imageFile('chest.png'));
+  $('settings').click();
+  const stop = control(STOP_SWITCH);
+  stop.checked = false;
+  change(stop);
+  const turn = h.app.send();
+  await flush();
+  assert.equal(userChips().includes('full budget'), false);   // drawn before the server has answered: the page knows which model it chose
+  h.api.streams[0].accept('m_a');
+  await flush();
+  resetEvents();
+  const run = h.api.streams[0].channel;
+  run.push(startEv({ model: eosCard, options: eosOptions() }), stageStartEv('generate', 3), snapEv('Findings: clear.'));
+  await flush();
+  assert.deepEqual(userChips().filter((c) => c === 'full budget' || c === 'ended the report'), []);   // the server's own options came: still no claim
+  run.push(stageEndEv('generate', 9, { decode: 'beam', beam_size: 3, tokens: 31, stopped: 'eos' }));
+  await flush();
+  assert.equal(userChips().at(-1), 'ended the report');
+  assert.equal(userChips().includes('full budget'), false);
+  assert.equal(qa($('conversation'), 'article.turn.user').length, 1);   // the bubble was redrawn in place, not added
+  run.push(stopEv('done', { report: 'Findings: clear.', display_report: 'Findings: clear.' }));
+  run.end();
+  await turn;
+  assert.equal(userChips().at(-1), 'ended the report');
+});
+
+test('an EOS model\'s turn that reached the budget says "full budget" once it has, and a published model\'s says it from the start', async () => {
+  const h = harness({ sessions: [sess('s_a', 'earlier', 0)], routes: EXISTING, models: MODELS_EOS });
+  await h.app.start();
+  await flush();
+  attach(imageFile('chest.png'));
+  $('settings').click();
+  change(Object.assign(control(STOP_SWITCH), { checked: false }));
+  const turn = h.app.send();
+  await flush();
+  assert.equal(userChips().includes('full budget'), true);   // the default model is a published one, which never ends by itself
+  h.api.streams[0].accept('m_a');
+  await flush();
+  resetEvents();
+  const run = h.api.streams[0].channel;
+  run.push(startEv({ model: eosCard, options: eosOptions() }), stageStartEv('generate', 3));   // the server ran the EOS model all the same
+  await flush();
+  assert.equal(userChips().includes('full budget'), false);   // the card the server sent is what the turn ran on
+  run.push(stageEndEv('generate', 9, { decode: 'beam', beam_size: 3, tokens: 100, stopped: 'budget' }));
+  await flush();
+  assert.equal(userChips().at(-1), 'full budget');
+  run.push(stopEv('done', { report: 'Findings: clear.', display_report: 'Findings: clear.' }));
+  run.end();
+  await turn;
+});
+
+test('a turn that was running when its chat was opened keeps its chips, and gets "ended the report" when its generate stage ends', async () => {
+  resetEvents();
+  const options = eosOptions();
+  const started = [startEv({ message_id: 'm_r', model: eosCard, options }), stageStartEv('generate', 3), snapEv('Findings: so far')];
+  const h = harness({
+    sessions: [sess('s_r', 'chest.png', 1)], models: MODELS_EOS,
+    routes: {
+      'GET /v1/sessions/s_r': { ...sess('s_r', 'chest.png', 1), messages: [userMsg('u_r', '', 'chest.png'), botMsg('m_r', 'running', options)] },
+      'GET /v1/messages/m_r': { ...botMsg('m_r', 'running', options), events: rows(started) },
+    },
+  });
+  await h.app.start();
+  await flush();
+  assert.deepEqual(userChips(), ['beam 5', '100 tok', 'cached', 'k 4/3']);   // the replay: the options it had, and no claim yet
+  assert.equal(h.api.polls.length, 1);   // it runs: the page polls it from the last seq it has
+  h.api.polls[0].channel.push(stageEndEv('generate', 9, { decode: 'beam', tokens: 31, stopped: 'eos' }));
+  await flush();
+  assert.deepEqual(userChips(), ['beam 5', '100 tok', 'cached', 'k 4/3', 'ended the report']);   // the options it had, and the reason it stopped
+  h.api.polls[0].channel.push(stopEv('done', { message_id: 'm_r', report: 'Findings: so far', display_report: 'Findings: so far' }));
+  h.api.polls[0].channel.end();
+  await flush();
+});
+
+test('a replayed chat shows, in each user turn, how its report ended: "ended the report" for an EOS stop, "full budget" for the budget', async () => {
+  const turnOf = (id, stopped) => {
+    resetEvents();
+    return [startEv({ message_id: id, model: eosCard, options: eosOptions() }), stageStartEv('generate', 3), snapEv('Findings: clear.'),
+            stageEndEv('generate', 9, { decode: 'beam', beam_size: 3, tokens: 31, stopped }),
+            stopEv('done', { message_id: id, report: 'Findings: clear.', display_report: 'Findings: clear.' })];
+  };
+  const options = eosOptions();
+  const [eos, budget] = [turnOf('m_1', 'eos'), turnOf('m_2', 'budget')];
+  const h = harness({
+    sessions: [sess('s_b', 'two', 2)], models: MODELS_EOS,
+    routes: {
+      'GET /v1/sessions/s_b': { ...sess('s_b', 'two', 2), messages: [userMsg('u_1', '', 'a.png'), botMsg('m_1', 'done', options),
+                                                                      userMsg('u_2', '', 'b.png'), botMsg('m_2', 'done', options)] },
+      'GET /v1/messages/m_1': { ...botMsg('m_1', 'done', options), events: rows(eos) },
+      'GET /v1/messages/m_2': { ...botMsg('m_2', 'done', options), events: rows(budget) },
+    },
+  });
+  await h.app.start();
+  await flush();
+  assert.equal(userChips(0).at(-1), 'ended the report');
+  assert.equal(userChips(1).at(-1), 'full budget');
+  assert.equal(userChips(0).includes('full budget'), false);
+});
+
+test('the drawer\'s model list shows a model\'s evaluation note under its name, once, and a model with none has no such line', async () => {
+  await withDrawerOpen({ models: MODELS_EOS });
+  const section = $('models-section');
+  const notes = qa(section, 'p.model-note');
+  assert.deepEqual(texts(notes), [EOS_NOTE]);   // the published models carry none, so none is drawn for them
+  const parts = section.children;
+  const at = parts.findIndex((n) => n.localName === 'h4' && n.textContent === CARD_EOS.name);
+  assert.ok(at >= 0);
+  assert.equal(parts[at + 1], notes[0]);                    // right under the model's name ...
+  assert.equal(parts[at + 2].localName, 'table');          // ... above its card
+  assert.equal(texts(qa(parts[at + 2], 'th')).includes('evaluation_note'), false, 'the table does not say it a second time');
+  assert.ok(texts(qa(parts[at + 2], 'th')).includes('eos_trained'), 'the rest of the card is still there');
+  assert.equal(qa(section, 'table').length, 3);
+  assert.equal(q(section, 'p.model-note').getAttribute('role'), null);   // a paragraph of the list, not an alert
+});
+
+test('a model card whose note is not text, or is empty, shows no note line', async () => {
+  const odd = { ...MODELS, models: [{ ...CARD_CACHED, evaluation_note: 7 }, { ...CARD_PLAIN, evaluation_note: '   ' }, { ...CARD_EOS, name: 'third', evaluation_note: null }] };
+  await withDrawerOpen({ models: odd });
+  assert.equal(qa($('models-section'), 'p.model-note').length, 0);
+  assert.equal(qa($('models-section'), 'table').length, 3);
 });
 
 test('a Send carries the stop switch as the drawer has it', async () => {

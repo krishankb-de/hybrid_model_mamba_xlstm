@@ -1027,7 +1027,8 @@ test('the card of the recorded turn: timeline, report with its note, labels unav
   assert.equal(q(card, '.labels').textContent, 'labels unavailable (labeler_unavailable)');
   assert.equal(q(card, '.provenance p').textContent.startsWith('tiny · scan legacy/tfla exact · prefix_k 4'), true);
   assert.equal(button(card, 'Copy') !== null && button(card, 'Show raw') !== null && button(card, 'model details') !== null, true);
-  assert.deepEqual(['ol.timeline', '.notes', '.report', '.labels', '.provenance'].map((s) => card.children.indexOf(q(card, s))), [0, 1, 2, 3, 4]);
+  assert.deepEqual(['ol.timeline', '.notes', '.test-notice', '.report', '.labels', '.provenance'].map((s) => card.children.indexOf(q(card, s))),
+                   [0, 1, 2, 3, 4, 5]);   // the recorded turn is the tiny engine's: its card says so, between the notes and the report (P9-G5b)
 });
 
 test('a card is a pure function of its view: the same view gives the same markup, and a re-render replaces the card whole', () => {
@@ -1159,6 +1160,112 @@ test('Stop when the report starts repeating has a chip only when it is off, and 
   assert.deepEqual(optionChips({ ...base, display_repair: false, stop_on_repeat: false }), ['beam 3', 'raw text', 'full budget']);
   assert.deepEqual(optionChips({ ...base, stop_on_repeat: false, compile: true, reference: 'a note', test_row: 17 }),
                    ['beam 3', 'full budget', 'compiled', 'reference', 'test row 17']);
+});
+
+// ---- P9-G5b: a model trained to end its reports (eos_trained) ---------------------------------------------------------------------
+
+test('a report that ended at its own EOS says so where the chip would say "full budget": the stop reason, "ended the report"', () => {
+  const off = { decode: 'beam', beam_size: 3, stop_on_repeat: false };
+  assert.deepEqual(optionChips(off, { stopped: 'eos' }), ['beam 3', 'ended the report']);   // not "full budget": the report ended where the model meant it to
+  assert.deepEqual(optionChips(off, { stopped: 'eos', eosTrained: true }), ['beam 3', 'ended the report']);
+  assert.deepEqual(optionChips(off, { stopped: 'budget', eosTrained: true }), ['beam 3', 'full budget']);   // an EOS model that did reach the budget: it did decode it all
+  assert.deepEqual(optionChips(off, { stopped: 'budget' }), ['beam 3', 'full budget']);
+  assert.deepEqual(optionChips(off, { eosTrained: true }), ['beam 3']);   // an EOS model whose turn has not ended (or the next turn's settings): no claim
+  assert.deepEqual(optionChips(off, { stopped: '', eosTrained: true }), ['beam 3']);
+  for (const published of [undefined, null, {}, { eosTrained: false }, { stopped: '', eosTrained: false }, 'eos', 7]) {
+    assert.deepEqual(optionChips(off, published), ['beam 3', 'full budget'], JSON.stringify(published));   // a published model, as ever
+  }
+  assert.deepEqual(optionChips(off), ['beam 3', 'full budget']);   // and a call with no second argument is the call it was
+  const on = { decode: 'beam', beam_size: 3, stop_on_repeat: true };
+  for (const outcome of [{ stopped: 'eos' }, { stopped: 'budget' }, { stopped: 'repeat' }, { eosTrained: true }, { stopped: 'eos', eosTrained: true }]) {
+    assert.deepEqual(optionChips(on, outcome), ['beam 3'], JSON.stringify(outcome));   // the switch on says nothing, whatever ended the report
+  }
+  assert.deepEqual(optionChips({ ...off, stop_on_repeat: undefined }, { stopped: 'eos' }), ['beam 3']);   // a turn that does not say: no claim
+  assert.deepEqual(optionChips({ ...off, display_repair: false, compile: true, test_row: 4 }, { stopped: 'eos' }),
+                   ['beam 3', 'raw text', 'ended the report', 'compiled', 'test row 4']);   // in the place of the chip it replaces
+  assert.deepEqual(optionChips({ ...off, stop_on_repeat: false }, { stopped: 'repeat' }), ['beam 3']);   // a repeat stop is not "full budget" either
+});
+
+test('the user turn of a report that ended at EOS reads "ended the report" and never "full budget"; the card of that turn adds no budget note', () => {
+  const options = { ...tinyView().options, stop_on_repeat: false };
+  const chips = (outcome) => texts(qa(renderUserTurn({ text: 'x', options, outcome }, {}), '.options .chip'));
+  assert.deepEqual(chips({ stopped: 'eos', eosTrained: true }), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text', 'ended the report']);
+  assert.deepEqual(chips({ stopped: 'budget', eosTrained: true }), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text', 'full budget']);
+  assert.deepEqual(chips({ eosTrained: true }), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text']);   // still running: nothing claimed
+  assert.deepEqual(chips(undefined), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text', 'full budget']);   // a message with no outcome: as before
+  const card = renderAssistantCard(finished({ options: { stop_on_repeat: false }, generate: { stopped: 'eos', tokens: 31 } }), {});
+  assert.deepEqual(texts(qa(card, '.report .note')), []);   // no budget note: the report ends where the model meant it to
+});
+
+test('the user turn replaces nothing it was given: its message, options and outcome stay as they were', () => {
+  const message = deepFreeze({ text: 'x', options: { ...tinyView().options, stop_on_repeat: false }, outcome: { stopped: 'eos', eosTrained: true } });
+  assert.doesNotThrow(() => renderUserTurn(message, {}));   // a write to a frozen object throws in a module
+});
+
+// ---- P9-G5b: the tiny engine's random weights are announced on every card -----------------------------------------------------------
+
+const TEST_NOTICE = 'Test model with random weights: this text is not a report. Real reports come from the cluster server.';
+
+test('every card of the tiny model has the notice, above its report: "Test model with random weights: this text is not a report..."', () => {
+  assert.equal(tinyView().provenance.name, 'tiny');   // the recorded turn is the tiny engine's own
+  const card = renderAssistantCard(tinyView(), { copy() {}, showModels() {} });
+  const notice = q(card, '.test-notice');
+  assert.ok(notice, 'the card has the notice');
+  assert.equal(notice.textContent, TEST_NOTICE);
+  assert.equal(notice.hidden, false);
+  assert.equal(notice.localName, 'p');
+  assert.equal(notice.getAttribute('role'), 'note');   // a statement about the card: not an alert, which would be read out at every frame
+  assert.equal(render.TEST_NOTICE, TEST_NOTICE);
+  const kids = card.children;
+  assert.ok(kids.indexOf(notice) < kids.indexOf(q(card, '.report')), 'above the report');
+  assert.equal(kids.filter((n) => n.classList.contains('test-notice')).length, 1);   // once, not once per section
+  assert.equal(texts(qa(card, '.notes .note')).includes(TEST_NOTICE), false);   // it is not one of the notes a test of the card counts
+  assert.equal(texts(qa(card, '.report .note')).includes(TEST_NOTICE), false);
+});
+
+test('the notice is on the tiny card in every state of the turn, and only a turn that ran the model has one', () => {
+  const tiny = { ...START.data.model, name: 'tiny' };
+  const start = step('message_start', { ...START.data, model: tiny });
+  const running = viewOf([start, stageStart('preprocess', 0)]);
+  const done = viewOf([start, stageStart('generate', 3), snapshot('Findings: x.'), stopOf('done', { report: 'Findings: x.', display_report: 'Findings: x.' })]);
+  const stopped = viewOf([start, stageStart('generate', 3), stopOf('aborted')]);
+  const failed = viewOf([start, stageStart('generate', 3), step('error', { type: 'error', error: { type: 'model_error', message: 'Out of memory' } }), stopOf('error')]);
+  for (const [why, view] of [['running', running], ['done', done], ['stopped', stopped], ['failed', failed]]) {
+    assert.equal(q(renderAssistantCard(view, {}), '.test-notice')?.hidden, false, why);
+  }
+  const queued = renderAssistantCard(initialView('m1'), {});   // not yet started: no model is known
+  assert.equal(q(queued, '.test-notice'), null);
+  const accepted = viewOf([start]);   // the card of the model is known, and no stage has begun: nothing has been written that could be mistaken
+  assert.equal(q(renderAssistantCard(accepted, {}), '.test-notice'), null);
+  const question = viewOf([start, step('warning', { code: 'not_a_command', message: 'Send an image.' }), stopOf('done')]);   // no stage ran: no model ran
+  assert.equal(q(renderAssistantCard(question, {}), '.test-notice'), null);
+  const asking = viewOf([start, step('warning', { code: 'not_a_command', message: 'Send an image.' })]);   // and not for the moment before it is done
+  assert.equal(q(renderAssistantCard(asking, {}), '.test-notice'), null);
+  const begun = viewOf([start, stageStart('preprocess', 0)]);   // the first stage: from here every frame of the card has it
+  assert.equal(q(renderAssistantCard(begun, {}), '.test-notice')?.textContent, TEST_NOTICE);
+});
+
+test('a real engine never gets the notice: not the published models, not the EOS model, not a card that names nothing', () => {
+  for (const name of ['hybrid_150m_m3_rrg', 'hybrid_150m_v2_rrg', 'hybrid_150m_m3_rrg_eos', 'tiny2', 'Tiny', ' tiny', '', undefined]) {
+    const model = { ...START.data.model, name };
+    const view = viewOf([step('message_start', { ...START.data, model }), stageStart('generate', 3), snapshot('Findings: x.'),
+                         stopOf('done', { report: 'Findings: x.', display_report: 'Findings: x.' })]);
+    const card = renderAssistantCard(view, {});
+    assert.equal(q(card, '.test-notice')?.hidden ?? true, true, String(name));
+    assert.equal(card.textContent.includes('random weights'), false, String(name));
+  }
+  const bare = viewOf([step('message_start', { ...START.data, model: null }), stopOf('aborted')]);   // a log with no card at all
+  assert.equal(q(renderAssistantCard(bare, {}), '.test-notice')?.hidden ?? true, true);
+  assert.equal(q(renderAssistantCard(finished(), {}), '.test-notice')?.hidden ?? true, true);   // the card most of this file draws
+});
+
+test('isTestModel is true for the card named tiny and for nothing else', () => {
+  assert.equal(typeof render.isTestModel, 'function');
+  assert.equal(render.TEST_MODEL, 'tiny');
+  assert.equal(render.isTestModel({ name: 'tiny' }), true);
+  for (const other of [{ name: 'hybrid_150m_m3_rrg' }, { name: 'Tiny' }, { name: 'tiny ' }, { name: null }, {}, null, undefined, 'tiny', ['tiny'], 7]) {
+    assert.equal(render.isTestModel(other), false, JSON.stringify(other));
+  }
 });
 
 test('the user turn shows the note, the thumbnail and the option chips', async () => {

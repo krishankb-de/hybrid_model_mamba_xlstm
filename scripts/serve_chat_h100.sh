@@ -50,8 +50,8 @@
 # API's own status. The gallery is opened against the default model's image tower, and retrieval is on for the models that share it.
 #
 # Levers, as NAME=value arguments of `chat_remote.sh submit`: MODE (private|public), DEVICE (cpu|cuda), BIND, GALLERY (a build directory, or
-# none), MODELS (m3, 13d and m3eos, as in m3 or m3,13d: 1 to 32 characters of a-z, 0-9 and commas, and the CLI knows the names), DRIFT_NOTE (the P1-D sentence every
-# card carries), CHAT_HOME, LABELER_WAIT_S (default 180), CHEXBERT_HF_HUB_OFFLINE
+# none), MODELS (m3, 13d and m3eos, as in m3 or m3,13d: 1 to 32 characters of a-z, 0-9 and commas, and the CLI knows the names), DRIFT_NOTE (the P1-D sentence, which the
+# cards of the published models carry: it was measured for them, and m3eos says its own), CHAT_HOME, LABELER_WAIT_S (default 180), CHEXBERT_HF_HUB_OFFLINE
 # (default 0), PUBLISHED_MODEL and PUBLISHED_FLOOR (the published dumps, so that a test study's score shows the published line; both are
 # looked for under results/, and when one is missing the line is skipped, which the log says).
 # ============================================================================

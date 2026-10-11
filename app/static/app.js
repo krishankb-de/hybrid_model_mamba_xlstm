@@ -29,7 +29,8 @@ import { attachComposer } from './composer.js';
 import { applyEvent, initialView } from './state.js';
 import { openViewer as showViewer } from './viewer.js';
 import {
-  detailTable, el, focusKey, optionChips, renderAssistantCard, renderUserTurn, restoreFocus, scheduleRender, settleClamps, statusText,
+  TEST_MODEL, detailTable, el, focusKey, optionChips, renderAssistantCard, renderUserTurn, restoreFocus, scheduleRender, settleClamps,
+  statusText,
 } from './render.js';
 
 const { authHeaders } = realApi;
@@ -196,6 +197,15 @@ export function chosenCard(settings, models) {
   const cards = cardsOf(models);
   return cards.find((c) => c.name === wanted) ?? cards.find((c) => c.name === models?.default_model) ?? null;
 }
+
+// What the drawer says under the stop switch (P9-G5b), worded for the model that is chosen. A model trained to end its reports (its card says
+// eos_trained, and only a real true says it) ends at its own end of report with the switch off, as with it on, so "the whole token budget"
+// would be wrong of it; the published models have no stop of their own.
+export const STOP_HINTS = Object.freeze({
+  budget: 'Off: the published protocol, which always decodes the whole token budget.',
+  eos: 'Off: this model still ends its report where it was trained to; the token budget is the limit.',
+});
+export const stopHint = (card) => (card?.eos_trained === true ? STOP_HINTS.eos : STOP_HINTS.budget);
 
 // The options field of a turn: exactly the keys of the server's Options that the drawer sets (it refuses any other), every
 // one inside its bounds. models is the /v1/models payload ({default_model, allow_compile, models: [card, ...]}), or null
@@ -470,7 +480,7 @@ export function createApp(env) {
     toggle: $('sidebar-toggle'), sidebar: $('sidebar'), newChat: $('new-session'), list: $('session-list'),
     conversation: $('conversation'), drawer: $('drawer'), composer: $('composer'), well: $('image-well'),
     preview: $('preview'), prompt: $('prompt'), chips: $('chips'), settings: $('settings'), send: $('send'),
-    stop: $('stop'), file: $('file'), badge: $('mode-badge'), health: $('health'),
+    stop: $('stop'), file: $('file'), badge: $('mode-badge'), testBadge: $('test-badge'), health: $('health'),
   };
 
   const state = {
@@ -625,9 +635,23 @@ export function createApp(env) {
     if (near) scroller.toEnd(next);
   }
 
-  function refreshUserBubble(turn, options) {
+  // What the chips of a user turn need besides its options (render.js optionChips, P9-G5b): how its generate stage ended, and whether its model
+  // was trained to end its reports. The turn's own card (message_start) says the second; before the server has answered, it is the card the
+  // page lists for the model it chose (the server's default when none was named).
+  function chipsOutcome(view, model) {
+    const card = isObject(view?.provenance) ? view.provenance : chosenCard({ model: model ?? '' }, state.models);
+    const detail = view?.stages?.generate?.detail;
+    return { stopped: typeof detail?.stopped === 'string' ? detail.stopped : '', eosTrained: card?.eos_trained === true };
+  }
+
+  // Draws the user turn again from the turn's view: when the server says what it resolved (message_start) and when the generate stage says
+  // how the report ended. The options are the server's own, commands included; a turn with no image is a question it answers with no model,
+  // so none were used.
+  function refreshUserBubble(turn) {
     if (!turn.userEl) return;
-    const next = renderUserTurn({ text: turn.text, image: turn.image, options }, userCtx(turn.n, options?.model));
+    const options = turn.view.image && isObject(turn.view.options) ? turn.view.options : null;
+    const next = renderUserTurn({ text: turn.text, image: turn.image, options, outcome: chipsOutcome(turn.view, options?.model) },
+                                userCtx(turn.n, options?.model));
     turn.userEl.replaceWith(next);
     turn.userEl = next;
   }
@@ -738,10 +762,11 @@ export function createApp(env) {
       if (!turn.card && typeof event.data?.message_id === 'string') accept(turn, event.data.message_id);   // a server that sent no X-Message-Id
       turn.view = applyEvent(turn.view, event);
       turn.dirty = true;
-      // The options the server resolved, commands included; a turn with no image is a question it answers with no model, so none were used.
       if (event.event === 'message_start') {
         adoptStudy(turn, event.data);
-        refreshUserBubble(turn, event.data.image ? event.data.options : null);
+        refreshUserBubble(turn);
+      } else if (event.event === 'stage_end' && event.data.stage === 'generate') {
+        refreshUserBubble(turn);   // how the report ended is known now: the chip of the stop switch says it (P9-G5b)
       }
       if (turn.view.status !== 'running') settle(turn);
       else scheduleRender(turn.draw);
@@ -817,7 +842,7 @@ export function createApp(env) {
       }
       // A note the server will not run (no file, no command) uses no settings, so its turn shows no chips (P4-H).
       const ran = runsTheModel(note, file) || Number.isInteger(options.test_row);   // a picked study runs whatever the note says
-      turn.userEl = renderUserTurn({ text: note, image: turn.image, options: ran ? options : null },
+      turn.userEl = renderUserTurn({ text: note, image: turn.image, options: ran ? options : null, outcome: chipsOutcome(null, options.model) },
                                    userCtx(turn.n, options.model));
       session.turns.push(turn);
       ui.conversation.append(turn.userEl);
@@ -1173,6 +1198,8 @@ export function createApp(env) {
     const nodes = [];
     for (const { user: u, assistant: a } of pairs) {
       const turn = makeTurn(view, view.turns.length + 1);
+      const loaded = a ? logs.get(a.id) : null;
+      const replayed = loaded?.log ? loaded.log.events.reduce(applyEvent, initialView(a.id)) : null;   // the turn as its log tells it
       if (u) {
         const events = a ? logs.get(a.id)?.log?.events : null;
         const start = Array.isArray(events) ? events.find((e) => e?.event === 'message_start')?.data ?? null : null;
@@ -1180,14 +1207,14 @@ export function createApp(env) {
         turn.text = shown.text;      // a turn that was still queued has no events: its message_start rebuilds this bubble,
         turn.image = shown.image;    // and rebuilds it from these
         turn.testRow = Number.isInteger(u.test_row) ? u.test_row : null;   // a test study: what the re-run hint names (P6-D)
-        turn.userEl = renderUserTurn(shown, userCtx(turn.n, shown.options?.model));
+        // how its report ended, and what its model was, from the log (P9-G5b): "ended the report" is the turn's, not the page's today
+        turn.userEl = renderUserTurn({ ...shown, outcome: chipsOutcome(replayed, shown.options?.model) }, userCtx(turn.n, shown.options?.model));
         nodes.push(turn.userEl);
       }
       if (a) {
         turn.id = a.id;
-        const loaded = logs.get(a.id);
-        if (loaded?.log) {
-          turn.view = loaded.log.events.reduce(applyEvent, initialView(a.id));
+        if (replayed) {
+          turn.view = replayed;
           turn.card = renderAssistantCard(turn.view, cardCtx(turn.n));
         } else {
           turn.card = failedCard(turn, loaded?.error);
@@ -1680,7 +1707,7 @@ export function createApp(env) {
     fields.labelsNote = el('p', { class: 'note', id: 'labels-note', hidden: true }, 'This server has no CheXbert labeller, so labels are skipped.');
     fields.repair = toggle('display_repair');
     fields.stop = toggle('stop_on_repeat');
-    fields.stopHint = el('p', { class: 'hint', id: 'stop-hint' }, 'Off: the published protocol, which always decodes the whole token budget.');
+    fields.stopHint = el('p', { class: 'hint', id: 'stop-hint' }, stopHint(chosenCard(state.settings, state.models)));   // worded per model: syncDrawer
     fields.stop.setAttribute('aria-describedby', 'stop-hint');
     fields.applyNote = el('p', { class: 'hint', id: 'apply-note' }, 'Changes apply from your next Send.');
     fields.runningNote = el('p', { class: 'hint', id: 'running-note', hidden: true }, 'The running turn keeps the settings it started with.');
@@ -1729,8 +1756,13 @@ export function createApp(env) {
   function fillModels() {
     const cards = cardsOf(state.models);
     fields.model.replaceChildren(...(cards.length ? cards.map((c) => el('option', { value: c.name }, c.name)) : [el('option', { value: '' }, 'Server default')]));
-    ui.modelsSection.replaceChildren(el('h3', {}, 'Models'),
-      ...cards.flatMap((c) => [el('h4', {}, c.name), detailTable(c, `${c.name} details`)]));
+    // A model's description: its name, the line it says about how it measured (the card's evaluation_note, P9-G5b: the EOS model has one), and
+    // its card. The note is a paragraph of its own, so the card's table does not say it a second time; a note that is no text stays in the table.
+    ui.modelsSection.replaceChildren(el('h3', {}, 'Models'), ...cards.flatMap((c) => {
+      const note = text(c.evaluation_note);
+      const { evaluation_note: _said, ...rest } = c;
+      return [el('h4', {}, c.name), ...(note ? [el('p', { class: 'note model-note' }, note)] : []), detailTable(note ? rest : c, `${c.name} details`)];
+    }));
     syncDrawer();
     ui.pick.hidden = !pickerAvailable(state.models);   // private mode with a gallery only (P6-D)
     if (ui.pick.hidden) closePicker({ restore: false });
@@ -1869,19 +1901,23 @@ export function createApp(env) {
     fields.labelsNote.hidden = labelling;
     fields.repair.checked = s.display_repair;
     fields.stop.checked = s.stop_on_repeat;
+    fields.stopHint.textContent = stopHint(card);   // what Off means for the chosen model (P9-G5b)
     fields.mode.value = text(state.models?.mode) || '—';
   }
 
   function renderChips() {
     const options = optionsFromSettings(state.settings, state.models);
     if (!serverHas(state.models, 'retrieval', state.settings.model)) { delete options.k_images; delete options.k_reports; }   // that stage is skipped: no "k 4/3" to show
-    ui.chips.replaceChildren(...optionChips(options).map((c) => el('span', {}, c)));
+    // The next turn has not run: for a model trained to end its reports the chip of the stop switch claims nothing (optionChips, P9-G5b).
+    const outcome = { eosTrained: chosenCard(state.settings, state.models)?.eos_trained === true };
+    ui.chips.replaceChildren(...optionChips(options, outcome).map((c) => el('span', {}, c)));
   }
 
   async function refreshModels() {
     try {
       state.models = await request('/v1/models');
       if (text(state.models.mode)) ui.badge.textContent = state.models.mode;
+      ui.testBadge.hidden = state.models.default_model !== TEST_MODEL;   // "test model" while the server's default is the random-weights engine (P9-G5b)
       fillModels();
       renderChips();
     } catch (err) {
