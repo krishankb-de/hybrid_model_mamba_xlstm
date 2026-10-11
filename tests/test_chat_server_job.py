@@ -733,7 +733,8 @@ def test_a_model_name_only_the_cli_knows_is_the_clis_refusal_and_becomes_the_job
     lines = job_lines(done)
     assert done.returncode == 2, done.stdout
     errors = [l for l in lines if l.startswith("ERROR")]
-    assert errors == ["ERROR --models: unknown model (the models are 13d, m3)", "ERROR the API exited with code 2 (see the server log under CHAT_HOME)"], lines
+    assert errors == ["ERROR --models: unknown model (the models are 13d, m3, m3eos)",
+                      "ERROR the API exited with code 2 (see the server log under CHAT_HOME)"], lines
     assert not [l for l in lines if not LINE_OK.match(l)], lines
     assert "m4" not in "\n".join(l for l in lines if "unknown model" in l), "the refused value is not quoted"
 

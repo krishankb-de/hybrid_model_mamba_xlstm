@@ -1,0 +1,272 @@
+"""CHAT_UI_PLAN.md P9-G5a: the EOS-trained model in the server's model registry (name hybrid_150m_m3_rrg_eos, CLI alias m3eos).
+
+In this order: the registry (the two published models unchanged; the EOS model beside them with its own name, the config it was trained
+with and a checkpoint that is resolved against CHAT_HOME; a missing checkpoint is a one-line refusal that names no path), the CLI alias and
+the defaults (nothing here makes the EOS model the default: that is the user's decision), and the card (eos_trained and the training's
+name are read from the run's own metadata, never written into the registry). The loaders are stubbed and the checkpoints are made-up bytes:
+synthetic data only (R7).
+"""
+import inspect
+import json
+import re
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
+from fastapi.testclient import TestClient
+
+from app import cli, server
+from app.engine import REPO_ROOT, build_engine
+from app.server import create_app
+from app.tiny import TinyTokenizer, TinyTower, tiny_decoder, tiny_prefix_mapper
+
+EOS_MODEL = "hybrid_150m_m3_rrg_eos"
+PUBLISHED = ("hybrid_150m_m3_rrg", "hybrid_150m_v2_rrg")
+EOS_CHECKPOINT = Path("models") / "report_gen_m3_eos_s42" / "checkpoints" / "last.ckpt"
+G4_NUMBERS = ("2,662", "2,663", "44.2", "0.1948", "0.1920", "0.4464", "0.4661")   # the P9-G4 result the card's note is built from
+
+
+@pytest.fixture
+def keep_threads():
+    """RealEngine.__init__ calls torch.set_num_threads, which is process-wide."""
+    threads = torch.get_num_threads()
+    yield threads
+    torch.set_num_threads(threads)
+
+
+def eos_run(home: Path, dataset=None, experiment="report_gen_m3_eos_s42") -> Path:
+    """<home>/models/report_gen_m3_eos_s42/{run_metadata.json, checkpoints/last.ckpt}: the layout scripts/train_report_eos_h100.sh leaves
+    under CHAT_HOME. `dataset`, when given, is the resolved config's dataset block, where P9-G1's report_eos_target lands."""
+    run = home / EOS_CHECKPOINT.parent.parent
+    (run / "checkpoints").mkdir(parents=True)
+    ckpt = run / "checkpoints" / "last.ckpt"
+    ckpt.write_bytes(b"not a real checkpoint" * 50)
+    resolved = {"experiment_name": experiment, "model": {"prefix_k": 4}}
+    if dataset is not None:
+        resolved["dataset"] = dataset
+    (run / "run_metadata.json").write_text(json.dumps({"git_sha": "x", "resolved_config": resolved}))
+    return ckpt
+
+
+def stub_loader(monkeypatch):
+    """The heavy parts of RealEngine.__init__ (the published loader, the GPT-2 download) replaced; -> what the loader was asked for."""
+    import scripts.evaluate_report_generation as erg
+    import transformers
+    module = SimpleNamespace(image_encoder=TinyTower(), prefix_mapper=tiny_prefix_mapper(), decoder=tiny_decoder(), prefix_k=4)
+    seen = {}
+
+    def fake_load(checkpoint, model_config, device="cpu", **kw):
+        seen.update(checkpoint=checkpoint, model_config=model_config, device=device)
+        return module
+
+    monkeypatch.setattr(erg, "load_report_generation_module", fake_load)
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", staticmethod(lambda name, **kw: TinyTokenizer()))
+    return seen
+
+
+def fake_builder(monkeypatch):
+    """server.build_engine replaced by one that records the calls for real engines and answers a tiny engine called what the engine would
+    be called. A tiny engine is built as it always was."""
+    calls = []
+    real = server.build_engine
+
+    def fake(kind, **kw):
+        if kind == "tiny":
+            return real(kind, **kw)
+        calls.append((kind, kw))
+        engine = real("tiny")
+        engine.name = kw.get("name") or kw["model_config"]
+        engine._card.update(name=engine.name, checkpoint=kw["checkpoint"])
+        return engine
+
+    monkeypatch.setattr(server, "build_engine", fake)
+    return calls
+
+
+def listing(app):
+    with TestClient(app) as c:
+        return c.get("/v1/models").json()
+
+
+# ---- the registry ------------------------------------------------------------------------------------------------------------------
+
+def test_the_two_published_models_are_registered_exactly_as_before_and_the_eos_model_is_a_third():
+    assert server.MODEL_CHECKPOINTS == {
+        "hybrid_150m_m3_rrg": "outputs/h100_report_gen_m3_tower13d_s42/checkpoints/last.ckpt",
+        "hybrid_150m_v2_rrg": "outputs/h100_report_gen_full_ext_4gpu_tower13d/checkpoints/last.ckpt"}
+    assert set(server.MODEL_NAMES) == set(PUBLISHED) | {EOS_MODEL} and len(server.MODEL_NAMES) == 3
+
+
+def test_the_published_models_are_built_exactly_as_before_and_the_eos_model_from_chat_home_under_its_own_name(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    eos_run(home)
+    calls = fake_builder(monkeypatch)
+    app = create_app(engine="real", home=str(home), models=PUBLISHED + (EOS_MODEL,), drift_note="CPU vs GPU: 0/20 differ")
+    with TestClient(app):
+        pass
+    assert calls[:2] == [("real", {"checkpoint": str(REPO_ROOT / server.MODEL_CHECKPOINTS[m]), "model_config": m, "device": "cpu",
+                                    "drift_note": "CPU vs GPU: 0/20 differ"}) for m in PUBLISHED]   # no name, no note: nothing new reaches them
+    assert calls[2] == ("real", {"checkpoint": str(home.resolve() / EOS_CHECKPOINT), "model_config": "hybrid_150m_m3_rrg",
+                                 "name": EOS_MODEL, "evaluation_note": server.EOS_MODEL_NOTE, "device": "cpu",
+                                 "drift_note": "CPU vs GPU: 0/20 differ"})
+    assert len(calls) == 3
+
+
+def test_the_eos_models_checkpoint_follows_the_servers_home_and_never_the_repo(tmp_path, monkeypatch):
+    first, second = tmp_path / "one", tmp_path / "two"
+    eos_run(first)
+    eos_run(second)
+    calls = fake_builder(monkeypatch)
+    for home in (first, second):
+        with TestClient(create_app(engine="real", home=str(home), models=(EOS_MODEL,))):
+            pass
+    paths = [kw["checkpoint"] for _, kw in calls]
+    assert paths == [str(first.resolve() / EOS_CHECKPOINT), str(second.resolve() / EOS_CHECKPOINT)]
+    assert not any(str(REPO_ROOT) in p for p in paths)
+
+
+def test_the_first_model_listed_is_the_default_in_either_order_and_the_eos_model_is_listed_under_its_own_name(tmp_path, monkeypatch):
+    eos_run(tmp_path / "home")
+    fake_builder(monkeypatch)
+    for models in ((EOS_MODEL, PUBLISHED[0]), (PUBLISHED[0], EOS_MODEL)):
+        answer = listing(create_app(engine="real", home=str(tmp_path / "home"), models=models))
+        assert answer["default_model"] == models[0] and [m["name"] for m in answer["models"]] == list(models)
+
+
+def test_a_missing_eos_checkpoint_refuses_the_start_with_one_line_that_names_no_path(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(server, "build_engine", lambda *a, **k: pytest.fail("an engine was built for a model that has no checkpoint"))
+    with pytest.raises(server.ModelUnavailable) as stop:
+        create_app(engine="real", home=str(home), models=(EOS_MODEL,))
+    message = str(stop.value)
+    assert EOS_MODEL in message and "CHAT_HOME" in message and len(message.splitlines()) == 1
+    for fragment in (str(tmp_path), str(home), "last.ckpt", "report_gen_m3_eos_s42", "/", "\\"):
+        assert fragment not in message, fragment
+    assert not home.exists(), "nothing was created: the database was not opened"
+
+
+def test_a_missing_eos_checkpoint_is_only_refused_when_the_model_is_asked_for(tmp_path, monkeypatch):
+    calls = fake_builder(monkeypatch)
+    with TestClient(create_app(engine="real", home=str(tmp_path / "home"))) as c:    # the defaults: no EOS model
+        assert [m["name"] for m in c.get("/v1/models").json()["models"]] == ["hybrid_150m_m3_rrg"]
+    assert [kw["model_config"] for _, kw in calls] == ["hybrid_150m_m3_rrg"]
+    with TestClient(create_app(engine="tiny", home=str(tmp_path / "tiny"), models=(EOS_MODEL,))) as c:   # tiny ignores models
+        assert [m["name"] for m in c.get("/v1/models").json()["models"]] == ["tiny"]
+
+
+def test_a_directory_where_the_checkpoint_should_be_is_no_checkpoint(tmp_path, monkeypatch):
+    (tmp_path / "home" / EOS_CHECKPOINT).mkdir(parents=True)
+    monkeypatch.setattr(server, "build_engine", lambda *a, **k: pytest.fail("an engine was built for a model that has no checkpoint"))
+    with pytest.raises(server.ModelUnavailable):
+        create_app(engine="real", home=str(tmp_path / "home"), models=(EOS_MODEL,))
+
+
+def test_a_name_that_is_in_no_registry_is_still_refused_and_the_message_lists_all_three(tmp_path):
+    with pytest.raises(ValueError, match="models") as stop:
+        create_app(engine="real", home=str(tmp_path / "b"), models=("hybrid_70m",))
+    assert all(name in str(stop.value) for name in server.MODEL_NAMES)
+
+
+def test_the_cli_turns_a_missing_eos_checkpoint_into_one_error_line_and_exit_1_without_a_path(tmp_path, capsys):
+    home = tmp_path / "home"
+    code = cli.main(["--engine", "real", "--mode", "private", "--home", str(home), "--models", "m3eos"])
+    captured = capsys.readouterr()
+    errors = [line for line in captured.out.splitlines() if line.startswith("ERROR")]
+    assert code == 1 and len(errors) == 1 and EOS_MODEL in errors[0] and "no checkpoint in CHAT_HOME" in errors[0], captured.out
+    assert str(tmp_path) not in captured.out and "last.ckpt" not in captured.out and "/" not in errors[0]
+    assert not home.exists()
+
+
+# ---- the alias and the defaults ----------------------------------------------------------------------------------------------------
+
+def test_the_alias_m3eos_names_the_eos_model_and_fits_the_wrappers_models_pattern():
+    assert cli.MODEL_ALIASES["m3eos"] == EOS_MODEL
+    assert cli.MODEL_ALIASES["m3"] == "hybrid_150m_m3_rrg" and cli.MODEL_ALIASES["13d"] == "hybrid_150m_v2_rrg"
+    assert set(cli.MODEL_ALIASES.values()) == set(server.MODEL_NAMES), "an alias for every registered model, and no other"
+    for models in ("m3eos", "m3eos,m3", "m3,m3eos", "m3,13d,m3eos"):
+        assert re.fullmatch(r"[a-z0-9,]{1,32}", models), models   # serve_chat_*_h100.sh's MODELS pattern
+
+
+@pytest.mark.parametrize("value, want", [("m3eos", (EOS_MODEL,)), ("m3eos,m3", (EOS_MODEL, "hybrid_150m_m3_rrg")),
+                                         ("m3,m3eos", ("hybrid_150m_m3_rrg", EOS_MODEL)),
+                                         ("hybrid_150m_m3_rrg_eos,13d", (EOS_MODEL, "hybrid_150m_v2_rrg"))])
+def test_models_take_the_eos_alias_or_its_registry_name_in_the_order_given(value, want):
+    assert cli.parse_args(["--engine", "tiny", "--mode", "private", "--home", "H", "--models", value]).models == want
+
+
+def test_the_eos_model_named_twice_is_refused_like_any_other(capsys):
+    with pytest.raises(SystemExit):
+        cli.parse_args(["--engine", "tiny", "--mode", "private", "--home", "H", "--models", "m3eos,hybrid_150m_m3_rrg_eos"])
+    assert "twice" in capsys.readouterr().out
+
+
+def test_the_defaults_do_not_change_the_published_model_alone_is_what_a_server_serves_without_models():
+    assert inspect.signature(create_app).parameters["models"].default == ("hybrid_150m_m3_rrg",)
+    assert cli.build_parser().get_default("models") == "m3"
+    assert cli.parse_args(["--engine", "tiny", "--mode", "private", "--home", "H"]).models == ("hybrid_150m_m3_rrg",)
+
+
+def test_a_server_started_without_models_lists_the_published_model_alone_as_its_default(tmp_path, monkeypatch):
+    fake_builder(monkeypatch)
+    answer = listing(create_app(engine="real", home=str(tmp_path / "home")))
+    assert answer["default_model"] == "hybrid_150m_m3_rrg" and [m["name"] for m in answer["models"]] == ["hybrid_150m_m3_rrg"]
+
+
+# ---- the card ----------------------------------------------------------------------------------------------------------------------
+
+def test_the_eos_models_card_reads_its_training_from_the_run_metadata_and_carries_the_g4_note(tmp_path, monkeypatch, keep_threads):
+    home = tmp_path / "home"
+    eos_run(home, dataset={"report_eos_target": True})
+    seen = stub_loader(monkeypatch)
+    answer = listing(create_app(engine="real", home=str(home), models=(EOS_MODEL,)))
+    (card,) = answer["models"]
+    assert answer["default_model"] == card["name"] == EOS_MODEL
+    assert card["eos_trained"] is True and card["train_experiment"] == "report_gen_m3_eos_s42"
+    assert card["checkpoint"] == str(home.resolve() / EOS_CHECKPOINT) and card["prefix_k"] == 4
+    assert seen == {"checkpoint": card["checkpoint"], "model_config": "hybrid_150m_m3_rrg", "device": "cpu"}
+    note = card["evaluation_note"]
+    assert all(number in note for number in G4_NUMBERS), note
+    assert len(note) <= 240 and "\n" not in note and note.isascii(), "one or two lines of plain text"
+
+
+def test_eos_trained_is_read_from_the_runs_metadata_never_written_into_the_registry(tmp_path, monkeypatch, keep_threads):
+    stub_loader(monkeypatch)
+    cards = {}
+    for label, dataset in (("flagged", {"report_eos_target": True}), ("unflagged", {}), ("false", {"report_eos_target": False})):
+        home = tmp_path / label
+        eos_run(home, dataset=dataset)
+        (cards[label],) = listing(create_app(engine="real", home=str(home), models=(EOS_MODEL,)))["models"]
+    assert [cards[k]["eos_trained"] for k in ("flagged", "unflagged", "false")] == [True, False, False]
+    assert {c["name"] for c in cards.values()} == {EOS_MODEL}               # the same registry entry in all three
+    assert all(c["train_experiment"] == "report_gen_m3_eos_s42" for c in cards.values())
+
+
+def test_a_model_given_no_note_has_no_evaluation_note_key_so_the_published_cards_are_byte_for_byte_what_they_were(tmp_path, monkeypatch,
+                                                                                                                 keep_threads):
+    ckpt = eos_run(tmp_path / "home", dataset={"report_eos_target": True})
+    stub_loader(monkeypatch)
+    plain = build_engine("real", checkpoint=str(ckpt), model_config="hybrid_150m_m3_rrg").card()
+    assert "evaluation_note" not in plain and plain["name"] == "hybrid_150m_m3_rrg"
+    named = build_engine("real", checkpoint=str(ckpt), model_config="hybrid_150m_m3_rrg", name=EOS_MODEL, evaluation_note="A note.")
+    assert named.name == EOS_MODEL and named.card()["name"] == EOS_MODEL and named.card()["evaluation_note"] == "A note."
+    assert {k: v for k, v in named.card().items() if k not in ("name", "evaluation_note")} == {
+        k: v for k, v in plain.items() if k != "name"}, "the name and the note are the only differences"
+
+
+def test_the_models_route_says_a_card_may_carry_an_evaluation_note_in_the_two_sentences_a_description_may_have(tmp_path):
+    with TestClient(create_app(engine="tiny", home=str(tmp_path))) as c:
+        description = c.get("/openapi.json").json()["paths"]["/v1/models"]["get"]["description"]
+    assert "`evaluation_note`" in description and "`eos_trained`" in description
+    assert len(re.split(r"(?<=[.!?])\s+", description.strip())) <= 2    # tests/test_app_openapi.py's rule for every route
+
+
+def test_the_note_is_aggregate_numbers_only_so_a_public_card_keeps_it_and_shortens_only_the_checkpoint(tmp_path, monkeypatch, keep_threads):
+    from app.redact import redact_card
+    home = tmp_path / "home"
+    eos_run(home, dataset={"report_eos_target": True})
+    stub_loader(monkeypatch)
+    (card,) = listing(create_app(engine="real", home=str(home), models=(EOS_MODEL,)))["models"]
+    public = redact_card(card, "public")
+    assert public["evaluation_note"] == card["evaluation_note"] and public["checkpoint"] == "last.ckpt"
+    assert "study" not in card["evaluation_note"].lower() and not re.search(r"\d{8,}", card["evaluation_note"])

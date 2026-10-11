@@ -54,10 +54,21 @@ from app.store import Store
 
 log = logging.getLogger("app.server")
 
-MODEL_CHECKPOINTS = {   # resolved against the repo root (ruling 1)
+MODEL_CHECKPOINTS = {   # resolved against the repo root (ruling 1): the published models, each named after its model config
     "hybrid_150m_m3_rrg": "outputs/h100_report_gen_m3_tower13d_s42/checkpoints/last.ckpt",
     "hybrid_150m_v2_rrg": "outputs/h100_report_gen_full_ext_4gpu_tower13d/checkpoints/last.ckpt",
 }
+# P9-G5a: the model trained to end its reports (P9-G3) keeps its files in the app's own home, not in the thesis checkout (R8): `checkpoint` is
+# resolved against CHAT_HOME, `config` is the model config it was trained with (so the name is the registry's, not the config's), and `note` is
+# one static line about how it measured, which its card carries. The note is aggregate numbers, so it is no Class R data and a public card keeps
+# it. Whether the model is `eos_trained` is read from its run's own metadata, as for every model: the registry says nothing of it.
+EOS_MODEL_NOTE = ("EOS-trained: 2,662 of 2,663 test reports end by themselves (44.2 words each). Against the published model: ROUGE-L 0.1948 vs "
+                  "0.1920, CheXbert-14 micro F1 0.4464 vs 0.4661; BLEU and all four CheXbert F1 scores are significantly lower.")
+HOME_MODELS = {
+    "hybrid_150m_m3_rrg_eos": {"config": "hybrid_150m_m3_rrg", "checkpoint": "models/report_gen_m3_eos_s42/checkpoints/last.ckpt",
+                               "note": EOS_MODEL_NOTE},
+}
+MODEL_NAMES = tuple(MODEL_CHECKPOINTS) + tuple(HOME_MODELS)   # every model a server can be asked for; the first one asked for is its default
 STATIC_DIR = Path(__file__).resolve().parent / "static"   # the page; P4 builds it
 MAX_REQUEST_BYTES = MAX_UPLOAD_BYTES + 1024 * 1024        # the image and room for the form's other fields
 PING_S = 15.0                                             # a keep-alive comment while no event comes
@@ -415,15 +426,38 @@ def _chat_home(home: Optional[str]) -> Path:
     return path
 
 
+class ModelUnavailable(RuntimeError):
+    """A model that was asked for has no checkpoint where the server keeps it. The message names the model and no path: it is a line of a job
+    log, and a path under CHAT_HOME holds the user name."""
+
+
+def _require_checkpoints(models: Sequence[str], home: Path) -> None:
+    """P9-G5a: every model kept under CHAT_HOME (HOME_MODELS) that was asked for is there, before the database is opened or an engine is
+    built. A published model's checkpoint is not looked for here: the thesis loader's own error says so, as it always has."""
+    for name in models:
+        spec = HOME_MODELS.get(name)
+        if spec is not None and not (home / spec["checkpoint"]).is_file():
+            raise ModelUnavailable("{} has no checkpoint in CHAT_HOME: train it first, or serve without it.".format(name))
+
+
 def _engines(kind: str, models: Sequence[str], tiny_step_delay_s: float, drift_note: str, device: str = "cpu",
-             threads: Optional[int] = None) -> Dict[str, Engine]:
+             threads: Optional[int] = None, home: Optional[Path] = None) -> Dict[str, Engine]:
     """Ruling 1: tiny is one engine and ignores models, device and threads; real is one engine per model on `device` (a CPU one by
-    default), the first the default. Without a thread count the engine keeps its own default."""
+    default), the first the default. Without a thread count the engine keeps its own default. A published model is built from the repo root
+    under its config's name; a model of HOME_MODELS (P9-G5a) from CHAT_HOME (`home`), under its own name and with its note."""
     if kind == "tiny":
         return {"tiny": build_engine("tiny", step_delay_s=tiny_step_delay_s)}
     extra = {} if threads is None else {"threads": threads}
-    return {name: build_engine("real", checkpoint=str(REPO_ROOT / MODEL_CHECKPOINTS[name]), model_config=name,
-                               device=device, drift_note=drift_note, **extra) for name in models}
+    engines = {}
+    for name in models:
+        if name in HOME_MODELS:
+            spec = HOME_MODELS[name]
+            engines[name] = build_engine("real", checkpoint=str(Path(home) / spec["checkpoint"]), model_config=spec["config"], name=name,
+                                         evaluation_note=spec["note"], device=device, drift_note=drift_note, **extra)
+        else:
+            engines[name] = build_engine("real", checkpoint=str(REPO_ROOT / MODEL_CHECKPOINTS[name]), model_config=name,
+                                         device=device, drift_note=drift_note, **extra)
+    return engines
 
 
 def _readable(errors: Sequence[Any]) -> str:
@@ -614,6 +648,10 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     ({"model": dir, "floor": dir}, each holding a hyps.txt) puts the published lines beside a test study's score. All of them
     are on app.state, with gallery_dir, labeler_url and published_dirs as given. device ("cpu" or "cuda") and threads are for the
     real engines (P7-B: the serving command line, app/cli.py, passes them); the tiny engine ignores both.
+
+    `models` (real engines only) are names of MODEL_NAMES, the first the default; without it the published Mamba-3 model is served alone. A
+    model of HOME_MODELS (P9-G5a, the EOS-trained one) is loaded from `home`, and a start that asks for one whose checkpoint is not there is
+    refused with ModelUnavailable, before the database is opened.
     """
     if mode not in ("private", "public"):
         raise ValueError("mode must be 'private' or 'public', got {!r}".format(mode))
@@ -627,13 +665,16 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         raise RuntimeError("Public mode needs a token (R6).")
     if engine not in ("tiny", "real"):
         raise ValueError("engine must be 'tiny' or 'real', got {!r}".format(engine))
-    if engine == "real" and (not models or any(m not in MODEL_CHECKPOINTS for m in models)):
-        raise ValueError("models must be among {}, got {}".format(sorted(MODEL_CHECKPOINTS), list(models)))
+    if engine == "real" and (not models or any(m not in MODEL_NAMES for m in models)):
+        raise ValueError("models must be among {}, got {}".format(sorted(MODEL_NAMES), list(models)))
     if queue_cap < 1:
         raise ValueError("queue_cap must be at least 1, got {}".format(queue_cap))
     days = retention.resolve_days(mode, retention_days)   # a bad value stops the server here, before the database is opened
     policy = retention.retention_policy(mode, days)
-    store = Store(_chat_home(home))
+    chat_home = _chat_home(home)
+    if engine == "real":
+        _require_checkpoints(models, chat_home)   # P9-G5a: a model kept under CHAT_HOME must be there, or the start is refused here
+    store = Store(chat_home)
     print("[server] sqlite journal_mode={}".format(store.journal_mode), flush=True)
     print("[server] recovered {} running turn(s)".format(store.recover_after_restart()), flush=True)
 
@@ -645,7 +686,7 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
 
     sweeper = retention.RetentionSweeper(store, policy, report=report_sweep)   # started with the server, in the lifespan
     try:
-        engines = _engines(engine, models, tiny_step_delay_s, drift_note, device, threads)
+        engines = _engines(engine, models, tiny_step_delay_s, drift_note, device, threads, store.home)
         default_model = next(iter(engines))
         gallery, retrieval_models = _wire_gallery(gallery, gallery_dir, tiny_gallery, store.home, engines, default_model)
         labeler = _wire_labeler(labeler, labeler_url, tiny_gallery)
@@ -761,7 +802,8 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
              description="The models this server can run, each with its card (checkpoint, device, architecture "
                          "settings, whether decoding can be cached, and `eos_trained`: whether it was trained to end its "
                          "reports, in which case decoding stops where it does and the generate stage reports "
-                         "`stopped: eos`), and the default model, the mode, whether "
+                         "`stopped: eos`; a model that has one also carries an `evaluation_note`, a line on how it measured), "
+                         "and the default model, the mode, whether "
                          "`compile` is allowed and, in `features`, whether it runs the retrieval and labels stages for the "
                          "default model (each card's own `features` says so for that model). "
                          "In public mode a card names its checkpoint by file name only.")

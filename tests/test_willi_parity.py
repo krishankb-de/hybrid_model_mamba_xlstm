@@ -8260,6 +8260,27 @@ def test_serve_chat_wrappers_default_to_the_real_gallery_and_name_the_published_
         assert "ls -d" not in code and "sort | tail" not in code, "the gallery is the named build, never the newest directory"
 
 
+def test_serve_chat_wrappers_document_both_model_orders_of_the_eos_model_and_keep_the_published_model_the_default():
+    """P9-G5a. `MODELS=m3eos,m3` serves the EOS model first, which makes it the default model of that deployment (the first model listed is
+    the default); `MODELS=m3,m3eos` keeps the published model the default. Both are written in the header of both wrappers. The code does not
+    change: MODELS still defaults to m3 alone (the user, not the code, decides whether the EOS model becomes a deployment's default), the
+    wrapper judges only the shape of MODELS, and the names are the CLI's to judge, so `m3eos` appears in no line of code."""
+    for name in SERVE_WRAPPERS:
+        header = [l for l in _serve_text(name).splitlines() if l.startswith("#") and not l.startswith("#SBATCH")]
+        eos_first = [l for l in header if "MODELS=m3eos,m3 " in l + " "]
+        published_first = [l for l in header if "MODELS=m3,m3eos " in l + " "]
+        assert len(eos_first) == 1 and len(published_first) == 1, (name, eos_first, published_first)
+        assert "default model of that deployment" in eos_first[0] and "EOS model first" in eos_first[0], eos_first
+        assert "published model first" in published_first[0] and "default" in published_first[0], published_first
+        assert header.index(eos_first[0]) < header.index(published_first[0])
+        text = "\n".join(header)
+        assert "hybrid_150m_m3_rrg_eos" in text and "report_gen_m3_eos_s42" in text and "refuses to start" in text
+        assert "names no path" in text and "Without MODELS the job serves m3 alone" in text
+        code = _serve_code(name)
+        assert 'MODELS="${MODELS:-m3}"' in code and "m3eos" not in code
+        assert '[[ "${MODELS}" =~ ^[a-z0-9,]{1,32}$ ]]' in code and re.fullmatch(r"[a-z0-9,]{1,32}", "m3eos,m3")
+
+
 def test_serve_chat_wrappers_start_the_labeller_on_loopback_in_the_chexbert_environment():
     """D24: CheXbert's weights live in the default HF cache and it runs with HF_HUB_OFFLINE=0 (scripts/score_chexbert_h100.sh), so the
     job's own HF_HOME and offline mode must not reach it; and it listens on loopback only, on a free port (nodes are shared)."""

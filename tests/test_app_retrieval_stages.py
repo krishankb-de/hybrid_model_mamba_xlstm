@@ -100,7 +100,7 @@ def _fake_real_engines(monkeypatch, other_tower=()):
     weights differ, as a report model whose image tower was trained on would."""
     def fake(kind, **kw):
         engine = build_engine("tiny")
-        engine.name = kw["model_config"]
+        engine.name = kw.get("name") or kw["model_config"]   # P9-G5a: a registry name that is not the model config
         engine._card.update(name=engine.name, checkpoint=kw["checkpoint"])
         if engine.name in other_tower:
             engine.tower.head.bias.data += 1.0
@@ -411,6 +411,51 @@ def test_live_equals_published_is_compared_only_under_the_published_protocol(tmp
         for other in ({"stop_on_repeat": True}, {"beam_size": 2}, {"decode": "greedy"}, {"max_new_tokens": 16}, {"compile": True}):
             block = _ends(_turn(c, dict(other, test_row=2), image=None))["score"]["detail"]["published"]
             assert block["model_report"] == report and block["live_equals_published"] is None, other
+
+
+def _published_app(tmp_path, tiny_gallery, monkeypatch, models):
+    """create_app over real-engine stand-ins (tiny engines named as the registry names them), the tiny gallery, and published dumps of the
+    test split; the EOS model's run directory is under the home, as the registry looks for it. -> (the app, the number of test studies)."""
+    _fake_real_engines(monkeypatch)
+    home = tmp_path / "home"
+    (home / "models" / "report_gen_m3_eos_s42" / "checkpoints").mkdir(parents=True)
+    (home / "models" / "report_gen_m3_eos_s42" / "checkpoints" / "last.ckpt").write_bytes(b"synthetic")
+    root = decide_gate(tiny_gallery)
+    _set_manifest(root, tower_sha256=build_engine("tiny").tower_sha256())
+    n_test = json.loads((root / "manifest.json").read_text())["counts"]["test"]
+    return create_app(engine="real", models=models, home=str(home), gallery_dir=str(root), labeler=RuleLabeler(),
+                      published_dirs=_dumps(tmp_path, n_test)), n_test
+
+
+def test_live_equals_published_never_applies_to_an_eos_trained_card_even_under_the_published_name_and_protocol(tmp_path, tiny_gallery,
+                                                                                                            monkeypatch):   # P9-G5a, R2
+    app, _ = _published_app(tmp_path, tiny_gallery, monkeypatch, (PUBLISHED_MODEL,))
+    with TestClient(app) as c:
+        engine = c.app.state.engines[PUBLISHED_MODEL]
+        assert engine.card()["eos_trained"] is False
+        report = _turn(c, {"test_row": 2}, image=None)[-1]["data"]["report"]
+        dumps = c.app.state.published
+        c.app.state.worker.pipeline.published = PublishedDumps([report if i == 2 else line for i, line in enumerate(dumps.model_hyps)],
+                                                               dumps.floor_hyps)
+        under_the_published_protocol = _ends(_turn(c, {"test_row": 2}, image=None))["score"]["detail"]["published"]
+        assert under_the_published_protocol["live_equals_published"] is True       # the comparison that exists today ...
+        engine._card["eos_trained"] = True                                         # ... and what the same turn says once the card does
+        block = _ends(_turn(c, {"test_row": 2}, image=None))["score"]["detail"]["published"]
+        assert block["model_report"] == report and block["live_equals_published"] is None, block   # the line is shown; it is never compared
+
+
+def test_the_eos_model_gets_the_floor_line_and_no_model_line_and_no_comparison(tmp_path, tiny_gallery, monkeypatch):   # P9-G5a, R2
+    from app.server import MODEL_CHECKPOINTS
+    eos = "hybrid_150m_m3_rrg_eos"
+    app, _ = _published_app(tmp_path, tiny_gallery, monkeypatch, (eos, PUBLISHED_MODEL))
+    assert PUBLISHED_MODEL in MODEL_CHECKPOINTS and eos not in MODEL_CHECKPOINTS      # the published dump is of the published model only
+    with TestClient(app) as c:
+        assert c.get("/v1/models").json()["default_model"] == eos
+        c.app.state.engines[eos]._card["eos_trained"] = True                          # what its run's metadata says
+        score = _ends(_turn(c, {"test_row": 2}, image=None))["score"]["detail"]       # no model option: the server's default, the EOS model
+        assert score["published"] == {"model_report": None, "floor_report": "SYNTHETIC floor line 2", "live_equals_published": None}
+        other = _ends(_turn(c, {"test_row": 2, "model": PUBLISHED_MODEL}, image=None))["score"]["detail"]["published"]
+        assert other["model_report"] == "SYNTHETIC model line 2" and other["live_equals_published"] is False   # unchanged for the published model
 
 
 # ---- public mode (R1, U2) -------------------------------------------------------------------------------------------------

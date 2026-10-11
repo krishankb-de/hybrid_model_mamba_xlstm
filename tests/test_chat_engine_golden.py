@@ -220,7 +220,25 @@ def test_driver_states_what_it_ran_on_in_its_first_lines(run_driver):
     lines = run_driver(n=1)["stdout"].splitlines()
     assert lines[0].startswith("[golden] device=") and "threads=" in lines[0] and "torch=" in lines[0]
     assert lines[1].startswith("[golden] card name=tiny") and "git=" in lines[1] and "source=" in lines[1]
-    assert "cached_decode_available=True" in lines[1]
+    assert "cached_decode_available=True" in lines[1] and "eos_trained=False" in lines[1]
+
+
+def test_driver_prints_eos_trained_in_its_card_line_as_the_card_says_it(golden, studies, monkeypatch, capsys):   # P9-G5a
+    """A golden run of an EOS-trained model decodes with the EOS search, so its line must say which kind of model it was: the flag is what the
+    card says, not a constant. It is a bool, so the line still holds no text."""
+    import app.engine as engine_module
+    card_lines = {}
+    for trained in (False, True):
+        eng = engine_module.TinyEngine()
+        eng._card["eos_trained"] = trained
+        monkeypatch.setattr(engine_module, "build_engine", lambda kind, eng=eng, **kw: eng)
+        capsys.readouterr()
+        golden.main(["--checkpoint", str(studies["checkpoint"]), "--parquet", str(studies["parquet"]), "--n", "1",
+                     "--out", str(studies["out"] / str(trained))])
+        card_lines[trained] = [l for l in capsys.readouterr().out.splitlines() if l.startswith("[golden] card ")]
+    assert [len(v) for v in card_lines.values()] == [1, 1]
+    assert "eos_trained=False" in card_lines[False][0] and "eos_trained=True" not in card_lines[False][0]
+    assert "eos_trained=True" in card_lines[True][0] and "eos_trained=False" not in card_lines[True][0]
 
 
 def test_an_n_beyond_the_parquet_decodes_every_row_and_pads_nothing(run_driver, studies):

@@ -49,9 +49,10 @@ import uvicorn
 
 from app.labels import RuleLabeler
 from app.retention import resolve_days
-from app.server import MODEL_CHECKPOINTS, _is_loopback, create_app
+from app.server import MODEL_NAMES, ModelUnavailable, _is_loopback, create_app
 
-MODEL_ALIASES = {"m3": "hybrid_150m_m3_rrg", "13d": "hybrid_150m_v2_rrg"}   # --models m3,13d
+MODEL_ALIASES = {"m3": "hybrid_150m_m3_rrg", "13d": "hybrid_150m_v2_rrg",
+                 "m3eos": "hybrid_150m_m3_rrg_eos"}   # --models m3,13d; m3eos is the model trained to end its reports (P9-G5a)
 GRACEFUL_S = 10                    # uvicorn's timeout_graceful_shutdown: SLURM sends SIGKILL KillWait (30 s by default) after SIGTERM
 MAX_TOKEN_FILE_BYTES = 4096
 TOKEN = re.compile(r"[\x21-\x7e]+")                             # visible ASCII, no space: it travels in an Authorization header
@@ -109,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=0, help="0 picks a free port; the endpoint file says which")
     p.add_argument("--endpoint-file", metavar="PATH", help="written when the server is serving: {host, port, mode, pid, started_at}")
     p.add_argument("--token-file", metavar="PATH", help="the token: a file of mode 0600 that you own, never an argument or a variable")
-    p.add_argument("--models", default="m3", metavar="m3[,13d]", help="the models served, the first is the default (m3, 13d)")
+    p.add_argument("--models", default="m3", metavar="m3[,13d,m3eos]", help="the models served, the first is the default (m3, 13d, m3eos)")
     p.add_argument("--threads", type=int, default=8, help="CPU threads of the real engine")
     p.add_argument("--drift-note", default="", metavar="TEXT", help="the CPU-versus-GPU drift sentence every card carries")
     p.add_argument("--allow-compile", action="store_true", help="accept the compile option")
@@ -162,7 +163,7 @@ def _models(parser: argparse.ArgumentParser, text: str) -> tuple:
         if not name:
             parser.error("--models has an empty name")
         full = MODEL_ALIASES.get(name, name)
-        if full not in MODEL_CHECKPOINTS:
+        if full not in MODEL_NAMES:
             parser.error("--models: unknown model (the models are {})".format(", ".join(sorted(MODEL_ALIASES))))
         if full in names:
             parser.error("--models names a model twice")
@@ -373,6 +374,9 @@ def _serve(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         emit("ERROR interrupted while starting")
         return 130
+    except ModelUnavailable as exc:     # P9-G5a: a model asked for has no checkpoint; its message names the model and never a path
+        emit("ERROR {}".format(exc))
+        return 1
     except Exception as exc:    # its text can hold a path: the class here, the traceback in the server log (stderr)
         emit("ERROR cannot start the server ({})".format(type(exc).__name__))
         traceback.print_exc()

@@ -147,7 +147,7 @@ def test_models_take_the_short_names_or_the_config_names_in_the_order_given():
     assert parsed("--models", "m3,13d").models == ("hybrid_150m_m3_rrg", "hybrid_150m_v2_rrg")
     assert parsed("--models", "13d").models == ("hybrid_150m_v2_rrg",)
     assert parsed("--models", "hybrid_150m_v2_rrg,m3").models == ("hybrid_150m_v2_rrg", "hybrid_150m_m3_rrg")
-    assert set(cli.MODEL_ALIASES.values()) == set(server.MODEL_CHECKPOINTS), "an alias for a model the server has no checkpoint for"
+    assert set(cli.MODEL_ALIASES.values()) == set(server.MODEL_NAMES), "an alias for a model the server has no checkpoint for"
 
 
 @pytest.mark.parametrize("value, why", [("m4", "unknown model"), ("hybrid_70m", "unknown model"), ("", "empty"), ("m3,,13d", "empty"),

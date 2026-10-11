@@ -361,17 +361,24 @@ class TinyEngine(Engine):
 
 
 class RealEngine(Engine):
+    """`model_config` is the Hydra model config the checkpoint was trained with; the engine is called that too, unless `name` says otherwise
+    (P9-G5a: the EOS model is its own entry of the registry, and shares the Mamba-3 config). `evaluation_note`, when given, is one static line
+    about how the model measured, carried by its card; a card of a model that has none has no such key."""
+
     def __init__(self, checkpoint: str, model_config: str, device: str = "cpu", threads: int = 8,
-                 cache_dir: Optional[Path] = None, drift_note: str = ""):
+                 cache_dir: Optional[Path] = None, drift_note: str = "", name: Optional[str] = None,
+                 evaluation_note: Optional[str] = None):
         from scripts.evaluate_report_generation import load_report_generation_module
         from transformers import AutoTokenizer
         torch.set_num_threads(threads)
-        self.name, self.device, self.drift_note = model_config, torch.device(device), drift_note
+        self.name, self.device, self.drift_note = name or model_config, torch.device(device), drift_note
         self.module = load_report_generation_module(checkpoint, model_config, device=device)
         self.tower, self.prefix_mapper, self.decoder = (self.module.image_encoder, self.module.prefix_mapper,
                                                         self.module.decoder)
         self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
         self._card = self._provenance(Path(checkpoint), cache_dir)
+        if evaluation_note:
+            self._card["evaluation_note"] = evaluation_note
 
     def _provenance(self, ckpt: Path, cache_dir: Optional[Path]) -> Dict[str, Any]:
         meta = ckpt.resolve().parent.parent / "run_metadata.json"    # beside the run, where resolve_prefix_k reads k

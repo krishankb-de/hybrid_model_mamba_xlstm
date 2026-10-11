@@ -43,8 +43,16 @@
 #   [server] starting: ...  /  [server] ... lines of the app  /  [server] serving: retrieval=on labels=on published=on
 #   === signal received: stopping ===  [server] stopping  [server] stopped  === chat server stopped ===
 #
+# The EOS model (CHAT_UI_PLAN.md P9-G5a). m3eos is hybrid_150m_m3_rrg_eos: the Mamba-3 report model that was trained to end its own reports
+# (scripts/train_report_eos_h100.sh), loaded from ${CHAT_HOME}/models/report_gen_m3_eos_s42/checkpoints/last.ckpt. Without MODELS the job serves m3 alone,
+# as before: the default does not change. The first model listed is the default model, so the order decides:
+#   MODELS=m3eos,m3   the EOS model first, which makes it the default model of that deployment, with the published model beside it
+#   MODELS=m3,m3eos   the published model first, still the default, with the EOS model beside it for a turn that picks it (options.model)
+# Either one needs the EOS checkpoint in CHAT_HOME: without it the API refuses to start, in one ERROR line that names no path, and the job fails
+# with the API's own status. The gallery is opened against the default model's image tower, and retrieval is on for the models that share it.
+#
 # Levers, as NAME=value arguments of `chat_remote.sh submit`: MODE (private|public), DEVICE (cpu|cuda), BIND, GALLERY (a build directory, or
-# none), MODELS (m3 or m3,13d: 1 to 32 characters of a-z, 0-9 and commas, and the CLI knows the names), DRIFT_NOTE (the P1-D sentence every
+# none), MODELS (m3, 13d and m3eos, as in m3 or m3,13d: 1 to 32 characters of a-z, 0-9 and commas, and the CLI knows the names), DRIFT_NOTE (the P1-D sentence every
 # card carries), CHAT_HOME, LABELER_WAIT_S (default 180), CHEXBERT_HF_HUB_OFFLINE
 # (default 0), PUBLISHED_MODEL and PUBLISHED_FLOOR (the published dumps, so that a test study's score shows the published line; both are
 # looked for under results/, and when one is missing the line is skipped, which the log says).

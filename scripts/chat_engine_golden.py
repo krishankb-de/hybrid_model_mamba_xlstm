@@ -41,8 +41,8 @@ def main(argv=None) -> None:
     device_name = torch.cuda.get_device_name(0) if device == "cuda" else "cpu"
     print("[golden] device={} name={} torch={} threads={}".format(
         device, device_name, torch.__version__, torch.get_num_threads()), flush=True)
-    print("[golden] card name={} prefix_k={} experiment={} cached_decode_available={} git={} dirty={} source={}".format(
-        card["name"], card["prefix_k"], card["train_experiment"], card["cached_decode_available"],
+    print("[golden] card name={} prefix_k={} experiment={} eos_trained={} cached_decode_available={} git={} dirty={} source={}".format(
+        card["name"], card["prefix_k"], card["train_experiment"], card["eos_trained"], card["cached_decode_available"],
         (card["git_sha"] or "None")[:7], card["git_dirty"], card["git_source"]), flush=True)
 
     df = pd.read_parquet(args.parquet).iloc[: args.n]
