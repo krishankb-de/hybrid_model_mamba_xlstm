@@ -407,7 +407,7 @@
           "desc": "app/labels.py (names, client, rule labeller, agreement) and the app/labeler.py service."
         },
         "P5-B": {
-          "done": false,
+          "done": true,
           "desc": "scripts/build_retrieval_gallery.py (with --tiny) and _h100.sh: the §6.5 files through evaluate_cxr_retrieval's own loaders; tower hash; R@k gate inside the job."
         },
         "P5-C": {
@@ -440,7 +440,22 @@
         "p5f_commits": "f39857f,7117cab",
         "p5f_tests": "tests/test_chat_retrieval_gates.py (158) + 12 pins",
         "p5f_review": "opus approve -> fix round 1 (6 minors) -> sonnet re-review clean",
-        "p5f_job": "not submitted (needs 2632531 + P5-C labels)"
+        "p5f_job": "not submitted (needs 2632531 + P5-C labels)",
+        "p5b_job": "2632531",
+        "p5b_node": "gx12",
+        "p5b_wall_s": "1346",
+        "p5b_towers_identical": "true",
+        "p5b_img_proj": "false",
+        "p5b_tower_sha256": "75bd7a6f279497a24d1bcc6a99da389b3d9b52ddac377d2e6478d5b37c535b84",
+        "p5b_gate_rk_equal": "true",
+        "p5b_n_test": "2663",
+        "p5b_n_train": "191462",
+        "p5b_texts_rows": "194125",
+        "p5b_text_groups": "184686",
+        "p5b_isbi_max_abs_diff": "3.035e-03",
+        "p5b_withheld": "0",
+        "p5b_labels_status": "pending",
+        "p5b_sync": "c516e4e"
       },
       "verdict": null
     },
@@ -593,7 +608,7 @@
           "desc": "(laptop) EOS-stop decoders and the engine."
         },
         "P9-G3": {
-          "done": false,
+          "done": true,
           "desc": "(cluster) The training job."
         },
         "P9-G4": {
@@ -615,7 +630,16 @@
         "p9g2_stress": "re-review 1152 quantised-logit runs, 0 mismatches vs published",
         "p9a_commits": "7de8178,4e4bcd0",
         "p9a_tests": "tests/test_restricted_files_hook.py (163; audit re-stages every tracked path)",
-        "p9a_hook": "not installed (user's decision)"
+        "p9a_hook": "not installed (user's decision)",
+        "g3_job": "2632173",
+        "g3_node": "gx07",
+        "g3_steps": "12000",
+        "g3_wall_s": "4704",
+        "g3_val_loss": "1.02",
+        "g3_published_val_loss": "1.0188",
+        "g3_ckpt_exists": "true",
+        "g3_preflight_ok": "true",
+        "g3_sync": "c516e4e"
       },
       "verdict": null
     }
@@ -670,9 +694,11 @@
     "2026-10-10: 2026-10-10: P7-A smoke job submitted 2632776 (chat_app_smoke, CPU, sync c516e4e clean); read via chat_remote.sh state/summary logs/chat_app_smoke_2632776.log",
     "2026-10-10: P5-E retrieve/label/score stages + endpoints + R1 redaction, merged",
     "P7-A smoke 2632776 COMPLETED 50 s gx14 (sync c516e4e clean): app.server imports (fastapi 0.142.2), app.labeler imports (transformers 4.57.6), chexbert label order equal true (f1chexbert 0.0.2); matches the R4 prediction",
-    "2026-10-10: P6-B/C/D (d1aa5ad, 1db1f0b, 70bcce6) + fix 1 37f7a53 on chat_ui (review: 2 Important picker keyboard defects + 7 minors, all fixed; re-review pending). P5-F merged (f39857f, 7117cab; review -> fix 1 clean). P7-B merged (CLI app/cli.py + serve_chat_h100.sh/gpu twin; review approved -> fix 1 done, re-review pending). P7-C merged (tunnel.sh/public_demo.sh; review approved, 1 open Important). User stop: no new subagents; committed + pushed."
+    "2026-10-10: P6-B/C/D (d1aa5ad, 1db1f0b, 70bcce6) + fix 1 37f7a53 on chat_ui (review: 2 Important picker keyboard defects + 7 minors, all fixed; re-review pending). P5-F merged (f39857f, 7117cab; review -> fix 1 clean). P7-B merged (CLI app/cli.py + serve_chat_h100.sh/gpu twin; review approved -> fix 1 done, re-review pending). P7-C merged (tunnel.sh/public_demo.sh; review approved, 1 open Important). User stop: no new subagents; committed + pushed.",
+    "P5-B: gallery g13d_m3_v1 built by job 2632531 (gx12, 22.8 min, sync c516e4e clean): towers_identical=True, img_proj=False, gate_rk_equal=true on n=2663 (i2t R@1/5/10 0.0458/0.1573/0.2418, t2i 0.0364/0.1476/0.2433), withheld 0. As predicted except wall time (22.8 min vs 45-90 predicted). ISBI cross-check max_abs_diff 3.035e-03 (bf16-compute scale; D4 confirmed by hash).",
+    "P9-G3: EOS training job 2632173 (gx07, 4 H100, sync c516e4e clean) DONE: 12000 steps, wall 4704 s (1.31 h), val_loss 1.02 vs published 1.0188 (+0.0012), ckpt_exists true; preflight code eos_flag/module_in_cwd true, recipe ok with exactly the 6 root keys changed + dataset.report_eos_target added. All as predicted (R4)."
   ],
-  "last_updated": "2026-10-10T07:56:15+02:00",
+  "last_updated": "2026-10-11T11:38:40+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",

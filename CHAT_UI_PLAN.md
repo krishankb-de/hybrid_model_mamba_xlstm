@@ -3212,7 +3212,7 @@ Commit `"P5-A: labels client, rule labeller, agreement, CheXbert service"`.
   - A persistent load failure has no back-off, so pollers must poll more slowly than the load takes.
   - Polish for the final review: a reorder-only mismatch message, overlapping client tests.
 
-- [ ] **P5-B** `scripts/build_retrieval_gallery.py` (with `--tiny`) and `_h100.sh`: the §6.5 files through `evaluate_cxr_retrieval`'s own loaders; tower hash; R@k gate inside the job.
+- [x] **P5-B** `scripts/build_retrieval_gallery.py` (with `--tiny`) and `_h100.sh`: the §6.5 files through `evaluate_cxr_retrieval`'s own loaders; tower hash; R@k gate inside the job.
 
 **Files:** create `scripts/build_retrieval_gallery.py`, `scripts/build_retrieval_gallery_h100.sh`, `tests/test_build_retrieval_gallery.py`; modify `tests/test_willi_parity.py`.
 
@@ -4175,7 +4175,7 @@ What it means for the plan:
     - the `[1]` variant of the argmax-frame test cannot discriminate;
     - the `[:2*beam]` cap is inert;
     - three wording nits.
-- [ ] **P9-G3** (cluster) The training job.
+- [x] **P9-G3** (cluster) The training job.
   - The recipe is the published `h100_report_gen_m3_tower13d_s42` (`hybrid_150m_m3_rrg`, the same tower, Mamba-3 backbone, data and seed 42), with only `dataset.report_eos_target=true`.
   - It writes to a new directory outside `MAIN_REPO` (R8): `CHAT_HOME/models/report_gen_m3_eos_s42/`. Checkpoints are MIMIC-derived (Class R), so they stay on the cluster.
   - Before submitting, record a prediction (R4): wall time ≈ the published 1.3 h, and a final val loss close to the published run's, because the target gains one token per report.

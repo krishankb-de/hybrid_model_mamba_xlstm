@@ -13,6 +13,7 @@
 /output_willi_server/
 /hpi_results_logs/
 /ISBI Paper /
+/Master Thesis/
 /.superpowers/
 /scripts/chat_cluster.env
 # local tool settings and PhysioNet session cookies are credentials: never ship them
