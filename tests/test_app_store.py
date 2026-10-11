@@ -390,6 +390,65 @@ def test_a_failed_upload_write_leaves_no_partial_files(tmp_path, monkeypatch):  
     assert s.upload_path(sess["id"], "ab" * 32, "original").read_bytes() == b"o"
 
 
+def test_a_save_that_a_save_of_the_same_bytes_beats_to_the_place_leaves_the_winners_copy_alone(tmp_path, monkeypatch):
+    """P8-C. Two saves of one picture into one session, and the second has finished when the first is about to put its copy in place (the test lets
+    it run to the end while the first is writing its temporary files). The first used to take the second's finished copy for an incomplete leftover
+    and remove it; it must find it complete and leave it: the copy that is in place stands, as the docstring says, and no temporary directory is
+    left behind."""
+    s = Store(tmp_path)
+    sess, _, _ = _turn(s)
+    sha, real, beaten = "ab" * 32, Path.write_bytes, []
+
+    def the_quick_save_finishes_first(self, data):
+        if self.name == "model_input.png" and not beaten:   # the slow save has written two of its files and nothing is in place yet
+            beaten.append(True)
+            s.save_upload(sess["id"], sha, b"quick-o", "png", b"quick-t", b"quick-m")   # the whole of the other save, in the slow one's gap
+        return real(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", the_quick_save_finishes_first)
+    s.save_upload(sess["id"], sha, b"slow-o", "png", b"slow-t", b"slow-m")
+    monkeypatch.setattr(Path, "write_bytes", real)
+    base = tmp_path / "uploads" / sess["id"]
+    assert beaten == [True]
+    assert [p.name for p in base.iterdir()] == [sha]   # the one copy, and no temporary directory beside it
+    assert {p.name: p.read_bytes() for p in (base / sha).iterdir()} == {
+        "original.png": b"quick-o", "thumb.jpg": b"quick-t", "model_input.png": b"quick-m"}
+
+
+def test_saves_of_the_same_bytes_into_one_session_at_once_all_succeed_and_leave_one_complete_copy(tmp_path):
+    """P8-C. The load drill found it: turns of one session that carry the same picture save it at the same moment, and one of them failed with
+    OSError (Directory not empty), so a turn that was fine was refused with a 500. Eight threads save the same bytes, sixty times over (a hash of its
+    own each time, so that every save has a copy to put in place). Every save returns, and what is left is one complete copy for each hash and no
+    temporary directory. Before the fix about a third of the rounds raised."""
+    s = Store(tmp_path)
+    sess, _, _ = _turn(s)
+    rounds, threads, raised = 60, 8, []
+    for n in range(rounds):
+        sha = "{:064x}".format(n)
+        ready, errors = threading.Barrier(threads), []
+
+        def save():
+            ready.wait(10)
+            try:
+                s.save_upload(sess["id"], sha, b"original", "png", b"thumb", b"model")
+            except Exception as exc:   # which one is said below
+                errors.append(type(exc).__name__ + ": " + str(exc))
+
+        pool = [threading.Thread(target=save) for _ in range(threads)]
+        for t in pool:
+            t.start()
+        for t in pool:
+            t.join(30)
+        assert not any(t.is_alive() for t in pool), "a save never returned"
+        if errors:
+            raised.append((n, errors[0]))
+    assert not raised, "{} of {} rounds raised, the first: {}".format(len(raised), rounds, raised[0])
+    base = tmp_path / "uploads" / sess["id"]
+    assert sorted(p.name for p in base.iterdir()) == ["{:064x}".format(n) for n in range(rounds)]   # one directory per hash, no temporary one
+    for copy in base.iterdir():
+        assert {p.name: p.read_bytes() for p in copy.iterdir()} == {"original.png": b"original", "thumb.jpg": b"thumb", "model_input.png": b"model"}
+
+
 def test_recovery_closes_the_log_of_an_interrupted_turn_and_is_idempotent(tmp_path):
     s = Store(tmp_path)
     sess, _, mid = _turn(s)

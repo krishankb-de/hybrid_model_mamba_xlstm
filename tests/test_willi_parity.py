@@ -8690,7 +8690,8 @@ def test_the_load_drill_imports_httpx_and_no_other_http_library():
 def test_the_load_drill_reads_its_token_only_from_chat_token_or_a_token_file():
     """P8-C. A token on the command line shows in `ps` and in the shell history. The one environment read is CHAT_TOKEN, the one option that
     names a token is --token-file, the one positional is the URL, the parser takes no abbreviation (`--token abc` must not become
-    `--token-file abc`), and the file is read in one place, from that option."""
+    `--token-file abc`), and the file is read in one place, from that option. A token is not sent over plain http to a host that is not
+    loopback: that refusal is raised in main, on exactly that condition, before the client that would send it is built."""
     tree, parents = _drill_tree()
     consts = _drill_constants(tree)
     assert consts.get("TOKEN_ENV") == "CHAT_TOKEN"
@@ -8718,6 +8719,12 @@ def test_the_load_drill_reads_its_token_only_from_chat_token_or_a_token_file():
     assert isinstance(reads[0].args[0], ast.Name) and reads[0].args[0].id == "token_file"
     finds = _drill_calls(tree, "find_token")
     assert len(finds) == 1 and ast.unparse(finds[0].args[0]) == "args.token_file"
+    guards = [n for n in _drill_calls(tree, "Refused") if n.args and ast.unparse(n.args[0]) == "CLEARTEXT_REFUSAL"]
+    assert len(guards) == 1 and _drill_function(guards[0], parents) == "main", "one guard, in main"
+    guard = parents[parents[guards[0]]]                   # Refused(...) <- raise <- if
+    assert isinstance(guard, ast.If) and ast.unparse(guard.test) == "token is not None and sends_token_in_clear(base)"
+    clients = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == "httpx.Client"]
+    assert len(clients) == 1 and guards[0].lineno < clients[0].lineno, "the refusal comes before the client exists"
 
 
 def test_the_load_drill_prints_and_writes_nothing_but_the_result_line_help_and_its_fixed_refusals():
@@ -8726,7 +8733,8 @@ def test_the_load_drill_prints_and_writes_nothing_but_the_result_line_help_and_i
     tree, parents = _drill_tree()
     assert not _drill_calls(tree, "print") and not _drill_calls(tree, "open") and not _drill_calls(tree, "breakpoint")
     roots, _ = _imports_of(_DRILL)
-    allowed = {"argparse", "json", "os", "re", "stat", "struct", "sys", "threading", "time", "zlib", "collections", "dataclasses", "typing", "httpx"}
+    allowed = {"argparse", "ipaddress", "json", "os", "re", "stat", "struct", "sys", "threading", "time", "zlib", "collections", "dataclasses",
+               "typing", "httpx"}   # ipaddress: the loopback test for the cleartext guard
     assert roots <= allowed, sorted(roots - allowed)   # no logging, traceback, pprint, tempfile, shutil, pathlib, io, pickle, subprocess ...
     writers = {"write", "writelines", "write_text", "write_bytes", "dump", "flush"}
     writes = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in writers]

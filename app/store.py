@@ -158,6 +158,7 @@ class Store:
         self.home = Path(home)
         self._uploads = self.home / "uploads"
         self._lock = threading.Lock()
+        self._upload_lock = threading.Lock()   # save_upload puts one copy in place at a time (P8-C)
         self.home.mkdir(parents=True, exist_ok=True)
         self._uploads.mkdir(mode=0o700, exist_ok=True)
         db = self.home / "chat.db"
@@ -281,6 +282,8 @@ class Store:
 
         Atomic: the files go to a temp directory that is renamed into place, so a failed write (disk quota) leaves
         nothing behind. Once per session and hash: if all three files are there already, the first copy stands.
+        Saves of the same bytes at once (turns of one session that carry one picture) are safe: the copy that is put
+        in place first stands, and a save that is late finds it complete and leaves it alone (P8-C, the load drill).
         """
         if not _safe_id(session_id) or not _is_sha256(sha256):
             raise ValueError("session_id and sha256 must be plain ids")
@@ -304,13 +307,16 @@ class Store:
             tmp.mkdir(parents=True, mode=0o700)
             for name, blob in zip(names, (original, thumb_jpeg, model_input_png)):
                 (tmp / name).write_bytes(blob)
-            if final.exists():
-                shutil.rmtree(final, ignore_errors=True)   # an incomplete leftover
-            try:
-                os.replace(str(tmp), str(final))
-            except OSError:
-                if not complete():   # else a concurrent save of the same bytes won the rename
-                    raise
+            with self._upload_lock:   # one copy at a time: a save that is late must see the copy of the save before it, complete
+                if complete():
+                    return   # the copy in place stands; the finally below removes this save's temporary directory
+                if final.exists():
+                    shutil.rmtree(final, ignore_errors=True)   # an incomplete leftover
+                try:
+                    os.replace(str(tmp), str(final))
+                except OSError:
+                    if not complete():   # else the copy is in place already
+                        raise
         finally:
             shutil.rmtree(tmp, ignore_errors=True)   # after a successful rename tmp is gone and this does nothing
             if not final.exists():

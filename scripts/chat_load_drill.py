@@ -27,7 +27,8 @@ The token. A server in public mode, or bound off loopback, wants `Authorization:
 CHAT_TOKEN, or from --token-file (a regular file of mode 0600 that you own, read as the server's own command line reads one, app/cli.py), and
 never from an argument, where it would show in `ps` and in the shell history: an argument that could be one is refused, unnamed. --token-file
 wins when both are given. The token is sent as a bearer, to the URL that was given and nowhere else (no proxy named in the environment is
-used, no redirect is followed), and never printed.
+used, no redirect is followed), and never printed. It is not sent over plain http to a host that is not loopback (localhost, 127.0.0.0/8,
+::1): that is refused, in one line, before anything is sent. https to any host, and http to the tunnel's loopback end, are fine.
 
 The client id. In public mode a client id scopes sessions and counts turns (6 per client in 10 minutes, app/hardening.py). The drill sends one
 fixed id, `chat-load-drill`, on every request, as the page sends its own. It starts 6 turns and is given 2 back when they are refused, so a
@@ -36,6 +37,7 @@ second drill on a public server within 10 minutes of the first finds only 2 left
 Port 8000 is the local dev server's, and a URL with that port is refused. The tunnel's own port is whatever LOCAL_PORT it was started with.
 """
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -71,6 +73,7 @@ ARGV_REFUSAL = "unrecognized arguments: a token never goes on the command line, 
 URL_MISSING = "the URL of the server is required, for example http://localhost:8010"
 DEV_REFUSAL = "port 8000 is the local dev server: give the tunnel's own port"
 URL_REFUSAL = "the URL must be http://host[:port] or https://host[:port], with a port from 1 to 65535 and no login, query or fragment"
+CLEARTEXT_REFUSAL = "a token is not sent over plain http to a host that is not loopback: use https, or the tunnel's loopback URL"
 
 
 class Refused(Exception):
@@ -176,6 +179,25 @@ def check_url(raw: str) -> str:
         raise Refused(URL_REFUSAL)
     host = "[{}]".format(url.host) if ":" in url.host else url.host
     return "{}://{}{}".format(url.scheme, host, "" if port is None else ":{}".format(port))
+
+
+def is_loopback(host: str) -> bool:
+    """localhost, an address in 127.0.0.0/8, or ::1 (an IPv4-mapped one too). This decides where a token may travel readable, so what it cannot
+    show to be loopback is not: a name that happens to resolve there, 127.1 and the integer form of 127.0.0.1 are all "not"."""
+    if host.lower() == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return (getattr(ip, "ipv4_mapped", None) or ip).is_loopback
+
+
+def sends_token_in_clear(base: str) -> bool:
+    """True when `base` (what check_url returns) is plain http to a host that is not loopback: a bearer token sent there crosses the network
+    readable. https to any host, and http to loopback (the tunnel's own end), are not."""
+    url = httpx.URL(base)
+    return url.scheme == "http" and not is_loopback(url.host)
 
 
 def read_token(path: str) -> str:
@@ -395,6 +417,8 @@ def main(argv: Optional[Sequence[str]] = None, stdout: Optional[TextIO] = None, 
         if args.url is None:
             raise Refused(URL_MISSING)
         base, token = check_url(args.url), find_token(args.token_file)
+        if token is not None and sends_token_in_clear(base):   # before there is a client to send it with
+            raise Refused(CLEARTEXT_REFUSAL)
     except Refused as exc:
         _write(stderr, "ERROR " + str(exc))
         return 2

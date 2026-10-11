@@ -55,11 +55,11 @@ def test_six_concurrent_turns_four_accepted_two_refused(tmp_path):
         results = []
         together = threading.Barrier(6)   # the six leave at the same moment, so the queue is full for the last two however loaded the machine is
 
-        def one(n):
+        def one():
             together.wait(30)
-            # Each turn has a picture of its own, as six people's would. Identical bytes uploaded at once into one session race inside
-            # Store.save_upload (a 500 "could not store the image"); that is for its own fix and not what this drill is about.
-            with httpx.stream("POST", url, files={"image": ("x.png", png_bytes(320 + n, 320), "image/png")},
+            # The same picture from all six, at once, into one session: the case Store.save_upload used to race on (a 500 "could not store the
+            # image", about one drill in ten), so this is also the end-to-end test of its P8-C fix.
+            with httpx.stream("POST", url, files={"image": ("x.png", png_bytes(), "image/png")},
                               data={"text": "", "options": json.dumps({"max_new_tokens": 60})}, timeout=60) as r:
                 if r.status_code == 200:
                     results.append((200, list(iter_sse(r.iter_text())), None))
@@ -67,7 +67,7 @@ def test_six_concurrent_turns_four_accepted_two_refused(tmp_path):
                     r.read()
                     results.append((r.status_code, [], r.json()["error"]["type"]))
 
-        threads = [threading.Thread(target=one, args=(n,)) for n in range(6)]
+        threads = [threading.Thread(target=one) for _ in range(6)]
         for t in threads:
             t.start()
         for t in threads:
@@ -276,7 +276,7 @@ class Recording:
 
 def test_run_turns_sends_each_turn_a_picture_of_its_own_with_the_budget_and_files_every_outcome():
     client, outcomes = Recording(), []
-    args = drill.build_parser().parse_args(["http://localhost:8010", "--turns", "5", "--max-new-tokens", "33", "--timeout", "30"])
+    args = drill.build_parser().parse_args(["http://localhost:18080", "--turns", "5", "--max-new-tokens", "33", "--timeout", "30"])
     assert drill.run_turns(client, "s_abc", args, outcomes) is False
     assert [(m, p) for m, p, _, _ in client.sent] == [("POST", "/v1/sessions/s_abc/messages")] * 5
     assert len({files[1] for _, _, files, _ in client.sent}) == 5, "five different pictures"
@@ -294,7 +294,7 @@ def test_run_turns_reports_that_time_ran_out_when_a_stream_does_not_end():
             return Answered()
 
     outcomes = []
-    args = drill.build_parser().parse_args(["http://localhost:8010", "--turns", "2", "--timeout", "0.2"])
+    args = drill.build_parser().parse_args(["http://localhost:18080", "--turns", "2", "--timeout", "0.2"])
     try:
         assert drill.run_turns(Hanging(), "s_abc", args, outcomes) is True
         assert len(outcomes) == 2 and all(o.status is None for o in outcomes)
@@ -316,6 +316,23 @@ def offline(monkeypatch):
     monkeypatch.setattr(httpx, "Client", NoNetwork)
     for name in ("get", "post", "delete", "request", "stream"):
         monkeypatch.setattr(httpx, name, NoNetwork)
+
+
+class Unreachable:
+    """In place of httpx.Client when a test needs the drill to get past its checks to its first request, which nothing answers. A run that gets
+    that far ends in one RESULT line whose error is session_create_ConnectError; a run that was refused before it never gets there."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def post(self, *args, **kwargs):
+        raise httpx.ConnectError("could not connect to a thing with a secret in its name")
 
 
 def refusal_line(err):
@@ -559,6 +576,53 @@ def test_a_chat_token_that_is_not_visible_ascii_is_refused_without_being_quoted(
     assert drill.find_token(None) == TOKEN
 
 
+# ---- a token is not sent in the clear to another machine (P8-C fix) -----------------------------------------------------------------
+
+@pytest.mark.parametrize("url", ["http://example.org:18080", "http://10.0.0.5:18080", "http://192.168.1.20", "http://[2001:db8::1]:18080",
+                                 "http://[::ffff:10.0.0.5]:18080", "http://0.0.0.0:18080", "http://localhost.example.org:18080",
+                                 "http://127.0.0.1.example.org:18080", "http://127.1:18080", "http://2130706433:18080", "http://node-07.internal",
+                                 "example.org:18080", "http://128.0.0.1:18080", "http://127.0.0.1x:18080"])
+def test_a_token_is_not_sent_over_plain_http_to_a_host_that_is_not_loopback(url, offline, monkeypatch):
+    """One fixed line, exit 2, nothing sent. What cannot be shown to be loopback is not: a name that happens to resolve there, 127.1 and the integer
+    form of 127.0.0.1 included, is refused, because this decides where a bearer token may travel readable."""
+    monkeypatch.setenv("CHAT_TOKEN", SECRET)
+    code, out, err = run_drill([url])
+    assert code == 2 and out == "" and refusal_line(err) == drill.CLEARTEXT_REFUSAL
+    assert SECRET not in err and "example" not in err and "10.0.0.5" not in err and "internal" not in err
+
+
+def test_the_refusal_to_send_a_token_in_the_clear_holds_for_a_token_file_too(tmp_path, offline):
+    path = write_token_file(tmp_path)
+    code, out, err = run_drill(["http://example.org:18080", "--token-file", str(path)])
+    assert code == 2 and out == "" and refusal_line(err) == drill.CLEARTEXT_REFUSAL and TOKEN not in err
+
+
+@pytest.mark.parametrize("url", ["http://localhost:18080", "http://LOCALHOST", "http://127.0.0.1:18080", "http://127.9.9.9:18080",
+                                 "http://[::1]:18080", "http://[::ffff:127.0.0.1]:18080", "https://example.org", "https://10.0.0.5:18080",
+                                 "https://[2001:db8::1]:18080", "https://localhost:18080", "HTTPS://Example.ORG:8443"])
+def test_a_token_goes_to_loopback_over_http_and_to_any_host_over_https(url, monkeypatch):
+    """Past the check, the drill asks for its session, and nothing answers (Unreachable): that is how this test sees it was not refused."""
+    monkeypatch.setenv("CHAT_TOKEN", SECRET)
+    monkeypatch.setattr(httpx, "Client", Unreachable)
+    code, out, err = run_drill([url])
+    assert code == 1 and err == "" and the_result(out)["error"] == "session_create_ConnectError"
+    assert SECRET not in out
+
+
+def test_without_a_token_a_plain_http_url_to_any_host_is_not_refused(monkeypatch):
+    monkeypatch.setattr(httpx, "Client", Unreachable)
+    for url in ("http://example.org:18080", "http://10.0.0.5:18080", "http://[2001:db8::1]"):
+        code, out, err = run_drill([url])
+        assert code == 1 and err == "" and the_result(out)["error"] == "session_create_ConnectError", url
+
+
+def test_is_loopback_is_true_for_localhost_127_0_0_0_8_and_ipv6_loopback_only():
+    assert [drill.is_loopback(h) for h in ("localhost", "LocalHost", "127.0.0.1", "127.255.255.254", "::1", "::ffff:127.0.0.1", "::ffff:7f00:1")] == [True] * 7
+    for host in ("", "localhost.", "127.0.0.1.example.org", "128.0.0.1", "126.255.255.255", "0.0.0.0", "10.0.0.5", "::", "::2", "::ffff:10.0.0.5",
+                 "127.1", "2130706433", "0x7f.0.0.1", "127.0.0.01", "example.org", "fe80::1%eth0"):
+        assert drill.is_loopback(host) is False, host
+
+
 # ---- it leaves nothing behind -----------------------------------------------------------------------------------------------------
 
 def test_a_drill_that_fails_inside_still_deletes_its_one_session(tmp_path, monkeypatch):
@@ -621,19 +685,6 @@ def test_a_session_that_cannot_be_deleted_is_reported_and_fails_the_drill(tmp_pa
 
 
 def test_a_server_that_cannot_be_reached_ends_in_one_result_line_with_the_class_of_the_failure_only(monkeypatch):
-    class Unreachable:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def post(self, *args, **kwargs):
-            raise httpx.ConnectError("could not connect to a thing with a secret in its name")
-
     monkeypatch.setattr(httpx, "Client", Unreachable)
     code, out, err = run_drill(["http://127.0.0.1:18080"])
     result = the_result(out)
