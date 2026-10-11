@@ -8914,3 +8914,180 @@ def test_the_load_drill_keeps_nothing_of_a_frame_but_its_seq_event_and_status_an
         for use in uses:   # `type(exc)`: the class, never the text
             parent = parents[use]
             assert isinstance(parent, ast.Call) and ast.unparse(parent.func) == "type", ast.unparse(handler) + " uses " + handler.name
+
+
+# ── CHAT_UI_PLAN.md P7-D: the real-turn probe ─────────────────────────────────
+# Static pins on scripts/chat_realturn_probe.py, the gate the laptop runs against the cluster's private server through the tunnel, which prints
+# numbers only because that server streams MIMIC-derived text (R7). Its behaviour (the three passes, the gate, the exit statuses, the refusals, the
+# sessions, what it does not print) is run for real against a live tiny server in tests/test_chat_realturn_probe.py. These pins hold what a later
+# edit could break without a test noticing: which libraries it imports, where its token comes from, and what can reach its two output streams.
+
+_PROBE = REPO_ROOT / "scripts" / "chat_realturn_probe.py"
+
+
+def _probe_tree():
+    """-> (the script's syntax tree, a map from each node to its parent)."""
+    tree = ast.parse(_PROBE.read_text(encoding="utf-8"))
+    return tree, {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+
+def _probe_calls(tree, dotted):
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == dotted]
+
+
+def _probe_outer(node, parents):
+    """The name of the module-level function a node is in, however deep it sits (a helper defined inside it counts as it), or None."""
+    name = None
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            name = node.name
+    return name
+
+
+def test_the_realturn_probe_imports_httpx_the_standard_library_and_the_drill_beside_it_and_nothing_else():
+    """P7-D. Like the drill it runs on the laptop, in the venv, beside the tunnel, with the server's code absent: httpx and the standard library, no
+    other HTTP client, nothing of the app or the model stack, and of its own repository only the drill, whose transport helpers it imports (the URL
+    check, the token, the cleartext guard, the synthetic picture, the one write, the session calls). It makes one httpx client, built in main, which
+    goes straight to the URL it was given (no proxy named in the environment, no redirect), because the token and the stream travel on it; httpx's
+    module-level functions build a client of their own with the defaults, so none is called."""
+    if not hasattr(sys, "stdlib_module_names"):
+        pytest.skip("sys.stdlib_module_names needs Python 3.10")
+    roots, first_party = _imports_of(_PROBE)
+    allowed = {"argparse", "json", "math", "os", "re", "sys", "time", "dataclasses", "typing", "httpx", "scripts"}
+    assert roots <= allowed, sorted(roots - allowed)
+    assert roots - {"httpx", "scripts"} <= set(sys.stdlib_module_names)
+    assert not first_party and not roots & {"app", "tests", "hybrid_xmamba", "torch", "numpy", "PIL"}, sorted(roots)
+    stdlib_http = {"urllib", "http", "socket", "ssl", "ftplib", "smtplib", "xmlrpc", "asyncio", "selectors", "socketserver", "wsgiref", "subprocess"}
+    assert not roots & stdlib_http, sorted(roots & stdlib_http)
+    tree, parents = _probe_tree()
+    from_scripts = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "scripts"]
+    assert [[(a.name, a.asname) for a in n.names] for n in from_scripts] == [[("chat_load_drill", "drill")]], "the drill, and no other script"
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Import) and any(a.name.split(".")[0] == "scripts" for a in n.names)]
+    clients = _probe_calls(tree, "httpx.Client")
+    assert len(clients) == 1 and _probe_outer(clients[0], parents) == "main", "one client, for everything it sends"
+    settings = {k.arg: getattr(k.value, "value", None) for k in clients[0].keywords}
+    assert settings.get("trust_env") is False and settings.get("follow_redirects") is False, settings
+    functions = {"httpx." + name for name in ("get", "post", "put", "patch", "delete", "head", "options", "request", "stream")}
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) in functions]
+    # the one use of os is the path arithmetic that puts the repository's root on sys.path; sys is the path, the two streams and the exit status
+    assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "os"} == {"path"}
+    assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and ast.unparse(n.value) == "os.path"} == {"dirname", "abspath"}
+    assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "sys"} == {
+        "path", "stdout", "stderr", "exit"}
+
+
+def test_the_realturn_probe_reads_its_token_only_through_the_drills_find_token_from_chat_token_or_a_token_file():
+    """P7-D. A token on the command line shows in `ps` and in the shell history. The probe reads no environment variable and no argument itself: the
+    one read of the token is the drill's find_token, which takes CHAT_TOKEN or the file named by --token-file (the one option that names a token);
+    the one positional is the URL; the parser takes no abbreviation (`--token abc` must not become `--token-file abc`); the URL goes through the
+    drill's check (port 8000 refused); and a token is not sent over plain http to a host that is not loopback: that refusal is raised in main, on
+    exactly that condition, before the client that would send it is built. The bearer is made in main from the token, and the client id is fixed."""
+    tree, parents = _probe_tree()
+    consts = _drill_constants(tree)
+    assert consts.get("CLIENT_ID") == "chat-realturn-probe"
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in ("environ", "environb", "getenv", "argv")]
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module in ("os", "sys")]
+    assert not _probe_calls(tree, "drill.read_token") and not _drill_calls(tree, "read_token")
+    finds = _probe_calls(tree, "drill.find_token")
+    assert len(finds) == 1 and ast.unparse(finds[0].args[0]) == "args.token_file" and _probe_outer(finds[0], parents) == "main"
+    checks = _probe_calls(tree, "drill.check_url")
+    assert len(checks) == 1 and ast.unparse(checks[0].args[0]) == "args.url" and _probe_outer(checks[0], parents) == "main"
+    adds = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "add_argument"]
+    added = [[a.value for a in n.args if isinstance(a, ast.Constant) and isinstance(a.value, str)] for n in adds]
+    assert [names[0] for names in added if not names[0].startswith("-")] == ["url"], "no positional but the URL"
+    assert sorted(name for names in added for name in names if name.startswith("-")) == sorted(
+        ["--token-file", "--rows", "--eos-tokens", "--timeout", "-h", "--help"]), "the only option that takes a token is --token-file"
+    assert not [k for call in adds for k in call.keywords if k.arg == "dest"], "no option under another name"
+    parsers = _probe_calls(tree, "drill._Parser")
+    assert len(parsers) == 1 and [k.value.value for k in parsers[0].keywords if k.arg == "allow_abbrev"] == [False]
+    guards = [n for n in _probe_calls(tree, "drill.Refused") if n.args and ast.unparse(n.args[0]) == "drill.CLEARTEXT_REFUSAL"]
+    assert len(guards) == 1 and _probe_outer(guards[0], parents) == "main", "one guard, in main"
+    guard = parents[parents[guards[0]]]                   # Refused(...) <- raise <- if
+    assert isinstance(guard, ast.If) and ast.unparse(guard.test) == "token is not None and drill.sends_token_in_clear(base)"
+    clients = _probe_calls(tree, "httpx.Client")
+    assert len(clients) == 1 and guards[0].lineno < clients[0].lineno, "the refusal comes before the client exists"
+    bearers = [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.startswith("Bearer")]
+    assert len(bearers) == 1 and _probe_outer(bearers[0], parents) == "main" and ast.unparse(parents[bearers[0]]) == "'Bearer ' + token"
+    headers = [n for n in ast.walk(tree) if isinstance(n, ast.Dict) and any(isinstance(k, ast.Constant) and k.value == "X-Client-Id" for k in n.keys)]
+    assert len(headers) == 1 and ast.unparse(headers[0]) == "{'X-Client-Id': CLIENT_ID}", "the client id is fixed"
+
+
+def test_the_realturn_probe_prints_and_writes_nothing_but_result_lines_help_and_its_fixed_refusals():
+    """P7-D, R7. No print, no logging, no traceback, no file opened or written: every write is the drill's one `_write`, and it has four callers in
+    main: the help text, a refusal (`ERROR ` and the text of a Refused, which is fixed), a pass's RESULT line and the gate's, each made by
+    result_line, the one function that builds a RESULT line, out of a payload of numbers, booleans and fixed words. json.dumps is called
+    there and, for the options a turn sends (a dict the probe built), in run_turn."""
+    tree, parents = _probe_tree()
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id in ("print", "open", "breakpoint", "exec", "eval", "input", "compile", "__import__")]
+    writers = {"write", "writelines", "write_text", "write_bytes", "dump", "flush", "truncate", "mkdir", "unlink", "rename"}
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in writers], "its own writes are the drill's, through one call"
+    sinks = _probe_calls(tree, "drill._write")
+    assert {_probe_outer(s, parents) for s in sinks} == {"main"}
+    assert sorted((ast.unparse(s.args[0]), ast.unparse(s.args[1])) for s in sinks) == sorted((stream, _normalized(shape)) for stream, shape in (
+        ("stderr", '"ERROR " + str(exc)'), ("stdout", 'parser.format_help().rstrip("\\n")'),
+        ("stdout", "result_line(pass_payload(run, runs[0] if number == 2 else None))"), ("stdout", 'result_line({"gate": gate})')))
+    refusal = next(s for s in sinks if ast.unparse(s.args[1]) == _normalized('"ERROR " + str(exc)'))
+    handler = parents[refusal]
+    while not isinstance(handler, ast.ExceptHandler):
+        handler = parents[handler]
+    assert ast.unparse(handler.type) == "drill.Refused" and handler.name == "exc", "the text of a refusal is that of a Refused"
+    assert [_probe_outer(n, parents) for n in _probe_calls(tree, "result_line")] == ["main", "main"]
+    functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    assert [ast.unparse(r.value) for r in ast.walk(functions["result_line"]) if isinstance(r, ast.Return)] == [
+        _normalized('"RESULT " + json.dumps(payload, separators=(",", ":"))')]
+    dumps = _probe_calls(tree, "json.dumps")
+    assert sorted(_probe_outer(n, parents) for n in dumps) == ["result_line", "run_turn"]
+    assert [ast.unparse(n.args[0]) for n in dumps if _probe_outer(n, parents) == "run_turn"] == ["spec.options"]
+    streams = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "sys"
+               and n.attr in ("stdout", "stderr")]
+    assert {_probe_outer(n, parents) for n in streams} == {"main"} and len(streams) == 2, "the process's own streams are main's defaults"
+
+
+def test_the_realturn_probe_keeps_nothing_of_a_frame_but_numbers_booleans_and_fixed_words_and_names_exceptions_by_class():
+    """P7-D, R7. A frame is parsed in one place (read_into) and looked at in four small functions that take its data; what leaves them is the
+    fields of Facts, and those hold numbers, booleans and a few words, each of which is chosen from a fixed list by `_word` (the stop reason, the
+    status, a skip reason, an error kind, a refusal's kind) or is a class name or a literal. A report's text goes through sentence_facts, which
+    returns three numbers. The ids and rows a turn names are in Handles, which only the image requests read: no line is built from them. The text
+    of an exception is never used: every handler but those of Refused and DrillError (whose texts are written in the drill) names the class."""
+    tree, parents = _probe_tree()
+    functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    loads = _probe_calls(tree, "json.loads")
+    assert [_probe_outer(n, parents) for n in loads] == ["read_into"]
+    looks = {name for name, fn in functions.items() if {a.arg for a in fn.args.args} & {"data", "detail", "text", "report"}}
+    assert looks == {"_note", "_stage_end", "_retrieve", "_label", "sentence_facts"}, "the functions that are given what a frame holds"
+    assert [ast.unparse(r.value) for r in ast.walk(functions["sentence_facts"]) if isinstance(r, ast.Return)] == [
+        _normalized("(len(tokens), any((is_sentence_end(t) for t in tokens)), bool(tokens) and is_sentence_end(tokens[-1]))")]
+    assert {_probe_outer(n, parents) for n in _drill_calls(tree, "sentence_facts")} == {"_note"}
+    facts = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Facts")
+    fields = {s.target.id: ast.unparse(s.annotation) for s in facts.body if isinstance(s, ast.AnnAssign)}
+    safe = {"Optional[int]", "Optional[float]", "Optional[bool]", "Optional[str]", "Dict[str, float]", "Dict[str, str]", "List[int]"}
+    assert set(fields.values()) <= safe, {k: v for k, v in fields.items() if v not in safe}
+    words = {name for name, kind in fields.items() if "str" in kind and "Dict[str, float]" != kind}
+    assert words == {"refusal", "error", "final", "stream_error", "stopped", "skipped"}, "the fields that hold a word"
+    for node in ast.walk(tree):   # every word put into Facts is picked from a fixed list, or is a class name, or is the literal "timeout"
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            on = target.value if isinstance(target, ast.Subscript) else target
+            if isinstance(on, ast.Attribute) and ast.unparse(on.value) == "facts" and on.attr in words:
+                value = ast.unparse(node.value)
+                assert value.startswith("_word(") or value in ("type(exc).__name__", "'timeout'"), ast.unparse(node)
+    fetched = [n for n in _drill_calls(tree, "Fetched") if any(k.arg == "error" for k in n.keywords)]
+    assert fetched and all(ast.unparse(k.value) in ("type(exc).__name__", "'no_id'") for n in fetched for k in n.keywords if k.arg == "error")
+    handles = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Handles")
+    names = {s.target.id for s in handles.body if isinstance(s, ast.AnnAssign)}
+    assert names == {"message_id", "neighbor_rows"}
+    reads = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in names and isinstance(n.ctx, ast.Load)]
+    assert {_probe_outer(n, parents) for n in reads} == {"_retrieve", "fetch_features"}, "only the image requests, and the reader that fills them"
+    for name in ("_gate_row", "_stop_entry", "_eos_entry", "_gate_line", "_stop_line", "_eos_line", "pass_payload", "gate_payload"):
+        assert "handles" not in {n.id for n in ast.walk(functions[name]) if isinstance(n, ast.Name)}, name
+    caught = [n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler) and n.name]
+    assert caught, "the pin looks at something"
+    for handler in caught:
+        if ast.unparse(handler.type) in ("drill.Refused", "drill.DrillError"):
+            continue   # their text is written in the drill, and pinned there
+        for use in (n for stmt in handler.body for n in ast.walk(stmt) if isinstance(n, ast.Name) and n.id == handler.name):
+            parent = parents[use]   # `type(exc)`: the class, never the text
+            assert isinstance(parent, ast.Call) and ast.unparse(parent.func) == "type", ast.unparse(handler) + " uses " + handler.name
