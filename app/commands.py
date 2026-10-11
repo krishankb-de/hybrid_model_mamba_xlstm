@@ -8,7 +8,7 @@ NOT_A_QA_BOT = ("I generate chest X-ray reports and can't answer questions. Atta
 # The whitespace a note is split on (P6-A f), the same on both sides: Python's str.split() whitespace and JavaScript's \s together, so the
 # server and the page (app/static/app.js SPACE) tell a command, and an empty note, alike. Python's alone took U+001C..U+001F and U+0085,
 # JavaScript's alone U+FEFF. tests/fixtures/whitespace.json lists it, and both test suites read that file. A regex class body.
-WHITESPACE = "\t\n\x0b\x0c\r\x1c-\x1f \x85\xa0  -     　﻿"
+WHITESPACE = "\t\n\x0b\x0c\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
 _SPACE = re.compile("[" + WHITESPACE + "]+")
 _RULES = [
     (r"beam (\d+)", lambda m: {"decode": "beam", "beam_size": int(m.group(1))}),

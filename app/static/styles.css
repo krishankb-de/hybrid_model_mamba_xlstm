@@ -496,8 +496,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   color: var(--muted);
   font-size: 0.8125rem;
 }
-#preview > span > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }   /* a long name is cut short: the title has it whole */
-#preview .preview-name { color: var(--fg); }
+#preview .preview-name { overflow: hidden; color: var(--fg); text-overflow: ellipsis; white-space: nowrap; }   /* a long name is cut short: the title has it whole */
+#preview .preview-size { overflow-wrap: anywhere; }   /* the pixel size and the MB wrap where the composer is narrowest, and stay readable */
 #preview .preview-sep { display: none; }   /* the two lines part the name from the sizes; the text keeps it, for a copy */
 #preview > button { flex: none; }
 
@@ -586,6 +586,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 @container composer (max-width: 260px) {
   #image-well, #rerun-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #image-well { padding-block: 6px; }
+  #preview { gap: 6px; }   /* a smaller thumbnail and Remove leave the file's line the room its sizes need to stay readable (P6 fix 1) */
+  #preview img { width: 40px; height: 40px; }
+  #preview > button { min-height: 32px; padding: 0 8px; }
+  #composer > button { padding-inline: 8px; }   /* Settings and Send share a row: a row saved for the rows above them */
 }
 
 /* ---- drawer: settings, on the right --------------------------------------------------------------------------- */
@@ -750,6 +754,10 @@ body.viewer-open { overflow: hidden; }   /* where the page scrolls (a short view
 }
 @media (max-height: 480px) and (max-width: 699.98px) {
   .viewer-pane { flex: none; }   /* stacked, in a viewer that scrolls: each pane is as tall as its picture and its footer */
+  /* A stage takes a touch for its picture (pan, pinch), so on a phone held sideways a stage of 60vh leaves a finger little but pictures to
+     land on (P6 fix 1): each stage is half the viewer's height, which the viewer gives its panes as a size container (cqh). */
+  #viewer { container-type: size; }
+  .viewer-stage { height: max(64px, 50cqh); }
 }
 
 /* ---- motion: none for a reader who asked for less ------------------------------------------------------------- */

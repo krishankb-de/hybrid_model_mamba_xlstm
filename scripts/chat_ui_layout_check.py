@@ -35,7 +35,9 @@ page); six chips and a 140-character unbroken word are injected, and Stop is sho
      the viewer overflows horizontally, the viewer lies inside the viewport's width, each pane's picture has loaded and is drawn whole
      inside its stage, each stage is at least 40 px each way, each footer gives its picture's pixel size, two panes are side by side from
      700 px and stacked below, and every control of the viewer (its buttons, sliders, its link switch and each stage) can be reached: once
-     scrolled into view (the viewer scrolls inside itself where the page is short), its centre hits it
+     scrolled into view (the viewer scrolls inside itself where the page is short), its centre hits it. Where it scrolls with its panes
+     stacked, each stage takes at most 60% of its height: a stage takes a touch for its picture, and the rest is where a finger scrolls the
+     viewer. P6 fix 1 adds a landscape phone (568x320) to the viewer's cases
 
 On the short viewports, where the page scrolls instead (667x375, 320x256), c and d give way to: the report keeps its
 natural height (no scroller of its own, at least 120 px), the composer is not capped, the banner stays at the top of
@@ -93,6 +95,8 @@ LONG_FILE = "chest_xray_" + "a1b2c3d4" * 11 + ".png"   # 103 characters with no 
 VIEWER_STATES = ["single", "pair"]   # check l (P6-E): the viewer with one picture, and with the turn's X-ray beside a similar one
 MIN_STAGE_PX = 40                    # a pane's picture area, each way: something to look at
 STACK_BELOW_PX = 700                 # below this width the two panes are stacked
+VIEWER_TOUCH_VIEWPORTS = [(568, 320)]   # check l only, as well (P6 fix 1): a landscape phone, where the stacked viewer scrolls by touch
+MAX_TOUCH_STAGE_SHARE = 0.6          # what a stage may take of a stacked viewer that scrolls: the rest is where a finger scrolls it
 
 
 def section_events() -> List[Dict[str, Any]]:
@@ -408,10 +412,10 @@ INJECT_COMPOSER_JS = """async (args) => {
     return true;
   }
   hint.hidden = true;
-  const canvas = document.createElement('canvas');
-  canvas.width = 256;
-  canvas.height = 320;
-  canvas.getContext('2d').fillRect(0, 0, 256, 320);
+  const canvas = document.createElement('canvas');   // an X-ray's own size: its preview line says "2544×3056 px", the widest a size gets
+  canvas.width = 2544;
+  canvas.height = 3056;
+  canvas.getContext('2d').fillRect(0, 0, 2544, 3056);
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
   const data = new DataTransfer();
   data.items.add(new File([blob], args.name, { type: 'image/png' }));
@@ -520,15 +524,17 @@ MEASURE_VIEWER_JS = """() => {
     return { name: name(c), ok: !!top && (top === c || c.contains(top)), got: name(top) };
   });
   viewer.scrollTop = 0;
-  return { doc: [doc.scrollWidth, doc.clientWidth], viewer: { box: box(viewer), sw: viewer.scrollWidth, cw: viewer.clientWidth }, panes, controls };
+  return { doc: [doc.scrollWidth, doc.clientWidth], viewer: { box: box(viewer), sw: viewer.scrollWidth, cw: viewer.clientWidth, ch: viewer.clientHeight },
+           panes, controls };
 }"""
 
 
 def check_viewer(m: Dict[str, Any], width: int, height: int, pair: bool, scroll: bool = False) -> List[str]:
     """The failures in one measurement of the open viewer (check l): no horizontal overflow, the viewer inside the viewport's width, a pane per
     picture, each picture loaded and whole inside its stage, each stage big enough to look at and inside the viewer (and the viewport, where
-    the page does not scroll: there the viewer scrolls inside itself, and a pane below its fold is fine if it can be scrolled to), each footer
-    with its pixel size, two panes side by side from 700 px and stacked below, and every control reachable."""
+    the page does not scroll: there the viewer scrolls inside itself, and a pane below its fold is fine if it can be scrolled to; stacked, a
+    stage then takes at most 60% of its height, P6 fix 1), each footer with its pixel size, two panes side by side from 700 px and stacked
+    below, and every control reachable."""
     failures = []
     if m["doc"][0] > m["doc"][1]:
         failures.append("documentElement overflows horizontally: scrollWidth {} > clientWidth {}".format(*m["doc"]))
@@ -552,6 +558,9 @@ def check_viewer(m: Dict[str, Any], width: int, height: int, pair: bool, scroll:
             failures.append("pane {} leaves the viewer's width".format(n))
         if not scroll and (stage[1] < -0.5 or stage[3] > height + 0.5):
             failures.append("pane {} leaves the viewport: top {:.0f}, bottom {:.0f}, viewport {}".format(n, stage[1], stage[3], height))
+        if scroll and width < STACK_BELOW_PX and viewer.get("ch") and h > MAX_TOUCH_STAGE_SHARE * viewer["ch"] + 0.5:   # P6 fix 1 (8)
+            failures.append("pane {} takes {:.0f} of the {:.0f} px viewer ({:.0%}), over {:.0%}: little of it is left for a touch to scroll "
+                            "it".format(n, h, viewer["ch"], h / viewer["ch"], MAX_TOUCH_STAGE_SHARE))
         if not img["loaded"]:
             failures.append("pane {}'s picture has not loaded".format(n))
         elif img["box"][0] < stage[0] - 1 or img["box"][1] < stage[1] - 1 or img["box"][2] > stage[2] + 1 or img["box"][3] > stage[3] + 1:
@@ -773,6 +782,19 @@ def run_checks(browser: Browser, url: str) -> Tuple[int, List[str]]:
                     seen.setdefault(where + ("the page did not show the {}".format(state),), []).append(scheme)
                     continue
                 for failure in check_composer(browser.run(MEASURE_COMPOSER_JS, None), width, height, state):
+                    seen.setdefault(where + (failure,), []).append(scheme)
+    for width, height in VIEWER_TOUCH_VIEWPORTS:   # the viewer on a landscape phone, where it is stacked and scrolls by touch (P6 fix 1)
+        for scheme in SCHEMES:
+            serial += 1
+            browser.open("{}?case={}".format(url, serial), width, height, scheme)
+            for state in VIEWER_STATES:
+                cases += 1
+                pair = state == "pair"
+                where = ("{}x{}".format(width, height), "viewer {}".format(state))
+                if not browser.run(INJECT_VIEWER_JS, {"pair": pair}):
+                    seen.setdefault(where + ("the viewer did not open with its pictures",), []).append(scheme)
+                    continue
+                for failure in check_viewer(browser.run(MEASURE_VIEWER_JS, None), width, height, pair, scroll=True):
                     seen.setdefault(where + (failure,), []).append(scheme)
     for width in TALL_WIDTHS:   # a composer taller than the viewport: the report's floor
         for scheme in SCHEMES:

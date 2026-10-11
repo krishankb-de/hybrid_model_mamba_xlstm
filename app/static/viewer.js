@@ -182,8 +182,11 @@ export function openViewer(spec, env = {}) {
     if (typeof url === 'string' && PICTURE.test(url)) { pane.img.setAttribute('src', url); return; }
     if (!isSameOriginPath(url) || typeof env.loadImage !== 'function') { failed(pane); return; }
     pane.img.setAttribute('data-src', url);   // whose picture it is, for the page and its checks; never its src
-    Promise.resolve().then(() => env.loadImage(url)).then(
-      (objectUrl) => { if (!closed && typeof objectUrl === 'string' && PICTURE.test(objectUrl)) pane.img.setAttribute('src', objectUrl); else failed(pane); },
+    Promise.resolve().then(() => (closed ? null : env.loadImage(url))).then(   // a viewer closed meanwhile asks for nothing (P6 fix 1)
+      (objectUrl) => {
+        if (closed) return;
+        if (typeof objectUrl === 'string' && PICTURE.test(objectUrl)) pane.img.setAttribute('src', objectUrl); else failed(pane);
+      },
       () => failed(pane));
   }
 
@@ -350,7 +353,7 @@ export function openViewer(spec, env = {}) {
       const last = list[list.length - 1];
       const now = doc.activeElement;
       if (!first) return;
-      if (e.shiftKey ? (now === first || !root.contains(now)) : (now === last || !root.contains(now))) {
+      if (e.shiftKey ? (now === first || now === root || !root.contains(now)) : (now === last || !root.contains(now))) {
         e.preventDefault();
         (e.shiftKey ? last : first).focus();
       }
@@ -388,6 +391,7 @@ export function openViewer(spec, env = {}) {
     observer?.disconnect();
     win?.removeEventListener?.('resize', onResize);
     root.removeEventListener('keydown', onKey);
+    root.removeAttribute('tabindex');
     for (const node of inerted) node.removeAttribute('inert');
     doc.body.classList.remove('viewer-open');
     root.hidden = true;
@@ -406,6 +410,9 @@ export function openViewer(spec, env = {}) {
   root.setAttribute('aria-label', panes.length > 1 ? `Image viewer: ${panes[0].label} beside ${panes[1].label}` : `Image viewer: ${panes[0].label}`);
   for (const node of inerted) node.setAttribute('inert', '');
   doc.body.classList.add('viewer-open');
+  // A click on a part that is no control (the bar, a footer, the dark ground) gives the focus to the viewer itself, which a Tab never stops at:
+  // its keys then still reach it (P6 fix 1). Without this the focus would go to the page behind, and + and the arrows would do nothing.
+  root.setAttribute('tabindex', '-1');
   root.addEventListener('keydown', onKey);
   root.hidden = false;
   place();

@@ -42,8 +42,8 @@ from app import retention
 from app.commands import COMMAND_HELP, is_question, parse_command
 from app.engine import REPO_ROOT, Engine, build_engine
 from app.gallery import Gallery, GalleryMismatch
-from app.hardening import (RATE_CAPACITY, RATE_LIMITED, RATE_WINDOW_S, REQUEST_ID_HEADER, RequestLog, TurnLimiter, TurnRateLimit,
-                           configure_request_log)
+from app.hardening import (NO_RESPONSE, RATE_CAPACITY, RATE_LIMITED, RATE_WINDOW_S, REQUEST_ID_HEADER, RequestLog, TurnLimiter,
+                           TurnRateLimit, configure_request_log)
 from app.imaging import (MAX_UPLOAD_BYTES, MIN_SIDE, TOO_LARGE_MSG, UploadError, load_upload, model_input_image, sniff_format,
                          thumbnail_jpeg)
 from app.labels import LabelerClient, LabelerUnavailable, RuleLabeler
@@ -890,7 +890,7 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
                   422: "Invalid options: beam_size: Input should be less than or equal to 8",
                   429: BUSY_MSG.format(queue_cap),
                   500: "Could not store the image."}))})
-    async def post_message(session_id: str, image: Optional[UploadFile] = File(None, description=IMAGE_DOC),
+    async def post_message(request: Request, session_id: str, image: Optional[UploadFile] = File(None, description=IMAGE_DOC),
                            text: str = Form("", description=TEXT_DOC),
                            options: str = Form("{}", description=OPTIONS_DOC, examples=[OPTIONS_EXAMPLE]),
                            client_id: Optional[str] = Depends(client_scope)) -> Response:
@@ -935,6 +935,10 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
                 sha256, filename = previous["sha256"], previous["filename"]
                 if previous.get("test_row") is not None:   # the turn runs that study again, as its resolved options say
                     opts = opts.model_copy(update={"test_row": previous["test_row"]})
+        # P6 fix 1: a client gone by now (the page's Cancel upload aborts its request once the body is sent) starts no turn: no slot is
+        # reserved and nothing is stored, and the request log says 499. The answer reaches no one.
+        if await request.is_disconnected():
+            return Response(status_code=NO_RESPONSE)
         if not worker.reserve():
             raise HTTPException(429, BUSY_MSG.format(queue_cap))
         try:

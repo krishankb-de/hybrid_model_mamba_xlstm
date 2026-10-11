@@ -1,6 +1,7 @@
 """CHAT_UI_PLAN.md P3-D: text commands (spec §4)."""
 import json
 import re
+import unicodedata
 from pathlib import Path
 
 from app.commands import _RULES, COMMAND_HELP, NOT_A_QA_BOT, WHITESPACE, collapse, is_question, parse_command
@@ -102,3 +103,25 @@ def test_the_shared_whitespace_is_pythons_and_javascripts_together_and_no_more()
     assert shared - javascript == {"\x1c", "\x1d", "\x1e", "\x1f", "\x85"} and shared - python == {"\ufeff"}   # the drift this closes
     everything = "".join(chr(c) for c in range(0x110000))
     assert set(re.findall("[" + WHITESPACE + "]", everything)) == shared   # the class the server splits on is that list exactly
+
+
+def _invisible(ch):
+    """A whitespace, separator, format or control character that a reader cannot see in a review or a diff (a space, tab and line end aside)."""
+    return ch not in " \t\r\n" and unicodedata.category(ch) in ("Zs", "Zl", "Zp", "Cf", "Cc")
+
+
+def test_the_chat_apps_sources_write_invisible_characters_as_escapes():
+    """P6 fix 1 (2): a raw U+FEFF or U+2028 in a source is invisible in a review and in a diff, and an editor may drop it unseen. The chat app
+    and its tests write such characters as \\u escapes, as app/static/app.js does, so that a note's whitespace can be read off the page."""
+    root = Path(__file__).resolve().parents[1]
+    files = [*root.glob("app/**/*.py"), *root.glob("app/static/*.*"), *root.glob("tests/test_app_*.py"), *root.glob("tests/test_chat_*.py"),
+             *root.glob("tests/frontend/*.mjs"), *root.glob("tests/frontend/fixtures/*.json"), *root.glob("tests/e2e/*.py"),
+             *root.glob("tests/fixtures/*.json")]
+    assert len(files) > 40
+    found = []
+    for path in files:
+        for n, line in enumerate(path.read_text(encoding="utf-8").split("\n"), start=1):
+            raw = sorted({"U+{:04X}".format(ord(c)) for c in line if _invisible(c)})
+            if raw:
+                found.append((path.relative_to(root).as_posix(), n, raw))
+    assert found == []

@@ -226,7 +226,7 @@ def test_a_command_never_titles_a_session_its_image_does(tmp_path):
              ("  reference: Findings: clear lungs. ", "chest.png", None, "chest.png"),   # nor does a reference's text become the title
              ("greedy", None, 7, "test row 7"),
              ("beam\x1c5", "chest.png", None, "chest.png"),
-             ("﻿", "chest.png", None, "chest.png"),            # no note at all
+             ("\ufeff", "chest.png", None, "chest.png"),             # no note at all
              ("beam 5 please", "chest.png", None, "beam 5 please"),  # no command: a note, which titles the chat
              ("is it\x85pneumonia?", "chest.png", None, "is it pneumonia?")]
     for note, filename, row, title in cases:

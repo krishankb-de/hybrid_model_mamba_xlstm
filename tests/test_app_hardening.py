@@ -361,6 +361,38 @@ def test_a_chunked_body_is_counted_as_it_streams_and_the_chunks_after_the_cap_ar
         app.state.store.close()
 
 
+def _form(boundary, fields, files):
+    """A multipart/form-data body, as a browser's FormData sends it: each field, then each file (name -> (filename, bytes, content type))."""
+    parts = [b'--%s\r\nContent-Disposition: form-data; name="%s"\r\n\r\n%s\r\n' % (boundary.encode(), name.encode(), value.encode())
+             for name, value in fields.items()]
+    parts += [b'--%s\r\nContent-Disposition: form-data; name="%s"; filename="%s"\r\nContent-Type: %s\r\n\r\n' % (
+        boundary.encode(), name.encode(), filename.encode(), ctype.encode()) + data + b"\r\n" for name, (filename, data, ctype) in files.items()]
+    return b"".join(parts) + b"--%s--\r\n" % boundary.encode()
+
+
+def test_a_turn_whose_client_is_gone_once_its_body_is_read_starts_nothing_and_is_logged_as_499(tmp_path, capsys):
+    """P6 fix 1 (defence in depth): the page's Cancel upload aborts the request, and the server would still start the turn from the whole body it
+    has. The turn route asks whether the client is still there once the body is read and checked, before it reserves a slot or stores anything:
+    a client already gone starts no turn, holds no slot and leaves no message and no upload, and the request log shows 499. _run_asgi's receive
+    says http.disconnect after the last chunk, as uvicorn's does for a client that has closed its connection (a client still there, as every
+    TestClient turn of this suite is, starts its turn as before)."""
+    app = create_app(engine="tiny", home=str(tmp_path))
+    try:
+        sid = app.state.store.create_session("private")["id"]
+        body = _form("zzz", {"text": "beam 2", "options": json.dumps({"max_new_tokens": 16})}, {"image": ("x.png", png_bytes(), "image/png")})
+        capsys.readouterr()
+        sent, _ = _run_asgi(app, "POST", "/v1/sessions/{}/messages".format(sid), [MULTIPART, ("X-Request-Id", "rid-gone")], [body])
+        assert sent[0]["status"] == 499
+        assert app.state.store.get_session(sid, None)["messages"] == []   # no turn was started, nothing stored
+        assert app.state.worker.in_flight == 0                            # no slot is held
+        assert not (tmp_path / "uploads" / sid).exists()                  # and no upload kept
+        [row] = [row for row in logged(capsys.readouterr().err) if row["request_id"] == "rid-gone"]
+        assert row["status"] == 499 and row["path"] == "/v1/sessions/{}/messages".format(sid)
+    finally:
+        app.state.worker.shutdown()
+        app.state.store.close()
+
+
 def test_a_body_exactly_at_the_cap_is_not_refused_by_the_cap(client):
     sid = client.post("/v1/sessions", json={}).json()["id"]
     r = client.post("/v1/sessions/{}/messages".format(sid), content=b"x" * CAP, headers={"Content-Type": "multipart/form-data; boundary=zzz"})

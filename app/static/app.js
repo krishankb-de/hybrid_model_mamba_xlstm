@@ -75,8 +75,11 @@ const rangeMessage = (key) => `Enter a whole number from ${BOUNDS[key][0]} to ${
 const SAVED_TEXT = 'Settings saved. They apply from your next Send.';
 const QUESTION_TEXT = 'This note is not a command: with no new image, Send gets no report.';   // the re-run hint, for a note the server will not run
 const SAVED_MS = 4000;   // how long the page says so
-const UPLOADING_TEXT = 'Uploading…';          // the status between Send and the accept (P6-A c)
-const CANCEL_UPLOAD = 'Cancel upload';        // and what Stop reads then: the server has no turn yet, so it aborts the request
+const UPLOADING_TEXT = 'Uploading…';          // the status between Send and the accept of a turn that uploads an image (P6-A c)
+const SENDING_TEXT = 'Sending…';              // and of one that uploads nothing: a re-run, a test study (P6 fix 1)
+const CANCEL_UPLOAD = 'Cancel upload';        // what Stop reads then: the page has no id of the turn yet, so it aborts the request
+const CANCEL_SEND = 'Cancel';
+const CANCELLED = 'cancelled';                // what runTurn says of a turn whose request the user aborted before its id came
 const PICK_LIMIT = 50;         // test-split studies per request of the picker (GET /v1/test-studies takes 1 to 200)
 const PICK_DEBOUNCE_MS = 250;  // the pause in typing after which the picker asks for the studies that match
 const STORAGE_TEXT = 'Browser storage is unavailable, so these settings last until the page closes.';
@@ -662,8 +665,10 @@ export function createApp(env) {
     ui.rerun.hidden = !name;
     if (name) {
       ui.rerun.textContent = runsTheModel(ui.prompt.value ?? '', null) ? `No new image: Send re-runs ${name} with these settings.` : QUESTION_TEXT;
+      ui.rerun.setAttribute('title', ui.rerun.textContent);   // whole, where a short page or a narrow composer cuts its one line short (P6 fix 1)
       ui.send.setAttribute('aria-describedby', 'rerun-hint');   // Send says what it will do, to whoever reaches it by tab
     } else {
+      ui.rerun.removeAttribute('title');
       ui.send.removeAttribute('aria-describedby');   // a hidden note that is still named would still be read out
     }
   }
@@ -832,16 +837,17 @@ export function createApp(env) {
         feed(turn, event);
       }
     } catch (err) {
-      if (!turn.id) { refuse(turn, err); return; }   // it never started: no id was ever given
+      if (!turn.id) return refuse(turn, err);   // it never started here: no id was ever given (CANCELLED: the user aborted it)
       // A network error mid-stream (a server that died, a tunnel that dropped) is no bug of the page's: the poll below carries the turn
       // on, and only what is unexpected is logged (P4-H: a killed server logged "TypeError: network error" as one).
       if (!expected(err) && !turn.left) report(err);
     } finally {
       turn.streaming = false;
     }
-    if (turn.left || turn.settled) return;
-    if (!turn.id) { refuse(turn, new Error('The server closed the connection before it accepted the turn.')); return; }
+    if (turn.left || turn.settled) return null;
+    if (!turn.id) return refuse(turn, new Error('The server closed the connection before it accepted the turn.'));
     if (watchdog.ended(turn.view.status) === 'poll') await pollTurn(turn);
+    return null;
   }
 
   // The page's own work around a turn must not stop the turn, nor the work after it: a failure is logged and said, and the caller goes on.
@@ -885,14 +891,14 @@ export function createApp(env) {
     // turn ends (P4-H; a new chat was listed as an empty "New chat" for as long as its first turn ran), and so does the strip (P6-A d).
     detach(refreshSessions());
     detach(checkHealth());
-    if (turn.cancelled) detach(stopTurn());   // Cancel upload was pressed as the server took the turn: it has an id now, so cancel it there
   }
 
-  // The turn never started (the request was refused, the network was down, or the user cancelled the upload): take its user turn back out,
-  // show why, and leave the composer as the user had it, so Send tries again with nothing to re-enter. A cancel is the user's own doing:
-  // the status says so, and no alert does.
+  // The turn never started here (the request was refused, the network was down, or the user cancelled it): take its user turn back out, show
+  // why, and leave the composer as the user had it, so Send tries again with nothing to re-enter. A cancel is the user's own doing: the status
+  // says so, and no alert does; the composer stays locked until send() has asked the chat whether the server took the turn all the same
+  // (afterCancel). -> CANCELLED for a cancel, else null.
   function refuse(turn, err) {
-    if (turn.left) return;   // the user left this chat: nothing here to undo, and the ticker is now another turn's
+    if (turn.left) return null;   // the user left this chat: nothing here to undo, and the ticker is now another turn's
     stopTicker();
     watchdog.settle();
     turn.userEl?.remove();
@@ -900,19 +906,54 @@ export function createApp(env) {
     if (at >= 0) turn.session.turns.splice(at, 1);
     if (turn.image) { urls.revokeObjectURL(turn.image.url); turn.session.blobUrls.delete(turn.image.url); }
     if (state.turn === turn) state.turn = null;
-    setBusy(false);
     if (turn.cancelled && isAbort(err)) {
-      announce('Upload cancelled.', true);
-      return;
+      announce(cancelledText(turn), true);
+      return CANCELLED;
     }
+    setBusy(false);
     doneUploading();
     showNotice(errorMessage(err));
     if (!expected(err)) report(err);
+    return null;
   }
 
-  // The status still says "Uploading…" about a request that is over: it is taken down.
+  const cancelledText = (turn) => (turn.file ? 'Upload cancelled.' : 'Send cancelled.');
+
+  // The status still says "Uploading…" or "Sending…" about a request that is over: it is taken down.
   function doneUploading() {
-    if (state.said === UPLOADING_TEXT) announce('');
+    if (state.said === UPLOADING_TEXT || state.said === SENDING_TEXT) announce('');
+  }
+
+  // After a Cancel upload (P6 fix 1). The server starts a turn as soon as it has the whole body, so a cancel between the request's last byte and
+  // its response's headers aborts a request whose turn already runs, and no id ever came. The chat is asked once, and every running turn of it
+  // that the page follows none of is cancelled, as Stop cancels one. A chat this Send made is deleted after that cancel (at once when the server
+  // stored nothing in it); a chat that was there before is kept, and drawn again from the server when it held such a turn, so the stopped turn
+  // shows as it is.
+  async function afterCancel(session, fresh, said) {
+    if (fresh) {
+      dropEmptySession(session, { cancelFirst: true });
+      return;
+    }
+    const cancelled = await cancelStrayTurns(session.id);
+    if (cancelled > 0 && state.session === session) {
+      await openSession(session.id);
+      announce(said, true);
+    }
+  }
+
+  // Cancels every running turn of the chat that the page is not following; -> how many there were, or null when the chat could not be read.
+  async function cancelStrayTurns(id) {
+    let stored;
+    try {
+      stored = await request(`/v1/sessions/${encodeURIComponent(id)}`);
+    } catch {
+      return null;
+    }
+    const followed = state.turn?.id ?? null;
+    const running = (Array.isArray(stored?.messages) ? stored.messages : [])
+      .filter((m) => isObject(m) && m.role === 'assistant' && m.status === 'running' && m.id !== followed);
+    await Promise.all(running.map((m) => api.cancelMessage({ messageId: m.id, ...auth() }).catch(() => null)));
+    return running.length;
   }
 
   // Send: the attached file and the note, with the drawer's settings. study (P6-D, the picker) is a test row to run instead: the turn has no
@@ -928,15 +969,18 @@ export function createApp(env) {
     const options = optionsFromSettings(state.settings, state.models);
     if (picked !== null) options.test_row = picked;
     setBusy(true);
-    ui.stop.disabled = true;               // until the request is on its way (the chat may still be being made): there is nothing to cancel
-    ui.stop.textContent = CANCEL_UPLOAD;   // until the server has the turn, Stop aborts the request (P6-A c)
-    announce(UPLOADING_TEXT);
+    ui.stop.disabled = true;   // until the request is on its way (the chat may still be being made): there is nothing to cancel
+    // Until the page has the turn's id, Stop aborts the request (P6-A c): "Cancel upload" while an image goes up, "Cancel" for a turn that
+    // uploads nothing, a re-run or a test study (P6 fix 1).
+    ui.stop.textContent = file ? CANCEL_UPLOAD : CANCEL_SEND;
+    announce(file ? UPLOADING_TEXT : SENDING_TEXT);
     const fresh = !session.id;   // this Send makes the chat
     try {
       if (fresh) await createSession(session);
       if (state.session !== session) return;   // the user moved to another chat while this one was being made
-      await runTurn(session, { text: note, file, options });
-      if (fresh && !session.turns.length) dropEmptySession(session);   // its first turn was refused: no chat was started after all
+      const outcome = await runTurn(session, { text: note, file, options });
+      if (outcome === CANCELLED) await afterCancel(session, fresh, file ? 'Upload cancelled.' : 'Send cancelled.');
+      else if (fresh && !session.turns.length) dropEmptySession(session);   // its first turn was refused: no chat was started after all
     } catch (err) {   // the chat could not be made, or something broke that runTurn does not deal with itself
       if (state.session === session) {
         showNotice(errorMessage(err));
@@ -965,7 +1009,9 @@ export function createApp(env) {
   // does the composer. The page lets go of the chat first and deletes it after, in the background: the composer is free again already, and
   // a Send meanwhile makes a chat of its own instead of sending into the one being deleted. A delete that fails leaves the chat as it is:
   // empty, and harmless.
-  function dropEmptySession(session) {
+  // cancelFirst (P6 fix 1, a Cancel upload): the server may have started the turn all the same, so its running turns are cancelled before the
+  // chat is deleted, and the delete waits for that.
+  function dropEmptySession(session, { cancelFirst = false } = {}) {
     const id = session.id;
     if (state.session === session) {
       session.id = null;
@@ -973,7 +1019,8 @@ export function createApp(env) {
       state.route = 'new';   // the page is where it was, so its notice is not one of a route left behind
       syncControls();
     }
-    detach(request(`/v1/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(() => refreshSessions(), () => {}));
+    const remove = () => request(`/v1/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(() => refreshSessions(), () => {});
+    detach(cancelFirst ? cancelStrayTurns(id).then(remove) : remove());
   }
 
   // Stop: ask the server to cancel, then drop the stream. The turn's own message_stop (status aborted) settles the card;
@@ -1002,8 +1049,9 @@ export function createApp(env) {
     else follow(turn);                              // nothing is following it (its poll failed for good): follow it again
   }
 
-  // "Cancel upload" (P6-A c): the server has no turn yet, so there is nothing to ask it to cancel, and nothing is: the request is aborted, and
-  // refuse() takes the user turn back out. The note and the image were not spent (the accept spends them), so Send sends them again.
+  // "Cancel upload" (P6-A c): the page has no id of the turn yet, so the request is aborted, and refuse() takes the user turn back out. The note
+  // and the image were not spent (the accept spends them), so Send sends them again. The server may have taken the turn all the same, between
+  // the request's last byte and its response's headers: send() then asks the chat, and cancels it there (afterCancel, P6 fix 1).
   function cancelUpload(turn) {
     if (turn.cancelled || !turn.controller) return;   // while the chat is still being made there is no request yet: Stop is off then
     turn.cancelled = true;

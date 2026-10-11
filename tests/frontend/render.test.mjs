@@ -1629,7 +1629,31 @@ test('Show less on a report that fits its three lines by now (widened while open
   const still = open(5);   // still too long for three lines: its Show all stays
   assert.deepEqual([still.text.classList.contains('open'), still.row.hidden, still.toggle.textContent], [false, false, 'Show all']);
   assert.equal(document.activeElement, still.toggle);
-  assert.equal(still.text.hasAttribute('tabindex'), false);
+  assert.equal(still.text.getAttribute('tabindex'), '-1');   // the page can focus a report at any time (P6 fix 1); Tab never stops at it
+  document.body.replaceChildren();
+});
+
+test('the report a Show less left the focus on is found again by its key when a running card is painted again: never the page body (P6 fix 1)', () => {
+  const view = matchesView({}, stageStart('generate', 3), snapshot('Findings: so far'));   // the turn runs on: each frame paints a new card
+  const ctx = { labelNames: LABEL_NAMES, ui: new Map(), turn: 1 };
+  let card = renderAssistantCard(view, ctx);
+  document.body.replaceChildren(card);
+  settleClamps(card, () => true);
+  const toggle = q(card, 'section.matches button[data-action="show"]');
+  toggle.click();   // Show all
+  const text = q(card, 'section.matches li.match .clamp-text');
+  Object.defineProperty(text, 'scrollHeight', { configurable: true, value: 42 });   // widened meanwhile: two lines hold it
+  Object.defineProperty(text, 'clientHeight', { configurable: true, value: 42 });
+  toggle.focus();
+  toggle.click();   // Show less: the row goes, and its focus to the report
+  assert.equal(document.activeElement, text);
+  const key = focusKey(document.activeElement);   // what app.js paint() reads before it replaces the card ...
+  assert.equal(key, 'clamp:match:1');
+  const next = renderAssistantCard(view, ctx);
+  card.replaceWith(next);
+  card = next;
+  assert.equal(restoreFocus(card, key), true);   // ... and gives back after
+  assert.equal(document.activeElement, q(card, 'section.matches li.match .clamp-text'));
   document.body.replaceChildren();
 });
 

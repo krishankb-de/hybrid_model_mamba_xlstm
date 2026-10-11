@@ -362,6 +362,43 @@ test('a picture no card shows is let go of when the viewer closes; one a card sh
   assert.deepEqual(fake.forgotten, [ORIGINAL.url]);   // the full-size original: its object URL is revoked (api.js forgetImage)
 });
 
+test('after a click on the bar or a footer the viewer itself has the focus, and +, −, 0 and the arrows still work (P6 fix 1)', async () => {
+  const p = page();
+  const handle = openViewer({ left: ORIGINAL }, { root: p.root, loadImage: fakeLoader().loadImage });
+  await tick();
+  const [pane] = panesOf(p.root);
+  decoded(pane, 800, 600, 400, 300);
+  assert.equal(p.root.getAttribute('tabindex'), '-1');   // a click can focus it, Tab cannot
+  p.root.focus();   // a click on a part that is no control: the browser gives the focus to the nearest focusable ancestor
+  assert.equal(document.activeElement, p.root);
+  assert.equal(press(p.root, '+').defaultPrevented, true);
+  assert.equal(scaleOf(pane), ZOOM_STEP);
+  const x = () => Number(/translate\((-?[\d.]+)px/.exec(pane.querySelector('img').style.transform)[1]);
+  const before = x();
+  press(p.root, 'ArrowRight');
+  assert.ok(near(x(), before - PAN_STEP, 0.01));
+  press(p.root, '-');
+  assert.equal(scaleOf(pane), 1);
+  press(p.root, '+');
+  press(p.root, '0');
+  assert.equal(scaleOf(pane), 1);
+  const controls = p.root.querySelectorAll('button, input, [tabindex]');
+  assert.equal(press(p.root, 'Tab', { shiftKey: true }).defaultPrevented, true);   // Shift+Tab from the viewer itself stays inside it
+  assert.equal(document.activeElement, controls.at(-1));
+  handle.close();
+  assert.equal(p.root.hasAttribute('tabindex'), false);   // closed, it is nothing to focus
+});
+
+test('a viewer closed before its pictures were asked for asks for none (P6 fix 1)', async () => {
+  const p = page();
+  const fake = fakeLoader();
+  const handle = openViewer({ left: ORIGINAL, right: NEIGHBOUR }, { root: p.root, loadImage: fake.loadImage, forgetImage: fake.forgetImage });
+  handle.close();   // in the same task: before the microtask that would ask
+  await tick();
+  assert.deepEqual(fake.asked, []);
+  assert.equal(p.root.querySelectorAll('img').length, 0);
+});
+
 test('a picture that cannot load says so; a path on another origin is not even asked for; a blob: or data: picture is shown as it is', async () => {
   const p = page();
   const fake = fakeLoader();

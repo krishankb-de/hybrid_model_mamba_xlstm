@@ -1103,9 +1103,11 @@ test('a Send right after a refused first turn makes a new chat, and does not sen
 
 // P6-A (c): "Uploading…" and "Cancel upload" between Send and the accept ---------------------------------------------------------------
 
-test('between Send and the accept a status says "Uploading…" and Stop reads "Cancel upload": it aborts the request with no call to the server, and the preview and the note stay (P6-A c)', async (t) => {
+test('between Send and the accept a status says "Uploading…" and Stop reads "Cancel upload": it aborts the request, the chat is asked once whether the server took the turn, and the preview and the note stay (P6-A c, P6 fix 1)', async (t) => {
   const logged = captureErrors(t);
   const h = await ready();   // an open chat with chest.png attached
+  const asked = () => h.fetch.to('GET', '/v1/sessions/s_a').length;
+  const before = asked();
   $('prompt').value = 'beam 4';
   const turn = h.app.send();
   await flush();
@@ -1116,7 +1118,8 @@ test('between Send and the accept a status says "Uploading…" and Stop reads "C
   await turn;
   await flush();
   assert.equal(run.opts.signal.aborted, true);     // the request is aborted ...
-  assert.deepEqual(h.api.cancels, []);             // ... and the server is asked nothing: it has no turn to cancel yet
+  assert.equal(asked(), before + 1);               // ... the chat is read once: did the server take the turn before the abort reached it?
+  assert.deepEqual(h.api.cancels, []);             // it did not, so there is nothing to cancel
   assert.deepEqual([$('preview').hidden, h.app.state.file?.name, $('prompt').value], [false, 'chest.png', 'beam 4']);   // nothing was spent
   assert.equal($('conversation').children.length, 0);   // the user turn is taken back out
   assert.deepEqual([$('stop').hidden, $('stop').textContent, $('send').disabled], [true, 'Stop', false]);
@@ -1157,8 +1160,9 @@ test('Cancel upload from the keyboard hands the focus to the note; while the cha
   assert.equal(document.activeElement, $('prompt'));   // the Stop that had the focus is gone
 });
 
-test('a first upload cancelled before the accept leaves no empty chat behind: the chat made for it is deleted and nothing else is opened (P6-A c, d)', async () => {
-  const h = harness({ sessions: [], routes: { 'POST /v1/sessions': NEW_SESSION, 'DELETE /v1/sessions/s_new': () => new Response(null, { status: 204 }) } });
+test('a first upload cancelled before the accept leaves no empty chat behind: the chat made for it, which holds nothing, is deleted at once and nothing else is opened (P6-A c, d)', async () => {
+  const h = harness({ sessions: [], routes: { 'POST /v1/sessions': NEW_SESSION, 'GET /v1/sessions/s_new': { ...NEW_SESSION, messages: [] },
+                                              'DELETE /v1/sessions/s_new': () => new Response(null, { status: 204 }) } });
   await h.app.start();
   await flush();
   attach(imageFile('chest.png'));
@@ -1168,28 +1172,100 @@ test('a first upload cancelled before the accept leaves no empty chat behind: th
   await turn;
   await flush();
   assert.deepEqual(h.fetch.to('DELETE', '/v1/sessions/').map((c) => c.url), ['/v1/sessions/s_new']);
+  assert.equal(h.fetch.to('GET', '/v1/sessions/s_new').length, 1);   // asked once: the server stored nothing in it
+  assert.deepEqual(h.api.cancels, []);
   assert.equal(h.win.location.hash, '#/new');   // the empty chat it was on: no other chat is selected
   assert.deepEqual(qa($('session-list'), 'li'), []);
   assert.deepEqual([$('preview').hidden, $('exports').hidden], [false, true]);
 });
 
-test('a Cancel upload pressed as the server accepted the turn cancels that turn on the server, now that it has an id (P6-A c)', async () => {
-  const h = await ready();
-  h.api.holdAbort = true;   // the abort does not end the request at once: the server's answer is already on its way
+// P6 fix 1 (Important): the server starts a turn as soon as it has the whole body. A Cancel upload between the last byte and the response's
+// headers makes fetch reject with AbortError, and no X-Message-Id ever comes, while the turn runs on the server.
+
+test('a Cancel upload that came after the server had taken the turn (fetch aborts, no id comes) cancels that turn there, and the chat is drawn again from the server (P6 fix 1)', async () => {
+  let stored = false;
+  resetEvents();
+  const started = [startEv({ message_id: 'm_late' }), stageStartEv('preprocess', 0)];
+  const h = await ready({ routes: {
+    'GET /v1/sessions/s_a': () => ({ ...sess('s_a', 'earlier', stored ? 1 : 0),
+                                     messages: stored ? [userMsg('u_late', 'beam 4', 'chest.png'), botMsg('m_late', 'running', START_DATA.options)] : [] }),
+    'GET /v1/messages/m_late': () => ({ ...botMsg('m_late', 'running'), events: rows(started) }),
+  } });
+  $('prompt').value = 'beam 4';
+  const turn = h.app.send();
+  await flush();
+  stored = true;        // the whole body is in: the server has started the turn, and its answer is still on its way
+  $('stop').click();    // Cancel upload: fetch rejects with AbortError, and no X-Message-Id ever comes
+  await turn;
+  await flush(12);
+  assert.deepEqual(h.api.cancels.map((c) => c.messageId), ['m_late']);   // the turn the page never heard of is cancelled, as any Stop cancels
+  assert.deepEqual(h.fetch.to('DELETE', '/v1/sessions/'), []);           // a chat that was there before is kept
+  assert.equal(q($('conversation'), '.turn.user .user-text').textContent, 'beam 4');   // and drawn again from what the server stored
+  assert.equal(cardOf().getAttribute('data-message-id'), 'm_late');
+  assert.equal(h.api.polls.length, 1);   // the turn is followed to its end
+  h.api.polls[0].channel.push(stopEv('aborted', { message_id: 'm_late' }));
+  h.api.polls[0].channel.end();
+  await flush();
+  assert.equal(cardOf().getAttribute('data-status'), 'aborted');   // the stopped turn shows as it is
+  assert.deepEqual([$('preview').hidden, $('prompt').value], [false, 'beam 4']);   // and the composer keeps what the user cancelled
+  assert.deepEqual([$('send').disabled, $('stop').hidden], [false, true]);
+});
+
+test('a first upload cancelled after the server had taken it: the turn is cancelled first, and the chat made for it deleted after (P6 fix 1)', async () => {
+  const order = [];
+  const h = harness({ sessions: [], routes: {
+    'POST /v1/sessions': NEW_SESSION,
+    'GET /v1/sessions/s_new': () => ({ ...NEW_SESSION, messages: [userMsg('u_late', '', 'chest.png'), botMsg('m_late', 'running', START_DATA.options)] }),
+    'DELETE /v1/sessions/s_new': () => { order.push('delete'); return new Response(null, { status: 204 }); },
+  } });
+  await h.app.start();
+  await flush();
+  const cancel = h.api.cancelMessage;
+  h.api.cancelMessage = (opts) => { order.push(`cancel ${opts.messageId}`); return cancel(opts); };
+  attach(imageFile('chest.png'));
   const turn = h.app.send();
   await flush();
   $('stop').click();
-  h.api.streams[0].accept('m_a');
-  await flush();
-  assert.deepEqual(h.api.cancels.map((c) => c.messageId), ['m_a']);
-  h.api.streams[0].fail(abortError());
-  await flush();
-  h.api.polls.at(-1).channel.push(stopEv('aborted'));
-  h.api.polls.at(-1).channel.end();
   await turn;
+  await flush(12);
+  assert.deepEqual(order, ['cancel m_late', 'delete']);   // a session with a turn in it is deleted only once that turn is cancelled
+  assert.equal(h.win.location.hash, '#/new');
+  assert.deepEqual(qa($('session-list'), 'li'), []);
+  assert.deepEqual([$('preview').hidden, $('send').disabled, $('status').textContent], [false, false, 'Upload cancelled.']);
+});
+
+test('a turn that uploads nothing (a re-run, a test study) says "Sending…" and offers "Cancel"; one that uploads an image says "Uploading…" and "Cancel upload" (P6 fix 1)', async () => {
+  const h = harness({ models: GALLERY_MODELS, sessions: [sess('s_a', 'A')], routes: { ...doneSession('s_a', 'A', 'm_a'), ...studyRoutes() } });
+  await h.app.start();
   await flush();
-  assert.equal(cardOf().getAttribute('data-status'), 'aborted');
-  assert.deepEqual([$('send').disabled, $('stop').hidden], [false, true]);
+  const said = () => [$('status').textContent, $('stop').textContent];
+  $('prompt').value = 'tokens 30';   // a re-run of the chat's last X-ray: no upload
+  const rerun = h.app.send();
+  await flush();
+  assert.deepEqual(said(), ['Sending…', 'Cancel']);
+  $('stop').click();
+  await rerun;
+  await flush(12);
+  assert.equal($('status').textContent, 'Send cancelled.');
+  pickButton().click();
+  await flush();
+  q($('picker-list'), 'button[data-test-row="3"]').click();   // a test study: no upload either
+  await flush();
+  assert.deepEqual(said(), ['Sending…', 'Cancel']);
+  h.api.streams.at(-1).accept('m_p');
+  await flush();
+  assert.equal($('stop').textContent, 'Stop');
+  h.api.streams.at(-1).channel.push(stopEv('done', { message_id: 'm_p' }));
+  h.api.streams.at(-1).channel.end();
+  await flush();
+  attach(imageFile('new.png'));
+  const upload = h.app.send();
+  await flush();
+  assert.deepEqual(said(), ['Uploading…', 'Cancel upload']);
+  $('stop').click();
+  await upload;
+  await flush(12);
+  assert.equal($('status').textContent, 'Upload cancelled.');
 });
 
 // P6-A (d): the health strip follows a turn ----------------------------------------------------------------------------------------------
@@ -4401,6 +4477,20 @@ test('with no new image and an earlier one in the chat, the composer says that S
   h.api.streams[1].channel.end();
   await rerun;
   assert.equal(hint.textContent, 'No new image: Send re-runs second.png with these settings.');   // a re-run does not change which image is the newest
+});
+
+test('the re-run hint carries its whole text in its title, for the one line a narrow composer cuts short (P6 fix 1)', async () => {
+  const h = harness({ sessions: [sess('s_a', 'A')], routes: doneSession('s_a', 'A', 'm_a') });
+  await h.app.start();
+  await flush();
+  const hint = $('rerun-hint');
+  assert.deepEqual([hint.textContent, hint.getAttribute('title')], ['No new image: Send re-runs s_a.png with these settings.',
+                                                                     'No new image: Send re-runs s_a.png with these settings.']);
+  $('prompt').value = 'Is there pneumonia?';
+  $('prompt').dispatchEvent(new ShimEvent('input', { bubbles: true }));
+  assert.equal(hint.getAttribute('title'), 'This note is not a command: with no new image, Send gets no report.');
+  attach(imageFile('new.png'));
+  assert.deepEqual([hint.hidden, hint.hasAttribute('title')], [true, false]);   // a hidden hint names nothing
 });
 
 test('the re-run hint names the newest image of the chat, not the newest turn', async () => {

@@ -284,7 +284,10 @@ def test_the_preview_puts_a_long_name_on_a_line_of_its_own_cut_short_and_keeps_t
     each, cut short where the composer is narrow (the title has the line whole), and the separator is left to the text."""
     rules = {h: b for _, h, b in _walk(_stylesheet())}
     assert re.search(r"flex-direction:\s*column", rules["#preview > span"]) and re.search(r"min-width:\s*0", rules["#preview > span"])
-    assert re.search(r"white-space:\s*nowrap", rules["#preview > span > span"]) and re.search(r"text-overflow:\s*ellipsis", rules["#preview > span > span"])
+    name = rules["#preview .preview-name"]
+    assert re.search(r"white-space:\s*nowrap", name) and re.search(r"text-overflow:\s*ellipsis", name) and re.search(r"overflow:\s*hidden", name)
+    size = rules["#preview .preview-size"]   # P6 fix 1: the pixel size and the MB wrap rather than being cut short, at 801-890 px too
+    assert re.search(r"overflow-wrap:\s*anywhere", size) and not re.search(r"nowrap|ellipsis", size)
     assert re.search(r"display:\s*none", rules["#preview .preview-sep"])
 
 

@@ -30,8 +30,9 @@
 //                                            whole-card replace; without it a re-rendered card starts closed
 //   turn: 3                                  the turn's number in the session: it names the card and tells the same
 //                                            control of two cards apart ("Copy report, turn 3")
-// Every control a card rebuilds each frame has a data-action (copy, raw, models, more, stage, view, show), so the page can give
-// focus back to the same control after the replace: focusKey before it, restoreFocus after.
+// Every control a card rebuilds each frame has a data-action (copy, raw, models, more, stage, view, show), and so does a clamped report
+// (clamp), which takes the focus its Show less had, so the page can give focus back to the same element after the replace: focusKey before it,
+// restoreFocus after.
 import { isSameOriginPath } from './api.js';
 import { STAGES, initialView, labelsPending, stageState } from './state.js';
 
@@ -661,13 +662,15 @@ export function renderNeighbors(view, ctx) {
 // card is in it and the text is measured (settleClamps, P6 fix 1). ui.reports keeps the open ones by key, so the next frame builds them open,
 // and an open report keeps its Show less. A report closed again is measured as it closes (P6-A g): the page may have grown wider while it
 // was open, and three lines may hold it all now, so no Show all is left that would reveal nothing; the focus its button had goes to the
-// report itself. key also names the button for focusKey. -> nodes.
+// report itself, which can take it (tabindex -1: never a stop of Tab) and is found again by its key in the next frame's card (P6 fix 1).
+// key also names the button for focusKey. -> nodes.
 function clampedText(text, key, name, v, cx) {
   const ui = uiOf(v, cx);
   if (!(ui.reports instanceof Set)) ui.reports = new Set();   // a record made before the field existed
   let open = ui.reports.has(key);
   const id = `clamp-${str(v.id).replace(/[^\w-]/g, '_') || 'turn'}-${key.replace(/[^\w-]/g, '_')}`;
-  const body = el('p', { class: open ? 'clamp-text clamped open' : 'clamp-text clamped', id }, text);
+  const body = el('p', { class: open ? 'clamp-text clamped open' : 'clamp-text clamped', id, tabindex: '-1', 'data-action': 'clamp',
+                         'data-key': key }, text);
   const verb = () => (open ? 'Show less' : 'Show all');
   const toggle = el('button', { type: 'button', class: 'show-all', 'data-action': 'show', 'data-key': key, 'aria-expanded': String(open),
                                 'aria-controls': id, 'aria-label': named(`${verb()} of ${name}`, cx) }, verb());
@@ -680,10 +683,7 @@ function clampedText(text, key, name, v, cx) {
     toggle.setAttribute('aria-label', named(`${verb()} of ${name}`, cx));
     if (open) ui.reports.add(key); else ui.reports.delete(key);
     if (open || overflowing(body)) return;
-    if (toggle.matches?.(':focus')) {   // the button is going: its focus goes to the report it was about, not to the page
-      body.setAttribute('tabindex', '-1');
-      body.focus({ preventScroll: true });
-    }
+    if (toggle.matches?.(':focus')) body.focus({ preventScroll: true });   // the button is going: its focus goes to the report it was about
     row.hidden = true;
   });
   return [body, row];
@@ -822,13 +822,15 @@ export function renderAssistantCard(view, ctx) {
 
 // ---- keeping focus through the whole-card replace -------------------------------------------------------------------------
 
-// Controls a card has several of outside its stages (a picture's viewer button, a report's Show all): each names what it is for in its
-// data-key ("match:2", "published:model", "image:thumb", "neighbor:3"), which no section that appears before it can shift (P6 fix 1).
-const KEYED_ACTIONS = ['view', 'show'];
+// Controls a card has several of outside its stages (a picture's viewer button, a report's Show all, the clamped report itself): each names
+// what it is for in its data-key ("match:2", "published:model", "image:thumb", "neighbor:3"), which no section that appears before it can shift
+// (P6 fix 1).
+const KEYED_ACTIONS = ['view', 'show', 'clamp'];
 const DATA_KEY = /^[\w:-]{1,64}$/;
 
 // The control a node is in (or is), as a key that survives the rebuild: copy, raw, models, stage:<stage>, more:<stage>:<n>,
-// the nth show-more button of that stage's table, or view:<data-key> and show:<data-key>. null when the node is not in one of those.
+// the nth show-more button of that stage's table, or view:<data-key>, show:<data-key> and clamp:<data-key>. null when the node is not in one
+// of those.
 export function focusKey(node) {
   const control = node?.closest?.('[data-action]');
   if (!control) return null;
@@ -847,7 +849,7 @@ export function focusKey(node) {
   return index < 0 ? null : `more:${stage}:${index}`;
 }
 
-const FOCUS_KEY = /^(?:(copy|raw|models)|stage:([a-z]+)|more:([a-z]+):(\d+)|(view|show):([\w:-]{1,64}))$/;
+const FOCUS_KEY = /^(?:(copy|raw|models)|stage:([a-z]+)|more:([a-z]+):(\d+)|(view|show|clamp):([\w:-]{1,64}))$/;
 
 // Puts focus on the control of the rebuilt card that key names: after card.replaceWith(next), restoreFocus(next, key),
 // with key taken by focusKey before it. true when the control took focus; false when there is no such control (a Copy

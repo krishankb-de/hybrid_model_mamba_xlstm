@@ -784,9 +784,12 @@ def test_the_composer_cases_are_the_carried_widths_with_the_drawer_open_and_320_
 def _viewer(width: int = 1280, height: int = 900, pair: bool = True) -> Dict[str, Any]:
     """What MEASURE_VIEWER_JS reports for a viewer in order (check l, P6-E): under a 40 px banner, a 50 px bar, then one pane, or two side by
     side (stacked below 700 px), each picture loaded and drawn whole inside its stage, its footer naming its size, and every control hit at its
-    centre."""
+    centre. On a short page under 700 px (P6 fix 1) each stage is half the viewer's height, and the second pane runs below the fold."""
     top, bar = 40.0, 90.0
-    if pair and width >= 700:
+    if height <= 480 and width < 700:   # the viewer scrolls inside itself, its panes stacked
+        stage = (height - top) / 2
+        boxes = [[0.0, bar + k * (stage + 26), float(width), bar + k * (stage + 26) + stage + 24] for k in range(2 if pair else 1)]
+    elif pair and width >= 700:
         boxes = [[0.0, bar, width / 2 - 1, float(height)], [width / 2 + 1, bar, float(width), float(height)]]
     elif pair:
         middle = (bar + height) / 2
@@ -797,8 +800,8 @@ def _viewer(width: int = 1280, height: int = 900, pair: bool = True) -> Dict[str
               "footer": "Your X-ray · 512×640 px"} for b in boxes]
     controls = [{"name": n, "ok": True} for n in ("[out]", "[in]", "[fit]", "[actual]", "[reset]", "[brightness]", "[contrast]", "[close]")]
     controls += [{"name": "viewer-stage", "ok": True} for _ in boxes]
-    return {"doc": [width, width], "viewer": {"box": [0.0, top, float(width), float(height)], "sw": width, "cw": width}, "panes": panes,
-            "controls": controls}
+    return {"doc": [width, width], "viewer": {"box": [0.0, top, float(width), float(height)], "sw": width, "cw": width, "ch": height - top},
+            "panes": panes, "controls": controls}
 
 
 def test_a_viewer_in_order_has_no_failures_single_or_side_by_side():   # P6-E
@@ -848,10 +851,32 @@ def test_two_pictures_are_side_by_side_from_700_px_and_stacked_below():   # P6-E
 
 def test_where_the_page_scrolls_a_pane_may_run_below_the_viewport_if_it_can_be_scrolled_to():   # P6-E
     tall = _viewer(320, 256)
-    tall["panes"][1]["box"][3] = tall["panes"][1]["stage"][3] = 700.0   # under the fold of a viewer that scrolls inside
-    tall["panes"][1]["img"]["box"][3] = 660.0
+    pane = tall["panes"][1]   # moved under the fold of a viewer that scrolls inside, as tall as it was
+    for box in (pane["box"], pane["stage"], pane["img"]["box"]):
+        box[1] += 450.0
+        box[3] += 450.0
     assert layout.check_viewer(tall, 320, 256, True, scroll=True) == []
     assert any("leaves the viewport" in f for f in layout.check_viewer(tall, 320, 256, True))
+
+
+def test_on_a_short_page_a_stacked_viewer_leaves_room_for_a_touch_to_scroll_it():   # P6 fix 1 (8)
+    """A stage takes a touch for its picture (pan, pinch). Where the viewer scrolls inside itself with its panes stacked (a phone held
+    sideways), a stage that fills most of it leaves a finger little but pictures to land on: each stage takes at most 60% of the viewer's
+    height. Side by side (from 700 px) the viewer scrolls only past its bar and footer, and a viewer that does not scroll needs no such room."""
+    for pair in (False, True):
+        roomy = _viewer(320, 256, pair)   # a 216 px viewer, each stage 108 px
+        assert layout.check_viewer(roomy, 320, 256, pair, scroll=True) == [], pair
+        edge = _viewer(320, 256, pair)
+        edge["panes"][0]["stage"][3] = edge["panes"][0]["stage"][1] + 129   # 59.7% of the viewer
+        assert layout.check_viewer(edge, 320, 256, pair, scroll=True) == [], pair
+        full = _viewer(320, 256, pair)
+        full["panes"][0]["stage"][3] = full["panes"][0]["stage"][1] + 131   # 60.6%
+        assert any("pane 1 takes 131 of the 216 px viewer (61%), over 60%: little of it is left for a touch to scroll it" in f
+                   for f in layout.check_viewer(full, 320, 256, pair, scroll=True)), pair
+        assert not any("touch" in f for f in layout.check_viewer(full, 320, 256, pair)), pair   # a viewer that does not scroll needs no room
+    beside = _viewer(800, 400)   # side by side, stages of 286 px in a 360 px viewer that scrolls past its bar and footer
+    assert layout.check_viewer(beside, 800, 400, True, scroll=True) == []
+    assert layout.VIEWER_TOUCH_VIEWPORTS == [(568, 320)] and layout.MAX_TOUCH_STAGE_SHARE == 0.6   # a landscape phone, beside the short ones
 
 
 def test_a_card_section_that_is_missing_wide_or_holds_a_bad_picture_fails():
@@ -976,12 +1001,14 @@ def test_the_loop_runs_every_case_and_passes_on_a_page_in_order():
                 + viewports * len(layout.SCHEMES)    # P6-B: and one for the card's own sections
                 + viewports * len(layout.SCHEMES)    # P6 fix 1: and one with the test-split picker open
                 + len(layout.COMPOSER_CASES) * len(layout.SCHEMES) * len(layout.COMPOSER_STATES)    # P6-A: the composer's rows
-                + viewports * len(layout.SCHEMES) * len(layout.VIEWER_STATES))   # P6-E: the viewer open, one picture and two
-    assert cases == expected == 342
+                + viewports * len(layout.SCHEMES) * len(layout.VIEWER_STATES)    # P6-E: the viewer open, one picture and two
+                + len(layout.VIEWER_TOUCH_VIEWPORTS) * len(layout.SCHEMES) * len(layout.VIEWER_STATES))   # P6 fix 1: and on a landscape phone
+    assert cases == expected == 346
     assert failures == []
     assert page.opened == ((len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)) * len(layout.SCHEMES)
                            + len(layout.TALL_WIDTHS) * len(layout.SCHEMES)
-                           + len(layout.COMPOSER_CASES) * len(layout.SCHEMES))   # one load per viewport and scheme, the drawer and Stop are toggled in it
+                           + len(layout.COMPOSER_CASES) * len(layout.SCHEMES)
+                           + len(layout.VIEWER_TOUCH_VIEWPORTS) * len(layout.SCHEMES))   # one load per viewport and scheme, the drawer and Stop are toggled in it
     assert page.sections_drawn == viewports * len(layout.SCHEMES)                  # the card drawn once per viewport and scheme,
     assert page.sections_measured == viewports * len(layout.SCHEMES) * 2           # and measured with the drawer closed and open
     assert page.picker_measured == viewports * len(layout.SCHEMES)
@@ -989,20 +1016,21 @@ def test_the_loop_runs_every_case_and_passes_on_a_page_in_order():
     assert {(w, h, drawer, state) for w, h, drawer, state, _ in page.composer_set_up} == {
         (w, h, drawer, state) for w, h, drawer in layout.COMPOSER_CASES for state in layout.COMPOSER_STATES}
     assert {name for *_, name in page.composer_set_up} == {layout.LONG_FILE}   # every case with the long file name
-    assert page.viewer_measured == viewports * len(layout.SCHEMES) * len(layout.VIEWER_STATES)
-    assert {(w, h) for w, h, _ in page.viewers_opened} == {(w, h) for h in layout.HEIGHTS for w in layout.WIDTHS} | set(layout.SHORT_VIEWPORTS)
+    assert page.viewer_measured == (viewports + len(layout.VIEWER_TOUCH_VIEWPORTS)) * len(layout.SCHEMES) * len(layout.VIEWER_STATES)
+    assert {(w, h) for w, h, _ in page.viewers_opened} == ({(w, h) for h in layout.HEIGHTS for w in layout.WIDTHS} | set(layout.SHORT_VIEWPORTS)
+                                                           | set(layout.VIEWER_TOUCH_VIEWPORTS))
     assert sorted({pair for *_, pair in page.viewers_opened}) == [False, True]
 
 
 def test_the_loop_reports_a_stop_button_that_never_renders_in_the_cases_that_show_it():
     cases, failures = layout.run_checks(FakePage(stop_renders=False), "http://x/")
     assert failures and all("#stop is not rendered, but the case shows it" in f and "stop=shown" in f for f in failures)
-    assert cases == 342
+    assert cases == 346
 
 
 def test_the_loop_reports_a_save_button_that_never_renders_in_the_save_cases_only():
     cases, failures = layout.run_checks(FakePage(save_renders=False), "http://x/")
-    assert cases == 342 and len(failures) == len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)   # once per viewport: both schemes fail alike
+    assert cases == 346 and len(failures) == len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)   # once per viewport: both schemes fail alike
     assert all("light+dark" in f and "save" in f and "#drawer-save is not rendered" in f for f in failures), failures
 
 

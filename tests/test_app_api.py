@@ -204,7 +204,7 @@ def test_a_text_only_turn_tells_a_question_by_the_whitespace_the_page_uses(clien
     the page's hint says; a question whose words a U+0085 splits is still a question, and gets the fixed answer."""
     sid = client.post("/v1/sessions", json={}).json()["id"]
     _turn(client, sid)
-    rerun = _turn(client, sid, image=False, text="﻿")
+    rerun = _turn(client, sid, image=False, text="\ufeff")
     assert rerun[0]["data"]["image"]["source"] == "previous" and not [f for f in rerun if f["event"] == "warning"]
     asked = _turn(client, sid, image=False, text="is it\x85pneumonia?")
     assert [f["data"]["code"] for f in asked if f["event"] == "warning"] == ["not_a_command"] and asked[0]["data"]["image"] is None
