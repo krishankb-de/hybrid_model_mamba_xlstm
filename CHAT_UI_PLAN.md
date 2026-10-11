@@ -3948,7 +3948,7 @@ def test_startup_sweep_removes_expired_sessions_and_health_reports_the_policy(tm
 
 Commit `"P8-B: retention sweep"`.
 
-- [ ] **P8-C** Load drill: 6 concurrent turns → 4 accepted, 2 × 429; all 4 complete with contiguous `seq`.
+- [x] **P8-C** Load drill: 6 concurrent turns → 4 accepted, 2 × 429; all 4 complete with contiguous `seq`.
 
 First extract the P3-D `live` fixture's body into `tests/app_helpers.py`, so both files share it (the fixture then calls it):
 

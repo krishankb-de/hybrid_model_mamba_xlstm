@@ -585,7 +585,7 @@
           "desc": "Retention: a sweep at start-up and daily; RETENTION_DAYS per mode; the banner states it."
         },
         "P8-C": {
-          "done": false,
+          "done": true,
           "desc": "Load drill: 6 concurrent turns → 4 accepted, 2 × 429; all 4 complete with contiguous seq."
         },
         "P8-D": {
@@ -605,7 +605,14 @@
         "p8ab_commits": "c8ab0f9,ec1111c",
         "p8ab_review": "approved",
         "p8ab_pytest": "3731",
-        "p8ab_e2e": "21"
+        "p8ab_e2e": "21",
+        "p8c_commits": "3612a3d,daaffcb",
+        "p8c_laptop_wall_s": "6.78",
+        "p8c_cluster_job": "2638789",
+        "p8c_cluster_accepted": "4",
+        "p8c_cluster_refused": "2",
+        "p8c_cluster_wall_s": "20.38",
+        "p8c_cluster_ok": "true"
       },
       "verdict": null
     },
@@ -764,9 +771,10 @@
     "P8-A (413 before parsing on every route, request ids + JSON request log without query, error envelope everywhere, public rate limit 6/10 min) and P8-B (retention sweep at start-up + daily, RETENTION_DAYS 1-3650, both-mode policy, /healthz retention_days, banner line): review approved (0 critical/important; 5 minors -> carried P8-followup/P8-E); merged c8ab0f9, ec1111c; gates on ec1111c: validate All gates passed (pytest 3731 passed, 1 skipped, 26 deselected, 21 xfailed), e2e 21/21.",
     "P7-C complete: tunnel.sh (forward loop, endpoint re-check every RECHECK_S=60, ::1 bind test, quoted known_hosts) + public_demo.sh (public-mode gate + watchdog every DEMO_RECHECK_S=10); review approved, fix round 1 re-review clean (1 minor parked); merged 86af48d + 98c596c; tunnel tests 196.",
     "2026-10-11: 2026-10-11: user approved the cluster retention sweep and chose the stop-trained model; root cause of the unreadable local report = the dev server's tiny random-init engine (by design). Serve job 2637561 submitted (sync 5c38b2a, MODELS=m3, DRIFT_NOTE 20/20); P9-G5a (EOS model in the registry) + P9-G6 (length-penalty lever) dispatched; P9-G6 added to the plan with its R4 prediction.",
-    "P6-A (one intake path in composer.js: click/drag/paste, preview with pixel size, DICOM/type/20 MB refusals, Uploading…/Cancel upload with server-side disconnect checks) and P6-E (viewer.js: full-screen single/side-by-side, zoom/pan/brightness/contrast, keyboard, focus trap, Escape topmost): review → fix rounds 1-2 clean; merged 1c013b1, b5fb4b6, 590a926, cb38f78 (save_upload combined with P8-C's lock). Gates on cb38f78: validate All gates passed (pytest 4214 passed, 1 skipped, 27 deselected, 21 xfailed), e2e 22/22, layout 356/0, browser 10/0."
+    "P6-A (one intake path in composer.js: click/drag/paste, preview with pixel size, DICOM/type/20 MB refusals, Uploading…/Cancel upload with server-side disconnect checks) and P6-E (viewer.js: full-screen single/side-by-side, zoom/pan/brightness/contrast, keyboard, focus trap, Escape topmost): review → fix rounds 1-2 clean; merged 1c013b1, b5fb4b6, 590a926, cb38f78 (save_upload combined with P8-C's lock). Gates on cb38f78: validate All gates passed (pytest 4214 passed, 1 skipped, 27 deselected, 21 xfailed), e2e 22/22, layout 356/0, browser 10/0.",
+    "P8-C: load drill — laptop (tiny, cap 4): 4 accepted, 2 x overloaded_error, seq contiguous, wall 6.78 s; cluster (serve job 2638789 via tunnel localhost:8010, default model hybrid_150m_m3_rrg_eos, CPU): RESULT requested 6, accepted 4, refused_429 2 (overloaded_error), done 4, seq_contiguous true, session_deleted true, wall_s 20.38, ok true. Drill found and fixed the save_upload race (merged 3612a3d, daaffcb; review approved)."
   ],
-  "last_updated": "2026-10-11T22:38:28+02:00",
+  "last_updated": "2026-10-11T22:41:54+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
