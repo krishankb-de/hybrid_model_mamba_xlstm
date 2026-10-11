@@ -3334,7 +3334,7 @@ Commit `"P5-B: gallery builder (+tiny) reusing the retrieval chapter's loaders"`
   - A sandbox rehearsal of the wrapper.
   - Unit tests of the pure pieces: grouping, report text, manifest and provenance.
 
-- [ ] **P5-C** `scripts/label_gallery_reports.py` and `_h100.sh` (`.venv_chexbert`): `labels.npy` via group representatives; canary and projection; a 0-mismatch cross-check on the 2,663 test references.
+- [x] **P5-C** `scripts/label_gallery_reports.py` and `_h100.sh` (`.venv_chexbert`): `labels.npy` via group representatives; canary and projection; a 0-mismatch cross-check on the 2,663 test references.
 
 **Files:** create `scripts/label_gallery_reports.py`, `scripts/label_gallery_reports_h100.sh`, `tests/test_label_gallery_reports.py`; modify `tests/test_willi_parity.py`.
 
@@ -4219,7 +4219,7 @@ What it means for the plan:
   - **Wall time.** 1.1–1.8 h for 12,000 steps on 4 H100. The published run took about 1.3 h.
   - **Final `val/lm_loss`.** Within 0.03 of the published run's last value, slightly higher more likely than lower: one more target per report.
   - **DONE.** Written, with `steps:12000`.
-- [ ] **P9-G4** (cluster) The evaluation job, on the official test split (n = 2,663).
+- [x] **P9-G4** (cluster) The evaluation job, on the official test split (n = 2,663).
   - The EOS model is decoded with the EOS-stop beam search (beam 3, budget 200, so the model, not the budget, ends the report).
   - The baseline is the published Mamba-3 run, decoded with the published protocol.
   - Report:
@@ -4266,6 +4266,17 @@ What it means for the plan:
   - **Length.** EOS reports average 40–80 words. Repeated sentences per report fall to near 0.
   - **Gate.** Pass, meaning no main metric significantly worse: 65%. ROUGE-L may even rise, because the published reports are cut at 100 tokens. The most likely "worse" is BLEU-4 or exact match, if the EOS model writes shorter reports.
   - **Wall time.** Decode 0.8–1.5 h (cached, beam 3), CheXbert about 30 min, compare under 30 min.
+
+  **Result (2026-10-11): the stop works; the gate fails.** Jobs 2636346 (decode, 31 min, gx08), 2636347 (CheXbert, 15 min) and 2636348 (compare, 12 min), sync a0afdb2 clean.
+  - **Decode, as predicted.** 2,662 of 2,663 reports end at EOS; 1 is cut at the 200-token budget (`share_cut` 0.0004).
+  - **Length, as predicted.** 44.2 words (68.3 GPT-2 tokens) per report, against 58.5 for the published run and 72.3 for the references. Repeated sentences per report fall from 0.16 to 0.02 (references 0.01). The share whose last sentence is unterminated falls from 77.4% to 21.1% (references 24.0%).
+  - **Gate: fail (predicted pass, 65%).** Six main metrics are significantly worse (paired bootstrap, 1,000 resamples, seed 0; EOS − published with its 95% CI):
+    - BLEU-1 0.1922 vs 0.2479 (−0.0557 [−0.0591, −0.0522]) and BLEU-4 0.0465 vs 0.0571 (−0.0105 [−0.0127, −0.0084]). This is consistent with BLEU's brevity penalty: the EOS reports are 61% of the references' mean length, the published ones 81%.
+    - CheXbert-14 micro 0.4464 vs 0.4661 (−0.0197 [−0.0285, −0.0111]), 14-macro 0.2616 vs 0.2834 (−0.0218 [−0.0313, −0.0129]), 5-micro 0.5128 vs 0.5316 (−0.0188 [−0.0305, −0.0073]), 5-macro 0.4127 vs 0.4357 (−0.0230 [−0.0346, −0.0121]).
+    - ROUGE-L is significantly better: 0.1948 vs 0.1920 (+0.0028 [0.0003, 0.0053]). Exact match ties (14 labels +0.0056 [−0.0034, 0.0143]; 5 labels +0.0015 [−0.0124, 0.0158]).
+    - Per label (informational, never gating), worse: Pneumonia 0.090 vs 0.205, Fracture 0.000 vs 0.061, Edema 0.356 vs 0.416, Pleural Effusion 0.597 vs 0.631. Shorter reports name fewer findings.
+  - **Wall time:** faster than predicted (decode 0.52 h, CheXbert 15 min, compare 12 min).
+  - **What it means.** The EOS model stops where a report ends and no longer repeats itself, but it says less, which costs about 2 points of every CheXbert F1. Per P9-G5 it is offered as a selectable model. Making it the default is the user's decision, and the failed gate argues against a silent switch.
 - [ ] **P9-G5** (laptop, then cluster) The EOS model in the UI.
   - The model appears in `MODEL_CHECKPOINTS` as a selectable model. Its card names the EOS training and links the G4 numbers.
   - The published checkpoints and numbers are unchanged.

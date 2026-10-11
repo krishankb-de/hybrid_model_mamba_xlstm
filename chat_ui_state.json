@@ -411,7 +411,7 @@
           "desc": "scripts/build_retrieval_gallery.py (with --tiny) and _h100.sh: the §6.5 files through evaluate_cxr_retrieval's own loaders; tower hash; R@k gate inside the job."
         },
         "P5-C": {
-          "done": false,
+          "done": true,
           "desc": "scripts/label_gallery_reports.py and _h100.sh (.venv_chexbert): labels.npy via group representatives; canary and projection; a 0-mismatch cross-check on the ..."
         },
         "P5-D": {
@@ -455,7 +455,17 @@
         "p5b_isbi_max_abs_diff": "3.035e-03",
         "p5b_withheld": "0",
         "p5b_labels_status": "pending",
-        "p5b_sync": "c516e4e"
+        "p5b_sync": "c516e4e",
+        "p5c_array_job": "2636349",
+        "p5c_merge_job": "2636350",
+        "p5c_refs_mismatch": "0",
+        "p5c_labels_mismatch": "0",
+        "p5c_groups": "184686",
+        "p5c_rows": "194125",
+        "p5c_test_rows_sharing_a_text": "23",
+        "p5c_labels_status": "done",
+        "p5c_shard_wall_min": "34",
+        "p5c_sync": "a0afdb2"
       },
       "verdict": null
     },
@@ -621,7 +631,7 @@
           "desc": "(cluster) The training job."
         },
         "P9-G4": {
-          "done": false,
+          "done": true,
           "desc": "(cluster) The evaluation job, on the official test split (n = 2,663)."
         },
         "P9-G5": {
@@ -648,7 +658,22 @@
         "g3_published_val_loss": "1.0188",
         "g3_ckpt_exists": "true",
         "g3_preflight_ok": "true",
-        "g3_sync": "c516e4e"
+        "g3_sync": "c516e4e",
+        "g4_decode_job": "2636346",
+        "g4_chexbert_job": "2636347",
+        "g4_compare_job": "2636348",
+        "g4_ended_by_eos": "2662",
+        "g4_cut": "1",
+        "g4_rouge_l": "0.1948",
+        "g4_bleu_1": "0.1922",
+        "g4_bleu_4": "0.0465",
+        "g4_chexbert_14_micro": "0.4464",
+        "g4_chexbert_14_macro": "0.2616",
+        "g4_chexbert_5_micro": "0.5128",
+        "g4_chexbert_5_macro": "0.4127",
+        "g4_gate": "fail",
+        "g4_mean_words": "44.17",
+        "g4_sync": "a0afdb2"
       },
       "verdict": null
     }
@@ -709,9 +734,11 @@
     "2026-10-11: 2026-10-11 resume: P5-B + P9-G3 ticked; sync a0afdb2; submitted G4 chain 2636346 -> 2636347 -> 2636348 and P5-C labels array 2636349 -> merge 2636350; re-reviews of P6-B/C/D fix 1 and P7-B fix 1 and the P7-C fix round dispatched.",
     "P7-B complete (laptop part): CLI app/cli.py + serve_chat_h100.sh / serve_chat_gpu_h100.sh; review approved (10 minors), fix round 1 (7 items) re-review clean 2026-10-11 (3 minors parked to final_review: argparse residual echoes, SIGINT doc, reap_group coverage). The real serve job runs in P7-D.",
     "P7-F: delivered inside P7-B (reviewed there): the plan's assertions are all held by test_serve_chat_wrappers_follow_the_cluster_invariants (partition/account/qos/ga03 exclusion/requeue/append, no --gres; GPU twin --gpus=1 without --qos), _start_the_labeller_on_loopback_in_the_chexbert_environment (env -u HF_HOME, --host 127.0.0.1), _refuse_before_they_start_anything (token needed for public or non-loopback bind, --token-file), _prepare_like_the_other_chat_wrappers (HF_HUB_OFFLINE=1) and the GPU-twin identity pin: 5 passed on a0afdb2.",
-    "P6-B/C/D complete: images row + model input (P6-B), similar X-rays grid with n/14 agree and private no-store gallery route (P6-C), ranked matching reports + own-rank badge + test-split picker (P6-D). Review: spec B/C ok, D failed on picker keyboard; fix round 1 (9 items) re-review clean 2026-10-11 (real-Chrome probes; new tests red on pre-fix code; layout 226/0, browser 10/10, e2e 21)."
+    "P6-B/C/D complete: images row + model input (P6-B), similar X-rays grid with n/14 agree and private no-store gallery route (P6-C), ranked matching reports + own-rank badge + test-split picker (P6-D). Review: spec B/C ok, D failed on picker keyboard; fix round 1 (9 items) re-review clean 2026-10-11 (real-Chrome probes; new tests red on pre-fix code; layout 226/0, browser 10/10, e2e 21).",
+    "P5-C: CheXbert labels for gallery g13d_m3_v1 — CPU array 2636349 (8 shards, ~34 min each, gx14) + merge 2636350 (sync a0afdb2 clean): rows 194125, groups 184686, test 2663, refs_mismatch 0, labels_mismatch 0, test_rows_sharing_a_text 23, labels_status=done, withheld 0. As predicted (0 mismatches; CPU shards, faster than ~1 h).",
+    "P9-G4: evaluation done, gate FAIL (a finding, pre-registered). EOS stop works: 2662/2663 end at EOS (share_cut 0.0004), 44.2 words vs 58.5 published vs 72.3 refs, repeats/report 0.02 vs 0.16, unterminated 21.1% vs 77.4%. Worse (CI below 0): BLEU-1 -0.0557, BLEU-4 -0.0105, CheXbert-14 micro -0.0197 (0.4464 vs 0.4661), 14-macro -0.0218, 5-micro -0.0188, 5-macro -0.0230. ROUGE-L better +0.0028 [0.0003,0.0053]; exact match ties. Default-model choice is the user's (P9-G5)."
   ],
-  "last_updated": "2026-10-11T12:02:53+02:00",
+  "last_updated": "2026-10-11T16:35:59+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
