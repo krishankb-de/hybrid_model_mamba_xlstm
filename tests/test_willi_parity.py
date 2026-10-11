@@ -8457,7 +8457,8 @@ def test_tunnel_scripts_are_executable_pass_bash_n_and_use_nothing_newer_than_ba
 def test_tunnel_sh_reads_chat_sessions_endpoint_once_over_ssh_in_batch_mode_and_runs_nothing_else_there():
     code = _tunnel_code()
     read = code[_only_line(code, "chat_sessions/endpoint")]
-    assert 'ssh -o BatchMode=yes -o ConnectTimeout=10 "${LOGIN}" cat chat_sessions/endpoint' in read, read
+    # P7-C fix 1, item 6: the read's stdin is /dev/null, or a tunnel started in the background of a terminal is stopped by SIGTTIN
+    assert read == 'EP=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "${LOGIN}" cat chat_sessions/endpoint 2>/dev/null </dev/null)', read
     # every ssh call is that read or one of the two forwards; `squeue` is only ever text for the person at the laptop
     ssh_calls = [l for l in code if re.search(r"(^|[\s(])ssh -", l)]
     assert len(ssh_calls) == 3 and sum(" -N " in l for l in ssh_calls) == 2, ssh_calls
@@ -8471,13 +8472,15 @@ def test_tunnel_sh_supports_both_paths_and_the_host_key_relaxation_is_on_the_jum
     assert match, "the forward is `if VIA = jump ... else ... fi`"
     jump, login = match.group(1), match.group(2)
     assert '-J "${LOGIN}"' in jump and '-L "${LOCAL_PORT}:127.0.0.1:${PORT}"' in jump and '"${CLUSTER_USER}@${NODE}"' in jump
-    assert "-o StrictHostKeyChecking=accept-new" in jump and '-o UserKnownHostsFile="${HOME}/.ssh/known_hosts_hpi_nodes"' in jump
-    assert login.endswith('-L "${LOCAL_PORT}:${NODE}:${PORT}" "${LOGIN}"'), login
+    assert "-o StrictHostKeyChecking=accept-new" in jump
+    assert '-o "UserKnownHostsFile=\\"${HOME}/.ssh/known_hosts_hpi_nodes\\""' in jump, "the path in double quotes for ssh: a HOME with a space is one file"
+    assert login.endswith('-L "${LOCAL_PORT}:${NODE}:${PORT}" "${LOGIN}" &'), login
     for relaxed in ("-J", "StrictHostKeyChecking", "accept-new", "known_hosts", "127.0.0.1", "CLUSTER_USER"):
         assert relaxed not in login, relaxed
     assert code.count("accept-new") == 1 and code.count("known_hosts_hpi_nodes") == 1, "nowhere but on the jump path"
     for branch in (jump, login):
-        assert branch.startswith("run_child ssh -N "), branch
+        # a background job (the loop that watches it needs its pid), not a command the script waits for
+        assert branch.startswith("ssh -N ") and branch.endswith("&"), branch
         for option in ("ExitOnForwardFailure=yes", "ServerAliveInterval=30", "ServerAliveCountMax=3", "ConnectTimeout=10", "GatewayPorts=no"):
             assert "-o " + option in branch, option
     assert 'VIA=login needs a server started with a BIND other than 127.0.0.1' in code and "(R6)" in code
@@ -8497,8 +8500,11 @@ def test_tunnel_sh_validates_the_endpoint_before_using_it_and_never_echoes_it():
 
 def test_tunnel_sh_tests_the_local_port_by_binding_it_before_every_forward_and_never_connects():
     text, code = _tunnel_text(), _tunnel_code()
-    assert 's.bind(("127.0.0.1", int(sys.argv[1])))' in text, "the loopback address ssh forwards on"
-    assert "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)" in text, "as ssh binds its own listener"
+    # both loopback addresses ssh -L listens on for localhost (P7-C fix 1, item 2), each bound with SO_REUSEADDR as ssh binds its own listener
+    assert 'families = [(socket.AF_INET, "127.0.0.1")]' in text and 'families.append((socket.AF_INET6, "::1"))' in text
+    assert "s.bind((address, port))" in text and text.count(".bind(") == 1, "one bind, for each family in turn"
+    assert "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)" in text and text.count("setsockopt") == 1
+    assert "if error.errno not in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT):" in text, "a family the host does not have counts as free"
     joined = "\n".join(code)
     for connecting in (r"\.connect\(", r"connect_ex", r"create_connection", r"\bcurl\b", r"\bnc\b", r"/dev/tcp", r"\blsof\b", r"\btelnet\b"):
         assert not re.search(connecting, joined), connecting
@@ -8510,10 +8516,11 @@ def test_tunnel_sh_tests_the_local_port_by_binding_it_before_every_forward_and_n
 def test_tunnel_sh_defaults_are_the_plans_and_its_loop_knobs_and_signals_are_handled_and_documented():
     code = _tunnel_code()
     for default in ('LOGIN="${LOGIN:-hpi-hpc}"', 'LOCAL_PORT="${LOCAL_PORT:-8000}"', 'VIA="${VIA:-jump}"',
-                    'CLUSTER_USER="${CLUSTER_USER:-krishankumar.bhushan}"', 'RETRY_SLEEP="${RETRY_SLEEP:-15}"', 'MAX_ATTEMPTS="${MAX_ATTEMPTS:-0}"'):
+                    'CLUSTER_USER="${CLUSTER_USER:-krishankumar.bhushan}"', 'RETRY_SLEEP="${RETRY_SLEEP:-15}"',
+                    'RECHECK_S="${RECHECK_S:-60}"', 'MAX_ATTEMPTS="${MAX_ATTEMPTS:-0}"'):
         assert any(l.startswith(default) for l in code), default
     header = "\n".join(l for l in _tunnel_text().splitlines() if l.startswith("#"))
-    for knob in ("LOGIN", "LOCAL_PORT", "VIA", "CLUSTER_USER", "MAX_ATTEMPTS", "RETRY_SLEEP", "chat_sessions/endpoint", "JSON"):
+    for knob in ("LOGIN", "LOCAL_PORT", "VIA", "CLUSTER_USER", "MAX_ATTEMPTS", "RETRY_SLEEP", "RECHECK_S", "chat_sessions/endpoint", "JSON"):
         assert knob in header, knob
     joined = "\n".join(code)
     for signal_name, status in (("INT", 130), ("TERM", 143), ("HUP", 129)):
@@ -8523,11 +8530,12 @@ def test_tunnel_sh_defaults_are_the_plans_and_its_loop_knobs_and_signals_are_han
 
 def test_public_demo_sh_checks_the_server_is_in_public_mode_before_it_starts_cloudflared():
     text, code = _tunnel_text("public_demo.sh"), _tunnel_code("public_demo.sh")
-    probe = _only_line(code, 'curl -s --max-time 5 "http://localhost:${LOCAL_PORT}/healthz"')
+    probe = _only_line(code, 'curl -s --max-time 5 "http://localhost:${LOCAL_PORT}/healthz"')      # inside public_mode(), the one place that asks
+    first = _only_line(code, "SEEN=$(public_mode)")
     verdict = _only_line(code, 'case "${SEEN}" in')
     installed = _only_line(code, "command -v cloudflared")
     start = _only_line(code, 'cloudflared tunnel --url "http://localhost:${LOCAL_PORT}"')
-    assert probe < verdict < installed < start, "mode first, then cloudflared is looked for, then it is started"
+    assert probe < first < verdict < installed < start, "mode first, then cloudflared is looked for, then it is started"
     arms = code[verdict + 1:code.index("esac", verdict)]
     assert arms[0] == "public) ;;" and all("refuse" in arm for arm in arms[1:]) and len(arms) >= 3, arms
     assert "json.loads" in text and re.search(r'print\(mode if mode in \("public", "private"\) else "unknown"\)', text)
@@ -8547,3 +8555,69 @@ def test_tunnel_scripts_run_nothing_on_the_cluster_and_never_touch_the_token():
             assert forbidden not in text, (name, forbidden)
         for secret in ("app_token", "Authorization", "Bearer", "X-Client-Id", "--token"):
             assert secret not in text, (name, secret)
+
+
+# ── P7-C fix 1 (controller review of 86af48d): the endpoint re-check, the demo watch, the ::1 bind test, the quoted path ──────────────────────
+
+def _header_words(name: str = "tunnel.sh") -> str:
+    """The script's header comment as one run of words: a phrase is found whatever line it was wrapped on."""
+    return " ".join(" ".join(l.lstrip("#") for l in _tunnel_text(name).splitlines() if l.startswith("#")).split())
+
+
+def test_tunnel_sh_rereads_the_endpoint_on_a_timer_with_the_same_read_and_parse_and_compares_before_it_stops_the_forward():
+    """Item 1. A forward whose node or port the server has left stays up and points at nothing: only a re-read finds that out."""
+    code = _tunnel_code()
+    joined = "\n".join(code)
+    assert sum(l == "read_endpoint" for l in code) == 2 and joined.count("parse_endpoint <<<") == 2, "one read and one parse: the attempt's and the watch's"
+    assert 'RECHECK_S="${RECHECK_S:-60}"' in joined
+    assert "case \"${RECHECK_S}\" in ''|0*|*[!0-9]*) die \"RECHECK_S must be a whole number of seconds from 1 to 99999\" ;; esac" in joined
+    assert '[ "${#RECHECK_S}" -le 5 ] || die "RECHECK_S must be a whole number of seconds from 1 to 99999"' in joined, "= ^[1-9][0-9]{0,4}$"
+    watch = joined[joined.index("watch_forward() {"):joined.index("attempt() {")]
+    assert 'while kill -0 "${fwd}" 2>/dev/null; do' in watch and "run_child sleep 1" in watch, "bash 3.2 has no wait -n: a one-second look at the pid"
+    assert '[ "${waited}" -ge "${RECHECK_S}" ] || continue' in watch and watch.count("read_endpoint") == 1
+    assert 'elif [ "${latest}" != "${PARSED}" ]; then' in watch, "host, port and mode, as validated, against the forward's own"
+    assert 'end_forward() { { kill "$1"; wait "$1"; } 2>/dev/null; }' in joined and watch.count('end_forward "${fwd}"') == 3, "gone, unreadable, changed"
+    failed = watch[watch.index('if [ "${RC}" -eq 255 ]; then'):watch.index("elif")]
+    assert "end_forward" not in failed and "return" not in failed, "ssh itself failing (255) keeps the forward: ServerAlive ends a dead one"
+    assert watch.count("NO_PAUSE=1") == 1 and '[ "${NO_PAUSE}" -eq 1 ] || run_child sleep "${RETRY_SLEEP}"' in joined, "no pause after a change only"
+
+
+def test_tunnel_sh_quotes_the_known_hosts_path_for_ssh_and_refuses_a_home_it_cannot_quote():
+    """Item 7. UserKnownHostsFile takes files separated by whitespace, so a path with a space needs the double quotes ssh_config(5) allows."""
+    joined = "\n".join(_tunnel_code())
+    assert '-o "UserKnownHostsFile=\\"${HOME}/.ssh/known_hosts_hpi_nodes\\""' in joined
+    assert 'case "${HOME}" in *[\\"\\\\%]*) die "HOME must not contain a double quote, a backslash or a percent sign' in joined
+    assert joined.index('case "${HOME}" in') < joined.index("read_endpoint"), "refused before anything is asked"
+    assert '[ "${VIA}" != "jump" ] || case "${HOME}"' in joined, "HOME matters on the jump path only"
+
+
+def test_tunnel_sh_header_says_what_it_decides_about_re_reads_and_attempts_and_where_its_port_test_stops():
+    words = _header_words()
+    for fragment in ("RECHECK_S", "re-reads belong to the attempt and are not counted", "the attempt that follows a change counts as a new one",
+                     "changed", "gone", "unreadable", "ssh failed", "exit 255", "ServerAlive", "no RETRY_SLEEP pause", "once a second",
+                     "stdin on /dev/null", "SIGTTIN", "double quotes", "known_hosts_hpi_nodes",
+                     "on 127.0.0.1 and on ::1", "on macOS a listener bound to a wildcard address (0.0.0.0 or ::) can read as free",
+                     "BSD lets a specific bind coexist with a wildcard one"):
+        assert fragment in words, fragment
+
+
+def test_public_demo_sh_checks_the_mode_again_while_the_link_is_up_and_closes_it_on_anything_but_public():
+    """Item 3. A server that comes back in private mode serves MIMIC-derived content and must never sit behind a live public link (R6, DUA)."""
+    text, code = _tunnel_text("public_demo.sh"), _tunnel_code("public_demo.sh")
+    joined = "\n".join(code)
+    start = _only_line(code, 'cloudflared tunnel --url "http://localhost:${LOCAL_PORT}"')
+    again = _only_line(code, "NOW=$(public_mode)")
+    assert start < again and sum("$(public_mode)" in l for l in code) == 2, "the start and the watch ask the same way, the watch after the link is up"
+    loop = joined[joined.index('while kill -0 "${LINK}" 2>/dev/null; do'):joined.index('wait "${LINK}"')]
+    assert "run_child sleep 1" in loop and '[ "${waited}" -ge "${DEMO_RECHECK_S}" ] || continue' in loop, "once a second, a check every DEMO_RECHECK_S"
+    arms = loop[loop.index('case "${NOW}" in'):loop.index("esac")]
+    assert "public) ;;" in arms and arms.count("close_link") == 2, "anything but public closes the link, however it fails"
+    closer = joined[joined.index("close_link() {"):joined.index("trap 'stop 130' INT")]
+    assert 'echo "refusing: $1; cloudflared is stopped and the public link is closed."' in closer and "exit 1" in closer and "end_jobs" in closer
+    assert 'DEMO_RECHECK_S="${DEMO_RECHECK_S:-10}"' in joined
+    assert "case \"${DEMO_RECHECK_S}\" in ''|0*|*[!0-9]*) die \"DEMO_RECHECK_S must be a whole number of seconds from 1 to 99999\" ;; esac" in joined
+    assert '[ "${#DEMO_RECHECK_S}" -le 5 ] || die "DEMO_RECHECK_S must be a whole number of seconds from 1 to 99999"' in joined
+    assert "wait -n" not in joined and "ssh" not in joined
+    words = _header_words("public_demo.sh")
+    for fragment in ("DEMO_RECHECK_S", "default 10", "private mode", "R6", "DUA", "fails closed", "refusing:", "Exit status"):
+        assert fragment in words, fragment

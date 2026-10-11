@@ -14,17 +14,25 @@ group when a rehearsal does not end. Every rehearsal runs in a session of its ow
 
 The static pins (what is on the jump path only, BatchMode on the read, the mode check before cloudflared, no secrets and no cluster
 commands, bash 3.2 syntax) are in tests/test_willi_parity.py. Synthetic data only (R7).
+
+P7-C fix 1 added the loops that watch a running child: tunnel.sh reads the endpoint again every RECHECK_S seconds while its forward runs,
+public_demo.sh asks /healthz again every DEMO_RECHECK_S seconds while cloudflared runs. Both look at their child once a second, so a rehearsal
+whose fake forward or cloudflared ends at once still takes up to a second for it, and RECHECK_S=1 / DEMO_RECHECK_S=1 (the smallest the settings
+allow) put a re-read or a check in every second of a run. The fake ssh numbers its forwards (forward.<n>.pid, forward.<n>.prev) and the fake
+curl its answers (healthz.<n>), so that a test can say what the second read, or the third answer, is.
 """
 import json
 import os
 import re
+import shlex
+import shutil
 import signal
 import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -50,10 +58,16 @@ def record(tool: str) -> str:
 
 
 # `ssh`. The forward (`-N`) and the read (`... cat chat_sessions/endpoint`) are told apart by -N. The n-th call of a kind is played by the
-# file KIND.<n> in $STUB_DIR, else by the file KIND: a forward's file says how it ends (a status, `sleep` to stay up until it is stopped,
-# or `bind` to take LOCAL_PORT as a dev server would, and then end), a read's file is what it prints, with <file>.rc beside it for its status.
+# file KIND.<n> in $STUB_DIR, else by the file KIND: a forward's file says how it ends (a status; `sleep` to stay up until it is stopped;
+# `after:SECONDS:STATUS` to stay up that long and then end by itself; or `bind` to take LOCAL_PORT as a dev server would, and then end), a
+# read's file is what it prints, with <file>.rc beside it for its status. Beside the argv it records, in ssh.stdin, what each call's stdin was
+# (/dev/null or something else), and for the n-th forward, in forward.<n>.pid its pid (the forwards that stay up) and in forward.<n>.prev
+# whether the (n-1)-th forward was still running when this one started.
 FAKE_SSH = "#!/bin/bash\n" + record("ssh") + r"""forward=0
 for a in "$@"; do [ "$a" = "-N" ] && forward=1; done
+kind=read
+[ "$forward" = 1 ] && kind=forward
+if [ /dev/stdin -ef /dev/null ]; then echo "$kind devnull" >> "$STUB_DIR/ssh.stdin"; else echo "$kind other" >> "$STUB_DIR/ssh.stdin"; fi
 nth() {
   local n=0
   [ -f "$STUB_DIR/$1.count" ] && n=$(cat "$STUB_DIR/$1.count")
@@ -63,10 +77,16 @@ nth() {
 }
 if [ "$forward" = 1 ]; then
   file=$(nth forward)
+  n=$(cat "$STUB_DIR/forward.count")
   how=255
   [ -n "$file" ] && how=$(cat "$file")
+  prev=$(cat "$STUB_DIR/forward.$((n - 1)).pid" 2>/dev/null)
+  if [ -n "$prev" ] && kill -0 "$prev" 2>/dev/null; then echo alive; else echo gone; fi > "$STUB_DIR/forward.$n.prev"
   case "$how" in
-    sleep) echo $$ > "$STUB_DIR/forward.pid"; exec sleep 60 ;;
+    sleep) echo $$ > "$STUB_DIR/forward.pid"; echo $$ > "$STUB_DIR/forward.$n.pid"; exec sleep 60 ;;
+    after:*) IFS=: read -r _ secs status <<< "$how"
+           echo $$ > "$STUB_DIR/forward.pid"; echo $$ > "$STUB_DIR/forward.$n.pid"
+           sleep "$secs"; exit "$status" ;;
     bind)  python3 "$STUB_DIR/binder.py" "$LOCAL_PORT" "$STUB_DIR/binder.ready" &
            for _ in $(seq 1 50); do [ -f "$STUB_DIR/binder.ready" ] && break; sleep 0.1; done
            exit 255 ;;
@@ -87,16 +107,24 @@ s.listen(1)
 open(sys.argv[2], "w").close()
 time.sleep(30)
 """
-# `curl`: answers with $STUB_DIR/healthz (and its status from healthz.rc), or, with no such file, as curl does for a refused connection.
-FAKE_CURL = "#!/bin/bash\n" + record("curl") + r"""rc=$(cat "$STUB_DIR/healthz.rc" 2>/dev/null)
-if [ -f "$STUB_DIR/healthz" ]; then cat "$STUB_DIR/healthz"; exit "${rc:-0}"; fi
+# `curl`: answers with $STUB_DIR/healthz (and its status from healthz.rc), or, with no such file, as curl does for a refused connection. The
+# n-th call is answered by healthz.<n> (and healthz.<n>.rc) when either exists, so that a test can make one answer in a row bad.
+FAKE_CURL = "#!/bin/bash\n" + record("curl") + r"""n=0
+[ -f "$STUB_DIR/curl.count" ] && n=$(cat "$STUB_DIR/curl.count")
+n=$((n + 1))
+echo "$n" > "$STUB_DIR/curl.count"
+name=healthz
+{ [ -f "$STUB_DIR/healthz.$n" ] || [ -f "$STUB_DIR/healthz.$n.rc" ]; } && name="healthz.$n"
+rc=$(cat "$STUB_DIR/$name.rc" 2>/dev/null)
+if [ -f "$STUB_DIR/$name" ]; then cat "$STUB_DIR/$name"; exit "${rc:-0}"; fi
 exit "${rc:-7}"
 """
 # `cloudflared`: records its argv and its pid, prints a line, then ends with the status in cloudflared.rc (default 0), or stays up until it
-# is stopped when cloudflared.stay exists.
+# is stopped when cloudflared.stay exists, or stays up that many seconds (the number in cloudflared.after) and then ends by itself.
 FAKE_CLOUDFLARED = "#!/bin/bash\n" + record("cloudflared") + r"""echo $$ > "$STUB_DIR/cloudflared.pid"
 echo "fake cloudflared is up"
 if [ -f "$STUB_DIR/cloudflared.stay" ]; then exec sleep 60; fi
+if [ -f "$STUB_DIR/cloudflared.after" ]; then sleep "$(cat "$STUB_DIR/cloudflared.after")"; fi
 exit "$(cat "$STUB_DIR/cloudflared.rc" 2>/dev/null || echo 0)"
 """
 PYTHON3_SHIM = """#!/bin/bash
@@ -213,8 +241,30 @@ class Box:
     def remove(self, name: str) -> None:
         (self.bin / name).unlink()
 
+    def toolbox(self, *names: str) -> Path:
+        """A directory of symlinks to exactly these tools and nothing else: a name that is one of the fakes here links to the fake, any other
+        to the real tool of that name. A script run with only this directory on its PATH can find nothing more, whatever happens to be
+        installed in /usr/bin or /bin on this machine."""
+        tools = self.root / "tools"
+        tools.mkdir(exist_ok=True)
+        for name in names:
+            target = self.bin / name
+            if not target.exists():
+                found = shutil.which(name)
+                assert found, "{} is not installed here".format(name)
+                target = Path(found)
+            (tools / name).symlink_to(target)
+        return tools
+
     def set(self, name: str, text: str) -> None:
-        (self.stubs / name).write_text(text)
+        """A stub file the fakes read, written atomically: a fake that reads it while a test changes it sees the old or the new, never half."""
+        tmp = self.stubs / (name + ".tmp")
+        tmp.write_text(text)
+        os.replace(str(tmp), str(self.stubs / name))
+
+    def unset(self, name: str) -> None:
+        if (self.stubs / name).exists():
+            (self.stubs / name).unlink()
 
     @staticmethod
     def endpoint(host: str = "gx01.example", port: int = 43211, mode: str = "private") -> str:
@@ -248,18 +298,20 @@ class Box:
     def checked_env(self, **extra_env: Optional[str]) -> Dict[str, str]:
         """env(), after the ways a rehearsal could touch the real world are refused: a script that would fall back to port 8000 or to the
         real cluster alias (an unset or empty variable is a default for the scripts), and a PATH on which a real ssh could come before the
-        fakes."""
+        fakes (the fakes' directory first, or a toolbox() directory alone: it holds the fakes and the few real tools a test names)."""
         env = self.env(**extra_env)
         assert env.get("LOCAL_PORT") not in (None, "", "8000"), "a rehearsal never meets port 8000"
         assert env.get("LOGIN") not in (None, "", "hpi-hpc"), "a rehearsal never meets the real login alias"
-        assert env["PATH"] == str(self.bin) or env["PATH"].startswith(str(self.bin) + ":"), "the fakes come first"
+        assert (env["PATH"] == str(self.bin) or env["PATH"].startswith(str(self.bin) + ":")
+                or env["PATH"] == str(self.root / "tools")), "the fakes come first"
         return env
 
-    def start(self, script: Path, **extra_env: Optional[str]) -> Run:
+    def start(self, script: Path, stdin=subprocess.DEVNULL, **extra_env: Optional[str]) -> Run:
+        """stdin is /dev/null unless a test hands the script something else (subprocess.PIPE: an open pipe nobody writes to)."""
         env = self.checked_env(**extra_env)
         log_path = self.root / "run{}.log".format(len(self.runs))
         log = open(str(log_path), "wb")
-        proc = spawn([BASH, str(script)], cwd=str(self.root), env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+        proc = spawn([BASH, str(script)], cwd=str(self.root), env=env, stdin=stdin, stdout=log, stderr=subprocess.STDOUT,
                      start_new_session=True)
         run = Run(proc, log_path, log)
         self.runs.append(run)
@@ -275,6 +327,8 @@ class Box:
         for run in self.runs:
             run.kill_group()
             run.log.close()
+            if run.proc.stdin is not None and not run.proc.stdin.closed:
+                run.proc.stdin.close()
 
 
 @pytest.fixture
@@ -353,16 +407,38 @@ def ctrl_c_on_a_terminal(box: Box, script: Path, ready: Callable[[], object], **
                 stream.close()
 
 
+def known_hosts_option(home: Path) -> str:
+    """The -o value for the nodes' known_hosts file: the path in double quotes, which ssh_config(5) allows around any argument and which a
+    path with a space needs (UserKnownHostsFile takes one or more files, separated by whitespace)."""
+    return 'UserKnownHostsFile="{}"'.format(home / ".ssh" / "known_hosts_hpi_nodes")
+
+
 def jump_forward(box: Box, node: str = "gx01.example", port: int = 43211, user: str = CLUSTER_USER) -> List[str]:
     return ["-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3",
             "-o", "ConnectTimeout=10", "-o", "GatewayPorts=no", "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "UserKnownHostsFile=" + str(box.home / ".ssh" / "known_hosts_hpi_nodes"),
+            "-o", known_hosts_option(box.home),
             "-J", LOGIN, "-L", "{}:127.0.0.1:{}".format(box.port, port), "{}@{}".format(user, node)]
 
 
 def login_forward(box: Box, node: str = "gx01.example", port: int = 43211) -> List[str]:
     return ["-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3",
             "-o", "ConnectTimeout=10", "-o", "GatewayPorts=no", "-L", "{}:{}:{}".format(box.port, node, port), LOGIN]
+
+
+def reads(box: Box) -> List[List[str]]:
+    """The calls of `ssh LOGIN cat chat_sessions/endpoint` so far: the first read of each attempt, and every re-read."""
+    return [c for c in box.calls("ssh") if "-N" not in c]
+
+
+def forwards(box: Box) -> List[List[str]]:
+    return [c for c in box.calls("ssh") if "-N" in c]
+
+
+def stdin_kinds(box: Box, kind: str) -> List[str]:
+    """What the stdin of each `kind` ("read" or "forward") call of the fake ssh was: devnull or other."""
+    path = box.stubs / "ssh.stdin"
+    lines = path.read_text().splitlines() if path.exists() else []
+    return [l.split()[1] for l in lines if l.split()[0] == kind]
 
 
 # ---- tunnel.sh: the endpoint -------------------------------------------------------------------------------------------------------
@@ -403,6 +479,17 @@ def test_a_failing_read_is_no_endpoint_even_when_it_printed_something(box):
     assert len([l for l in done.lines if "no endpoint yet" in l]) == 2
 
 
+def test_the_endpoint_read_takes_its_stdin_from_dev_null(box):
+    """A tunnel started as a background job of an interactive shell is stopped with SIGTTIN when a process of it reads the terminal, and
+    ssh reads its stdin when it runs a command. The harness gives the script an open pipe (not /dev/null, not a terminal) and the fake ssh
+    records whether its own stdin is /dev/null."""
+    box.read(box.endpoint())
+    box.forward("0")
+    run = box.start(TUNNEL, stdin=subprocess.PIPE, MAX_ATTEMPTS="1")
+    assert run.wait(20) == 0, run.out
+    assert stdin_kinds(box, "read") == ["devnull"], "the read inherited the script's stdin"
+
+
 # ---- tunnel.sh: the two paths --------------------------------------------------------------------------------------------------------
 
 def test_a_valid_endpoint_is_forwarded_through_the_login_node_as_a_jump_host(box):
@@ -438,8 +525,35 @@ def test_the_jump_path_keeps_the_host_key_relaxation_to_itself_and_to_the_nodes_
     box.run(TUNNEL, MAX_ATTEMPTS="1")
     forward = box.calls("ssh")[1]
     assert "StrictHostKeyChecking=accept-new" in forward
-    assert "UserKnownHostsFile=" + str(box.home / ".ssh" / "known_hosts_hpi_nodes") in forward, "a file of its own, never ~/.ssh/known_hosts"
-    assert not [a for a in forward if a.endswith("/.ssh/known_hosts")]
+    assert known_hosts_option(box.home) in forward, "a file of its own, never ~/.ssh/known_hosts"
+    assert not [a for a in forward if a.strip('"').endswith("/.ssh/known_hosts")]
+
+
+def test_a_home_with_a_space_reaches_ssh_as_one_quoted_known_hosts_path(box):
+    """P7-C fix 1, item 7. UserKnownHostsFile takes one or more files separated by whitespace, so `UserKnownHostsFile=/Users/a b/.ssh/x`
+    would be two files and the nodes' keys would go to neither. In double quotes (ssh_config(5)) it is one."""
+    home = box.root / "home with space"
+    box.read(box.endpoint())
+    box.forward("0")
+    box.run(TUNNEL, MAX_ATTEMPTS="1", HOME=str(home))
+    (option,) = [a for a in box.calls("ssh")[1] if a.startswith("UserKnownHostsFile=")]
+    path = home / ".ssh" / "known_hosts_hpi_nodes"
+    assert option == 'UserKnownHostsFile="{}"'.format(path)
+    # how ssh reads a -o value: the keyword, an optional '=', then arguments that whitespace separates unless they are in double quotes
+    assert shlex.split(option.replace("=", " ", 1)) == ["UserKnownHostsFile", str(path)], "one file, with its space"
+
+
+@pytest.mark.parametrize("name", ['a"b', "a%b", "a\\b"], ids=["double quote", "percent", "backslash"])
+def test_a_home_that_cannot_be_quoted_for_ssh_is_refused_on_the_jump_path_only(box, name):
+    """Inside double quotes a double quote ends the value, a backslash escapes, and ssh expands a % token in a file name."""
+    home = str(box.root / ("home" + name))
+    box.read(box.endpoint())
+    box.forward("0")
+    done = box.run(TUNNEL, HOME=home)
+    assert done.rc == 2 and len(done.lines) == 1 and done.lines[0].startswith("HOME must not contain"), done.out
+    assert box.calls("ssh") == [], "nothing was asked before the refusal"
+    done = box.run(TUNNEL, MAX_ATTEMPTS="1", VIA="login", HOME=home)      # the login path never uses HOME
+    assert done.rc == 0 and box.calls("ssh") == [READ, login_forward(box)], done.out
 
 
 def test_the_cluster_user_can_be_set(box):
@@ -560,10 +674,13 @@ def test_a_forward_that_ends_at_once_sends_the_loop_back_to_the_file(box):
 
 
 def test_the_pause_between_attempts_is_RETRY_SLEEP_and_there_is_none_after_the_last(box):
+    """Two attempts, one pause between them. The bug this guards against is a loop that sleeps before it looks at MAX_ATTEMPTS, so that
+    a pause follows the last attempt too: that takes 2 x RETRY_SLEEP = 6 s, which the upper bound (a loaded machine has 3 s to spare
+    before it) turns away. A loop with no pause at all (a hammering loop) ends in well under the lower bound."""
     started = time.monotonic()
-    box.run(TUNNEL, MAX_ATTEMPTS="2", RETRY_SLEEP="1.5")
+    box.run(TUNNEL, MAX_ATTEMPTS="2", RETRY_SLEEP="3")
     elapsed = time.monotonic() - started
-    assert 1.5 <= elapsed < 2.9, "one pause of 1.5 s between two attempts, and none after the second: {:.2f} s".format(elapsed)
+    assert 3 <= elapsed < 6, "one pause of 3 s between two attempts, and none after the second: {:.2f} s".format(elapsed)
 
 
 def test_a_busy_local_port_ends_the_tunnel_with_status_1_before_anything_is_asked(box):
@@ -606,8 +723,331 @@ def test_a_port_the_last_forward_left_in_time_wait_is_free(box):
     assert done.rc == 0 and box.calls("ssh") == [READ, jump_forward(box)], done.out
 
 
+def busy_line(box: Box) -> str:
+    return "localhost:{} is already in use (a local dev server?); set LOCAL_PORT to a free port".format(box.port)
+
+
+def loopback_free(family: int, address: str, port: int) -> bool:
+    """Would a bind to this address with SO_REUSEADDR (as ssh binds) succeed? Nothing connects."""
+    with socket.socket(family) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((address, port))
+        except OSError:
+            return False
+    return True
+
+
+def ipv6_loopback_listener(reuse: bool) -> Tuple[socket.socket, int]:
+    """A listener on ::1, on a port that is free on 127.0.0.1, so that only the IPv6 side is busy. Skips the test on a host with no IPv6
+    loopback. Never port 8000."""
+    if not socket.has_ipv6:
+        pytest.skip("this Python was built without IPv6")
+    for _ in range(50):
+        listener = socket.socket(socket.AF_INET6)
+        try:
+            if reuse:
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("::1", 0))
+            listener.listen(1)
+        except OSError as error:
+            listener.close()
+            pytest.skip("no usable IPv6 loopback on this host: {}".format(error))
+        port = listener.getsockname()[1]
+        if port != 8000 and loopback_free(socket.AF_INET, "127.0.0.1", port):
+            return listener, port
+        listener.close()
+    pytest.skip("found no port that is free on 127.0.0.1 and can be taken on ::1")
+
+
+@pytest.mark.parametrize("reuse", [False, True], ids=["plain listener", "SO_REUSEADDR listener"])
+def test_a_listener_on_ipv6_loopback_makes_the_port_busy_too(box, reuse):
+    """P7-C fix 1, item 2. ssh -L binds localhost, which is 127.0.0.1 and ::1, and a browser may resolve localhost to either one: a dev
+    server that listens on ::1 only (node does) is in the tunnel's way as much as one on 127.0.0.1."""
+    listener, box.port = ipv6_loopback_listener(reuse)
+    with listener:
+        box.read(box.endpoint())
+        done = box.run(TUNNEL, MAX_ATTEMPTS="2")      # bounded, so that a tunnel that does not see the listener ends the test quickly
+        assert done.rc == 1 and done.lines == [busy_line(box)], done.out
+        assert box.calls("ssh") == [], "no ssh at all"
+
+
+def test_a_127_0_0_1_listener_that_set_SO_REUSEADDR_itself_still_makes_the_port_busy(box):
+    """uvicorn, like most servers, sets SO_REUSEADDR on its listener, as the bind test does. Two sockets that both set it cannot share one
+    address and port while one of them listens (BSD and Linux agree), so the bind test still finds the server. What it cannot find is
+    named in the script's header: a wildcard listener on macOS."""
+    with socket.socket() as dev_server:
+        dev_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        dev_server.bind(("127.0.0.1", box.port))
+        dev_server.listen(1)
+        box.read(box.endpoint())
+        done = box.run(TUNNEL, MAX_ATTEMPTS="2")
+        assert done.rc == 1 and done.lines == [busy_line(box)], done.out
+        assert box.calls("ssh") == []
+
+
+# A host without IPv6 (no address family, or no ::1 address on its loopback): Python is made to fail the way the kernel does.
+NO_IPV6 = {
+    "EAFNOSUPPORT when the socket is made": """import errno, socket
+_init = socket.socket.__init__
+def _init_no_v6(self, family=-1, *args, **kwargs):
+    if family == socket.AF_INET6:
+        raise OSError(errno.EAFNOSUPPORT, "Address family not supported by protocol")
+    _init(self, family, *args, **kwargs)
+socket.socket.__init__ = _init_no_v6
+""",
+    "EADDRNOTAVAIL when ::1 is bound": """import errno, socket
+_bind = socket.socket.bind
+def _bind_no_v6(self, address):
+    if self.family == socket.AF_INET6:
+        raise OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
+    return _bind(self, address)
+socket.socket.bind = _bind_no_v6
+""",
+}
+
+
+@pytest.mark.parametrize("failure", sorted(NO_IPV6), ids=sorted(NO_IPV6))
+def test_a_family_the_host_does_not_have_counts_as_free_and_the_other_is_still_checked(box, failure):
+    site = box.root / "site"
+    site.mkdir()
+    (site / "sitecustomize.py").write_text(NO_IPV6[failure])
+    probe = subprocess.run([str(box.bin / "python3"), "-c", "import socket; socket.socket(socket.AF_INET6).bind(('::1', 0))"],
+                           env=box.env(PYTHONPATH=str(site)), capture_output=True)
+    assert probe.returncode != 0, "the shim must make IPv6 fail, or this test says nothing"
+    box.read(box.endpoint())
+    box.forward("0")
+    done = box.run(TUNNEL, MAX_ATTEMPTS="1", PYTHONPATH=str(site))
+    assert done.rc == 0 and box.calls("ssh") == [READ, jump_forward(box)], "no IPv6 here, so nothing on ::1 can be in the way: " + done.out
+    with socket.socket() as dev_server:
+        dev_server.bind(("127.0.0.1", box.port))
+        dev_server.listen(1)
+        done = box.run(TUNNEL, MAX_ATTEMPTS="2", PYTHONPATH=str(site))
+        assert done.rc == 1 and done.lines == [busy_line(box)], "127.0.0.1 is still checked: " + done.out
+
+
+def test_a_port_the_last_forward_left_in_time_wait_on_ipv6_is_free(box):
+    """The IPv6 twin of the TIME_WAIT test: ssh closes its forward's listener on ::1 as well, and that side's TIME_WAIT must not read busy."""
+    listener, box.port = ipv6_loopback_listener(reuse=False)
+    with listener:
+        client = socket.create_connection(("::1", box.port))
+        served, _ = listener.accept()
+        served.close()                   # the side that closes first keeps the TIME_WAIT
+        client.close()
+    box.read(box.endpoint())
+    box.forward("0")
+    done = box.run(TUNNEL, MAX_ATTEMPTS="1")
+    assert done.rc == 0 and box.calls("ssh") == [READ, jump_forward(box)], done.out
+
+
+# ---- tunnel.sh: the endpoint is read again while a forward runs ---------------------------------------------------------------------------
+# P7-C fix 1, item 1. A forward whose node or port the server has left stays up and points at nothing: ExitOnForwardFailure covers only the
+# local bind and ServerAlive only a dead ssh connection. RECHECK_S=1 is the smallest the setting allows, so that these runs take seconds.
+
+def forward_pid(box: Box, n: int) -> int:
+    return int((box.stubs / "forward.{}.pid".format(n)).read_text())
+
+
+def when_reads_reach(box: Box, counts: List[int], timeout: float = 30.0) -> Dict[int, float]:
+    """The monotonic time at which the n-th read of the endpoint was seen, for each n in counts (polled every 10 ms)."""
+    seen: Dict[int, float] = {}
+    deadline = time.monotonic() + timeout
+    while len(seen) < len(counts) and time.monotonic() < deadline:
+        have = len(reads(box))
+        for n in counts:
+            if have >= n and n not in seen:
+                seen[n] = time.monotonic()
+        time.sleep(0.01)
+    assert len(seen) == len(counts), "only {} reads were made".format(len(reads(box)))
+    return seen
+
+
+CHANGES = [("another node", {"host": "gx02"}), ("another port", {"port": 43002}), ("another mode", {"mode": "public"})]
+
+
+@pytest.mark.parametrize("change", [c for _, c in CHANGES], ids=[n for n, _ in CHANGES])
+def test_an_endpoint_that_changed_stops_the_forward_and_the_next_attempt_starts_at_once(box, change):
+    """(a) The server was requeued onto another node (or, with --port 0, another port), or came back in another mode. The first forward is
+    stopped and reaped before the second one starts, which goes to the new place, and no RETRY_SLEEP pause comes between them: the 30 s pause
+    would outlast the 20 s the run is given."""
+    old = {"host": "gx01", "port": 43001, "mode": "private"}
+    new = dict(old, **change)
+    box.read(box.endpoint(**old), n=1)                # the first read
+    box.read(box.endpoint(**new))                     # every later one: the re-read, then the next attempt's own read
+    box.forward("sleep", n=1)                         # the first forward stays up until it is stopped
+    box.forward("0", n=2)                             # the second one ends at once, so that MAX_ATTEMPTS ends the script
+    done = box.run(TUNNEL, timeout=20, RECHECK_S="1", RETRY_SLEEP="30", MAX_ATTEMPTS="2")
+    assert done.rc == 0, done.out
+    assert box.calls("ssh") == [READ, jump_forward(box, "gx01", 43001), READ, READ, jump_forward(box, new["host"], new["port"])], done.out
+    assert not alive(forward_pid(box, 1)), "the first forward was stopped"
+    assert (box.stubs / "forward.2.prev").read_text().strip() == "gone", "...and was gone before the second one started: reaped, not orphaned"
+    assert [l for l in done.lines if "forwarding" in l and "gx01:43001" in l], done.out
+    changed = [l for l in done.lines if "endpoint changed" in l]
+    assert len(changed) == 1 and re.match(STAMPED + r"endpoint changed: gx01:43001 \(mode private\) -> {}:{} \(mode {}\); restarting the forward$".format(
+        new["host"], new["port"], new["mode"]), changed[0]), done.out
+    assert len([l for l in done.lines if "forwarding" in l]) == 2 and re.match(
+        STAMPED + r"stopping after 2 attempt\(s\) \(MAX_ATTEMPTS\)$", done.lines[-1]), "the attempt after a change is counted as an attempt"
+
+
+def test_the_re_check_serves_the_login_path_too(box):
+    """The watch does not care which way the forward goes: with VIA=login a changed endpoint is followed by a forward to the new node."""
+    box.read(box.endpoint(host="gx01", port=43001), n=1)
+    box.read(box.endpoint(host="gx02", port=43001))
+    box.forward("sleep", n=1)
+    box.forward("0", n=2)
+    done = box.run(TUNNEL, timeout=20, VIA="login", RECHECK_S="1", RETRY_SLEEP="30", MAX_ATTEMPTS="2")
+    assert done.rc == 0, done.out
+    assert box.calls("ssh") == [READ, login_forward(box, "gx01", 43001), READ, READ, login_forward(box, "gx02", 43001)], done.out
+    assert not alive(forward_pid(box, 1)) and [l for l in done.lines if "endpoint changed: gx01:43001" in l]
+
+
+GONE = [("a read that fails in the file", "", 1), ("a read that prints nothing", "", 0),
+        ("a failing read that still printed an endpoint", Box.endpoint(host="gx01", port=43001), 1)]
+
+
+@pytest.mark.parametrize("text,rc", [(t, r) for _, t, r in GONE], ids=[n for n, _, _ in GONE])
+def test_an_endpoint_file_that_is_gone_stops_the_forward_prints_the_hint_and_retries_after_the_pause(box, text, rc):
+    """(b) A clean stop of the server removes the file first thing, so "gone" is the normal sign of a server that is stopping. The forward
+    is stopped, one line says so, then today's path: the hint, then RETRY_SLEEP, then the file is read again."""
+    box.read(box.endpoint(host="gx01", port=43001), n=1)
+    box.read(text, rc=rc, n=2)                                        # the re-read
+    box.read(box.endpoint(host="gx02", port=43002))                   # the retry, after the pause
+    box.forward("sleep", n=1)
+    box.forward("0", n=2)
+    run = box.start(TUNNEL, RECHECK_S="1", RETRY_SLEEP="2", MAX_ATTEMPTS="2")
+    seen = when_reads_reach(box, [2, 3])
+    assert run.wait(30) == 0, run.out
+    assert seen[3] - seen[2] >= 1.8, "RETRY_SLEEP (2 s) lay between the re-read and the retry: {:.2f} s".format(seen[3] - seen[2])
+    assert not alive(forward_pid(box, 1)), "the forward was stopped"
+    assert box.calls("ssh") == [READ, jump_forward(box, "gx01", 43001), READ, READ, jump_forward(box, "gx02", 43002)]
+    stamped = [re.sub(STAMPED, "", l) for l in run.lines]
+    assert stamped[1:3] == ["endpoint file is gone; stopped the forward to gx01:43001",
+                            "no endpoint yet; is the job running? (ssh fake-login.invalid squeue --me)"], run.out
+    assert all(re.match(STAMPED, l) for l in run.lines[:4]), "one timestamped line each"
+    assert [l for l in run.lines if "forwarding" in l and "gx02:43002" in l]
+
+
+UNREADABLE_LATER = [("not json", "<html>login</html>\n", "html"), ("a command in the host", '{"host": "gx01;touch PWNED", "port": 43211}', "PWNED"),
+                    ("port 70000", '{"host": "gx01", "port": 70000}', "70000"), ("the old host:port sketch", "gx01:43211\n", "43211")]
+
+
+@pytest.mark.parametrize("content,leak", [(c, l) for _, c, l in UNREADABLE_LATER], ids=[n for n, _, _ in UNREADABLE_LATER])
+def test_an_endpoint_that_becomes_unreadable_stops_the_forward_and_takes_the_unreadable_path(box, content, leak):
+    """The file is untrusted at every read: what fails the checks stops the forward, is never printed and never run."""
+    box.read(box.endpoint(host="gx01", port=43001), n=1)
+    box.read(content, n=2)
+    box.read(box.endpoint(host="gx02", port=43002))
+    box.forward("sleep", n=1)
+    box.forward("0", n=2)
+    done = box.run(TUNNEL, timeout=30, RECHECK_S="1", RETRY_SLEEP="0", MAX_ATTEMPTS="2")
+    assert done.rc == 0, done.out
+    assert not alive(forward_pid(box, 1))
+    stamped = [re.sub(STAMPED, "", l) for l in done.lines]
+    assert stamped[1:3] == ["endpoint file is unreadable; stopped the forward to gx01:43001", "endpoint unreadable; retrying"], done.out
+    assert leak not in done.out and not (box.root / "PWNED").exists()
+    assert box.calls("ssh") == [READ, jump_forward(box, "gx01", 43001), READ, READ, jump_forward(box, "gx02", 43002)]
+
+
+def test_a_re_read_that_fails_in_ssh_itself_keeps_the_forward_and_is_tried_again_at_the_next_interval(box):
+    """(c) ssh exit 255 is a connection problem, not news about the file; ServerAlive already ends a forward whose connection is dead."""
+    box.read(box.endpoint(), n=1)
+    box.read("", rc=255, n=2)                         # two re-reads fail in ssh itself...
+    box.read("", rc=255, n=3)
+    box.read(box.endpoint())                          # ...and the later ones are fine
+    box.forward("sleep")
+    run = box.start(TUNNEL, RECHECK_S="1", MAX_ATTEMPTS="0")
+    when_reads_reach(box, [5])
+    pid = forward_pid(box, 1)
+    assert run.proc.poll() is None and alive(pid), "the forward was kept"
+    assert len(forwards(box)) == 1, "no second forward"
+    failed = [l for l in run.lines if "re-check failed" in l]
+    assert len(failed) == 2 and all(re.match(STAMPED + r"endpoint re-check failed \(ssh exit 255\); keeping the forward to gx01\.example:43211$", l)
+                                    for l in failed), "one line per failed re-read: " + run.out
+    assert not [l for l in run.lines if re.search(r"gone|changed|unreadable|stopped the forward", l)], run.out
+    run.signal(signal.SIGTERM)
+    assert run.wait(10) == 143 and not alive(pid)
+
+
+UNCHANGED = [("the same file", lambda: Box.endpoint()),
+             ("the same place from a restarted server (another pid and start time)",
+              lambda: json.dumps({"host": "gx01.example", "port": 43211, "mode": "private", "pid": 777, "started_at": "2026-10-11T09:00:00+00:00"}) + "\n")]
+
+
+@pytest.mark.parametrize("again", [a for _, a in UNCHANGED], ids=[n for n, _ in UNCHANGED])
+def test_an_endpoint_that_is_unchanged_keeps_the_forward_across_re_reads_and_starts_nothing_else(box, again):
+    """(d) Two re-reads and more, one forward, nothing printed about the file, and every read is the same BatchMode read with its stdin on
+    /dev/null (the harness hands the script an open pipe, so a read that inherited it would show)."""
+    box.read(box.endpoint(), n=1)
+    box.read(again())
+    box.forward("sleep")
+    run = box.start(TUNNEL, stdin=subprocess.PIPE, RECHECK_S="1", MAX_ATTEMPTS="0")
+    when_reads_reach(box, [4])                        # the first read and three re-reads
+    pid = forward_pid(box, 1)
+    assert run.proc.poll() is None and alive(pid)
+    assert len(forwards(box)) == 1 and len([l for l in run.lines if "forwarding" in l]) == 1, run.out
+    assert all(c == READ for c in reads(box)), "the re-read is the read"
+    assert set(stdin_kinds(box, "read")) == {"devnull"}, "the re-read, too, takes its stdin from /dev/null"
+    assert [re.sub(STAMPED, "", l) for l in run.lines] == ["forwarding localhost:{} -> gx01.example:43211 via jump (mode private)".format(box.port)]
+    run.signal(signal.SIGTERM)
+    assert run.wait(10) == 143 and not alive(pid)
+
+
+def test_re_reads_are_not_attempts_so_MAX_ATTEMPTS_never_ends_a_forward_that_is_still_wanted(box):
+    """The count in MAX_ATTEMPTS is of attempts (a read, then its forward for as long as it lives), not of re-reads: with MAX_ATTEMPTS=1
+    a live forward is re-read three times and is still there."""
+    box.read(box.endpoint())
+    box.forward("sleep")
+    run = box.start(TUNNEL, RECHECK_S="1", MAX_ATTEMPTS="1")
+    when_reads_reach(box, [4])
+    assert run.proc.poll() is None and "stopping after" not in run.out
+    run.signal(signal.SIGTERM)
+    assert run.wait(10) == 143
+
+
+def test_a_forward_that_dies_between_two_re_reads_is_noticed_within_about_a_second(box):
+    """(e) The forward ends by itself 1.5 s after it started. The first re-read is 30 s away, and the loop must not wait for it: the next
+    attempt (its own read, no re-read) follows within about a second, and the whole run is done in seconds."""
+    box.read(box.endpoint())
+    box.forward("after:1.5:255", n=1)
+    box.forward("0", n=2)
+    started = time.monotonic()
+    done = box.run(TUNNEL, timeout=20, RECHECK_S="30", RETRY_SLEEP="0", MAX_ATTEMPTS="2")
+    elapsed = time.monotonic() - started
+    assert done.rc == 0, done.out
+    assert box.calls("ssh") == [READ, jump_forward(box), READ, jump_forward(box)], "a read for each attempt, and no re-read in between"
+    assert elapsed < 12, "{:.1f} s".format(elapsed)
+
+
+@pytest.mark.parametrize("sig,status,recheck", [(signal.SIGTERM, 143, "1"), (signal.SIGINT, 130, "1"), (signal.SIGHUP, 129, "1"),
+                                                (signal.SIGTERM, 143, "30")], ids=["TERM", "INT", "HUP", "TERM mid-interval"])
+def test_a_signal_during_the_re_check_loop_stops_everything_and_leaves_no_process(box, sig, status, recheck):
+    """(f) The first three: well into the cycle (the first read and two re-reads are behind it); the last: in the middle of a 30 s interval."""
+    box.read(box.endpoint())
+    box.forward("sleep")
+    run = box.start(TUNNEL, RECHECK_S=recheck, MAX_ATTEMPTS="0")
+    wait_for(lambda: (box.stubs / "forward.1.pid").exists())
+    if recheck == "1":
+        when_reads_reach(box, [3])
+    pid = forward_pid(box, 1)
+    assert alive(pid)
+    run.signal(sig)
+    assert run.wait(10) == status, run.out
+    assert not alive(pid), "the ssh was stopped with the script"
+    wait_for(lambda: not run.group_alive(), 5)
+    assert run.lines[-1] == "stopped"
+
+
+def test_ctrl_c_on_a_terminal_during_the_re_check_loop_stops_tunnel_sh_and_the_ssh_it_runs(box):
+    box.read(box.endpoint())
+    box.forward("sleep")
+    status, out, left = ctrl_c_on_a_terminal(box, TUNNEL, lambda: len(reads(box)) >= 3, RECHECK_S="1", MAX_ATTEMPTS="0")
+    assert status == 130 and out.rstrip().endswith("stopped"), (status, out)
+    assert not alive(forward_pid(box, 1)) and not left
+
+
 # ---- tunnel.sh: settings ---------------------------------------------------------------------------------------------------------------
 
+RECHECK_MESSAGE = "RECHECK_S must be a whole number of seconds from 1 to 99999"
 BAD_SETTINGS = [
     ({"VIA": "tunnel"}, "VIA must be jump or login"),
     ({"VIA": "Jump"}, "VIA must be jump or login"),
@@ -633,6 +1073,17 @@ BAD_SETTINGS = [
     ({"RETRY_SLEEP": "1.2.3"}, "RETRY_SLEEP must be a number of seconds"),
     ({"RETRY_SLEEP": ".5"}, "RETRY_SLEEP must be a number of seconds"),
     ({"RETRY_SLEEP": "5."}, "RETRY_SLEEP must be a number of seconds"),
+    ({"RECHECK_S": "0"}, RECHECK_MESSAGE),
+    ({"RECHECK_S": "05"}, RECHECK_MESSAGE),
+    ({"RECHECK_S": "-1"}, RECHECK_MESSAGE),
+    ({"RECHECK_S": "1.5"}, RECHECK_MESSAGE),
+    ({"RECHECK_S": "soon"}, RECHECK_MESSAGE),
+    ({"RECHECK_S": "100000"}, RECHECK_MESSAGE),
+    ({"RECHECK_S": "1e3"}, RECHECK_MESSAGE),
+    ({"RECHECK_S": "99999999999999999999"}, RECHECK_MESSAGE),
+    ({"RECHECK_S": "5 6"}, RECHECK_MESSAGE),
+    ({"RECHECK_S": " 5"}, RECHECK_MESSAGE),
+    ({"RECHECK_S": "5;touch PWNED"}, RECHECK_MESSAGE),
 ]
 
 
@@ -642,6 +1093,12 @@ def test_a_setting_that_is_not_one_is_refused_with_status_2_before_anything_runs
     done = box.run(TUNNEL, **setting)
     assert done.rc == 2 and len(done.lines) == 1 and done.lines[0].startswith(message), done.out
     assert box.calls("ssh") == [] and not (box.root / "PWNED").exists()
+
+
+@pytest.mark.parametrize("value", ["1", "9", "10", "60", "99999"])
+def test_RECHECK_S_takes_a_whole_number_from_1_to_99999(box, value):
+    done = box.run(TUNNEL, MAX_ATTEMPTS="1", RECHECK_S=value)
+    assert done.rc == 0 and [l for l in done.lines if "no endpoint yet" in l], done.out
 
 
 def test_without_python3_the_tunnel_says_so(box):
@@ -705,8 +1162,10 @@ def test_ctrl_c_on_a_terminal_while_it_pauses_between_attempts_ends_it_at_once(b
 # ---- public_demo.sh ----------------------------------------------------------------------------------------------------------------------
 
 def public(box: Box, body: Optional[str], rc: Optional[int] = None) -> None:
-    """What the server's /healthz answers (None: nothing is listening, as curl reports for a refused connection)."""
-    if body is not None:
+    """What the server's /healthz answers from now on (None: nothing is listening, as curl reports for a refused connection)."""
+    if body is None:
+        box.unset("healthz")
+    else:
         box.set("healthz", body)
     if rc is not None:
         box.set("healthz.rc", str(rc))
@@ -766,8 +1225,14 @@ def test_public_demo_refuses_everything_but_json_whose_mode_is_exactly_public(bo
 
 
 def test_without_cloudflared_a_public_server_is_still_refused_with_a_pointer_to_the_install_page(box):
+    """P7-C fix 1, item 4. Not "a PATH on which cloudflared happens to be missing": the PATH is one directory of symlinks to exactly the tools
+    the script runs (curl, python3, sleep) and the fake curl runs (cat), so no cloudflared can be found whatever is installed on this machine."""
+    tools = box.toolbox("curl", "python3", "sleep", "cat")
+    path = str(tools)
+    assert shutil.which("cloudflared", path=path) is None, "the test's own PATH must not hold a cloudflared"
+    assert sorted(p.name for p in tools.iterdir()) == ["cat", "curl", "python3", "sleep"] and all(p.is_symlink() for p in tools.iterdir())
     public(box, '{"mode": "public"}')
-    done = box.run(PUBLIC_DEMO)
+    done = box.run(PUBLIC_DEMO, PATH=path)
     assert done.rc == 1 and len(done.lines) == 1, done.out
     assert done.lines[0].startswith("refusing: cloudflared is not installed") and "https://developers.cloudflare.com/" in done.lines[0]
     assert box.calls("curl") == [CURL + [healthz_url(box)]] and box.calls("ssh") == [], "the one probe, and nothing else was run"
@@ -852,3 +1317,117 @@ def test_public_demo_without_python3_says_so(box):
     done = box.run(PUBLIC_DEMO, PATH=str(box.bin))
     assert done.rc == 2 and len(done.lines) == 1 and "python3" in done.lines[0], done.out
     assert box.calls("curl") == []
+
+
+# ---- public_demo.sh: the watch while the link is up ----------------------------------------------------------------------------------
+# P7-C fix 1, item 3. A server that comes back in private mode serves MIMIC-derived content (R6, DUA) and must never sit behind a live public
+# link, so the mode is asked again every DEMO_RECHECK_S seconds, and the link is closed on anything but JSON whose mode is exactly public.
+
+DEMO_RECHECK_MESSAGE = "DEMO_RECHECK_S must be a whole number of seconds from 1 to 99999"
+
+
+def start_public_demo(box: Box, **env: Optional[str]) -> Tuple[Run, int]:
+    """The demo, with a cloudflared that stays up until it is stopped and a server that says public, up and running: -> (run, cloudflared's pid)."""
+    box.install("cloudflared", FAKE_CLOUDFLARED)
+    public(box, '{"mode": "public"}')
+    box.set("cloudflared.stay", "")
+    run = box.start(PUBLIC_DEMO, **env)
+    wait_for(lambda: (box.stubs / "cloudflared.pid").exists() and "fake cloudflared is up" in run.out)
+    return run, int((box.stubs / "cloudflared.pid").read_text())
+
+
+# (case, what /healthz answers after the flip (None: nothing listening), curl's status, a word the one line must say)
+CLOSES = [
+    ("the mode flips to private", '{"status": "ok", "mode": "private", "default_model": "m"}', 0, "private mode"),
+    ("the server becomes unreachable", None, 7, "no usable answer"),
+    ("the answer times out", None, 28, "no usable answer"),
+    ("the answer is empty", "", 0, "no usable answer"),
+    ("the answer is not JSON", "<html>502 Bad Gateway</html>", 0, "no usable answer"),
+    ("public is only in another field", '{"mode": "private", "default_model": "public"}', 0, "private mode"),
+    ("a mode that only starts with public", '{"mode": "publicish"}', 0, "no usable answer"),
+]
+
+
+@pytest.mark.parametrize("body,rc,word", [(b, r, w) for _, b, r, w in CLOSES], ids=[n for n, _, _, _ in CLOSES])
+def test_the_public_link_is_closed_within_about_DEMO_RECHECK_S_of_the_server_ceasing_to_say_public(box, body, rc, word):
+    run, pid = start_public_demo(box, DEMO_RECHECK_S="2")
+    flipped = time.monotonic()
+    public(box, body, rc)
+    assert run.wait(15) == 1, run.out
+    assert time.monotonic() - flipped < 2 + 6, "within about DEMO_RECHECK_S (2 s)"
+    refusing = [l for l in run.lines if l.startswith("refusing:")]
+    assert len(refusing) == 1 and run.lines[-1] == refusing[0], "one line, and the last: " + run.out
+    assert "the public link is closed" in refusing[0] and word in refusing[0], refusing[0]
+    assert "cloudflared stopped:" not in run.out, "the one line says it all"
+    assert not alive(pid), "cloudflared was stopped"
+    wait_for(lambda: not run.group_alive(), 5)
+    assert len(box.calls("cloudflared")) == 1, "and not started again"
+
+
+def test_a_server_that_stays_public_keeps_the_link_across_checks(box):
+    run, pid = start_public_demo(box, DEMO_RECHECK_S="1")
+    wait_for(lambda: len(box.calls("curl")) >= 4, 15)             # the first look, then three checks
+    assert run.proc.poll() is None and alive(pid), run.out
+    assert len(box.calls("cloudflared")) == 1 and not [l for l in run.lines if "refusing" in l or "cloudflared stopped" in l], run.out
+    assert all(c == CURL + [healthz_url(box)] for c in box.calls("curl")), "every check is the same probe"
+    run.signal(signal.SIGTERM)
+    assert run.wait(10) == 143 and not alive(pid)
+    assert run.lines[-1] == "cloudflared stopped: the public link is closed."
+
+
+def test_one_bad_answer_is_enough_the_link_is_closed_even_though_the_next_answer_would_be_public(box):
+    """It fails closed: no second chance, no count of bad answers in a row."""
+    box.set("healthz.2.rc", "28")           # the first check (the second look at /healthz) times out; every other answer says public
+    run, pid = start_public_demo(box, DEMO_RECHECK_S="1")
+    assert run.wait(15) == 1, run.out
+    assert len(box.calls("curl")) == 2 and not alive(pid), "the third answer, which would have said public, was never asked for"
+    assert run.lines[-1].startswith("refusing: ") and "the public link is closed" in run.lines[-1]
+
+
+def test_a_cloudflared_that_ends_by_itself_is_noticed_within_about_a_second_and_its_status_is_the_scripts(box):
+    """The watch looks at cloudflared once a second: one that dies 1.5 s in is not left until the next check, 30 s away."""
+    box.install("cloudflared", FAKE_CLOUDFLARED)
+    public(box, '{"mode": "public"}')
+    box.set("cloudflared.after", "1.5")
+    box.set("cloudflared.rc", "3")
+    started = time.monotonic()
+    done = box.run(PUBLIC_DEMO, timeout=20, DEMO_RECHECK_S="30")
+    assert done.rc == 3 and done.lines[-1] == "cloudflared stopped: the public link is closed.", done.out
+    assert time.monotonic() - started < 10, "{:.1f} s".format(time.monotonic() - started)
+    assert len(box.calls("curl")) == 1, "it ended before the first check"
+
+
+@pytest.mark.parametrize("sig,status", [(signal.SIGTERM, 143), (signal.SIGINT, 130), (signal.SIGHUP, 129)], ids=["TERM", "INT", "HUP"])
+def test_a_signal_during_the_watch_stops_cloudflared_and_leaves_no_process_behind(box, sig, status):
+    run, pid = start_public_demo(box, DEMO_RECHECK_S="1")
+    wait_for(lambda: len(box.calls("curl")) >= 3, 15)             # well into the watch: the first look and two checks are behind it
+    assert alive(pid)
+    run.signal(sig)
+    assert run.wait(10) == status, run.out
+    assert not alive(pid), "cloudflared was stopped with the script"
+    wait_for(lambda: not run.group_alive(), 5)
+    assert run.lines[-1] == "cloudflared stopped: the public link is closed."
+
+
+def test_ctrl_c_on_a_terminal_during_the_watch_stops_public_demo_sh_and_the_cloudflared_it_runs(box):
+    box.install("cloudflared", FAKE_CLOUDFLARED)
+    public(box, '{"mode": "public"}')
+    box.set("cloudflared.stay", "")
+    status, out, left = ctrl_c_on_a_terminal(box, PUBLIC_DEMO, lambda: len(box.calls("curl")) >= 3, DEMO_RECHECK_S="1")
+    assert status == 130 and "cloudflared stopped: the public link is closed." in out, (status, out)
+    assert not alive(int((box.stubs / "cloudflared.pid").read_text())) and not left
+
+
+@pytest.mark.parametrize("bad", ["0", "05", "-1", "1.5", "soon", "100000", "1e3", "99999999999999999999", "5 6", " 5", "5;touch PWNED"])
+def test_public_demo_refuses_a_check_interval_that_is_not_one_before_asking_anything(box, bad):
+    done = box.run(PUBLIC_DEMO, DEMO_RECHECK_S=bad)
+    assert done.rc == 2 and done.lines == [DEMO_RECHECK_MESSAGE], done.out
+    assert box.calls("curl") == [] and not (box.root / "PWNED").exists()
+
+
+@pytest.mark.parametrize("value", ["1", "10", "99999"])
+def test_DEMO_RECHECK_S_takes_a_whole_number_from_1_to_99999(box, value):
+    box.install("cloudflared", FAKE_CLOUDFLARED)
+    public(box, '{"mode": "public"}')
+    done = box.run(PUBLIC_DEMO, DEMO_RECHECK_S=value)
+    assert done.rc == 0 and "cloudflared stopped" in done.out, done.out
