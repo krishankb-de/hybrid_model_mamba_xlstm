@@ -4290,6 +4290,13 @@ What it means for the plan:
       - a late win.
 
       `message_stop.display_report` settles the card in both.
+  - *Rulings (controller, 2026-10-11), after the user's decisions:* the user approved the retention sweep on the cluster CHAT_HOME, and chose the stop-trained model "as the option… if its another choice according to the market then choose something else". The deployed UI therefore lists the EOS model first (`MODELS=m3eos,m3`, the market practice for a product: EOS-terminated generation), with the published model selectable. The code's defaults (R2) do not change. The work is split: P9-G5a is the server side (registry, alias `m3eos`, card, golden driver), and P9-G5b the UI copy plus an unmissable notice on the laptop's tiny random-weights engine, after the user read its output as a broken report.
+- [ ] **P9-G6** (laptop, then cluster) Fuller EOS reports: length-normalised beam search, measured (user, 2026-10-11).
+  - **Why.** The user wants a full written report for an uploaded X-ray. G4 showed that the EOS model ends cleanly but writes 44 words against the references' 72, which costs about 2 points of CheXbert F1. Length-normalised beam search, ranking finished hypotheses by score / length^α with α > 1, is the field's standard lever against short outputs.
+  - **Laptop.** Expose the decoders' existing `length_penalty`, today always 1.0, as `--length-penalty` in `scripts/evaluate_report_generation.py`. It is additive: the default 1.0 keeps published decodes byte-identical (R3, the P9-G exception). Add a `LENGTH_PENALTY` lever to `scripts/eval_report_eos_h100.sh`; each arm writes to its own dump directory (`results/chat_report_eos_lp<NNN>_test_split_s42`), and the CheXbert and compare jobs take that DUMP_DIR.
+  - **Cluster.** One G4-style chain (decode → CheXbert → compare against the published run, the same gate) per α ∈ {1.5, 2.0}.
+  - **Prediction (R4), recorded before submission:** α = 2.0 lengthens the reports to 48–60 words. CheXbert-14 micro rises from 0.4464 towards the published 0.4661 but stays significantly below it on at least one CheXbert metric, so the gate still fails (60%). ROUGE-L stays at or above the published 0.1920. α = 1.5 lands between α = 1.0 and α = 2.0 on every one of these.
+  - **Decision rule.** The smallest α whose gate passes becomes the EOS model's serving default, as a per-model decode setting. If none passes, keep α = 1.0 and report the length-versus-F1 trade-off to the user.
 
 ---
 

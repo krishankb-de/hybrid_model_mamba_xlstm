@@ -651,6 +651,10 @@
         "P9-G5": {
           "done": false,
           "desc": "(laptop, then cluster) The EOS model in the UI."
+        },
+        "P9-G6": {
+          "done": false,
+          "desc": "(laptop, then cluster) Fuller EOS reports: length-normalised beam search, measured (user, 2026-10-11)."
         }
       },
       "evidence": {
@@ -753,9 +757,10 @@
     "P9-G4: evaluation done, gate FAIL (a finding, pre-registered). EOS stop works: 2662/2663 end at EOS (share_cut 0.0004), 44.2 words vs 58.5 published vs 72.3 refs, repeats/report 0.02 vs 0.16, unterminated 21.1% vs 77.4%. Worse (CI below 0): BLEU-1 -0.0557, BLEU-4 -0.0105, CheXbert-14 micro -0.0197 (0.4464 vs 0.4661), 14-macro -0.0218, 5-micro -0.0188, 5-macro -0.0230. ROUGE-L better +0.0028 [0.0003,0.0053]; exact match ties. Default-model choice is the user's (P9-G5).",
     "P5-F: live-path gates job 2637397 (gx14, CPU 8 threads, 151 s, sync f72bade clean): self_retrieval 50/50, own_rank equal 50/50 (dedup 50/50, max_diff 0), labeller 100/100 (pred 50 + true 50), label_names_ok true; gallery 191462 images / 194125 report rows / 184686 groups, towers_identical, labels_status done; labeller ready after 40 s. As predicted (R4: 50/50, >=48/50, 100/100). P5 complete.",
     "P8-A (413 before parsing on every route, request ids + JSON request log without query, error envelope everywhere, public rate limit 6/10 min) and P8-B (retention sweep at start-up + daily, RETENTION_DAYS 1-3650, both-mode policy, /healthz retention_days, banner line): review approved (0 critical/important; 5 minors -> carried P8-followup/P8-E); merged c8ab0f9, ec1111c; gates on ec1111c: validate All gates passed (pytest 3731 passed, 1 skipped, 26 deselected, 21 xfailed), e2e 21/21.",
-    "P7-C complete: tunnel.sh (forward loop, endpoint re-check every RECHECK_S=60, ::1 bind test, quoted known_hosts) + public_demo.sh (public-mode gate + watchdog every DEMO_RECHECK_S=10); review approved, fix round 1 re-review clean (1 minor parked); merged 86af48d + 98c596c; tunnel tests 196."
+    "P7-C complete: tunnel.sh (forward loop, endpoint re-check every RECHECK_S=60, ::1 bind test, quoted known_hosts) + public_demo.sh (public-mode gate + watchdog every DEMO_RECHECK_S=10); review approved, fix round 1 re-review clean (1 minor parked); merged 86af48d + 98c596c; tunnel tests 196.",
+    "2026-10-11: 2026-10-11: user approved the cluster retention sweep and chose the stop-trained model; root cause of the unreadable local report = the dev server's tiny random-init engine (by design). Serve job 2637561 submitted (sync 5c38b2a, MODELS=m3, DRIFT_NOTE 20/20); P9-G5a (EOS model in the registry) + P9-G6 (length-penalty lever) dispatched; P9-G6 added to the plan with its R4 prediction."
   ],
-  "last_updated": "2026-10-11T17:08:09+02:00",
+  "last_updated": "2026-10-11T17:36:14+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
