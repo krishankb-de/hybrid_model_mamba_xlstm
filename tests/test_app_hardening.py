@@ -19,7 +19,7 @@ from app import hardening, server
 from app.imaging import MAX_UPLOAD_BYTES, TOO_LARGE_MSG
 from app.schemas import error_body
 from app.server import create_app
-from tests.app_helpers import png_bytes, wait_until
+from tests.app_helpers import iter_sse, png_bytes, start_live_server, wait_until
 
 CAP = 21 * 1024 * 1024   # what a request body may hold, before any parsing (ruling 1)
 LOG_KEYS = ["ts", "request_id", "method", "path", "status", "ms", "client"]
@@ -447,8 +447,34 @@ def test_a_body_exactly_at_the_cap_is_not_refused_by_the_cap(client):
 def test_a_413_is_answered_to_any_route_not_only_to_the_turn_route(client):
     for method, path in [("POST", "/v1/sessions"), ("POST", "/v1/label"), ("GET", "/healthz"), ("POST", "/v1/retrieve")]:
         r = client.request(method, path, content=b"x" * (CAP + 1))
-        assert r.status_code == 413 and r.json() == error_body("validation_error", TOO_LARGE_MSG), (method, path)
+        # P8 follow-up (6): a route that takes an image says the image is too large; the others, that the request is
+        want = TOO_LARGE_MSG if (method, path) == ("POST", "/v1/retrieve") else server.TOO_LARGE_REQUEST_MSG
+        assert r.status_code == 413 and r.json() == error_body("validation_error", want), (method, path)
         assert len(r.headers["X-Request-Id"]) == 32
+
+
+def test_the_413_of_a_request_over_the_cap_names_the_request_on_a_route_with_no_image_and_the_image_on_the_two_that_take_one(client):
+    """P8 follow-up (6): "Image is larger than 20 MB." was the answer to a 22 MB JSON body for /v1/label too. A declared length and a body
+    counted as it streams are answered alike, by route: the turn route and /v1/retrieve keep the image message."""
+    assert server.TOO_LARGE_REQUEST_MSG == "The request is larger than {} MB.".format(CAP // (1024 * 1024)) and "image" not in server.TOO_LARGE_REQUEST_MSG.lower()
+    sid = client.post("/v1/sessions", json={}).json()["id"]
+    for method, path, message in [("POST", "/v1/sessions", server.TOO_LARGE_REQUEST_MSG), ("DELETE", "/v1/sessions/s_x", server.TOO_LARGE_REQUEST_MSG),
+                                  ("GET", "/v1/models", server.TOO_LARGE_REQUEST_MSG), ("POST", "/v1/label", server.TOO_LARGE_REQUEST_MSG),
+                                  ("GET", "/v1/gallery/images/0", server.TOO_LARGE_REQUEST_MSG), ("GET", "/nowhere", server.TOO_LARGE_REQUEST_MSG),
+                                  ("POST", "/v1/sessions/{}/messages".format(sid), TOO_LARGE_MSG), ("POST", "/v1/retrieve", TOO_LARGE_MSG),
+                                  ("GET", "/v1/sessions/{}/messages".format(sid), server.TOO_LARGE_REQUEST_MSG)]:   # only a POST takes an image
+        r = client.request(method, path, content=b"x" * (CAP + 1))
+        assert r.status_code == 413 and r.json() == error_body("validation_error", message), (method, path)
+
+    def chunked():   # a body with no Content-Length, counted as it arrives
+        yield b"x" * 1024
+        yield bytes(CAP)
+
+    for path, message in [("/v1/sessions", server.TOO_LARGE_REQUEST_MSG), ("/v1/label", server.TOO_LARGE_REQUEST_MSG),
+                          ("/v1/sessions/{}/messages".format(sid), TOO_LARGE_MSG), ("/v1/retrieve", TOO_LARGE_MSG)]:
+        r = client.post(path, content=chunked(), headers={"Content-Type": "multipart/form-data; boundary=zzz"})
+        assert "content-length" not in r.request.headers
+        assert r.status_code == 413 and r.json() == error_body("validation_error", message), path
 
 
 # ---- ruling 5: the page and its files are revalidated, not fetched again -------------------------------------------------------------------
@@ -607,6 +633,113 @@ def test_only_a_turn_that_is_accepted_takes_a_token(public, monkeypatch):
     assert public.app.state.rate_limiter.tracked() == 0, "every one of them gave its token back"
     assert [_turn_request(public, sid).status_code for _ in range(6)] == [200] * 6   # all six are still there
     assert _turn_request(public, sid).status_code == 429
+
+
+def _note(c, sid, text="Is there pneumonia?", headers=PUBLIC):
+    """A text-only turn: no image, and `text` as the note."""
+    return _turn_request(c, sid, headers=headers, files={}, data={"text": text, "options": json.dumps({"max_new_tokens": 16})})
+
+
+def _stages_run(r):
+    """The stages a turn's stream says ran (a stage_start each), and its warning codes."""
+    frames = list(iter_sse([r.text]))
+    return [f["data"]["stage"] for f in frames if f["event"] == "stage_start"], [f["data"]["code"] for f in frames if f["event"] == "warning"]
+
+
+def test_a_chat_note_that_runs_no_model_takes_no_token_one_image_turn_and_six_notes_leave_five_image_turns(public):
+    """P8 follow-up (ruling 3): a public-mode text-only turn that is answered with a warning and runs no model (a question, or a note that is no
+    command) must not spend a token, as a refusal does not: the limiter takes the token at the check, before the body is read, and the route
+    marks a turn that ran no model so that the limiter gives it back. One image turn and six notes: the six notes cost nothing, so five image
+    turns are still accepted (the bucket holds six), and the sixth of those is the seventh token."""
+    sid = _session(public)
+    assert _turn_request(public, sid).status_code == 200   # the image turn: one token
+    wait_until(lambda: public.app.state.worker.in_flight == 0)
+    notes = [_note(public, sid) for _ in range(6)]
+    assert [r.status_code for r in notes] == [200] * 6, "a sixth note would be the seventh token if each cost one"
+    assert [_stages_run(r) for r in notes] == [([], ["not_a_command"])] * 6   # no stage ran: nothing used the model
+    wait_until(lambda: public.app.state.worker.in_flight == 0)
+    assert [_turn_request(public, sid).status_code for _ in range(5)] == [200] * 5   # the image turn after them is accepted, and four more
+    wait_until(lambda: public.app.state.worker.in_flight == 0)
+    spent = _turn_request(public, sid)
+    assert spent.status_code == 429 and spent.json()["error"]["type"] == "rate_limited"   # six image turns in all: the notes were free
+    assert spent.headers["Retry-After"] == "100"
+
+
+def test_a_text_only_turn_that_runs_the_model_still_takes_its_token(public):
+    """A command, or no text at all, re-runs the session's last image: that runs the model, so it is a turn like any other."""
+    sid = _session(public)
+    assert _turn_request(public, sid).status_code == 200
+    wait_until(lambda: public.app.state.worker.in_flight == 0)
+    reruns = [_note(public, sid, text) for text in ("beam 2", "", "tokens 20", "greedy", "retrieve 2")]
+    assert [r.status_code for r in reruns] == [200] * 5
+    assert all("generate" in _stages_run(r)[0] for r in reruns)   # each one ran the model
+    wait_until(lambda: public.app.state.worker.in_flight == 0)
+    assert _note(public, sid, "beam 2").status_code == 429   # six turns in all, so the seventh is refused
+    assert _note(public, sid).status_code == 429             # and a note is refused too while the bucket is empty: the limiter asks before the body is read
+
+
+def test_a_note_in_a_session_with_no_image_is_a_refusal_and_costs_nothing_as_before(public):
+    sid = _session(public)
+    assert [_note(public, sid).status_code for _ in range(8)] == [422] * 8   # nothing to run it on: a 422 each, and none took a token
+    assert public.app.state.rate_limiter.tracked() == 0
+
+
+def test_however_many_notes_that_run_no_model_are_sent_the_bucket_holds_what_the_image_turn_left(public):
+    sid = _session(public)
+    assert _turn_request(public, sid).status_code == 200
+    wait_until(lambda: public.app.state.worker.in_flight == 0)
+    for _ in range(12):   # twice the bucket, in notes
+        assert _note(public, sid).status_code == 200
+    assert public.app.state.rate_limiter.tracked() == 1   # one client in the table: the image turn's token is the only one it has spent
+    tokens, _counted = public.app.state.rate_limiter._buckets["a"]
+    assert tokens == pytest.approx(5.0, abs=0.01)
+
+
+def test_a_note_is_free_over_a_real_socket_too_where_the_scope_carries_uvicorns_own_state(tmp_path):
+    """TestClient and uvicorn build a request's scope differently (uvicorn's holds a copy of the lifespan state): the flag the route sets in
+    request.state must reach the limiter through that scope as well, so eight notes after one image turn leave the bucket at five."""
+    base, stop = start_live_server(create_app(engine="tiny", home=str(tmp_path), mode="public", token="t"))
+    try:
+        sid = httpx.post(base + "/v1/sessions", json={}, headers=PUBLIC).json()["id"]
+        url = base + "/v1/sessions/{}/messages".format(sid)
+        image = httpx.post(url, files={"image": ("x.png", png_bytes(), "image/png")}, data={"options": json.dumps({"max_new_tokens": 16})},
+                           headers=PUBLIC, timeout=60)
+        assert image.status_code == 200
+        notes = [httpx.post(url, data={"text": "Is there pneumonia?"}, headers=PUBLIC, timeout=60) for _ in range(8)]
+        assert [r.status_code for r in notes] == [200] * 8
+        assert all("not_a_command" in r.text for r in notes)
+        again = [httpx.post(url, files={"image": ("x.png", png_bytes(), "image/png")}, data={"options": json.dumps({"max_new_tokens": 16})},
+                            headers=PUBLIC, timeout=60).status_code for _ in range(6)]
+        assert again == [200] * 5 + [429]   # the image turn, and five more: six in all, whatever the eight notes were
+    finally:
+        stop()
+
+
+def test_a_turn_the_route_marks_free_gives_its_token_back_though_it_is_a_200():
+    async def run():
+        limiter = hardening.TurnLimiter(6, 600.0, clock=Clock())
+
+        async def free_ok(scope, receive, send):
+            scope.setdefault("state", {})[hardening.FREE_TURN] = True   # what the route does for a note that runs no model
+            await JSONResponse({"ok": True})(scope, receive, send)
+
+        async def paid_ok(scope, receive, send):
+            await JSONResponse({"ok": True})(scope, receive, send)
+
+        out = []
+        for inner in (free_ok, paid_ok):
+            guarded = hardening.TurnRateLimit(inner, limiter, client_id=server.CLIENT_ID)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=guarded), base_url="http://test") as c:
+                out.append([(await c.post("/v1/sessions/s_1/messages", headers={"X-Client-Id": "a"})).status_code for _ in range(8)])
+        return out
+
+    assert asyncio.run(run()) == [[200] * 8, [200] * 6 + [429] * 2]   # eight free turns cost nothing; six paid ones empty the bucket
+
+
+def test_the_limiters_own_docstring_says_a_note_that_runs_no_model_costs_nothing():
+    text = " ".join(hardening.__doc__.split())
+    assert "a note that runs no model" in text and "costs the client nothing" in text
+    assert hardening.FREE_TURN == "free_turn"
 
 
 def test_a_burst_of_turns_started_together_is_admitted_six_at_a_time_and_no_more():

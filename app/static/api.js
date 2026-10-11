@@ -70,17 +70,26 @@ function within(signal, ms) {
 // when the connection cannot be made, a marked TypeError, so the network-error path of every caller takes it with no new code: pollMessage asks
 // again after its backoff, and the page tells a Stop that was not answered as it tells any network failure. The caller's own abort is no timeout
 // and goes through as it came. The streaming read of a turn does not use this: it is meant to stay open.
-async function asked(url, init, ms, read) {
+// This is the one timeout of the page: app.js's own requests (create, list, delete, export) run through it too (P8 follow-up), with the fetch the
+// page was given (`send`, which fetch is by default; a test hands its own), and read their bodies inside it.
+export async function asked(url, init, ms, read, send = fetched) {
   const outer = init.signal;
   const signal = within(outer, ms);
   try {
-    return await read(await fetched(url, { ...init, signal }));
+    return await read(await send(url, { ...init, signal }));
   } catch (err) {
     if (signal?.aborted && signal.reason?.name === 'TimeoutError' && !outer?.aborted) {
       throw transportFailure(new TypeError(`${init.method ?? 'GET'} request got no answer in ${ms} ms`));
     }
     throw err;
   }
+}
+
+// The wait a refusal asks for, from its Retry-After header: whole seconds (the server sends nothing else), or null for a header that is missing, is
+// a date, a fraction or a negative number. The error of a refused request carries it as `retryAfter`, so that the page can say how long a 429 is for.
+export function retryAfterSeconds(res) {
+  const raw = res?.headers?.get?.('Retry-After');
+  return typeof raw === 'string' && /^\s*\d{1,6}\s*$/.test(raw) ? Number(raw) : null;
 }
 
 export function authHeaders(token, clientId) {
@@ -98,7 +107,7 @@ export function authHeaders(token, clientId) {
 export async function* streamTurn({ base = '', sessionId, form, token, clientId, signal, onMessageId }) {
   const res = await fetched(`${base}/v1/sessions/${sessionId}/messages`,
                             { method: 'POST', body: form, signal, headers: authHeaders(token, clientId) });
-  if (!res.ok) throw Object.assign(new Error('turn refused'), { status: res.status, body: await res.json().catch(() => null) });
+  if (!res.ok) throw Object.assign(new Error('turn refused'), { status: res.status, body: await res.json().catch(() => null), retryAfter: retryAfterSeconds(res) });
   const reader = res.body.getReader();
   try {
     const id = res.headers.get('X-Message-Id');
@@ -125,7 +134,7 @@ export async function* streamTurn({ base = '', sessionId, form, token, clientId,
 
 // What every request but the turn throws when the server refuses it.
 async function refused(res, message) {
-  return Object.assign(new Error(message), { status: res.status, body: await res.json().catch(() => null) });
+  return Object.assign(new Error(message), { status: res.status, body: await res.json().catch(() => null), retryAfter: retryAfterSeconds(res) });
 }
 
 // A pause the signal can cut short: it resolves on abort (it never rejects) and takes its timer with it.

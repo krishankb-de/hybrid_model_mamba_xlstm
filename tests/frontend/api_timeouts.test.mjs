@@ -163,6 +163,49 @@ test('a picture that is never answered fails with the transport error, which is 
   assert.equal(calls.length, 1);
 });
 
+test('asked is the one timeout helper: it takes the fetch it is given, gives up on it in time, and reads inside the limit what it returns (P8 follow-up)', async (t) => {
+  keepAlive(t);
+  const calls = [];
+  const hang = (url, init) => new Promise((resolve, reject) => {
+    calls.push({ url: String(url), init });
+    init.signal?.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+  });
+  const global = t.mock.method(globalThis, 'fetch', () => { throw new Error('the global fetch was used'); });
+  assert.equal(typeof api.asked, 'function', 'api.js exports asked, for the page\'s own requests');
+  const got = await outcome(api.asked('/v1/sessions', { headers: { 'X-Client-Id': 'cid' } }, 30, (res) => res.json(), hang));
+  assert.ok(!got.hung && timedOut(got.error), String(got.hung ? 'hung' : got.error));
+  assert.equal(calls.length, 1);
+  assert.deepEqual([calls[0].url, calls[0].init.headers], ['/v1/sessions', { 'X-Client-Id': 'cid' }]);
+  assert.ok(calls[0].init.signal.aborted, 'the request itself was aborted, so the connection is not left open');
+  assert.equal(global.mock.callCount(), 0);   // the fetch it was given, not the global one
+  assert.deepEqual(await api.asked('/x', {}, 5000, (res) => res.json(), async () => json({ a: 1 })), { a: 1 });   // answered in time
+  const stalled = await outcome(api.asked('/x', {}, 30, (res) => res.json(), async (url, init) => stalledBody(init)));   // a body that never ends
+  assert.ok(!stalled.hung && timedOut(stalled.error), String(stalled.hung ? 'hung' : stalled.error));
+  const ctl = new AbortController();
+  const aborted = outcome(api.asked('/x', { signal: ctl.signal }, 5000, (res) => res.json(), hang));
+  ctl.abort();
+  const cancelled = await aborted;
+  assert.ok(!cancelled.hung && cancelled.error?.name !== undefined && !timedOut(cancelled.error), 'the caller\'s own abort is no timeout');
+  assert.equal(cancelled.error.name, 'AbortError');
+});
+
+test('a refusal carries its Retry-After as whole seconds on the error every request of the data layer throws, and null for anything else (P8 follow-up)', async (t) => {
+  const cases = [['45', 45], ['  7 ', 7], ['0', 0], ['soon', null], ['-3', null], ['1.5', null], ['', null], [undefined, null], ['Wed, 21 Oct 2026 07:28:00 GMT', null]];
+  let n = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    const [raw] = cases[Math.floor(n++ / 2)];   // each case answers a turn and a cancel
+    return new Response(JSON.stringify({ type: 'error', error: { type: 'rate_limited', message: 'Too many turns.' } }),
+                        { status: 429, headers: { 'Content-Type': 'application/json', ...(raw === undefined ? {} : { 'Retry-After': raw }) } });
+  });
+  for (const [raw, want] of cases) {
+    await assert.rejects(drain(streamTurn({ sessionId: 's1', form: new FormData() })), (err) => err.status === 429 && err.retryAfter === want, `streamTurn, ${raw}`);
+    await assert.rejects(cancelMessage({ messageId: 'm1' }), (err) => err.status === 429 && err.retryAfter === want, `cancelMessage, ${raw}`);
+  }
+  assert.equal(api.retryAfterSeconds(new Response('', { headers: { 'Retry-After': '12' } })), 12);
+  assert.equal(api.retryAfterSeconds(null), null);
+  assert.equal(api.retryAfterSeconds({}), null);
+});
+
 test('the streaming read of a turn has no timeout: its request carries the caller\'s signal as it is', async (t) => {
   const seen = [];
   t.mock.method(globalThis, 'fetch', async (url, init) => {

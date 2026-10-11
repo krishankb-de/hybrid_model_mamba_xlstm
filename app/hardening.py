@@ -21,7 +21,10 @@ The lines go through the `app.request` logger to stderr and never to stdout, whi
 **The turn rate limit.** In public mode a client (its X-Client-Id) may start 6 turns per 10 minutes: a token bucket of capacity 6 that refills
 6 per 600 s. Only turn creation, POST /v1/sessions/{id}/messages, is limited, and the check runs before the body is parsed, so a refused request
 costs one dictionary lookup: 429 `rate_limited` with Retry-After in whole seconds. A token is taken at the check and given back unless the turn is
-accepted (a 200), so a refusal of any other kind costs the client nothing. Private mode has no limit.
+accepted (a 200), so a refusal of any other kind costs the client nothing, and so does a note that runs no model (P8 follow-up): text with no
+image that is no command is answered with a warning and a 200, and the route, which alone knows that from the body, marks the request
+(FREE_TURN in its state) so that the token is given back at the end of the response. The check comes first, before the body is read, so a
+client with no token left is refused a note too, until one is back. Private mode has no limit.
 
 The limit is by client id, and a client id is whatever the caller sends: **a client that mints a new X-Client-Id for every turn escapes the
 limit.** It is a courtesy between honest visitors of a demo, not a defence. What bounds the load is the queue cap (4 accepted turns at once,
@@ -52,6 +55,7 @@ NO_RESPONSE = 499         # the status logged for a request that ended before an
 RATE_CAPACITY = 6         # turns a public-mode client can start at once ...
 RATE_WINDOW_S = 600.0     # ... and in every 10 minutes: the bucket refills RATE_CAPACITY tokens per RATE_WINDOW_S
 RATE_LIMITED = "rate_limited"   # the error type of its 429 (the queue's own 429 is "overloaded_error")
+FREE_TURN = "free_turn"   # the key of the request's state (request.state.free_turn) that a route sets for a turn that ran no model: its token is given back
 RATE_LIMITED_MSG = "Too many turns from this client: at most {} per {} minutes. Try again in {} s."   # capacity, window in minutes, seconds
 TURN_PATH = re.compile(r"/v1/sessions/[^/]+/messages")   # the one route that is limited: POST creates a turn
 MAX_TRACKED = 10_000      # clients in the limiter's table before it forgets those whose bucket has refilled
@@ -194,7 +198,8 @@ class TurnRateLimit:
     """Public mode only: limits POST /v1/sessions/{id}/messages per X-Client-Id with a TurnLimiter, before the body is parsed. It sits inside the
     token guard, so a request that has no token never reaches it. A request with no well-formed client id is passed on: the route refuses it
     (400) as it always has. The token is taken at the check and given back unless the response is a 200, so only an accepted turn costs one, and
-    a burst started together is still admitted `capacity` at a time."""
+    a burst started together is still admitted `capacity` at a time. A 200 that the route marked FREE_TURN (a note that ran no model) gives its
+    token back as well, once its response has ended."""
 
     def __init__(self, app: Callable, limiter: TurnLimiter, client_id: "re.Pattern"):
         self.app, self.limiter, self.client_id = app, limiter, client_id
@@ -226,5 +231,6 @@ class TurnRateLimit:
         try:
             await self.app(scope, receive, send_watching)
         finally:
-            if not accepted:
+            free = bool((scope.get("state") or {}).get(FREE_TURN))   # the route says so after it has read the body: request.state is this dict
+            if free or not accepted:
                 self.limiter.refund(client)

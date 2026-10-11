@@ -33,7 +33,7 @@ import {
   statusText,
 } from './render.js';
 
-const { authHeaders } = realApi;
+const { asked, authHeaders, retryAfterSeconds, REQUEST_TIMEOUT_MS } = realApi;
 
 export const SETTINGS_KEY = 'cxrchat.settings';
 export const CLIENT_KEY = 'cxrchat.client';
@@ -279,15 +279,26 @@ function markNetwork(err) {
 // A failure that is the server's (it refused), the network's or the user's own cancel is shown; anything else is ours and is logged.
 const expected = (err) => typeof err?.status === 'number' || err?.network === true || isAbort(err);
 
+// A 429 is two refusals (app/hardening.py, app/server.py). The queue is full (`overloaded_error`): that clears in moments, and the page says so in its own
+// short line. In public mode this client has started its turns of the last ten minutes (`rate_limited`): that does not clear in moments, and the server
+// words it, with how long to wait. The page shows the server's message, and the wait from Retry-After (api.js puts it on the error as `retryAfter`, in whole
+// seconds) unless the message gives that wait already, as the server's does: it is not said twice. No message at all is a sentence of our own.
+function rateLimitMessage(err) {
+  const server = text(err?.body?.error?.message) || 'Too many turns from this client.';
+  const wait = Number.isInteger(err?.retryAfter) && err.retryAfter > 0 ? err.retryAfter : null;
+  const said = wait !== null && new RegExp(`\\b${wait}\\s*(?:s|sec|secs|seconds)\\b`, 'i').test(server);
+  return clip(wait === null || said ? server : `${server} Try again in ${wait} s.`);
+}
+
 // What a failed request says to the user. err is what api.js throws: an Error with `status` and `body` (the server's
-// envelope {type: "error", error: {type, message}}), or what fetch throws when the network fails (a TypeError).
+// envelope {type: "error", error: {type, message}}) and, for a refusal that has the header, `retryAfter`; or what fetch throws when the network fails (a TypeError).
 export function errorMessage(err) {
   if (typeof err === 'string') return text(err) || 'Something went wrong.';
   if (isAbort(err)) return 'The request was cancelled.';   // never the browser's own "signal is aborted without reason"
   const status = err?.status;
   const server = text(err?.body?.error?.message);
   if (status === 401) return 'Enter the access token in Settings';
-  if (status === 429) return 'The server is busy; try again shortly';
+  if (status === 429) return err?.body?.error?.type === 'rate_limited' ? rateLimitMessage(err) : 'The server is busy; try again shortly';
   if (status === 413) return clip(server || 'The image is too large.');
   if (status === 422) return clip(server || 'The server could not use that request.');
   if (typeof status === 'number') {
@@ -524,17 +535,24 @@ export function createApp(env) {
 
   // ---- requests --------------------------------------------------------------------------------------------------------------
 
-  // A JSON request with the page's auth headers. A refusal throws what api.js throws: an Error with status and body.
+  // A JSON request with the page's auth headers, under the data layer's own timeout (api.js asked, REQUEST_TIMEOUT_MS: P8 follow-up). A half-open
+  // tunnel takes the request and never answers, and fetch never fails by itself, so a list, a delete or an export would wait for ever. Its body is
+  // read inside the limit too: with `raw` the answer is {headers, blob}, the export's whole file, not a response whose body is still to come. The
+  // timeout is a failure of the transport, which api.js makes a TypeError as fetch's own is, so it surfaces as any network failure does ("Cannot
+  // reach the server..."). A refusal throws what api.js throws: an Error with status, body and, for a 429, retryAfter.
   async function request(path, { method = 'GET', body, headers, raw = false, signal } = {}) {
-    let res;
+    const init = { method, body, signal, headers: { ...authHeaders(state.settings.token, state.clientId), ...headers } };
     try {
-      res = await doFetch(path, { method, body, signal, headers: { ...authHeaders(state.settings.token, state.clientId), ...headers } });
+      return await asked(path, init, REQUEST_TIMEOUT_MS, async (res) => {
+        if (!res.ok) {
+          throw Object.assign(new Error('request refused'), { status: res.status, body: await res.json().catch(() => null), retryAfter: retryAfterSeconds(res) });
+        }
+        if (raw) return { headers: res.headers, blob: await res.blob() };
+        return res.status === 204 ? null : res.json();
+      }, doFetch);   // the page's fetch, which a test hands its own of
     } catch (err) {
-      throw markNetwork(err);   // only fetch itself can have thrown here
+      throw markNetwork(err);   // only the transport can have thrown a TypeError here: fetch itself, a body cut off, or the timeout
     }
-    if (!res.ok) throw Object.assign(new Error('request refused'), { status: res.status, body: await res.json().catch(() => null) });
-    if (raw) return res;
-    return res.status === 204 ? null : res.json();
   }
 
   // ---- the notice above the composer and the live status ----------------------------------------------------------------------
@@ -1390,12 +1408,11 @@ export function createApp(env) {
     const id = state.session.id;
     if (!id) return;
     try {
-      const res = await request(`/v1/sessions/${encodeURIComponent(id)}/export?format=${format}`, { raw: true });
-      const blob = await res.blob().catch((err) => { throw markNetwork(err); });
+      const { headers, blob } = await request(`/v1/sessions/${encodeURIComponent(id)}/export?format=${format}`, { raw: true });
       const url = urls.createObjectURL(blob);
       const link = doc.createElement('a');
       link.setAttribute('href', url);
-      link.setAttribute('download', exportFilename(res.headers?.get?.('Content-Disposition'), id, format));
+      link.setAttribute('download', exportFilename(headers?.get?.('Content-Disposition'), id, format));
       doc.body.append(link);
       link.click();
       link.remove();

@@ -5961,3 +5961,101 @@ test('a card drawn again while the viewer is open (its turn runs on) gets the fo
   run.channel.end();
   await turn;
 });
+
+// ---- P8 follow-up: what a 429 says, and the timeout of the page's own requests -------------------------------------------------------
+
+test('errorMessage tells a rate limit from a full queue: the server\'s own message with the wait from Retry-After, or the queue\'s short line', () => {
+  const MSG = 'Too many turns from this client: at most 6 per 10 minutes. Try again in 100 s.';   // app/hardening.py RATE_LIMITED_MSG, with its 100 s
+  const limited = (message, retryAfter) => Object.assign(refusal(429, message, 'rate_limited'), { retryAfter });
+  assert.equal(errorMessage(limited(MSG, 100)), MSG);   // the message says the wait already: it is not said twice
+  assert.equal(errorMessage(limited('Too many turns from this client: at most 6 per 10 minutes.', 45)),
+               'Too many turns from this client: at most 6 per 10 minutes. Try again in 45 s.');   // one that does not: Retry-After adds it
+  assert.equal(errorMessage(limited('Try again in 1000 s.', 100)), 'Try again in 1000 s. Try again in 100 s.');   // "1000 s" is not "100 s"
+  assert.equal(errorMessage(limited('Too many turns.', null)), 'Too many turns.');   // no header: the server's words alone
+  assert.equal(errorMessage(limited('Too many turns.', 0)), 'Too many turns.');      // and 0 s is no wait
+  const nameless = Object.assign(new Error('refused'), { status: 429, body: { type: 'error', error: { type: 'rate_limited' } }, retryAfter: 30 });
+  assert.equal(errorMessage(nameless), 'Too many turns from this client. Try again in 30 s.');   // a limit that sent no message: a sentence of our own
+  assert.equal(errorMessage(limited('x'.repeat(1000), 5)).length, 300);   // cut like every message
+  assert.equal(errorMessage(refusal(429, 'The server is busy with 4 turns; try again shortly.', 'overloaded_error')), 'The server is busy; try again shortly');
+  assert.equal(errorMessage(Object.assign(refusal(429, 'busy', 'overloaded_error'), { retryAfter: 5 })), 'The server is busy; try again shortly');   // the queue's, whatever came with it
+  assert.equal(errorMessage(refusal(429)), 'The server is busy; try again shortly');   // no envelope: as before
+  assert.equal(errorMessage(refusal(429, 'x', 'validation_error')), 'The server is busy; try again shortly');   // a kind it does not know: as before
+  assert.equal(errorMessage(Object.assign(refusal(503, 'down', 'rate_limited'), { retryAfter: 5 })), 'down');   // only a 429 is a rate limit
+});
+
+test('a turn the rate limit refuses shows the limit and the wait in the notice and keeps the composer as it was; a full queue keeps its short line', async () => {
+  const MSG = 'Too many turns from this client: at most 6 per 10 minutes. Try again in 100 s.';
+  const h = await ready();
+  $('prompt').value = 'beam 4';
+  h.api.refuse = Object.assign(refusal(429, MSG, 'rate_limited'), { retryAfter: 100 });
+  await h.app.send();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, MSG);
+  assert.equal($('prompt').value, 'beam 4');   // nothing was spent: Send tries again with nothing to re-enter
+  assert.equal($('send').disabled, false);
+  h.api.refuse = refusal(429, 'The server is busy with 4 turns; try again shortly.', 'overloaded_error');
+  await h.app.send();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'The server is busy; try again shortly');
+});
+
+test('a 429 of the page\'s own requests carries its Retry-After too, so a limit read anywhere says how long it is for', async () => {
+  const limited = new Response(JSON.stringify({ type: 'error', error: { type: 'rate_limited', message: 'Too many turns from this client.' } }),
+                               { status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': '45' } });
+  const h = harness({ routes: { 'GET /v1/sessions': () => limited } });
+  await h.app.start();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Too many turns from this client. Try again in 45 s.');
+});
+
+test('the page\'s own requests give up on a server that never answers, as the data layer\'s do: create, list, delete and export say it cannot be reached', async (t) => {
+  const real = AbortSignal.timeout;
+  const limits = [];
+  t.mock.method(AbortSignal, 'timeout', (ms) => { limits.push(ms); return real.call(AbortSignal, 20); });   // the real limit is api.js REQUEST_TIMEOUT_MS: a test cannot wait 15 s
+  const hang = (url, init) => new Promise((resolve, reject) => init.signal?.addEventListener('abort', () => reject(init.signal.reason), { once: true }));
+  const cannot = 'Cannot reach the server. Check the connection and try again.';
+  const later = () => new Promise((resolve) => setTimeout(resolve, 100));
+  // a request with no timeout waits for ever: the test says so and fails, rather than waiting with it
+  const finishes = async (promise, what) => assert.notEqual(await Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve('hung'), 2000))]), 'hung', what);
+  // the list, which the start-up asks for: nothing answers
+  const list = harness({ routes: { 'GET /v1/sessions': hang } });
+  await finishes(list.app.start(), 'the start-up waited for ever for the list');
+  assert.equal(q($('notice'), 'p').textContent, cannot);
+  assert.ok(limits.length > 0 && limits.every((ms) => ms === 15000), JSON.stringify(limits));   // api.js's limit, not a number of this file's
+  // create a chat: Send in a new chat asks for a session first
+  const create = harness({ routes: { 'POST /v1/sessions': hang } });
+  await create.app.start();
+  await flush();
+  attach(imageFile('chest.png'));
+  await finishes(create.app.send(), 'Send waited for ever for the chat to be made');
+  assert.equal(q($('notice'), 'p').textContent, cannot);
+  assert.equal($('send').disabled, false);   // the composer is not left locked
+  assert.equal(create.api.streams.length, 0);   // and no turn was started on a chat that was never made
+  // delete
+  const del = harness({ sessions: [sess('s_b', 'B')], routes: { ...doneSession('s_b', 'B', 'm_b'), 'DELETE /v1/sessions/s_b': hang } });
+  await del.app.start();
+  await flush();
+  q($('session-list'), 'button.session-delete').click();
+  await later();
+  assert.equal(q($('notice'), 'p').textContent, cannot);
+  assert.equal(qa($('session-list'), 'li').length, 1);   // nothing was taken out of the list
+  // export
+  const urls = { createObjectURL: () => { throw new Error('nothing to save'); }, revokeObjectURL() {} };
+  const exp = harness({ urls, sessions: [sess('s_a', 'A', 0)], routes: { ...EXISTING, 'GET /v1/sessions/s_a/export': hang } });
+  await exp.app.start();
+  await flush();
+  qa($('exports'), 'button')[0].click();
+  await later();
+  assert.equal(q($('notice'), 'p').textContent, cannot);
+});
+
+test('a request the server answers in time is not touched by the timeout, and a refusal is still the server\'s answer and not the network\'s', async () => {
+  const h = harness({ sessions: [sess('s_a', 'A', 0)], routes: { ...EXISTING, 'GET /v1/sessions/s_missing': refused(404, 'Session not found.', 'not_found_error') } });
+  await h.app.start();
+  await flush();
+  assert.equal($('notice').hidden, true);   // the list and the models came: no notice
+  assert.deepEqual(qa($('session-list'), 'li').map((li) => li.getAttribute('data-session')), ['s_a']);
+  h.win.location.hash = '#/s/s_missing';
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Session not found.');   // a refusal says what it says: the transport did not fail
+});

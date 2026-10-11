@@ -42,8 +42,8 @@ from app import retention
 from app.commands import COMMAND_HELP, is_question, parse_command
 from app.engine import REPO_ROOT, Engine, build_engine
 from app.gallery import Gallery, GalleryMismatch
-from app.hardening import (NO_RESPONSE, RATE_CAPACITY, RATE_LIMITED, RATE_WINDOW_S, REQUEST_ID_HEADER, RequestLog, TurnLimiter,
-                           TurnRateLimit, configure_request_log)
+from app.hardening import (FREE_TURN, NO_RESPONSE, RATE_CAPACITY, RATE_LIMITED, RATE_WINDOW_S, REQUEST_ID_HEADER, TURN_PATH, RequestLog,
+                           TurnLimiter, TurnRateLimit, configure_request_log)
 from app.imaging import (MAX_UPLOAD_BYTES, MIN_SIDE, TOO_LARGE_MSG, UploadError, load_upload, model_input_image, sniff_format,
                          thumbnail_jpeg)
 from app.labels import LabelerClient, LabelerUnavailable, RuleLabeler
@@ -117,6 +117,11 @@ PLACEHOLDER = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><
 # ---- the OpenAPI reference (P3-E): what /docs and /openapi.json say. Metadata only: no route reads any of it. ------
 UPLOAD_MB = MAX_UPLOAD_BYTES // (1024 * 1024)
 REQUEST_MB = MAX_REQUEST_BYTES // (1024 * 1024)
+# What a request over the cap is told (P8 follow-up). A route that takes an image (the turn route and /v1/retrieve) says the image is too large,
+# which is what a request that size is there; any other route takes no image, so it says the request is (a 22 MB JSON body for /v1/label was
+# told "Image is larger than 20 MB."). The reference's 413 example for each route is the message it really sends.
+TOO_LARGE_REQUEST_MSG = "The request is larger than {} MB.".format(REQUEST_MB)
+RETRIEVE_PATH = "/v1/retrieve"   # the other route that takes an image; the turn route's path is hardening.TURN_PATH
 # The published protocol as the options form field's string. FastAPI drops Form(openapi_examples=...) from the spec (a
 # form's fields become one body model), so it is the field's own `examples`; P8-E's README walkthrough copies it.
 OPTIONS_EXAMPLE = ('{"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "cached_decode": true, "compile": false, '
@@ -159,11 +164,12 @@ API_DESCRIPTION = (
     "that client's data.\n\n"
     "**Errors.** A refusal is JSON, `{\"type\": \"error\", \"error\": {\"type\": kind, \"message\": text}}`, with the "
     "kind of its status: " + ", ".join("{} {}".format(status, kind) for status, kind in ERROR_KINDS.items()) + ". An unknown "
-    "route, a wrong method and a failure of the server are refused the same way, and a 422 or a 500 never repeats what was "
-    "sent or what went wrong inside.\n\n"
+    "route, a wrong method and a failure of the server are refused the same way, and a 422 never repeats a value that was sent "
+    "(it names the key that was wrong, never what the key held), and a 500 never says what went wrong inside.\n\n"
     "**Limits.** A request over {cap} MB is refused with 413 before it is read (an image is capped at {image} MB). In public "
     "mode a client (`X-Client-Id`) may start {turns} turns per {minutes} minutes: the next is a 429 `{kind}` with `Retry-After`, "
-    "in whole seconds, and a turn that is refused for any other reason costs the client nothing.\n\n"
+    "in whole seconds. A turn that is refused for any other reason costs the client nothing, and so does a note that runs no "
+    "model (text with no image that is no command: the answer is a warning and no stage runs).\n\n"
     "**Request ids.** Every response, errors included, carries `X-Request-Id`: the caller's own when it is 1 to 64 letters, "
     "digits, `.`, `_` or `-`, else a new one. The server logs one JSON line per request (time, id, method, path, status, "
     "milliseconds, client) with no query string, no body and no header but `X-Client-Id`.".format(
@@ -231,10 +237,11 @@ def _refusals(messages: Dict[int, str], token: bool = True, client_id: bool = Tr
     (every route), 401 for a missing token (token: every /v1 route) and 400 for a missing client id in public mode
     (client_id: the session and message routes, not /v1/models). A route with a default is not given FastAPI's own
     422, whose HTTPValidationError body this API never sends. Every route also declares 413 (P8-A): the cap on a request's
-    body is answered before routing, so any route can say it, with the message the middleware sends; a route that
-    refuses an image over its own limit gives that status itself."""
+    body is answered before routing, so any route can say it, with the message the middleware sends (_too_large: that the
+    request is too large, TOO_LARGE_REQUEST_MSG, unless the route takes an image); a route that takes an image gives that
+    status itself, with the image message."""
     messages = dict(messages)
-    messages.setdefault(413, TOO_LARGE_MSG)
+    messages.setdefault(413, TOO_LARGE_REQUEST_MSG)
     out: Dict[Any, Dict[str, Any]] = {
         status: {"description": "{}: {}".format(ERROR_KINDS[status], REFUSALS[status]),
                  "content": {"application/json": {"example": error_body(ERROR_KINDS[status], message)}}}
@@ -327,18 +334,26 @@ def _declared_length(headers: Headers) -> Optional[int]:
         return MAX_REQUEST_BYTES + 1
 
 
-def _capped(receive: Callable) -> Callable:
-    """receive(), refusing a body once more than MAX_REQUEST_BYTES of it have arrived (one sent without a length)."""
+def _too_large(scope: Dict[str, Any]) -> str:
+    """What a request over the cap is told, by the route it is for: a POST to a route that takes an image (the turn route, /v1/retrieve) is
+    told the image is too large, any other request that the request is (P8 follow-up)."""
+    path = scope.get("path", "")
+    uploads = scope.get("method") == "POST" and (TURN_PATH.fullmatch(path) is not None or path == RETRIEVE_PATH)
+    return TOO_LARGE_MSG if uploads else TOO_LARGE_REQUEST_MSG
+
+
+def _capped(receive: Callable, message: str = TOO_LARGE_MSG) -> Callable:
+    """receive(), refusing a body once more than MAX_REQUEST_BYTES of it have arrived (one sent without a length), with `message`."""
     seen = 0
 
     async def capped() -> Dict[str, Any]:
         nonlocal seen
-        message = await receive()
-        if message["type"] == "http.request":
-            seen += len(message.get("body", b""))
+        event = await receive()
+        if event["type"] == "http.request":
+            seen += len(event.get("body", b""))
             if seen > MAX_REQUEST_BYTES:
-                raise HTTPException(413, TOO_LARGE_MSG)
-        return message
+                raise HTTPException(413, message)
+        return event
 
     return capped
 
@@ -349,7 +364,8 @@ class _Guard:
     R6: with no token, only a connection that arrived on a loopback address is served, whatever host the process was
     bound to (`uvicorn --factory --host 0.0.0.0` never tells create_app). D23: with a token set, every /v1 path needs
     Authorization: Bearer <token>. Ruling 4: a request whose Content-Length exceeds MAX_REQUEST_BYTES is refused
-    unread, and a body sent without a length is cut off as it arrives.
+    unread, and a body sent without a length is cut off as it arrives; either way with the message of _too_large (the image
+    is too large for the two routes that take one, the request for every other).
     """
 
     def __init__(self, app: Callable, token: Optional[str]):
@@ -368,9 +384,9 @@ class _Guard:
             response = _error(401, "Missing or wrong token: send Authorization: Bearer <token>.",
                               {"WWW-Authenticate": "Bearer"})
         elif declared is not None and declared > MAX_REQUEST_BYTES:
-            response = _error(413, TOO_LARGE_MSG)
+            response = _error(413, _too_large(scope))
         else:
-            await self.app(scope, _capped(receive), send)
+            await self.app(scope, _capped(receive, _too_large(scope)), send)
             return
         await response(scope, receive, send)
 
@@ -941,6 +957,8 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
                 sha256, filename = previous["sha256"], previous["filename"]
                 if previous.get("test_row") is not None:   # the turn runs that study again, as its resolved options say
                     opts = opts.model_copy(update={"test_row": previous["test_row"]})
+            else:   # P8 follow-up: a note that runs no model costs the client no turn of its rate limit (app/hardening.py gives the token back)
+                setattr(request.state, FREE_TURN, True)
         # P6 fix 1: a client gone by now (the page's Cancel upload aborts its request once the body is sent) starts no turn: no slot is
         # reserved and nothing is stored, and the request log says 499. The answer reaches no one.
         if await request.is_disconnected():
@@ -1098,7 +1116,7 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         if mode == "public":
             raise HTTPException(403, PUBLIC_TEST_SPLIT_MSG)
 
-    @app.post("/v1/retrieve", summary="Find similar X-rays and reports",
+    @app.post(RETRIEVE_PATH, summary="Find similar X-rays and reports",
               description="Runs the X-ray through preprocess and encode on the turn worker and returns what a turn's retrieve stage "
                           "shows: the `k_images` most similar training X-rays and the `k_reports` best-matching report groups, as rank "
                           "and similarity only in public mode. Answers 413 for an image over the limit, 422 for an image that cannot "

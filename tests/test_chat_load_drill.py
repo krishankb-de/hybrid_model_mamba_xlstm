@@ -363,6 +363,9 @@ def test_only_port_8000_itself_is_refused_for_being_the_dev_server(url):
     ("http://127.0.0.1:abc", "abc"), ("http://127.0.0.1:8000.5", "8000.5"),
     ("http://user:pass@127.0.0.1:1234", "pass"), ("http://tok@127.0.0.1:1234", "tok@"),
     ("http://127.0.0.1:1234/?token=abc", "token=abc"), ("http://127.0.0.1:1234/#frag", "#frag"),
+    # P8 follow-up (7), from the P8-C review: httpx raises no InvalidURL for these two, so each ended as a traceback and exit 1
+    ("http://127.0.0.1:1234/\udcff", None),   # a byte of the path that is no UTF-8 (a shell's argv, decoded with surrogateescape): UnicodeEncodeError
+    ("http://xn--", None),                    # an internationalised host name that is none (idna.IDNAError, a UnicodeError as well)
 ])
 def test_a_url_that_is_not_plain_scheme_host_and_port_is_refused_without_being_quoted(url, piece, offline):
     code, out, err = run_drill([url])

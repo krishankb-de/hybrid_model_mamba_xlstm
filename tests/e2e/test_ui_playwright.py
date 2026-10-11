@@ -1146,6 +1146,52 @@ def test_a_model_trained_to_end_its_reports_words_its_stop_switch_for_it_shows_i
     ui.assert_clean()
 
 
+@pytest.mark.parametrize("ui", [{"public_token": "t"}], indirect=True, ids=["public"])
+def test_in_public_mode_a_note_costs_no_turn_and_the_page_says_a_refused_turn_is_the_rate_limit_with_its_wait(ui, images):
+    """P8 follow-up (3, 4) in a real browser against a real server: the six notes between an image turn and five re-runs cost nothing, so the
+    sixth turn that runs the model is the last one the bucket (six per ten minutes) allows, and the seventh is refused. The notice says what
+    the server says, 429 rate_limited, with the wait it asks for in Retry-After, and not the queue's "The server is busy": the note and the
+    image are still in the composer, for the next Send."""
+    ui.page.context.add_init_script(ui.server.setup_script())   # the token, as Settings holds it, and the shared client id
+    page = ui.open()
+    card = ui.turn(images["xray_a.png"])   # the first turn: one of the six
+    assert card["status"] == "done"
+    for n in range(6):   # a note that runs no model: answered with the command list, no stage, and no token
+        answer = ui.turn(note="Is there pneumonia?")
+        assert answer["status"] == "done" and answer["notes"] == [NOT_A_QA_BOT] and answer["timeline_hidden"], (n, answer)
+    for n in range(5):   # five re-runs of the X-ray: each runs the model and takes a token, which makes six
+        rerun = ui.turn(note="tokens 16")
+        assert rerun["status"] == "done" and not rerun["timeline_hidden"], (n, rerun)
+    ui.expect_refusal(429, "POST", r"/messages$")
+    ui.type_note("tokens 16")
+    page.click("#send")
+    page.wait_for_function("!document.querySelector('#notice').hidden")
+    composer = ui.composer()
+    found = re.fullmatch(r"Too many turns from this client: at most 6 per 10 minutes\. Try again in (\d+) s\.", composer["notice"])
+    assert found and 0 < int(found.group(1)) <= 100, composer["notice"]   # the server's message, whose wait is Retry-After's
+    assert composer["prompt"] == "tokens 16" and not composer["send_disabled"] and ui.cards() == 12   # nothing was sent for it, nothing was spent
+    assert "busy" not in composer["notice"]
+    assert len(ui.refusals) == 1 and ui.refusals[0].startswith("HTTP 429 POST")
+    ui.shot("rate_limited_1280x900_light.png")
+    ui.assert_clean()
+
+
+def test_a_request_of_the_page_that_the_server_never_answers_gives_up_after_15_seconds_and_says_the_server_cannot_be_reached(ui):
+    """P8 follow-up (5) in a real Chrome, whose AbortSignal.timeout and .any are the browser's own, not node's: a half-open tunnel takes the
+    list of chats and never answers, and fetch never fails by itself. The page's request gives up at api.js's limit (REQUEST_TIMEOUT_MS, 15 s)
+    and the notice is the one every network failure has. The request is held by the test; nothing else is touched."""
+    held = []
+    ui.page.route("**/v1/sessions?*", lambda route: held.append(route))   # the list the start-up asks for, and nothing answers it
+    ui.page.goto(ui.server.url)
+    ui.page.wait_for_function("document.querySelector('#mode-badge').textContent !== ''", timeout=30000)   # the rest of the page started
+    assert ui.composer()["notice"] is None, "the page does not give up before its limit"
+    ui.page.wait_for_function("!document.querySelector('#notice').hidden", timeout=40000)   # at the limit: 15 s after the request
+    assert ui.composer()["notice"] == "Cannot reach the server. Check the connection and try again."
+    assert held, "the list was asked for, and the test held it"
+    ui.page.unroute("**/v1/sessions?*")
+    ui.assert_clean()
+
+
 COMPOSER_BOXES_JS = """() => {
   const q = (s) => document.querySelector(s);
   const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };

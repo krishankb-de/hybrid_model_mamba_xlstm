@@ -223,6 +223,43 @@ def test_the_api_description_states_the_size_cap_the_rate_limit_and_the_request_
     assert "`{}`".format(hardening.RATE_LIMITED) in description and "`Retry-After`" in description and "public mode" in description
     assert "one JSON line per request" in description   # and what the log never holds
     assert "no query string" in description and "no body" in description and "no header but `X-Client-Id`" in description
+    assert "a note that runs no model" in description and "costs the client nothing" in description   # P8 follow-up (3): such a turn is free
+
+
+def test_the_api_description_says_a_422_never_repeats_a_value_that_was_sent_and_it_is_true(client):   # P8 follow-up (6)
+    """A 422 names the key that was wrong ("retrieval_k: Extra inputs are not permitted") and never the value it held, so the sentence is about
+    values: "never repeats what was sent" was not true of a key name."""
+    description = " ".join(client.get("/openapi.json").json()["info"]["description"].split())
+    assert "a 422 never repeats a value that was sent" in description
+    assert "never repeats what was sent" not in description
+    assert "a 500 never says what went wrong inside" in description
+    sid = client.post("/v1/sessions", json={}).json()["id"]
+    for r in (client.post("/v1/sessions", json={"nope": "VALUE-THAT-MUST-NOT-COME-BACK"}),
+              client.post(MESSAGES.format(session_id=sid), data={"options": json.dumps({"retrieval_k": "VALUE-THAT-MUST-NOT-COME-BACK"})}),
+              client.get("/v1/sessions?limit=VALUE-THAT-MUST-NOT-COME-BACK")):
+        assert r.status_code == 422 and "VALUE-THAT-MUST-NOT-COME-BACK" not in r.text
+    assert "nope" in client.post("/v1/sessions", json={"nope": "x"}).json()["error"]["message"]   # the key is named
+
+
+UPLOAD_ROUTES = {("POST", MESSAGES), ("POST", "/v1/retrieve")}   # the routes that take an image
+
+
+def test_the_413_example_names_the_request_on_a_route_that_takes_no_image_and_keeps_the_image_message_on_the_upload_routes(client):   # P8 follow-up (6)
+    spec = client.get("/openapi.json").json()
+    request_msg = "The request is larger than {} MB.".format(server.MAX_REQUEST_BYTES // (1024 * 1024))
+    assert server.TOO_LARGE_REQUEST_MSG == request_msg
+    seen = set()
+    for method, path, op in _operations(spec):
+        message = op["responses"]["413"]["content"]["application/json"]["example"]["error"]["message"]
+        seen.add((method, path))
+        if (method, path) in UPLOAD_ROUTES:
+            assert message == "Image is larger than {} MB.".format(MAX_UPLOAD_BYTES // (1024 * 1024)), (method, path)
+        else:
+            assert message == request_msg and "image" not in message.lower(), (method, path)
+    assert UPLOAD_ROUTES <= seen and len(seen - UPLOAD_ROUTES) >= 10   # and every other route has the one example
+    for method, path in sorted(UPLOAD_ROUTES):   # the status line is the same everywhere: the image limit, and the whole request's
+        description = spec["paths"][path][method.lower()]["responses"]["413"]["description"]
+        assert "upload limit" in description and "{} MB".format(server.MAX_REQUEST_BYTES // (1024 * 1024)) in description
 
 
 def test_the_turn_route_documents_both_429s_and_the_retry_after_header_of_the_rate_limit(client):   # P8-A

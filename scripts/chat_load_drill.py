@@ -164,21 +164,25 @@ def check_url(raw: str) -> str:
     text = raw.strip()
     if "://" not in text:
         text = "http://" + text
+    # Every part of the URL that is read is read inside the try: httpx raises InvalidURL for a port that is no number or a character a URL cannot
+    # hold, but a byte of the path that is no UTF-8 is a UnicodeEncodeError when the URL is made, and a host name that is none ("http://xn--") an
+    # idna.IDNAError (a UnicodeError) when .host is read. Each was a traceback and exit 1, and is one ERROR line and exit 2 (P8 follow-up, from the P8-C review).
     try:
         url = httpx.URL(text)
-        port = url.port
-    except httpx.InvalidURL:   # a port that is no number, a character a URL cannot hold
+        port, host, scheme = url.port, url.host, url.scheme
+        plain = not (url.userinfo or url.query or url.fragment)
+    except (httpx.InvalidURL, UnicodeError):
         raise Refused(URL_REFUSAL) from None
     if port == DEV_PORT:
         raise Refused(DEV_REFUSAL)
-    if url.scheme not in ("http", "https") or HOST.fullmatch(url.host) is None:
+    if scheme not in ("http", "https") or HOST.fullmatch(host) is None:
         raise Refused(URL_REFUSAL)
     if port is not None and not 1 <= port <= 65535:
         raise Refused(URL_REFUSAL)
-    if url.userinfo or url.query or url.fragment:
+    if not plain:
         raise Refused(URL_REFUSAL)
-    host = "[{}]".format(url.host) if ":" in url.host else url.host
-    return "{}://{}{}".format(url.scheme, host, "" if port is None else ":{}".format(port))
+    shown = "[{}]".format(host) if ":" in host else host
+    return "{}://{}{}".format(scheme, shown, "" if port is None else ":{}".format(port))
 
 
 def is_loopback(host: str) -> bool:
