@@ -61,12 +61,15 @@ MODEL_CHECKPOINTS = {   # resolved against the repo root (ruling 1): the publish
 # P9-G5a: the model trained to end its reports (P9-G3) keeps its files in the app's own home, not in the thesis checkout (R8): `checkpoint` is
 # resolved against CHAT_HOME, `config` is the model config it was trained with (so the name is the registry's, not the config's), and `note` is
 # one static line about how it measured, which its card carries. The note is aggregate numbers, so it is no Class R data and a public card keeps
-# it. Whether the model is `eos_trained` is read from its run's own metadata, as for every model: the registry says nothing of it.
-EOS_MODEL_NOTE = ("EOS-trained: 2,662 of 2,663 test reports end by themselves (44.2 words each). Against the published model: ROUGE-L 0.1948 vs "
-                  "0.1920, CheXbert-14 micro F1 0.4464 vs 0.4661; BLEU and all four CheXbert F1 scores are significantly lower.")
+# it. Whether the model is `eos_trained` is read from its run's own metadata, as for every model: the registry never says it. What it does say,
+# with `eos`, is what the entry IS, an EOS model, and a start whose card does not agree is refused (fix 1): served without its stop, such an
+# entry would carry the note above and decode like a published model.
+EOS_MODEL_NOTE = ("EOS-trained: at a 200-token budget, 2,662 of 2,663 test reports end by themselves (44.2 words on average). Against the "
+                  "published model: ROUGE-L 0.1948 vs 0.1920, CheXbert-14 micro F1 0.4464 vs 0.4661; BLEU and all four CheXbert F1 scores are "
+                  "significantly lower.")
 HOME_MODELS = {
     "hybrid_150m_m3_rrg_eos": {"config": "hybrid_150m_m3_rrg", "checkpoint": "models/report_gen_m3_eos_s42/checkpoints/last.ckpt",
-                               "note": EOS_MODEL_NOTE},
+                               "note": EOS_MODEL_NOTE, "eos": True},
 }
 MODEL_NAMES = tuple(MODEL_CHECKPOINTS) + tuple(HOME_MODELS)   # every model a server can be asked for; the first one asked for is its default
 STATIC_DIR = Path(__file__).resolve().parent / "static"   # the page; P4 builds it
@@ -427,17 +430,32 @@ def _chat_home(home: Optional[str]) -> Path:
 
 
 class ModelUnavailable(RuntimeError):
-    """A model that was asked for has no checkpoint where the server keeps it. The message names the model and no path: it is a line of a job
-    log, and a path under CHAT_HOME holds the user name."""
+    """A model that was asked for cannot be served as it is: it has no checkpoint where the server keeps it, or an EOS entry's run does not
+    say it was trained to end its reports. The message names the model and no path: it is a line of a job log, and a path under CHAT_HOME
+    holds the user name."""
 
 
 def _require_checkpoints(models: Sequence[str], home: Path) -> None:
-    """P9-G5a: every model kept under CHAT_HOME (HOME_MODELS) that was asked for is there, before the database is opened or an engine is
-    built. A published model's checkpoint is not looked for here: the thesis loader's own error says so, as it always has."""
+    """P9-G5a: every model kept under CHAT_HOME (HOME_MODELS) that was asked for is there, and its run finished (the DONE marker the training
+    job writes only for a run that did, which the decode job asks for too), before the database is opened or an engine is built. A published
+    model's checkpoint is not looked for here: the thesis loader's own error says so, as it always has."""
     for name in models:
         spec = HOME_MODELS.get(name)
-        if spec is not None and not (home / spec["checkpoint"]).is_file():
+        if spec is None:
+            continue
+        checkpoint = home / spec["checkpoint"]
+        if not checkpoint.is_file() or not (checkpoint.parent.parent / "DONE").is_file():
             raise ModelUnavailable("{} has no checkpoint in CHAT_HOME: train it first, or serve without it.".format(name))
+
+
+def _require_eos_entries_marked(engines: Dict[str, Engine]) -> None:
+    """P9-G5a fix 1: an entry of HOME_MODELS marked `eos` is an EOS model, so its card must say `eos_trained`, which the engine reads from the
+    run's own metadata (the flag is not written here, only checked against what the entry is). A missing or damaged run_metadata.json, or one
+    without dataset.report_eos_target true, gives a card that says otherwise: served, that model would decode with the published search and
+    never stop at its own end, under a card that carries the EOS note, and under MODELS=m3eos,m3 it would be the deployment's default."""
+    for name, engine in engines.items():
+        if (HOME_MODELS.get(name) or {}).get("eos") and not engine.card().get("eos_trained"):
+            raise ModelUnavailable("{} is not marked as trained to end its reports in its run metadata: serve the run it came from.".format(name))
 
 
 def _engines(kind: str, models: Sequence[str], tiny_step_delay_s: float, drift_note: str, device: str = "cpu",
@@ -650,8 +668,10 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     real engines (P7-B: the serving command line, app/cli.py, passes them); the tiny engine ignores both.
 
     `models` (real engines only) are names of MODEL_NAMES, the first the default; without it the published Mamba-3 model is served alone. A
-    model of HOME_MODELS (P9-G5a, the EOS-trained one) is loaded from `home`, and a start that asks for one whose checkpoint is not there is
-    refused with ModelUnavailable, before the database is opened.
+    model of HOME_MODELS (P9-G5a, the EOS-trained one) is loaded from `home`, and a start that asks for one whose checkpoint, or whose run's DONE
+    marker, is not there is refused with ModelUnavailable, before the database is opened. An entry marked `eos` whose engine's card does not
+    say eos_trained (its run metadata is missing, damaged or lacks the flag) is refused the same way once the engines are built, the store
+    closed: it would otherwise be served without its stop.
     """
     if mode not in ("private", "public"):
         raise ValueError("mode must be 'private' or 'public', got {!r}".format(mode))
@@ -687,6 +707,7 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     sweeper = retention.RetentionSweeper(store, policy, report=report_sweep)   # started with the server, in the lifespan
     try:
         engines = _engines(engine, models, tiny_step_delay_s, drift_note, device, threads, store.home)
+        _require_eos_entries_marked(engines)   # P9-G5a fix 1: inside this block, so that a refusal closes the store
         default_model = next(iter(engines))
         gallery, retrieval_models = _wire_gallery(gallery, gallery_dir, tiny_gallery, store.home, engines, default_model)
         labeler = _wire_labeler(labeler, labeler_url, tiny_gallery)

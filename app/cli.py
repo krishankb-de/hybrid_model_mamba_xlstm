@@ -374,7 +374,8 @@ def _serve(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         emit("ERROR interrupted while starting")
         return 130
-    except ModelUnavailable as exc:     # P9-G5a: a model asked for has no checkpoint; its message names the model and never a path
+    except ModelUnavailable as exc:     # P9-G5a: a model asked for has no finished checkpoint, or an EOS entry is not marked EOS-trained by its run;
+                                        # the message names the model and never a path
         emit("ERROR {}".format(exc))
         return 1
     except Exception as exc:    # its text can hold a path: the class here, the traceback in the server log (stderr)

@@ -32,7 +32,9 @@
 # a dump from before the lever, decoded at 1.0), and names system A for it: eos_s42 for 1.0, eos_lp<NNN>_s42 for any other, NNN being
 # the penalty times 100 in three digits (eos_lp200_s42 for 2.0). The report is bootstrap_<system A>_vs_m3_s42.md beside that dump, so two
 # arms never share a system name or a report, and a finished report is never overwritten. A line it cannot name (more than two
-# decimals, or outside 0.5 to 3.0) stops the job before anything runs, and the refusal does not show it.
+# decimals, or outside 0.5 to 3.0) stops the job before anything runs, and the refusal does not show it. A directory named like an
+# arm's (it ends in lp<NNN>_test_split_s42; trailing slashes do not count) is a claim, and the log must bear it out: its penalty must be
+# NNN / 100, so a dump with no eval.log, which reads as 1.0 for a G4 dump, is refused rather than read as 1.0 when its directory says 2.0.
 #
 # WHAT IT PRINTS (RESULT lines, numbers and allowlisted names only; scripts/report_eos_stats.py says what each holds):
 #   the stats of A, then of B, then of the references (the baseline: some reference reports lack a final period too, and the length
@@ -131,6 +133,16 @@ if [ -f "${DUMP_DIR}/eval.log" ]; then
 fi
 LP_CENTI="$(lp_centi "${LP_LOGGED}")" || fail "the length penalty in the dump's eval.log is not a number with at most two decimals"
 { [ "${LP_CENTI}" -ge 50 ] && [ "${LP_CENTI}" -le 300 ]; } || fail "the length penalty in the dump's eval.log is outside 0.5 to 3.0"
+# A directory named like an arm's, the decode job's default for a penalty, is a claim: the log must bear it out, and a log that is not
+# there cannot (it would read as 1.0). The name is judged without its trailing slashes, and nothing of it is printed.
+DUMP_PATH="${DUMP_DIR%"${DUMP_DIR##*[!/]}"}"
+case "${DUMP_PATH}" in
+  *lp[0-9][0-9][0-9]_test_split_s42)
+    [ -f "${DUMP_DIR}/eval.log" ] || fail "the dump's directory names a length penalty, and the dump has no eval.log to confirm it"
+    DIR_NNN="${DUMP_PATH%_test_split_s42}"
+    [ "$((10#${DIR_NNN: -3}))" -eq "${LP_CENTI}" ] || fail "the dump's directory names another length penalty than its eval.log records"
+    ;;
+esac
 [ "${LP_CENTI}" -eq 100 ] || NAME_A="eos_lp$(printf '%03d' "${LP_CENTI}")_s42"
 OUTPUT="${DUMP_DIR}/bootstrap_${NAME_A}_vs_${NAME_B}.md"
 

@@ -97,11 +97,14 @@ def _set_manifest(root, **fields):
 
 def _fake_real_engines(monkeypatch, other_tower=()):
     """build_engine("real", ...) without checkpoints: a tiny engine named after its model. A model in other_tower gets a tower whose
-    weights differ, as a report model whose image tower was trained on would."""
+    weights differ, as a report model whose image tower was trained on would. An engine named for an EOS entry of the registry says
+    eos_trained, as its run's metadata does: the server refuses to start such an entry whose card does not (P9-G5a fix 1)."""
     def fake(kind, **kw):
         engine = build_engine("tiny")
         engine.name = kw.get("name") or kw["model_config"]   # P9-G5a: a registry name that is not the model config
         engine._card.update(name=engine.name, checkpoint=kw["checkpoint"])
+        if (server.HOME_MODELS.get(engine.name) or {}).get("eos"):
+            engine._card["eos_trained"] = True
         if engine.name in other_tower:
             engine.tower.head.bias.data += 1.0
         return engine
@@ -420,6 +423,7 @@ def _published_app(tmp_path, tiny_gallery, monkeypatch, models):
     home = tmp_path / "home"
     (home / "models" / "report_gen_m3_eos_s42" / "checkpoints").mkdir(parents=True)
     (home / "models" / "report_gen_m3_eos_s42" / "checkpoints" / "last.ckpt").write_bytes(b"synthetic")
+    (home / "models" / "report_gen_m3_eos_s42" / "DONE").write_text("2026-10-09T20:00:00Z job=1\n")   # the run finished (the registry asks)
     root = decide_gate(tiny_gallery)
     _set_manifest(root, tower_sha256=build_engine("tiny").tower_sha256())
     n_test = json.loads((root / "manifest.json").read_text())["counts"]["test"]
@@ -451,8 +455,8 @@ def test_the_eos_model_gets_the_floor_line_and_no_model_line_and_no_comparison(t
     assert PUBLISHED_MODEL in MODEL_CHECKPOINTS and eos not in MODEL_CHECKPOINTS      # the published dump is of the published model only
     with TestClient(app) as c:
         assert c.get("/v1/models").json()["default_model"] == eos
-        c.app.state.engines[eos]._card["eos_trained"] = True                          # what its run's metadata says
-        score = _ends(_turn(c, {"test_row": 2}, image=None))["score"]["detail"]       # no model option: the server's default, the EOS model
+        assert c.app.state.engines[eos].card()["eos_trained"] is True                 # what its run's metadata says: the server started on it
+        score =_ends(_turn(c, {"test_row": 2}, image=None))["score"]["detail"]       # no model option: the server's default, the EOS model
         assert score["published"] == {"model_report": None, "floor_report": "SYNTHETIC floor line 2", "live_equals_published": None}
         other = _ends(_turn(c, {"test_row": 2, "model": PUBLISHED_MODEL}, image=None))["score"]["detail"]["published"]
         assert other["model_report"] == "SYNTHETIC model line 2" and other["live_equals_published"] is False   # unchanged for the published model

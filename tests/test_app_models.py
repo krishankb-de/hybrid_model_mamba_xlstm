@@ -25,6 +25,8 @@ EOS_MODEL = "hybrid_150m_m3_rrg_eos"
 PUBLISHED = ("hybrid_150m_m3_rrg", "hybrid_150m_v2_rrg")
 EOS_CHECKPOINT = Path("models") / "report_gen_m3_eos_s42" / "checkpoints" / "last.ckpt"
 G4_NUMBERS = ("2,662", "2,663", "44.2", "0.1948", "0.1920", "0.4464", "0.4661")   # the P9-G4 result the card's note is built from
+EOS_NOTE = ("EOS-trained: at a 200-token budget, 2,662 of 2,663 test reports end by themselves (44.2 words on average). Against the published "
+            "model: ROUGE-L 0.1948 vs 0.1920, CheXbert-14 micro F1 0.4464 vs 0.4661; BLEU and all four CheXbert F1 scores are significantly lower.")
 
 
 @pytest.fixture
@@ -35,9 +37,10 @@ def keep_threads():
     torch.set_num_threads(threads)
 
 
-def eos_run(home: Path, dataset=None, experiment="report_gen_m3_eos_s42") -> Path:
-    """<home>/models/report_gen_m3_eos_s42/{run_metadata.json, checkpoints/last.ckpt}: the layout scripts/train_report_eos_h100.sh leaves
-    under CHAT_HOME. `dataset`, when given, is the resolved config's dataset block, where P9-G1's report_eos_target lands."""
+def eos_run(home: Path, dataset=None, experiment="report_gen_m3_eos_s42", done: bool = True) -> Path:
+    """<home>/models/report_gen_m3_eos_s42/{DONE, run_metadata.json, checkpoints/last.ckpt}: the layout scripts/train_report_eos_h100.sh
+    leaves under CHAT_HOME (DONE only for a run that finished). `dataset`, when given, is the resolved config's dataset block, where
+    P9-G1's report_eos_target lands."""
     run = home / EOS_CHECKPOINT.parent.parent
     (run / "checkpoints").mkdir(parents=True)
     ckpt = run / "checkpoints" / "last.ckpt"
@@ -46,6 +49,8 @@ def eos_run(home: Path, dataset=None, experiment="report_gen_m3_eos_s42") -> Pat
     if dataset is not None:
         resolved["dataset"] = dataset
     (run / "run_metadata.json").write_text(json.dumps({"git_sha": "x", "resolved_config": resolved}))
+    if done:
+        (run / "DONE").write_text("2026-10-09T20:00:00Z job=1\n")
     return ckpt
 
 
@@ -67,7 +72,8 @@ def stub_loader(monkeypatch):
 
 def fake_builder(monkeypatch):
     """server.build_engine replaced by one that records the calls for real engines and answers a tiny engine called what the engine would
-    be called. A tiny engine is built as it always was."""
+    be called. A tiny engine is built as it always was. An engine named for an EOS entry of the registry says what its run's metadata would
+    say, eos_trained: the server refuses to start an EOS entry whose card does not (P9-G5a fix 1)."""
     calls = []
     real = server.build_engine
 
@@ -78,6 +84,8 @@ def fake_builder(monkeypatch):
         engine = real("tiny")
         engine.name = kw.get("name") or kw["model_config"]
         engine._card.update(name=engine.name, checkpoint=kw["checkpoint"])
+        if (server.HOME_MODELS.get(engine.name) or {}).get("eos"):
+            engine._card["eos_trained"] = True
         return engine
 
     monkeypatch.setattr(server, "build_engine", fake)
@@ -87,6 +95,11 @@ def fake_builder(monkeypatch):
 def listing(app):
     with TestClient(app) as c:
         return c.get("/v1/models").json()
+
+
+def never_serve(monkeypatch):
+    """The CLI must stop before it serves: a start that did not stop would block its test for good, so serving fails the test instead."""
+    monkeypatch.setattr(cli, "ServingServer", lambda *a, **k: pytest.fail("the server was started"))
 
 
 # ---- the registry ------------------------------------------------------------------------------------------------------------------
@@ -168,8 +181,9 @@ def test_a_name_that_is_in_no_registry_is_still_refused_and_the_message_lists_al
     assert all(name in str(stop.value) for name in server.MODEL_NAMES)
 
 
-def test_the_cli_turns_a_missing_eos_checkpoint_into_one_error_line_and_exit_1_without_a_path(tmp_path, capsys):
+def test_the_cli_turns_a_missing_eos_checkpoint_into_one_error_line_and_exit_1_without_a_path(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
+    never_serve(monkeypatch)
     code = cli.main(["--engine", "real", "--mode", "private", "--home", str(home), "--models", "m3eos"])
     captured = capsys.readouterr()
     errors = [line for line in captured.out.splitlines() if line.startswith("ERROR")]
@@ -226,20 +240,144 @@ def test_the_eos_models_card_reads_its_training_from_the_run_metadata_and_carrie
     assert card["checkpoint"] == str(home.resolve() / EOS_CHECKPOINT) and card["prefix_k"] == 4
     assert seen == {"checkpoint": card["checkpoint"], "model_config": "hybrid_150m_m3_rrg", "device": "cpu"}
     note = card["evaluation_note"]
+    assert note == EOS_NOTE == server.EOS_MODEL_NOTE, "the text is pinned: it says the budget the numbers were measured at and a mean"
     assert all(number in note for number in G4_NUMBERS), note
-    assert len(note) <= 240 and "\n" not in note and note.isascii(), "one or two lines of plain text"
+    assert len(note) <= 280 and "\n" not in note and note.isascii(), "one or two lines of plain text"
+    assert "at a 200-token budget" in note and "44.2 words on average" in note and "44.2 words each" not in note
 
 
-def test_eos_trained_is_read_from_the_runs_metadata_never_written_into_the_registry(tmp_path, monkeypatch, keep_threads):
+def test_eos_trained_is_read_from_the_runs_metadata_and_the_registry_only_says_what_the_entry_is(tmp_path, monkeypatch, keep_threads):
+    """The flag on the card still comes from the run's own metadata: the registry marks the entry as an EOS model (`eos`), which says what
+    the entry is and so what its card must agree with; it never says `eos_trained` itself."""
+    assert server.HOME_MODELS[EOS_MODEL]["eos"] is True and "eos_trained" not in server.HOME_MODELS[EOS_MODEL]
+    assert not set(PUBLISHED) & set(server.HOME_MODELS), "the published models are not EOS entries and are not judged by that guard"
+    home = tmp_path / "home"
+    eos_run(home, dataset={"report_eos_target": True})
     stub_loader(monkeypatch)
-    cards = {}
-    for label, dataset in (("flagged", {"report_eos_target": True}), ("unflagged", {}), ("false", {"report_eos_target": False})):
-        home = tmp_path / label
-        eos_run(home, dataset=dataset)
-        (cards[label],) = listing(create_app(engine="real", home=str(home), models=(EOS_MODEL,)))["models"]
-    assert [cards[k]["eos_trained"] for k in ("flagged", "unflagged", "false")] == [True, False, False]
-    assert {c["name"] for c in cards.values()} == {EOS_MODEL}               # the same registry entry in all three
-    assert all(c["train_experiment"] == "report_gen_m3_eos_s42" for c in cards.values())
+    (card,) = listing(create_app(engine="real", home=str(home), models=(EOS_MODEL,)))["models"]
+    assert card["eos_trained"] is True and card["name"] == EOS_MODEL and card["train_experiment"] == "report_gen_m3_eos_s42"
+
+
+# ---- a mis-provisioned EOS entry is refused, not served without its stop (P9-G5a fix 1) -------------------------------------------
+
+NOT_MARKED = "hybrid_150m_m3_rrg_eos is not marked as trained to end its reports in its run metadata: serve the run it came from."
+NO_CHECKPOINT = "hybrid_150m_m3_rrg_eos has no checkpoint in CHAT_HOME: train it first, or serve without it."
+FLAGGED_METADATA = {"git_sha": "x", "resolved_config": {"experiment_name": "report_gen_m3_eos_s42", "model": {"prefix_k": 4},
+                                                         "dataset": {"report_eos_target": True}}}
+HOWS = ["unflagged", "false", "null", "text", "no_dataset_block", "missing", "damaged"]   # how a run's metadata can fail to say it
+
+
+def mis_provisioned_run(home: Path, how: str) -> Path:
+    """A finished EOS run (checkpoint and DONE marker) whose metadata does not say it was trained to end its reports: it lacks the flag
+    (`unflagged`, no dataset block), says otherwise (`false`, `null`, or `text`, since P9-G1 insists on a bool), or is not there (`missing`)
+    or not readable (`damaged`). -> the run's metadata path."""
+    datasets = {"unflagged": {}, "false": {"report_eos_target": False}, "null": {"report_eos_target": None},
+                "text": {"report_eos_target": "true"}, "no_dataset_block": None}
+    ckpt = eos_run(home, dataset=datasets.get(how, {"report_eos_target": True}))
+    meta = ckpt.parent.parent / "run_metadata.json"
+    if how == "missing":
+        meta.unlink()
+    elif how == "damaged":
+        meta.write_text("{broken")
+    return meta
+
+
+@pytest.mark.parametrize("how", HOWS)
+def test_an_eos_entry_whose_run_metadata_does_not_say_it_was_trained_to_end_its_reports_refuses_the_start(tmp_path, monkeypatch, keep_threads, how):
+    home = tmp_path / "home"
+    meta = mis_provisioned_run(home, how)
+    stub_loader(monkeypatch)
+    with pytest.raises(server.ModelUnavailable) as stop:
+        create_app(engine="real", home=str(home), models=(EOS_MODEL,))
+    assert str(stop.value) == NOT_MARKED, "one line that names the model and no path"
+    for fragment in (str(tmp_path), "last.ckpt", "report_gen_m3_eos_s42", "run_metadata", "/", "\n"):
+        assert fragment not in str(stop.value), fragment
+    # The refusal came inside the block that closes the database: its exclusive lock is gone, and the same home starts once the run says so.
+    meta.write_text(json.dumps(FLAGGED_METADATA))
+    (card,) = listing(create_app(engine="real", home=str(home), models=(EOS_MODEL,)))["models"]
+    assert card["eos_trained"] is True and card["name"] == EOS_MODEL
+
+
+@pytest.mark.parametrize("how", HOWS)
+def test_the_cli_turns_an_eos_entry_that_is_not_marked_eos_trained_into_one_error_line_and_exit_1(tmp_path, monkeypatch, capsys, keep_threads, how):
+    home = tmp_path / "home"
+    mis_provisioned_run(home, how)
+    stub_loader(monkeypatch)
+    never_serve(monkeypatch)
+    code = cli.main(["--engine", "real", "--mode", "private", "--home", str(home), "--models", "m3eos"])
+    captured = capsys.readouterr()
+    assert code == 1 and [l for l in captured.out.splitlines() if l.startswith("ERROR")] == ["ERROR " + NOT_MARKED], captured.out
+    assert str(tmp_path) not in captured.out and "last.ckpt" not in captured.out
+
+
+def test_the_eos_entry_that_is_the_second_model_is_refused_too_so_a_deployment_never_serves_it_without_its_stop(tmp_path, monkeypatch,
+                                                                                                             keep_threads):
+    """MODELS=m3,m3eos: the published model first and the default, the EOS entry beside it. A mis-provisioned EOS entry still stops the
+    start, whichever place it holds, and the published model is not judged by the guard."""
+    home = tmp_path / "home"
+    mis_provisioned_run(home, "unflagged")
+    calls = fake_builder(monkeypatch)
+    build = server.build_engine
+
+    def unmarked(kind, **kw):          # the run's metadata says nothing of the EOS target, so the engine's card says eos_trained False
+        engine = build(kind, **kw)
+        if kw.get("name") == EOS_MODEL:
+            engine._card["eos_trained"] = False
+        return engine
+
+    monkeypatch.setattr(server, "build_engine", unmarked)
+    with pytest.raises(server.ModelUnavailable) as stop:
+        create_app(engine="real", home=str(home), models=(PUBLISHED[0], EOS_MODEL))
+    assert str(stop.value) == NOT_MARKED and len(calls) == 2, "both were built, and the one that is not what its entry says stops the start"
+
+
+def test_the_guard_judges_the_entries_marked_eos_and_no_other_entry_of_the_home_registry(tmp_path, monkeypatch):
+    other = "hybrid_150m_m3_rrg_other"
+    monkeypatch.setitem(server.HOME_MODELS, other, {k: v for k, v in server.HOME_MODELS[EOS_MODEL].items() if k != "eos"})
+    monkeypatch.setattr(server, "MODEL_NAMES", server.MODEL_NAMES + (other,))
+    eos_run(tmp_path / "home")
+    fake_builder(monkeypatch)
+    answer = listing(create_app(engine="real", home=str(tmp_path / "home"), models=(other, EOS_MODEL)))
+    by_name = {m["name"]: m for m in answer["models"]}
+    assert by_name[other]["eos_trained"] is False and by_name[EOS_MODEL]["eos_trained"] is True    # the unmarked entry starts as it is
+
+
+# ---- an EOS run that did not finish is no checkpoint (P9-G5a fix 1) ------------------------------------------------------------------
+
+def test_an_eos_run_without_its_done_marker_is_refused_like_a_missing_checkpoint(tmp_path, monkeypatch):
+    """The decode job (scripts/eval_report_eos_h100.sh) decodes a run that has DONE and no other; the server serves the same one. Same one-line
+    refusal as a checkpoint that is not there, before the database is opened and before anything is built."""
+    home = tmp_path / "home"
+    eos_run(home, dataset={"report_eos_target": True}, done=False)
+    monkeypatch.setattr(server, "build_engine", lambda *a, **k: pytest.fail("an engine was built for a run that did not finish"))
+    with pytest.raises(server.ModelUnavailable) as stop:
+        create_app(engine="real", home=str(home), models=(EOS_MODEL,))
+    assert str(stop.value) == NO_CHECKPOINT
+    assert not (home / "chat.db").exists(), "the database was not opened"
+
+
+def test_a_directory_named_done_is_no_marker_and_the_marker_is_checked_only_for_the_eos_entry(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    eos_run(home, dataset={"report_eos_target": True}, done=False)
+    (home / "models" / "report_gen_m3_eos_s42" / "DONE").mkdir()
+    calls = fake_builder(monkeypatch)
+    with pytest.raises(server.ModelUnavailable):
+        create_app(engine="real", home=str(home), models=(EOS_MODEL,))
+    assert calls == [], "nothing was built for a run whose marker is a directory"
+    with TestClient(create_app(engine="real", home=str(tmp_path / "bare"))):   # a published model asks nothing of CHAT_HOME: no run there at all
+        pass
+    assert [kw["model_config"] for _, kw in calls] == ["hybrid_150m_m3_rrg"]
+
+
+def test_the_cli_turns_an_unfinished_eos_run_into_the_missing_checkpoint_line(tmp_path, monkeypatch, capsys, keep_threads):
+    home = tmp_path / "home"
+    eos_run(home, dataset={"report_eos_target": True}, done=False)
+    stub_loader(monkeypatch)
+    never_serve(monkeypatch)
+    code = cli.main(["--engine", "real", "--mode", "private", "--home", str(home), "--models", "m3eos"])
+    captured = capsys.readouterr()
+    assert code == 1 and [l for l in captured.out.splitlines() if l.startswith("ERROR")] == ["ERROR " + NO_CHECKPOINT], captured.out
+    assert str(tmp_path) not in captured.out and not (home / "chat.db").exists()
 
 
 def test_a_model_given_no_note_has_no_evaluation_note_key_so_the_published_cards_are_byte_for_byte_what_they_were(tmp_path, monkeypatch,

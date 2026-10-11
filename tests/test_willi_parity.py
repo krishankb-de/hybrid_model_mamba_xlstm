@@ -7333,6 +7333,7 @@ def test_eval_report_eos_decode_header_documents_the_length_penalty_and_the_subm
     assert arm == "results/chat_report_eos_lp{:03d}_test_split_s42".format(round(2.0 * 100)), "the header's directory is the rule's for 2.0"
     compare_header = "\n".join(l for l in _eval_text("compare").splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))
     assert "eval_report_eos_h100.sh" in compare_header and "length-penalty arm" in compare_header and "eos_lp<NNN>_s42" in compare_header
+    assert "must bear it out" in compare_header and "refused rather than read as 1.0" in compare_header   # fix 1: the name check, in the header
 
 
 def test_eval_report_eos_compare_names_system_a_after_the_penalty_the_dumps_own_log_records():
@@ -7355,8 +7356,16 @@ def test_eval_report_eos_compare_names_system_a_after_the_penalty_the_dumps_own_
     banner, exists = code.index('echo "=== P9-G4 compare:'), code.index('if [ -e "${OUTPUT}" ]; then')
     assert guard < resolve < code.index("NAME_A=\"eos_lp") < output < exists, "the log is read after DUMP_DIR passed its guard, the name before it is used"
     assert code.index("NAME_A=\"eos_lp") < banner and exists < code.index("python scripts/bootstrap_compare.py")
+    # P9-G5a/G6 fix 1: a directory named like an arm's is a claim, which the log must bear out; a log that is not there cannot
+    for needle in ('DUMP_PATH="${DUMP_DIR%"${DUMP_DIR##*[!/]}"}"', 'case "${DUMP_PATH}" in', "*lp[0-9][0-9][0-9]_test_split_s42)",
+                   '[ -f "${DUMP_DIR}/eval.log" ] || fail "the dump\'s directory names a length penalty, and the dump has no eval.log to confirm it"',
+                   'DIR_NNN="${DUMP_PATH%_test_split_s42}"',
+                   '[ "$((10#${DIR_NNN: -3}))" -eq "${LP_CENTI}" ] || fail "the dump\'s directory names another length penalty than its eval.log records"'):
+        assert needle in code, needle
+    assert (code.index('{ [ "${LP_CENTI}" -ge 50 ]') < code.index('case "${DUMP_PATH}" in') < code.index("NAME_A=\"eos_lp")
+            ), "the name check comes after the log's own penalty has been judged, and before it names anything"
     messages = [m for m in re.findall(r'\bfail "([^"]*)"', code) if "penalty" in m.lower()]
-    assert len(messages) == 2 and not [m for m in messages if "$" in m], messages   # static text: what the log held is not in a refusal
+    assert len(messages) == 4 and not [m for m in messages if "$" in m], messages   # static text: what the log held is not in a refusal
 
 
 def test_eval_report_eos_chexbert_header_says_a_length_penalty_arms_dump_is_just_another_dump_directory():
@@ -8363,6 +8372,8 @@ def test_serve_chat_wrappers_document_both_model_orders_of_the_eos_model_and_kee
         text = "\n".join(header)
         assert "hybrid_150m_m3_rrg_eos" in text and "report_gen_m3_eos_s42" in text and "refuses to start" in text
         assert "names no path" in text and "Without MODELS the job serves m3 alone" in text
+        # P9-G5a fix 1: the run's DONE marker and its metadata are asked for as well, so the header says what the API will refuse over
+        assert "DONE marker" in text and "run_metadata.json" in text and "trained to end its reports" in text
         code = _serve_code(name)
         assert 'MODELS="${MODELS:-m3}"' in code and "m3eos" not in code
         assert '[[ "${MODELS}" =~ ^[a-z0-9,]{1,32}$ ]]' in code and re.fullmatch(r"[a-z0-9,]{1,32}", "m3eos,m3")

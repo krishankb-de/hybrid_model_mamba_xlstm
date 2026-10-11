@@ -1682,7 +1682,12 @@ def add_arm(box: Box, nnn: str, penalty_lines: Optional[str], names: Tuple[str, 
     """P9-G6: a second EOS dump beside the G4 one, in the directory the decode job makes for the penalty NNN / 100: the same studies as
     the published dump and its own label matrices, and an eval.log that holds `penalty_lines` (None: no eval.log at all). The report
     the fake bootstrap writes names the systems `names`."""
-    arm = box.main / lp_dump(nnn)
+    return add_dump(box, lp_dump(nnn), penalty_lines, names)
+
+
+def add_dump(box: Box, rel: str, penalty_lines: Optional[str], names: Tuple[str, str] = ("eos_s42", "m3_s42")) -> Path:
+    """add_arm for any directory under results/ (`rel`, as the job is given it): what the penalty cross-check of P9-G5a/G6 fix 1 is tested on."""
+    arm = box.main / rel
     refs = ["Findings: clear. Impression: none %d." % i for i in range(5)]
     write_dump(arm, 5, hyp_lines=["The heart is normal and clear. Report %d." % i for i in range(5)], ref_lines=refs)
     (arm / "chexbert_labels.json").write_text(json.dumps({"y_true": [[0] * 14] * 5, "y_pred": [[0] * 14] * 5}))
@@ -1760,6 +1765,85 @@ def test_the_last_penalty_line_of_a_requeued_log_is_the_one_that_names_the_dump(
     done = box.run(DUMP_DIR=lp_dump("200"))
     assert done.returncode == 0, done.stdout
     assert results_of(lines_of(done))[3]["name_a"] == "eos_lp200_s42"
+
+
+# ---- the arm's directory name against its log (P9-G5a/G6 fix 1) ----------------------------------------------------------------------
+# The decode job puts a penalty-NNN arm in results/chat_report_eos_lp<NNN>_test_split_s42, and the comparison reads the penalty from the
+# dump's own eval.log. A log that is missing reads as 1.0, which is right for a G4 dump and wrong for a directory that says 2.0: a name of
+# that shape is a claim, so the log must bear it out, and a log that is not there cannot.
+
+def test_an_arm_directory_with_no_eval_log_is_refused_and_not_compared_as_a_1_arm(tmp_path):
+    box = compare_box(tmp_path)
+    add_arm(box, "200", None)
+    before = snapshot(box.root, skip=AWAY)
+    done = box.run(DUMP_DIR=lp_dump("200"))
+    lines = lines_of(done)
+    errors = [l for l in lines if l.startswith("ERROR")]
+    assert done.returncode == 1 and len(errors) == 1 and "length penalty" in errors[0] and "eval.log" in errors[0], lines
+    assert_job_log_is_clean(lines)
+    assert box.calls() == [] and snapshot(box.root, skip=AWAY) == before, "nothing ran and nothing was written"
+    assert not list((box.main / lp_dump("200")).glob("bootstrap_*.md"))
+
+
+@pytest.mark.parametrize("nnn, logged", [("200", "1.5"), ("200", "1.0"), ("150", "2.0"), ("100", "1.5"), ("300", "0.5"), ("205", "2.5"),
+                                         ("050", "1.0"), ("200", "")])    # "": a log with no penalty line, the G4-era evaluator's: a 1.0
+def test_an_arm_directory_whose_name_and_log_name_different_penalties_is_refused_in_words_that_quote_neither(tmp_path, nnn, logged):
+    box = compare_box(tmp_path)
+    add_arm(box, nnn, "Length penalty: {}\n".format(logged) if logged else "")
+    before = snapshot(box.root, skip=AWAY)
+    done = box.run(DUMP_DIR=lp_dump(nnn))
+    lines = lines_of(done)
+    errors = [l for l in lines if l.startswith("ERROR")]
+    assert done.returncode == 1 and len(errors) == 1 and "another length penalty than its eval.log records" in errors[0], lines
+    assert_job_log_is_clean(lines)
+    assert box.calls() == [] and snapshot(box.root, skip=AWAY) == before
+    assert not any(bit in errors[0] for bit in (nnn, logged or "\0")), "neither the directory's number nor the log's is quoted"
+
+
+@pytest.mark.parametrize("nnn, logged, name_a", [("200", "2.0", "eos_lp200_s42"), ("050", "0.5", "eos_lp050_s42"), ("100", "1.0", "eos_s42"),
+                                                 ("125", "1.25", "eos_lp125_s42"), ("300", "3.0", "eos_lp300_s42")])
+def test_an_arm_directory_whose_log_bears_out_its_name_is_compared_as_before(tmp_path, nnn, logged, name_a):
+    box = compare_box(tmp_path)
+    arm = add_arm(box, nnn, "Length penalty: {}\n".format(logged), names=(name_a, "m3_s42"))
+    done = box.run(DUMP_DIR=lp_dump(nnn))
+    assert done.returncode == 0, done.stdout
+    assert results_of(lines_of(done))[3]["name_a"] == name_a
+    assert (arm / "bootstrap_{}_vs_m3_s42.md".format(name_a)).is_file()
+
+
+@pytest.mark.parametrize("rel", ["results/chat_report_eos_b_lp200_test_split_s42", "results/chat_report_eos_x_lp050_test_split_s42"])
+def test_the_name_check_looks_at_the_end_of_the_directory_name_so_a_prefix_of_the_users_choice_is_checked_too(tmp_path, rel):
+    box = compare_box(tmp_path)
+    add_dump(box, rel, None)
+    done = box.run(DUMP_DIR=rel)
+    assert done.returncode == 1 and any(l.startswith("ERROR") and "eval.log" in l for l in lines_of(done)), lines_of(done)
+    arm = add_dump(box, rel, "Length penalty: {}\n".format("2.0" if "lp200" in rel else "0.5"),
+                   names=("eos_lp200_s42" if "lp200" in rel else "eos_lp050_s42", "m3_s42"))
+    assert box.run(DUMP_DIR=rel).returncode == 0 and list(arm.glob("bootstrap_eos_lp*_s42_vs_m3_s42.md"))
+
+
+@pytest.mark.parametrize("slashes", ["/", "//"])
+def test_trailing_slashes_on_an_arm_directory_do_not_get_it_past_the_name_check(tmp_path, slashes):
+    box = compare_box(tmp_path)
+    add_arm(box, "200", None)
+    done = box.run(DUMP_DIR=lp_dump("200") + slashes)
+    assert done.returncode == 1 and any(l.startswith("ERROR") and "eval.log" in l for l in lines_of(done)), lines_of(done)
+    assert box.calls() == []
+    add_arm(box, "200", "Length penalty: 1.5\n")
+    done = box.run(DUMP_DIR=lp_dump("200") + slashes)
+    assert done.returncode == 1 and any("another length penalty" in l for l in lines_of(done)), lines_of(done)
+
+
+@pytest.mark.parametrize("rel", ["results/chat_report_eos_b", "results/chat_report_eos_test_split_s42",
+                                 "results/chat_report_eos_lp20_test_split_s42", "results/chat_report_eos_lp2000_test_split_s42",
+                                 "results/chat_report_eos_lp2x0_test_split_s42", "results/chat_report_eos_lp200_test_split_s43",
+                                 "results/chat_report_eos_lp200_test_split_s42x"])
+def test_a_directory_not_named_like_an_arm_is_not_cross_checked_and_a_missing_log_there_is_still_a_1(tmp_path, rel):
+    box = compare_box(tmp_path)
+    arm = add_dump(box, rel, None)                   # no eval.log: the G4 reading, 1.0
+    done = box.run(DUMP_DIR=rel)
+    assert done.returncode == 0, lines_of(done)
+    assert results_of(lines_of(done))[3]["name_a"] == "eos_s42" and (arm / "bootstrap_eos_s42_vs_m3_s42.md").is_file()
 
 
 @pytest.mark.parametrize("line", ["Length penalty: 9.99", "Length penalty: 0.25", "Length penalty: 3.01", "Length penalty: 1.234",

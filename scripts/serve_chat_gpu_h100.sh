@@ -48,8 +48,10 @@
 # as before: the default does not change. The first model listed is the default model, so the order decides:
 #   MODELS=m3eos,m3   the EOS model first, which makes it the default model of that deployment, with the published model beside it
 #   MODELS=m3,m3eos   the published model first, still the default, with the EOS model beside it for a turn that picks it (options.model)
-# Either one needs the EOS checkpoint in CHAT_HOME: without it the API refuses to start, in one ERROR line that names no path, and the job fails
-# with the API's own status. The gallery is opened against the default model's image tower, and retrieval is on for the models that share it.
+# Either one needs the finished EOS run in CHAT_HOME: its checkpoint, the DONE marker beside it that the training job writes only for a run
+# that finished, and the run_metadata.json that says it was trained to end its reports. Without them the API refuses to start, in one ERROR
+# line that names no path (an EOS run whose metadata does not say so would otherwise be served without its stop), and the job fails with the
+# API's own status. The gallery is opened against the default model's image tower, and retrieval is on for the models that share it.
 #
 # Levers, as NAME=value arguments of `chat_remote.sh submit`: MODE (private|public), DEVICE (cpu|cuda), BIND, GALLERY (a build directory, or
 # none), MODELS (m3, 13d and m3eos, as in m3 or m3,13d: 1 to 32 characters of a-z, 0-9 and commas, and the CLI knows the names), DRIFT_NOTE (the P1-D sentence every
