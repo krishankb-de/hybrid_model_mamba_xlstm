@@ -595,6 +595,10 @@ function fakeApi() {
     lenient: false,      // events already queued still come out of a stream or a poll that was aborted
     cancelError: null,   // what cancelMessage rejects with
     cancelGate: null,    // a promise cancelMessage waits for before it answers
+    reads: [],           // getSession calls: the page's read of a chat after a Cancel upload (P6 fix 2)
+    readError: null,     // what getSession rejects with
+    readGate: null,      // a promise getSession waits for before it reads
+    fetch: null,         // the harness's fetch: getSession reads the chat through its routes
     streamTurn(opts) {
       const run = { opts, channel: channel(), id: null };
       run.accepted = new Promise((resolve) => { run.accept = (id) => { run.id = id; resolve(); }; });
@@ -625,6 +629,14 @@ function fakeApi() {
       if (api.cancelGate) await api.cancelGate;
       if (api.cancelError) throw api.cancelError;
       return { id: opts.messageId, status: 'running', cancel_requested: true };
+    },
+    async getSession(opts) {
+      api.reads.push(opts);
+      if (api.readGate) await api.readGate;
+      if (api.readError) throw api.readError;
+      const res = await api.fetch(`/v1/sessions/${encodeURIComponent(opts.sessionId)}`, { headers: {} });
+      if (!res.ok) throw Object.assign(new Error('session refused'), { status: res.status });
+      return res.json();
     },
     loadImage: async (url) => `blob:fake/${url}`,
     clearImageCache() { api.cleared += 1; },
@@ -681,6 +693,7 @@ function harness({ hash = '', sessions = [], models = MODELS, storage = memorySt
     'GET /v1/sessions': () => ({ sessions: h.sessions, next_cursor: null }),
     ...routes,
   });
+  api.fetch = h.fetch;
   h.app = createApp({
     document, window: win, storage, fetch: h.fetch, api, now: timers.now, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout,
     setInterval: timers.setInterval, clearInterval: timers.clearInterval,
@@ -1202,6 +1215,7 @@ test('a Cancel upload that came after the server had taken the turn (fetch abort
   assert.deepEqual(h.fetch.to('DELETE', '/v1/sessions/'), []);           // a chat that was there before is kept
   assert.equal(q($('conversation'), '.turn.user .user-text').textContent, 'beam 4');   // and drawn again from what the server stored
   assert.equal(cardOf().getAttribute('data-message-id'), 'm_late');
+  assert.equal($('status').textContent, 'Upload cancelled.');   // said again after the redraw, which empties the status (P6 fix 2)
   assert.equal(h.api.polls.length, 1);   // the turn is followed to its end
   h.api.polls[0].channel.push(stopEv('aborted', { message_id: 'm_late' }));
   h.api.polls[0].channel.end();
@@ -1266,6 +1280,85 @@ test('a turn that uploads nothing (a re-run, a test study) says "Sending…" and
   await upload;
   await flush(12);
   assert.equal($('status').textContent, 'Upload cancelled.');
+});
+
+// P6 fix 2: the read after a cancel runs under api.js's limit, and the chat is drawn again whenever it shows a turn the page did not know ----
+
+test('while the page reads the chat after a Cancel upload, Stop reads "Cancelling…" and is off; the read is api.js\'s getSession, under its own 15 s limit (P6 fix 2)', async () => {
+  let release;
+  const h = await ready();
+  h.api.readGate = new Promise((resolve) => { release = resolve; });
+  $('prompt').value = 'beam 4';
+  const turn = h.app.send();
+  await flush();
+  $('stop').click();
+  await flush();
+  assert.deepEqual([$('stop').hidden, $('stop').textContent, $('stop').disabled, $('send').disabled], [false, 'Cancelling…', true, true]);
+  assert.equal($('status').textContent, 'Upload cancelled.');
+  assert.deepEqual(h.api.reads.map((r) => [r.sessionId, r.timeoutMs]), [['s_a', undefined]]);   // api.js's REQUEST_TIMEOUT_MS, no limit of the page's
+  release();
+  await turn;
+  await flush();
+  assert.deepEqual([$('stop').hidden, $('stop').textContent, $('stop').disabled, $('send').disabled], [true, 'Stop', false, false]);
+  assert.deepEqual([$('status').textContent, $('notice').hidden, h.api.reads.length], ['Upload cancelled.', true, 1]);
+});
+
+test('a read after a cancel that fails or times out frees the composer, keeps what the status said, and says the server may still finish that turn (P6 fix 2)', async () => {
+  for (const upload of [true, false]) {
+    const h = upload ? await ready() : harness({ sessions: [sess('s_a', 'A')], routes: doneSession('s_a', 'A', 'm_a') });
+    if (!upload) { await h.app.start(); await flush(); }
+    const said = upload ? 'Upload cancelled.' : 'Send cancelled.';
+    h.api.readError = transportFailure(new TypeError('GET request got no answer in 15000 ms'));   // what api.js throws once its limit expires
+    $('prompt').value = upload ? 'beam 4' : 'tokens 30';   // an upload, or a re-run of the chat's X-ray
+    const turn = h.app.send();
+    await flush();
+    $('stop').click();
+    await turn;
+    await flush(12);
+    assert.deepEqual([$('stop').hidden, $('stop').textContent, $('send').disabled], [true, 'Stop', false], said);
+    assert.equal($('status').textContent, said);
+    assert.equal(q($('notice'), 'p').textContent, 'The server may still finish that turn; reopen the chat to check.');
+    assert.deepEqual(h.api.cancels, []);   // the page knows of nothing to cancel
+    assert.equal(qa($('conversation'), 'article.card').length, upload ? 0 : 1, said);   // and the chat is not drawn again: its own turn is still there
+  }
+});
+
+test('a first upload whose cancel cannot be checked keeps the chat made for it: it may hold that turn (P6 fix 2)', async () => {
+  const h = harness({ sessions: [], routes: { 'POST /v1/sessions': NEW_SESSION, 'DELETE /v1/sessions/s_new': () => new Response(null, { status: 204 }) } });
+  await h.app.start();
+  await flush();
+  h.api.readError = transportFailure(new TypeError('Failed to fetch'));
+  attach(imageFile('chest.png'));
+  const turn = h.app.send();
+  await flush();
+  $('stop').click();
+  await turn;
+  await flush(12);
+  assert.deepEqual(h.fetch.to('DELETE', '/v1/sessions/'), []);   // not deleted: the page cannot know that it is empty
+  assert.equal(h.win.location.hash, '#/s/s_new');                // and still the page's chat, which a reload opens again
+  assert.equal(q($('notice'), 'p').textContent, 'The server may still finish that turn; reopen the chat to check.');
+  assert.deepEqual([$('send').disabled, $('status').textContent], [false, 'Upload cancelled.']);
+});
+
+test('a cancel after which the chat holds a turn that had already finished draws the chat again to show it, cancels nothing, and says again that the upload was cancelled (P6 fix 2)', async () => {
+  let stored = false;
+  const h = await ready({ routes: {
+    'GET /v1/sessions/s_a': () => ({ ...sess('s_a', 'earlier', stored ? 1 : 0),
+                                     messages: stored ? [userMsg('u_done', 'beam 4', 'chest.png'), botMsg('m_done', 'done', START_DATA.options)] : [] }),
+    'GET /v1/messages/m_done': () => ({ ...botMsg('m_done', 'done'), events: rows(fullTurn('m_done')) }),
+  } });
+  $('prompt').value = 'beam 4';
+  const turn = h.app.send();
+  await flush();
+  stored = true;   // the server took the turn, and ran it to its end before the page read the chat
+  $('stop').click();
+  await turn;
+  await flush(12);
+  assert.deepEqual(h.api.cancels, []);   // a finished turn is not cancelled
+  assert.equal(cardOf()?.getAttribute('data-message-id'), 'm_done');   // it is shown, as the server has it
+  assert.equal(cardOf().getAttribute('data-status'), 'done');
+  assert.equal($('status').textContent, 'Upload cancelled.');   // said again after the redraw, which empties the status
+  assert.deepEqual([$('send').disabled, $('stop').hidden], [false, true]);
 });
 
 // P6-A (d): the health strip follows a turn ----------------------------------------------------------------------------------------------

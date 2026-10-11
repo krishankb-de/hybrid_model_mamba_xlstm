@@ -291,6 +291,20 @@ def test_the_preview_puts_a_long_name_on_a_line_of_its_own_cut_short_and_keeps_t
     assert re.search(r"display:\s*none", rules["#preview .preview-sep"])
 
 
+def test_the_narrow_composers_remove_is_a_32_px_target_each_way():   # P6 fix 2 (5)
+    """In a composer 260 px wide or less the preview's Remove is compacted (P6 fix 1) to leave the file's line the room it needs; it stays a
+    target of 32 px each way, whatever its label."""
+    remove = " ".join(b for h, b in _media(r"@container\s+composer\s*\(\s*max-width:\s*260px\s*\)") if h == "#preview > button")
+    assert re.search(r"min-width:\s*32px", remove) and re.search(r"min-height:\s*32px", remove)
+
+
+def test_the_cancel_strings_are_written_once():   # P6 fix 2 (6)
+    """What the status says after a cancel, and what Stop reads while the page checks it, are each written once in app.js and used by name."""
+    source = (STATIC / "app.js").read_text(encoding="utf-8")
+    for text in ("'Upload cancelled.'", "'Send cancelled.'", "'Cancelling…'"):
+        assert source.count(text) == 1, (text, source.count(text))
+
+
 def test_the_viewer_stacks_below_700px_holds_the_page_still_and_stays_on_a_short_screen():
     """P6-E: two panes side by side, stacked below 700 px; the page behind does not scroll while it is open; and where the page scrolls (480
     px tall or less) the viewer is fixed under the banner and scrolls inside itself, each picture with a height of its own, so that every

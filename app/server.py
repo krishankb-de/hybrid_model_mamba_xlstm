@@ -511,12 +511,13 @@ def _checked_upload(data: bytes) -> Tuple[Image.Image, str, str]:
     return img, facts["format"].lower(), hashlib.sha256(data).hexdigest()
 
 
-def _save_upload(store: Store, session_id: str, sha256: str, data: bytes, img: Image.Image, ext: str) -> None:
+def _save_upload(store: Store, session_id: str, sha256: str, data: bytes, img: Image.Image, ext: str) -> bool:
     """The bytes as sent, the thumbnail and the 224x224 model input, stored before any record names the image: a
-    turn stopped while queued never reaches preprocess, and its image must still exist (fix-1 I1)."""
+    turn stopped while queued never reaches preprocess, and its image must still exist (fix-1 I1). -> True when this
+    call wrote the copy, False when one of the same bytes stood already (Store.save_upload)."""
     png = io.BytesIO()
     model_input_image(img).save(png, "PNG")   # exactly Prepared.model_input
-    store.save_upload(session_id, sha256, data, ext, thumbnail_jpeg(img), png.getvalue())
+    return store.save_upload(session_id, sha256, data, ext, thumbnail_jpeg(img), png.getvalue())
 
 
 def _test_count(gallery: Gallery) -> int:
@@ -941,12 +942,18 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
             return Response(status_code=NO_RESPONSE)
         if not worker.reserve():
             raise HTTPException(429, BUSY_MSG.format(queue_cap))
+        gone = wrote = False
         try:
             if checked is not None:   # stored before start_turn records it (fix-1 I1)
-                await run_in_threadpool(_save_upload, store, session_id, sha256, upload, checked[0], checked[1])
-            user_message_id, message_id = await run_in_threadpool(
-                store.start_turn, session_id, text, session["mode"], dict(opts.model_dump(), model=model),
-                sha256, filename, opts.test_row)
+                wrote = await run_in_threadpool(_save_upload, store, session_id, sha256, upload, checked[0], checked[1])
+            # P6 fix 2: asked again, right before the turn is recorded. The save above takes a while (a 7.8 MP X-ray; longer on the
+            # cluster's NFS), and a Cancel upload that lands during it would leave a turn that no one waits for and that the page's read
+            # after its abort has not seen.
+            gone = await request.is_disconnected()
+            if not gone:
+                user_message_id, message_id = await run_in_threadpool(
+                    store.start_turn, session_id, text, session["mode"], dict(opts.model_dump(), model=model),
+                    sha256, filename, opts.test_row)
         except KeyError:   # deleted since it was looked up
             worker.release()
             raise HTTPException(404, "Session not found.") from None
@@ -957,6 +964,13 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         except BaseException:
             worker.release()
             raise
+        if gone:
+            # No turn and no message: the slot goes back, and so does the copy of the upload this request wrote. A copy that stood already
+            # is an earlier turn's, of the same bytes (uploads are kept once per chat and hash), and stays.
+            worker.release()
+            if wrote:
+                await run_in_threadpool(store.discard_upload, session_id, sha256)
+            return Response(status_code=NO_RESPONSE)
         job = TurnJob(session_id, user_message_id, message_id, text, upload, filename,
                       opts.model_copy(update={"model": model}), mode=session["mode"],
                       previous_sha256=sha256 if upload is None else None)

@@ -285,13 +285,15 @@ class Store:
         return user_id, message_id
 
     def save_upload(self, session_id: str, sha256: str, original: bytes, ext: str,
-                    thumb_jpeg: bytes, model_input_png: bytes) -> None:
-        """Write uploads/<session>/<sha256>/{original.<ext>, thumb.jpg, model_input.png}.
+                    thumb_jpeg: bytes, model_input_png: bytes) -> bool:
+        """Write uploads/<session>/<sha256>/{original.<ext>, thumb.jpg, model_input.png}; -> True when this call wrote the copy.
 
         Atomic: the files go to a temp directory that is renamed into place, so a failed write (disk quota) leaves
-        nothing behind. Once per session and hash: if all three files are there already, the first copy stands.
-        Saves of the same bytes at once (turns of one session that carry one picture) are safe: the copy that is put
-        in place first stands, and a save that is late finds it complete and leaves it alone (P8-C, the load drill).
+        nothing behind. Once per session and hash: if all three files are there already, the first copy stands and this
+        call wrote nothing (False). Saves of the same bytes at once (turns of one session that carry one picture) are
+        safe: the copy that is put in place first stands, and a save that is late finds it complete, leaves it alone and
+        returns False (P8-C, the load drill). discard_upload takes back a copy that was written for a turn that was then
+        not started (P6 fix 2).
         """
         if not _safe_id(session_id) or not _is_sha256(sha256):
             raise ValueError("session_id and sha256 must be plain ids")
@@ -309,7 +311,7 @@ class Store:
             return all((final / name).is_file() for name in names)
 
         if complete():
-            return
+            return False
         tmp = final.parent / ".{}.{}.tmp".format(sha256[:12], secrets.token_hex(4))
         try:
             tmp.mkdir(parents=True, mode=0o700)
@@ -317,7 +319,7 @@ class Store:
                 (tmp / name).write_bytes(blob)
             with self._upload_lock:   # one copy at a time: a save that is late must see the copy of the save before it, complete
                 if complete():
-                    return   # the copy in place stands; the finally below removes this save's temporary directory
+                    return False   # the copy in place stands; the finally below removes this save's temporary directory
                 if final.exists():
                     shutil.rmtree(final, ignore_errors=True)   # an incomplete leftover
                 try:
@@ -325,10 +327,26 @@ class Store:
                 except OSError:
                     if not complete():   # else the copy is in place already
                         raise
+                    return False
+                return True   # the only path on which this call wrote the copy
         finally:
             shutil.rmtree(tmp, ignore_errors=True)   # after a successful rename tmp is gone and this does nothing
             if not final.exists():
                 _rmdir_quietly(final.parent)   # a failed first upload leaves no empty session directory either
+
+    def discard_upload(self, session_id: str, sha256: str) -> None:
+        """Remove uploads/<session>/<sha256>, and the session's directory if that leaves it empty (P6 fix 2).
+
+        Only for the copy a turn route wrote itself (save_upload said True) for a turn it then did not start, its client
+        gone: a copy that stood already is an earlier turn's. A copy that is gone already is fine; a failure to remove it
+        is left to the session's deletion, as the copy names nothing.
+        """
+        if not _safe_id(session_id) or not _is_sha256(sha256):
+            raise ValueError("session_id and sha256 must be plain ids")
+        final = self._uploads / session_id / sha256
+        with self._upload_lock:   # never between another save's complete() check and its rename
+            shutil.rmtree(final, ignore_errors=True)
+            _rmdir_quietly(final.parent)
 
     def upload_path(self, session_id: str, sha256: str, variant: str) -> Optional[Path]:
         """The file of one variant ("original", "thumb" or "model_input"); None if absent, unsafe or deleted."""

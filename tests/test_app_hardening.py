@@ -7,6 +7,7 @@ public mode. Synthetic data only (R7): the study-id-like numbers below are made 
 """
 import asyncio
 import datetime
+import hashlib
 import json
 
 import httpx
@@ -306,14 +307,18 @@ def test_the_cap_is_21_mb_a_megabyte_above_the_image_limit():
     assert server.MAX_REQUEST_BYTES == CAP == MAX_UPLOAD_BYTES + 1024 * 1024
 
 
-def _run_asgi(app, method, path, headers, chunks, query=b""):
+def _run_asgi(app, method, path, headers, chunks, query=b"", gone=None):
     """Call the app's ASGI interface directly with a body that arrives as `chunks`; -> (the messages sent, how many chunks were taken).
-    The scope is what uvicorn builds, so the request goes through every middleware and no network."""
+    The scope is what uvicorn builds, so the request goes through every middleware and no network. The client leaves with its last chunk:
+    a receive after it says http.disconnect. gone (P6 fix 2) keeps it there until gone() says it has left: such a receive waits until then
+    (is_disconnected() does not wait, and reads a client still there)."""
     sent, taken = [], []
     pending = list(chunks)
 
     async def receive():
         if not pending:
+            while gone is not None and not gone():
+                await asyncio.sleep(0.005)
             return {"type": "http.disconnect"}
         taken.append(1)
         body = pending.pop(0)
@@ -388,6 +393,46 @@ def test_a_turn_whose_client_is_gone_once_its_body_is_read_starts_nothing_and_is
         assert not (tmp_path / "uploads" / sid).exists()                  # and no upload kept
         [row] = [row for row in logged(capsys.readouterr().err) if row["request_id"] == "rid-gone"]
         assert row["status"] == 499 and row["path"] == "/v1/sessions/{}/messages".format(sid)
+    finally:
+        app.state.worker.shutdown()
+        app.state.store.close()
+
+
+def test_a_client_gone_while_its_upload_is_saved_starts_no_turn_and_takes_back_only_the_copy_it_wrote(tmp_path, capsys, monkeypatch):
+    """P6 fix 2: the save of a large upload takes a while (a 7.8 MP X-ray; longer on the cluster's NFS), and a Cancel upload that lands during
+    it comes after the first check. The route asks again right before it records the turn: a client gone by then starts no turn, stores no
+    message, gives its slot back, and the request log shows 499. The upload directory this request wrote goes too; a copy of the same bytes
+    that an earlier turn of the chat left (uploads are kept once per chat and hash) stays as it was."""
+    app = create_app(engine="tiny", home=str(tmp_path))
+    left = {"now": False}
+    save = server._save_upload
+
+    def saved_then_gone(*args):   # the abort lands while the upload is being saved: after the first check, before the turn is recorded
+        wrote = save(*args)
+        left["now"] = True
+        return wrote
+
+    monkeypatch.setattr(server, "_save_upload", saved_then_gone)
+    try:
+        store = app.state.store
+        fresh, kept = store.create_session("private")["id"], store.create_session("private")["id"]
+        data = png_bytes()
+        sha = hashlib.sha256(data).hexdigest()
+        store.save_upload(kept, sha, data, "png", b"earlier thumb", b"earlier model input")   # an earlier turn's copy of the same bytes
+        body = _form("zzz", {"text": "beam 2", "options": json.dumps({"max_new_tokens": 16})}, {"image": ("x.png", data, "image/png")})
+        capsys.readouterr()
+        for sid in (fresh, kept):
+            left["now"] = False
+            sent, _ = _run_asgi(app, "POST", "/v1/sessions/{}/messages".format(sid), [MULTIPART, ("X-Request-Id", "rid-late-" + sid)], [body],
+                                gone=lambda: left["now"])
+            assert sent[0]["status"] == 499, sid
+            assert store.get_session(sid, None)["messages"] == [], sid   # no turn was recorded
+            assert app.state.worker.in_flight == 0, sid                  # the slot it had reserved is free again
+        assert not (tmp_path / "uploads" / fresh).exists()               # the copy this request wrote, and the chat's directory, are gone
+        assert (tmp_path / "uploads" / kept / sha / "thumb.jpg").read_bytes() == b"earlier thumb"   # the earlier copy is untouched
+        assert sorted(p.name for p in (tmp_path / "uploads" / kept / sha).iterdir()) == ["model_input.png", "original.png", "thumb.jpg"]
+        rows = [row for row in logged(capsys.readouterr().err) if row["request_id"].startswith("rid-late-")]
+        assert [row["status"] for row in rows] == [499, 499]
     finally:
         app.state.worker.shutdown()
         app.state.store.close()

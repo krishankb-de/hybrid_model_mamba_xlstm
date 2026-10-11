@@ -76,6 +76,27 @@ test('a cancel whose answer starts but whose body stalls is cut off too', async 
   assert.ok(!got.hung && timedOut(got.error), String(got.hung ? 'hung' : got.error));
 });
 
+test('the page\'s read of a chat after a cancel gives up on a server that never answers, as a cancel does (getSession, P6 fix 2)', async (t) => {
+  keepAlive(t);
+  const calls = hangingFetch(t);
+  const got = await outcome(api.getSession({ sessionId: 's_1', token: 'tok', clientId: 'cid', timeoutMs: 30 }));
+  assert.ok(!got.hung, 'getSession never gave up on a server that does not answer');
+  assert.ok(timedOut(got.error), String(got.error));
+  assert.deepEqual([calls.length, calls[0].url, calls[0].init.headers.Authorization, calls[0].init.headers['X-Client-Id']],
+                   [1, '/v1/sessions/s_1', 'Bearer tok', 'cid']);
+  assert.ok(calls[0].init.signal.aborted, 'the request itself was aborted, so the connection is not left open');
+});
+
+test('a chat read in time is the chat; a refusal is the server\'s answer, not the transport\'s; the limit is 15 s unless one is given (P6 fix 2)', async (t) => {
+  const chat = { id: 's_1', title: 'A', messages: [] };
+  const signals = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => { signals.push(init.signal); return json(chat); });
+  assert.deepEqual(await api.getSession({ sessionId: 's_1' }), chat);
+  assert.ok(signals[0] instanceof AbortSignal && !signals[0].aborted, 'the default limit runs under a signal of its own');
+  t.mock.method(globalThis, 'fetch', async () => json({ type: 'error', error: { type: 'not_found_error', message: 'gone' } }, 404));
+  await assert.rejects(api.getSession({ sessionId: 's_gone', timeoutMs: 5000 }), (err) => err.status === 404 && !('transport' in err));
+});
+
 test('a cancel that is answered in time is not touched by its timeout', async (t) => {
   const answer = { id: 'm1', status: 'aborted', cancel_requested: true };
   t.mock.method(globalThis, 'fetch', async () => json(answer));

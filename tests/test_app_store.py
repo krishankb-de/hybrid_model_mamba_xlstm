@@ -467,6 +467,27 @@ def test_saves_of_the_same_bytes_into_one_session_at_once_all_succeed_and_leave_
         assert {p.name: p.read_bytes() for p in copy.iterdir()} == {"original.png": b"original", "thumb.jpg": b"thumb", "model_input.png": b"model"}
 
 
+def test_save_upload_says_whether_it_wrote_the_copy_and_discard_upload_takes_back_only_that(tmp_path):   # P6 fix 2
+    """A turn whose client left while its upload was being saved is not started (server.post_message), and the copy that request wrote goes
+    with it: save_upload says whether it wrote one (False where a copy of the same bytes stood, an earlier turn's), and discard_upload removes
+    it, with the session's directory if that leaves it empty. A copy of other bytes keeps the directory."""
+    s = Store(tmp_path)
+    sess, _, _ = _turn(s)
+    sid, sha, other = sess["id"], "ab" * 32, "cd" * 32
+    assert s.save_upload(sid, sha, b"o", "png", b"t", b"m") is True
+    assert s.save_upload(sid, sha, b"o2", "png", b"t2", b"m2") is False   # the first copy stands: this call wrote nothing
+    s.discard_upload(sid, sha)
+    assert not (tmp_path / "uploads" / sid).exists()   # the copy, and the session directory it alone was in
+    assert s.save_upload(sid, sha, b"o", "png", b"t", b"m") is True and s.save_upload(sid, other, b"p", "png", b"u", b"n") is True
+    s.discard_upload(sid, sha)
+    assert sorted(p.name for p in (tmp_path / "uploads" / sid).iterdir()) == [other]   # the other copy keeps the directory
+    assert (tmp_path / "uploads" / sid / other / "thumb.jpg").read_bytes() == b"u"
+    s.discard_upload(sid, sha)   # a copy that is gone already: nothing to do
+    for bad in (("../x", sha), (sid, "../" + "a" * 61)):
+        with pytest.raises(ValueError):
+            s.discard_upload(*bad)
+
+
 def test_recovery_closes_the_log_of_an_interrupted_turn_and_is_idempotent(tmp_path):
     s = Store(tmp_path)
     sess, _, mid = _turn(s)

@@ -189,6 +189,16 @@ export async function cancelMessage({ base = '', messageId, token, clientId, tim
   });
 }
 
+// Reads one chat, GET /v1/sessions/{id}; -> the chat with its messages. Under a timeout (timeoutMs, REQUEST_TIMEOUT_MS), as cancelMessage: the
+// page reads the chat after a Cancel upload to find a turn the server took all the same (P6 fix 2), and a tunnel that never answers must not
+// hold it at "Cancelling…". A refusal is thrown with its status and body.
+export async function getSession({ base = '', sessionId, token, clientId, timeoutMs = REQUEST_TIMEOUT_MS }) {
+  return asked(`${base}/v1/sessions/${encodeURIComponent(sessionId)}`, { headers: authHeaders(token, clientId) }, timeoutMs, async (res) => {
+    if (!res.ok) throw await refused(res, 'session refused');
+    return res.json();
+  });
+}
+
 const images = new Map();       // url -> Promise<object URL>: concurrent calls share one fetch, later calls reuse its result
 const objectUrls = new Set();   // every object URL made, so clearImageCache can revoke them all
 

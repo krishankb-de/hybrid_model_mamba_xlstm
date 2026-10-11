@@ -30,7 +30,9 @@ page); six chips and a 140-character unbroken word are injected, and Stop is sho
      568 to 650 px tall with the drawer open, and 320 x 568, with six chips and a 103-character file name. One case shows the re-run hint,
      the other the image preview (P6-A's, made by the page from a pasted file), as the page shows one or the other: the row is rendered
      inside the composer, the other is not, nothing overflows horizontally, the report keeps its 120 px, and Send lies inside the
-     composer's box and the viewport with nothing scrolled (never below the composer's fold), its centre hitting it
+     composer's box and the viewport with nothing scrolled (never below the composer's fold), its centre hitting it. P6 fix 2 adds a third
+     case at the drawer-open sizes (COMPOSER_BUSY_CASES): an upload on its way, the preview still shown, Send off and Stop reading "Cancel
+     upload", its longest label; Stop is held to what Send is
   l  (P6-E, two more cases for every viewport in every scheme) the image viewer open, with one picture and with two: neither the page nor
      the viewer overflows horizontally, the viewer lies inside the viewport's width, each pane's picture has loaded and is drawn whole
      inside its stage, each stage is at least 40 px each way, each footer gives its picture's pixel size, two panes are side by side from
@@ -91,6 +93,9 @@ PICKER_STUDIES = 60        # check j's list: more studies than the list shows, s
 # open, the drawer beside the conversation, so the composer is about 170 px wide there; at 320 px it is the phone's width.
 COMPOSER_CASES = [(801, 568, True), (801, 650, True), (820, 568, True), (820, 650, True), (834, 568, True), (320, 568, False), (320, 568, True)]
 COMPOSER_STATES = ["hint", "preview"]   # the page shows the re-run hint only with no image attached, and the preview only with one
+# P6 fix 2: the composer busy with an upload (Stop beside Send, the preview still up), at the drawer-open sizes where its column is narrowest.
+COMPOSER_BUSY_CASES = [case for case in COMPOSER_CASES if case[2] and case[0] > 800]
+BUSY_STOP_LABEL = "Cancel upload"   # what Stop reads while an image goes up: the longest of its labels
 LONG_FILE = "chest_xray_" + "a1b2c3d4" * 11 + ".png"   # 103 characters with no space: the widest name a row must take
 VIEWER_STATES = ["single", "pair"]   # check l (P6-E): the viewer with one picture, and with the turn's X-ray beside a similar one
 MIN_STAGE_PX = 40                    # a pane's picture area, each way: something to look at
@@ -397,11 +402,15 @@ MEASURE_PICKER_JS = """() => {
 
 
 # Check k: the composer as the page leaves it with the re-run hint shown (no image attached) or with an image attached (the preview, built by
-# composer.js from a pasted file, as a paste anywhere on the page does). args: chips, name, state ('hint' or 'preview'), drawer (open or not).
+# composer.js from a pasted file, as a paste anywhere on the page does), or busy with that image's upload (P6 fix 2: Send off, Stop reading
+# args.stop, as app.js sets them between Send and the accept). args: chips, name, state ('hint', 'preview' or 'busy'), drawer, stop.
 INJECT_COMPOSER_JS = """async (args) => {
   const q = (s) => document.querySelector(s);
-  const hint = q('#rerun-hint'), preview = q('#preview');
-  if (!hint || !preview) return false;
+  const hint = q('#rerun-hint'), preview = q('#preview'), stop = q('#stop'), send = q('#send');
+  if (!hint || !preview || !stop || !send) return false;
+  stop.hidden = true;   // idle, as the page is between turns
+  stop.textContent = 'Stop';
+  send.disabled = false;
   q('#drawer').hidden = !args.drawer;
   q('#chips').replaceChildren(...args.chips.map((t) => { const s = document.createElement('span'); s.textContent = t; return s; }));
   const remove = preview.querySelector('button');
@@ -424,32 +433,54 @@ INJECT_COMPOSER_JS = """async (args) => {
   if (!img || preview.hidden) return false;
   await img.decode().catch(() => null);
   for (let i = 0; i < 50 && !/ px /.test(preview.textContent); i++) await new Promise((r) => setTimeout(r, 10));   // its line has the pixel size
+  if (args.state === 'busy') {
+    send.disabled = true;
+    stop.textContent = args.stop;
+    stop.hidden = false;
+  }
   return true;
 }"""
 
 MEASURE_COMPOSER_JS = """() => {
   const q = (s) => document.querySelector(s);
-  const doc = document.documentElement, composer = q('#composer'), send = q('#send');
+  const doc = document.documentElement, composer = q('#composer'), send = q('#send'), stop = q('#stop');
   const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
   const shown = (el) => !!el && !el.hidden && el.getClientRects().length > 0;
   const name = (e) => !e ? null : (e.id ? '#' + e.id : e.tagName.toLowerCase());
   window.scrollTo(0, 0);
   composer.scrollTop = 0;   // as it is drawn: nothing scrolled
   const out = { doc: [doc.scrollWidth, doc.clientWidth], composer: { box: box(composer), sw: composer.scrollWidth, cw: composer.clientWidth },
-                conversation: q('#conversation').clientHeight, rows: {}, send: shown(send) ? box(send) : null, hit: null };
+                conversation: q('#conversation').clientHeight, rows: {}, send: shown(send) ? box(send) : null, hit: null,
+                stop: shown(stop) ? box(stop) : null, stop_hit: null };
   for (const s of ['#rerun-hint', '#preview']) out.rows[s] = shown(q(s)) ? box(q(s)) : null;
-  if (out.send) {
-    const b = out.send, x = (b[0] + b[2]) / 2, y = (b[1] + b[3]) / 2, top = document.elementFromPoint(x, y);
-    out.hit = { ok: !!top && (top === send || send.contains(top)), got: name(top) };
-  }
+  const hit = (el, b) => { const top = document.elementFromPoint((b[0] + b[2]) / 2, (b[1] + b[3]) / 2);
+                           return { ok: !!top && (top === el || el.contains(top)), got: name(top) }; };
+  if (out.send) out.hit = hit(send, out.send);
+  if (out.stop) out.stop_hit = hit(stop, out.stop);
   return out;
 }"""
+
+
+def _in_sight(name: str, label: str, b: List[float], hit: Optional[Dict[str, Any]], composer: List[float], width: int,
+              height: int) -> List[str]:
+    """A button of the composer inside its box (its fold: the composer scrolls inside, and a button under its bottom is out of sight until it
+    is scrolled) and inside the viewport, its centre hitting it (check k)."""
+    failures = []
+    if b[1] < composer[1] - 0.5 or b[3] > composer[3] + 0.5:
+        failures.append("{} is below the composer's fold: {} {:.0f} to {:.0f}, composer {:.0f} to {:.0f} (it is out of sight until the "
+                        "composer is scrolled)".format(name, label, b[1], b[3], composer[1], composer[3]))
+    if b[0] < -0.5 or b[1] < -0.5 or b[2] > width + 0.5 or b[3] > height + 0.5:
+        failures.append("{} is not inside the {}x{} viewport: {}".format(name, width, height, [round(v) for v in b]))
+    if not (hit and hit["ok"]):
+        failures.append("{} is covered: its centre hits {}".format(name, (hit or {}).get("got") or "nothing"))
+    return failures
 
 
 def check_composer(m: Dict[str, Any], width: int, height: int, state: str) -> List[str]:
     """The failures in one measurement of the composer's rows (check k): the row the case shows is rendered inside the composer and the other
     is not; nothing overflows horizontally; the report keeps its floor; and Send lies inside the composer's box (its fold: the composer
-    scrolls inside, and a Send under its bottom is out of sight until it is scrolled) and inside the viewport, its centre hitting it."""
+    scrolls inside, and a Send under its bottom is out of sight until it is scrolled) and inside the viewport, its centre hitting it. A busy
+    composer (P6 fix 2) shows the preview, and its Stop is held to the same."""
     failures = []
     for name, (sw, cw) in (("documentElement", m["doc"]), ("#composer", (m["composer"]["sw"], m["composer"]["cw"]))):
         if sw > cw:
@@ -466,18 +497,15 @@ def check_composer(m: Dict[str, Any], width: int, height: int, state: str) -> Li
         failures.append("{} is rendered with {}, which the page never shows together".format(other, row))
     if m["conversation"] < MIN_REPORT_PX:
         failures.append("the report area is {} px tall, under {}".format(m["conversation"], MIN_REPORT_PX))
+    if state == "busy":
+        if m.get("stop") is None:
+            failures.append("#stop is not rendered, but the case shows it")
+        else:
+            failures += _in_sight("#stop", "Stop", m["stop"], m.get("stop_hit"), composer, width, height)
     send = m["send"]
     if send is None:
         return failures + ["#send is not rendered"]
-    if send[1] < composer[1] - 0.5 or send[3] > composer[3] + 0.5:
-        failures.append("#send is below the composer's fold: Send {:.0f} to {:.0f}, composer {:.0f} to {:.0f} (it is out of sight until the "
-                        "composer is scrolled)".format(send[1], send[3], composer[1], composer[3]))
-    if send[0] < -0.5 or send[1] < -0.5 or send[2] > width + 0.5 or send[3] > height + 0.5:
-        failures.append("#send is not inside the {}x{} viewport: {}".format(width, height, [round(v) for v in send]))
-    hit = m["hit"]
-    if not (hit and hit["ok"]):
-        failures.append("#send is covered: its centre hits {}".format((hit or {}).get("got") or "nothing"))
-    return failures
+    return failures + _in_sight("#send", "Send", send, m["hit"], composer, width, height)
 
 
 # Check l (P6-E): the page's own viewer.js opened over the page with generated pictures (data: URLs, so nothing is fetched): a 512x640 one, and
@@ -775,10 +803,11 @@ def run_checks(browser: Browser, url: str) -> Tuple[int, List[str]]:
         for scheme in SCHEMES:
             serial += 1
             browser.open("{}?case={}".format(url, serial), width, height, scheme)
-            for state in COMPOSER_STATES:
+            for state in COMPOSER_STATES + (["busy"] if (width, height, drawer) in COMPOSER_BUSY_CASES else []):   # busy: P6 fix 2
                 cases += 1
                 where = ("{}x{}".format(width, height), "drawer={} composer {}".format("open" if drawer else "closed", state))
-                if not browser.run(INJECT_COMPOSER_JS, {"chips": CHIPS, "name": LONG_FILE, "state": state, "drawer": drawer}):
+                if not browser.run(INJECT_COMPOSER_JS, {"chips": CHIPS, "name": LONG_FILE, "state": state, "drawer": drawer,
+                                                        "stop": BUSY_STOP_LABEL}):
                     seen.setdefault(where + ("the page did not show the {}".format(state),), []).append(scheme)
                     continue
                 for failure in check_composer(browser.run(MEASURE_COMPOSER_JS, None), width, height, state):
