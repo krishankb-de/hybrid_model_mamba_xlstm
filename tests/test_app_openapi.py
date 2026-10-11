@@ -8,7 +8,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field
 
-from app import server
+from app import hardening, server
 from app.commands import COMMAND_HELP
 from app.gallery import Gallery
 from app.imaging import MAX_UPLOAD_BYTES
@@ -212,6 +212,27 @@ def test_the_api_description_names_the_access_rules_and_every_error_kind(client)
         assert "{} {}".format(status, kind) in description, status
 
 
+def test_the_api_description_states_the_size_cap_the_rate_limit_and_the_request_id_from_the_values_the_server_uses(client):   # P8-A
+    description = " ".join(client.get("/openapi.json").json()["info"]["description"].split())
+    mb = server.MAX_REQUEST_BYTES // (1024 * 1024)
+    assert "{} MB".format(mb) in description and "413" in description and "before it is read" in description
+    assert "`X-Request-Id`" in description and "errors included" in description and "1 to 64" in description
+    assert "{} turns per {} minutes".format(hardening.RATE_CAPACITY, int(hardening.RATE_WINDOW_S // 60)) in description   # "6 turns per 10 minutes"
+    assert "`{}`".format(hardening.RATE_LIMITED) in description and "`Retry-After`" in description and "public mode" in description
+    assert "one JSON line per request" in description   # and what the log never holds
+    assert "no query string" in description and "no body" in description and "no header but `X-Client-Id`" in description
+
+
+def test_the_turn_route_documents_both_429s_and_the_retry_after_header_of_the_rate_limit(client):   # P8-A
+    op = client.get("/openapi.json").json()["paths"][MESSAGES]["post"]
+    refusal = op["responses"]["429"]
+    assert "overloaded_error" in refusal["description"] and hardening.RATE_LIMITED in refusal["description"]   # the queue's, and the rate's
+    assert refusal["headers"]["Retry-After"]["schema"] == {"type": "string"} and "whole seconds" in refusal["headers"]["Retry-After"]["description"].lower()
+    assert "429" in op["description"]
+
+
+SIZE_CAP = {413}   # P8-A: the cap on a request's body is answered before routing, so every route declares it (REFUSED_BY_THE_ROUTE adds its own 413s)
+
 REFUSED_BY_THE_ROUTE = {   # what each route declares by itself; 401, 403 and the client id's 400 are its `default`
     ("POST", "/v1/sessions"): {422}, ("GET", "/v1/sessions"): {422},
     ("GET", "/v1/sessions/{session_id}"): {404}, ("DELETE", "/v1/sessions/{session_id}"): {404},
@@ -232,9 +253,10 @@ def test_refusals_are_declared_as_the_error_envelope_and_named_in_the_descriptio
     for key, op in ops.items():
         responses = op["responses"]
         declared = {int(status) for status in responses if status != "default" and int(status) >= 400}
-        assert declared == REFUSED_BY_THE_ROUTE[key], key
-        for status in declared:   # the description names each one, and the example is that status's envelope
-            assert str(status) in op["description"], (key, status)
+        assert declared == REFUSED_BY_THE_ROUTE[key] | SIZE_CAP, key   # P8-A: and 413 on every route, not on two
+        for status in declared:   # the description names each one the route answers itself, and the example is that status's envelope
+            if status in REFUSED_BY_THE_ROUTE[key]:
+                assert str(status) in op["description"], (key, status)   # (the cap is named by the API's own description: the test above)
             example = responses[str(status)]["content"]["application/json"]["example"]
             assert example["type"] == "error" and example["error"]["type"] == ERROR_KINDS[status], (key, status)
             assert set(example["error"]) == {"type", "message"} and example["error"]["message"], (key, status)
@@ -268,6 +290,13 @@ def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, m
         ("POST", MESSAGES, turn, {"files": image, "data": {"options": "[1, 2]"}}, 400),
         ("POST", MESSAGES, turn, {"files": image, "data": {"options": '{"beam_size": 9}'}}, 422),
         ("POST", MESSAGES, turn, {"files": {"image": ("x.png", bytes(MAX_UPLOAD_BYTES + 1), "image/png")}}, 413),
+        # P8-A: the cap on the whole request, answered before routing: any route can say it, and each declares it
+        ("GET", "/healthz", "/healthz", {"content": bytes(server.MAX_REQUEST_BYTES + 1)}, 413),
+        ("GET", "/v1/models", "/v1/models", {"content": bytes(server.MAX_REQUEST_BYTES + 1)}, 413),
+        ("POST", "/v1/sessions", "/v1/sessions", {"content": bytes(server.MAX_REQUEST_BYTES + 1)}, 413),
+        ("DELETE", "/v1/sessions/{session_id}", "/v1/sessions/s_missing", {"content": bytes(server.MAX_REQUEST_BYTES + 1)}, 413),
+        ("POST", "/v1/label", "/v1/label", {"content": bytes(server.MAX_REQUEST_BYTES + 1)}, 413),
+        ("GET", GALLERY_IMAGE, "/v1/gallery/images/0", {"content": bytes(server.MAX_REQUEST_BYTES + 1)}, 413),
         # P5-E: this server has no gallery and no labeller
         ("POST", "/v1/retrieve", "/v1/retrieve", {"files": image}, 503),
         ("POST", "/v1/retrieve", "/v1/retrieve", {"files": image, "data": {"k_images": "13"}}, 422),

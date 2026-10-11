@@ -7469,6 +7469,31 @@ def test_chexbert_service_imports_nothing_from_hybrid_xmamba():
     assert not roots & {"hybrid_xmamba", "app", "scripts", "tests"}, sorted(roots)
 
 
+def _imports_of(path):
+    """-> (the top-level names a module imports anywhere, its imports of first-party `app` modules), lazy ones included."""
+    roots, first_party = set(), set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            top = "app" if node.level else (node.module or "").split(".")[0]
+            roots.add(top)
+            if top == "app":
+                first_party.add(node.module or "")
+    return roots, first_party
+
+
+def test_the_request_hardening_module_imports_only_the_standard_library_starlette_and_the_apps_schemas():
+    """P8-A. app/hardening.py (the request id, the request log, the turn rate limit) is imported by app/server.py, so by every test and by the
+    serving command line before a model is loaded. It carries no torch and no thesis code, and the one first-party module it reads is
+    app.schemas (error_body): app.server passes it what it needs of its own (the client-id pattern), so there is no import cycle either."""
+    if not hasattr(sys, "stdlib_module_names"):
+        pytest.skip("sys.stdlib_module_names needs Python 3.10")
+    roots, first_party = _imports_of(REPO_ROOT / "app" / "hardening.py")
+    assert roots <= set(sys.stdlib_module_names) | {"starlette", "app"}, sorted(roots)
+    assert first_party == {"app.schemas"}, first_party
+
+
 # ── CHAT_UI_PLAN.md P5-C: the gallery labelling wrappers ──────────────────────
 # Static pins on scripts/label_gallery_reports_h100.sh (one GPU job with a canary), scripts/label_gallery_reports_cpu_h100.sh (the sharded
 # CPU fallback and its merge) and the scripts/label_gallery_reports.py they run. Their behaviour (guards, R7 output, the canary, shards and

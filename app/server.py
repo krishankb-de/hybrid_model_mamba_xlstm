@@ -29,7 +29,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, Query, UploadFile
 from fastapi import Path as PathParam
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -41,6 +41,8 @@ from starlette.requests import Request
 from app.commands import COMMAND_HELP, parse_command
 from app.engine import REPO_ROOT, Engine, build_engine
 from app.gallery import Gallery, GalleryMismatch
+from app.hardening import (RATE_CAPACITY, RATE_LIMITED, RATE_WINDOW_S, REQUEST_ID_HEADER, RequestLog, TurnLimiter, TurnRateLimit,
+                           configure_request_log)
 from app.imaging import (MAX_UPLOAD_BYTES, MIN_SIDE, TOO_LARGE_MSG, UploadError, load_upload, model_input_image, sniff_format,
                          thumbnail_jpeg)
 from app.labels import LabelerClient, LabelerUnavailable, RuleLabeler
@@ -60,11 +62,12 @@ MAX_REQUEST_BYTES = MAX_UPLOAD_BYTES + 1024 * 1024        # the image and room f
 PING_S = 15.0                                             # a keep-alive comment while no event comes
 CLIENT_ID = re.compile(r"[\x21-\x7e]{1,128}")             # visible ASCII: it scopes by equality only
 ERROR_KINDS = {400: "invalid_request_error", 401: "authentication_error", 403: "permission_error",
-               404: "not_found_error", 413: "validation_error", 422: "validation_error", 429: "overloaded_error",
-               500: "internal_error", 503: "unavailable_error"}   # 413 as P8-A's test expects; 403 as every public test-split
-                                                                  # refusal (fix-1); 503 when the gallery or the labeller is not there
+               404: "not_found_error", 405: "invalid_request_error", 413: "validation_error", 422: "validation_error",
+               429: "overloaded_error", 500: "internal_error", 503: "unavailable_error"}   # 413 as P8-A's test expects; 403 as every public
+                                                                  # test-split refusal (fix-1); 503 when the gallery or the labeller is not there
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 NO_CACHE = {"Cache-Control": "no-cache"}   # the page and its files: revalidate (ETag, Last-Modified) after a redeploy
+INTERNAL_ERROR_MSG = "Internal server error."   # all a 500 says: no exception text, no trace (the server log has them); the id is in X-Request-Id
 NO_IMAGE_MSG = "Attach an X-ray first."
 NO_CACHE_MSG = "{} has no O(1) decode cache; set cached_decode=false."   # the engine's own wording (P2-D)
 NO_TOKEN_MSG = "This server has no token; connect through loopback."
@@ -94,6 +97,7 @@ PLACEHOLDER = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><
 
 # ---- the OpenAPI reference (P3-E): what /docs and /openapi.json say. Metadata only: no route reads any of it. ------
 UPLOAD_MB = MAX_UPLOAD_BYTES // (1024 * 1024)
+REQUEST_MB = MAX_REQUEST_BYTES // (1024 * 1024)
 # The published protocol as the options form field's string. FastAPI drops Form(openapi_examples=...) from the spec (a
 # form's fields become one body model), so it is the field's own `examples`; P8-E's README walkthrough copies it.
 OPTIONS_EXAMPLE = ('{"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "cached_decode": true, "compile": false, '
@@ -134,7 +138,16 @@ API_DESCRIPTION = (
     "In public mode the session and message routes also need an `X-Client-Id` header (400 without it) and show only "
     "that client's data.\n\n"
     "**Errors.** A refusal is JSON, `{\"type\": \"error\", \"error\": {\"type\": kind, \"message\": text}}`, with the "
-    "kind of its status: " + ", ".join("{} {}".format(status, kind) for status, kind in ERROR_KINDS.items()) + ".")
+    "kind of its status: " + ", ".join("{} {}".format(status, kind) for status, kind in ERROR_KINDS.items()) + ". An unknown "
+    "route, a wrong method and a failure of the server are refused the same way, and a 422 or a 500 never repeats what was "
+    "sent or what went wrong inside.\n\n"
+    "**Limits.** A request over {cap} MB is refused with 413 before it is read (an image is capped at {image} MB). In public "
+    "mode a client (`X-Client-Id`) may start {turns} turns per {minutes} minutes: the next is a 429 `{kind}` with `Retry-After`, "
+    "in whole seconds, and a turn that is refused for any other reason costs the client nothing.\n\n"
+    "**Request ids.** Every response, errors included, carries `X-Request-Id`: the caller's own when it is 1 to 64 letters, "
+    "digits, `.`, `_` or `-`, else a new one. The server logs one JSON line per request (time, id, method, path, status, "
+    "milliseconds, client) with no query string, no body and no header but `X-Client-Id`.".format(
+        cap=REQUEST_MB, image=UPLOAD_MB, turns=RATE_CAPACITY, minutes=int(RATE_WINDOW_S // 60), kind=RATE_LIMITED))
 CLIENT_ID_DOC = ("Public mode only: names the caller, 1 to 128 visible ASCII characters, and scopes its sessions and "
                  "messages. A private server ignores it.")
 XRAY_DOC = "The chest X-ray: PNG, JPEG or WEBP, at most {} MB, each side at least {} px.".format(UPLOAD_MB, MIN_SIDE)
@@ -159,7 +172,8 @@ REFUSALS = {   # what a status means in the reference; a route that can answer i
          "invalid.",
     403: "A test-split study, a gallery image or an upload's original was asked for in public mode.",
     404: "The session, message, image or gallery row does not exist or was deleted, or in public mode it belongs to another client.",
-    413: "The image is over the {} MB upload limit.".format(UPLOAD_MB),
+    413: "The image is over the {} MB upload limit, or the whole request is over {} MB, which is refused before it is read.".format(
+        UPLOAD_MB, REQUEST_MB),
     422: "The request failed validation: a parameter, an option, the model or the image cannot be used, or there is "
          "no image to run.",
     429: "The server is busy: its queue of accepted turns is full.",
@@ -196,11 +210,15 @@ def _refusals(messages: Dict[int, str], token: bool = True, client_id: bool = Tr
     and a default for what is answered before the route runs. That is 403 for a tokenless server reached off loopback
     (every route), 401 for a missing token (token: every /v1 route) and 400 for a missing client id in public mode
     (client_id: the session and message routes, not /v1/models). A route with a default is not given FastAPI's own
-    422, whose HTTPValidationError body this API never sends."""
+    422, whose HTTPValidationError body this API never sends. Every route also declares 413 (P8-A): the cap on a request's
+    body is answered before routing, so any route can say it, with the message the middleware sends; a route that
+    refuses an image over its own limit gives that status itself."""
+    messages = dict(messages)
+    messages.setdefault(413, TOO_LARGE_MSG)
     out: Dict[Any, Dict[str, Any]] = {
         status: {"description": "{}: {}".format(ERROR_KINDS[status], REFUSALS[status]),
                  "content": {"application/json": {"example": error_body(ERROR_KINDS[status], message)}}}
-        for status, message in messages.items()}
+        for status, message in sorted(messages.items())}
     guards = []
     if token:
         guards.append("401 when the server has a token and the request lacks it")
@@ -212,6 +230,17 @@ def _refusals(messages: Dict[int, str], token: bool = True, client_id: bool = Tr
     out["default"] = {"description": "Any other refusal, in the same envelope: " + ", ".join(guards) + ".",
                       "content": {"application/json": {"example": example}}}
     return out
+
+
+def _with_rate_limit(responses: Dict[Any, Dict[str, Any]]) -> Dict[Any, Dict[str, Any]]:
+    """The turn route's 429 is two refusals (P8-A): a full queue, which is its example, and in public mode this client's own rate limit,
+    which sends Retry-After."""
+    refusal = responses[429]
+    refusal["description"] += (" Or, in public mode, `{}`: the client has started its {} turns of the last {} minutes, and `Retry-After` "
+                               "says when the next is allowed.").format(RATE_LIMITED, RATE_CAPACITY, int(RATE_WINDOW_S // 60))
+    refusal["headers"] = {"Retry-After": {"description": "Whole seconds until the client's next turn is allowed; sent with `{}` only.".format(
+        RATE_LIMITED), "schema": {"type": "string"}}}
+    return responses
 
 
 class NewSession(BaseModel):
@@ -256,6 +285,28 @@ def _error(status: int, message: str, headers: Optional[Dict[str, str]] = None) 
                         headers=headers)
 
 
+def _error_for(request: Request, status: int, message: str, headers: Optional[Dict[str, str]] = None) -> JSONResponse:
+    """_error for the exception handlers, carrying the request's id. RequestLog gives every response its id, but the answer to an unhandled
+    exception is sent by Starlette's own error middleware, outside it, so a handler puts the id on its response itself."""
+    response = _error(status, message, headers)
+    request_id = getattr(request.state, "request_id", None)
+    if request_id:
+        response.headers[REQUEST_ID_HEADER] = request_id
+    return response
+
+
+def _declared_length(headers: Headers) -> Optional[int]:
+    """The request's Content-Length; None when it has none, or none that is a number (the server's HTTP layer judges that). A length with more
+    digits than int() reads from a string (4300 on Python 3.11 and later) is no real length: it is over any cap, so it is the cap plus one."""
+    length = headers.get("content-length", "")
+    if not (length.isascii() and length.isdigit()):
+        return None
+    try:
+        return int(length)
+    except ValueError:
+        return MAX_REQUEST_BYTES + 1
+
+
 def _capped(receive: Callable) -> Callable:
     """receive(), refusing a body once more than MAX_REQUEST_BYTES of it have arrived (one sent without a length)."""
     seen = 0
@@ -290,13 +341,13 @@ class _Guard:
             return
         headers = Headers(scope=scope)
         path = scope["path"]
-        length = headers.get("content-length", "")
+        declared = _declared_length(headers)
         if not self.token and _arrived_off_loopback(scope):
             response = _error(403, NO_TOKEN_MSG)
         elif self.token and (path == "/v1" or path.startswith("/v1/")) and not self._authorized(headers):
             response = _error(401, "Missing or wrong token: send Authorization: Bearer <token>.",
                               {"WWW-Authenticate": "Bearer"})
-        elif length.isdigit() and int(length) > MAX_REQUEST_BYTES:
+        elif declared is not None and declared > MAX_REQUEST_BYTES:
             response = _error(413, TOO_LARGE_MSG)
         else:
             await self.app(scope, _capped(receive), send)
@@ -611,19 +662,31 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     app.state.mode, app.state.default_model = mode, default_model
     app.state.gallery_dir, app.state.labeler_url, app.state.published_dirs = gallery_dir, labeler_url, published_dirs
     app.state.gallery, app.state.labeler, app.state.published = gallery, labeler, published
+    configure_request_log()
+    limiter = TurnLimiter() if mode == "public" else None   # 6 turns per client per 10 minutes, in public mode only (app/hardening.py)
+    app.state.rate_limiter = limiter
+    if limiter is not None:   # inside the guard, which is added next: a request without the token never reaches it
+        app.add_middleware(TurnRateLimit, limiter=limiter, client_id=CLIENT_ID)
     app.add_middleware(_Guard, token=token)
-    if cors_origins:   # added last, so it runs first: a preflight is answered before the token check
+    if cors_origins:   # a preflight is answered before the token check
         app.add_middleware(CORSMiddleware, allow_origins=list(cors_origins), allow_methods=["GET", "POST", "DELETE"],
-                           allow_headers=["Authorization", "Content-Type", "X-Client-Id"],
-                           expose_headers=["X-Message-Id"])
+                           allow_headers=["Authorization", "Content-Type", "X-Client-Id", REQUEST_ID_HEADER],
+                           expose_headers=["X-Message-Id", REQUEST_ID_HEADER])
+    app.add_middleware(RequestLog, client_id=CLIENT_ID)   # added last, so it is the outermost: every answer has an id and a line of the log
 
     @app.exception_handler(HTTPException)
-    async def http_error(_: Request, exc: HTTPException) -> JSONResponse:
-        return _error(exc.status_code, str(exc.detail), exc.headers)
+    async def http_error(request: Request, exc: HTTPException) -> JSONResponse:   # an unknown route (404), a wrong method (405), every raise below
+        return _error_for(request, exc.status_code, str(exc.detail), exc.headers)
 
     @app.exception_handler(RequestValidationError)
-    async def invalid_request(_: Request, exc: RequestValidationError) -> JSONResponse:
-        return _error(422, "Invalid request: " + _readable(exc.errors()))
+    async def invalid_request(request: Request, exc: RequestValidationError) -> JSONResponse:
+        return _error_for(request, 422, "Invalid request: " + _readable(exc.errors()))   # field and problem; never what was sent (no `input`)
+
+    @app.exception_handler(Exception)
+    async def unhandled(request: Request, exc: Exception) -> JSONResponse:
+        """A 500 in the envelope: no exception text and no trace in the body. Starlette sends it from outside the middlewares and then re-raises
+        the exception for the server to log, so the trace is in the server log and nowhere else."""
+        return _error_for(request, 500, INTERNAL_ERROR_MSG)
 
     def client_scope(x_client_id: Optional[str] = Header(None, description=CLIENT_ID_DOC)) -> Optional[str]:
         """D8: the X-Client-Id that scopes sessions and messages in public mode; None (every session) in private."""
@@ -645,14 +708,15 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
             raise HTTPException(404, "Message not found.")
         return message
 
+    static_files = _StaticFiles(directory=str(static_dir), check_dir=False)
+
     @app.get("/", include_in_schema=False)
-    def index() -> Response:
-        page = static_dir / "index.html"
-        if page.is_file():
-            return FileResponse(page, headers=NO_CACHE)
+    async def index(request: Request) -> Response:
+        if (static_dir / "index.html").is_file():   # through the files' own path: its ETag and Last-Modified answer a conditional request with a 304
+            return await static_files.get_response("index.html", request.scope)
         return HTMLResponse(PLACEHOLDER.format(html.escape(DISCLAIMER)), headers=NO_CACHE)
 
-    app.mount("/static", _StaticFiles(directory=str(static_dir), check_dir=False), name="static")
+    app.mount("/static", static_files, name="static")
 
     @app.get("/healthz", summary="Check the server",
              responses={200: {"description": "The server is up.", "content": {"application/json": {"example": HEALTHZ_EXAMPLE}}},
@@ -731,12 +795,12 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
                           "message's id before the first event, so a client can cancel the turn or poll `GET "
                           "/v1/messages/{message_id}` at once; every refusal (400, 403, 404, 413, 422, 429, 500) "
                           "comes before the stream opens, as a JSON error envelope.",
-              responses={**STREAM_RESPONSE, **_refusals({
+              responses={**STREAM_RESPONSE, **_with_rate_limit(_refusals({
                   400: "options must be a JSON object.", 403: PUBLIC_TEST_SPLIT_MSG,
                   404: "Session not found.", 413: TOO_LARGE_MSG,
                   422: "Invalid options: beam_size: Input should be less than or equal to 8",
                   429: BUSY_MSG.format(queue_cap),
-                  500: "Could not store the image."})})
+                  500: "Could not store the image."}))})
     async def post_message(session_id: str, image: Optional[UploadFile] = File(None, description=IMAGE_DOC),
                            text: str = Form("", description=TEXT_DOC),
                            options: str = Form("{}", description=OPTIONS_DOC, examples=[OPTIONS_EXAMPLE]),

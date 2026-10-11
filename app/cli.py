@@ -20,7 +20,8 @@ This is app.server's create_app behind a command line, plus what a serving proce
   signal, counts that end as a stop.
 * Its stdout is the job log's for the life of the process, and a job log carries only === , [server] , RESULT and ERROR lines (R7). What
   the thesis loader prints while a model loads (it names the checkpoint), and anything else that is printed while the server runs, goes to
-  stderr instead, with uvicorn's own log, which the wrapper keeps in a file under CHAT_HOME. Nothing printed here names the endpoint, the
+  stderr instead, with uvicorn's own log and the request log (one JSON line per request, app/hardening.py: no query string, no body), which
+  the wrapper keeps in a file under CHAT_HOME. Nothing printed here names the endpoint, the
   token, a path or any report text, and a refusal never quotes a value it was given (it could be a secret put in the wrong place).
 """
 import argparse

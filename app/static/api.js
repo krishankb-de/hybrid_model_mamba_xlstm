@@ -55,6 +55,34 @@ async function fetched(url, init) {
   }
 }
 
+export const REQUEST_TIMEOUT_MS = 15000;   // a cancel or a poll not answered in this long has failed: a half-open tunnel never says so itself (P8-A)
+export const IMAGE_TIMEOUT_MS = 60000;     // a picture can be as big as the 20 MB upload limit
+
+// The signal a request runs under: the caller's own (or none) together with a timeout. A browser that has no AbortSignal.timeout or .any (before
+// 2024) gets no timeout, and its requests run as they did.
+function within(signal, ms) {
+  if (typeof AbortSignal === 'undefined' || typeof AbortSignal.timeout !== 'function' || typeof AbortSignal.any !== 'function') return signal;
+  const timeout = AbortSignal.timeout(ms);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+// fetch and then read(res), both inside the timeout. An expired timeout is a failure of the transport and looks like the one fetch itself throws
+// when the connection cannot be made, a marked TypeError, so the network-error path of every caller takes it with no new code: pollMessage asks
+// again after its backoff, and the page tells a Stop that was not answered as it tells any network failure. The caller's own abort is no timeout
+// and goes through as it came. The streaming read of a turn does not use this: it is meant to stay open.
+async function asked(url, init, ms, read) {
+  const outer = init.signal;
+  const signal = within(outer, ms);
+  try {
+    return await read(await fetched(url, { ...init, signal }));
+  } catch (err) {
+    if (signal?.aborted && signal.reason?.name === 'TimeoutError' && !outer?.aborted) {
+      throw transportFailure(new TypeError(`${init.method ?? 'GET'} request got no answer in ${ms} ms`));
+    }
+    throw err;
+  }
+}
+
 export function authHeaders(token, clientId) {
   const h = {};
   if (token) h.Authorization = `Bearer ${token}`;
@@ -121,17 +149,20 @@ const MAX_POLL_FAILURES = 20;                          // consecutive failed pol
 // growing at maxBackoffMs (5 s); a success starts it over, and the 20th failure in a row is thrown. Any other refusal
 // (401, 403, 404, 422 ...) is final and is thrown at once with its status and body. An aborted signal ends it quietly,
 // whether it is waiting, backing off or mid-request: that is the caller's own doing, not an error.
+// Each poll runs under a timeout (timeoutMs, REQUEST_TIMEOUT_MS): a poll that is not answered in time is the network error of the paragraph above,
+// so a tunnel that has gone half-open costs a backoff and not the rest of the turn.
 export async function* pollMessage({ base = '', messageId, after = 0, token, clientId, signal, intervalMs = 500,
-                                     maxBackoffMs = 5000 }) {
+                                     maxBackoffMs = 5000, timeoutMs = REQUEST_TIMEOUT_MS }) {
   let seen = after;
   let failures = 0;
   while (!signal?.aborted) {
     let message;
     try {
       const url = `${base}/v1/messages/${messageId}?after=${seen}`;
-      const res = await fetched(url, { signal, headers: authHeaders(token, clientId) });
-      if (!res.ok) throw await refused(res, 'poll refused');
-      message = await res.json().catch((err) => { throw err instanceof TypeError ? transportFailure(err) : err; });   // a body cut off
+      message = await asked(url, { signal, headers: authHeaders(token, clientId) }, timeoutMs, async (res) => {
+        if (!res.ok) throw await refused(res, 'poll refused');
+        return res.json().catch((err) => { throw err instanceof TypeError ? transportFailure(err) : err; });   // a body cut off
+      });
     } catch (err) {
       if (signal?.aborted) return;
       if (!(err instanceof TypeError || RETRY_STATUSES.has(err.status)) || ++failures >= MAX_POLL_FAILURES) throw err;
@@ -149,11 +180,13 @@ export async function* pollMessage({ base = '', messageId, after = 0, token, cli
   }
 }
 
-// Asks the server to stop a queued or running turn; -> {id, status, cancel_requested}. Idempotent on the server.
-export async function cancelMessage({ base = '', messageId, token, clientId }) {
-  const res = await fetched(`${base}/v1/messages/${messageId}/cancel`, { method: 'POST', headers: authHeaders(token, clientId) });
-  if (!res.ok) throw await refused(res, 'cancel refused');
-  return res.json();
+// Asks the server to stop a queued or running turn; -> {id, status, cancel_requested}. Idempotent on the server. Under a timeout (timeoutMs,
+// REQUEST_TIMEOUT_MS): a tunnel that never answers fails the call with the transport error, so Stop cannot hang at "Stopping…".
+export async function cancelMessage({ base = '', messageId, token, clientId, timeoutMs = REQUEST_TIMEOUT_MS }) {
+  return asked(`${base}/v1/messages/${messageId}/cancel`, { method: 'POST', headers: authHeaders(token, clientId) }, timeoutMs, async (res) => {
+    if (!res.ok) throw await refused(res, 'cancel refused');
+    return res.json();
+  });
 }
 
 const images = new Map();       // url -> Promise<object URL>: concurrent calls share one fetch, later calls reuse its result
@@ -173,20 +206,20 @@ export const isSameOriginPath = (url) => typeof url === 'string' && SAME_ORIGIN_
 // streamed turn, and a picture that cannot load must not be asked for at each of them. Another chat, or a new token, clears the cache and the
 // picture is asked for again. A failure of the transport itself (fetch rejected, the body cut off) is not kept: it is no answer about the
 // image, and the next call asks again, so a passing blip does not leave a picture broken for the rest of the chat.
-// Only a same-origin path is fetched: anything else rejects before a request is made, so the token never leaves.
-export function loadImage(url, auth = {}) {
+// Only a same-origin path is fetched: anything else rejects before a request is made, so the token never leaves. A picture that is not
+// delivered in time (timeoutMs, IMAGE_TIMEOUT_MS) fails with the transport error, which is not kept either.
+export function loadImage(url, auth = {}, { timeoutMs = IMAGE_TIMEOUT_MS } = {}) {
   if (!isSameOriginPath(url)) {
     return Promise.reject(new Error('loadImage takes a path on this origin, starting with a single "/"'));
   }
   if (!images.has(url)) {
-    const loading = (async () => {
-      const res = await fetched(url, { headers: authHeaders(auth.token, auth.clientId) });
+    const loading = asked(url, { headers: authHeaders(auth.token, auth.clientId) }, timeoutMs, async (res) => {
       if (!res.ok) throw await refused(res, 'image refused');
       const blob = await res.blob().catch((err) => { throw transportFailure(err); });
       const objectUrl = URL.createObjectURL(blob);
       objectUrls.add(objectUrl);
       return objectUrl;
-    })();
+    });
     loading.catch((err) => {   // handled here as well, so a kept refusal is never an unhandled rejection
       if (err?.transport === true && images.get(url) === loading) images.delete(url);
     });
