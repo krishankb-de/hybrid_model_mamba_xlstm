@@ -3561,7 +3561,7 @@ Commit `"P5-F: live retrieval + labeller gates job"`. Then `sbatch scripts/chat_
 
 Gate: each of the five features passes its tests and the browser checklist on the tiny engine and tiny gallery; P7-D repeats the checklist on a real test study in private mode.
 
-- [ ] **P6-A** Taking an image: click, drag-drop and paste into the image well; a preview (thumbnail, name, pixel size, MB, remove) before sending; client-side checks.
+- [x] **P6-A** Taking an image: click, drag-drop and paste into the image well; a preview (thumbnail, name, pixel size, MB, remove) before sending; client-side checks.
 
 **Files:** create `app/static/composer.js`, `tests/frontend/composer.test.mjs`; modify `app/static/app.js` (replace the P4-D picker).
 
@@ -3671,7 +3671,7 @@ Tests: a `test_row` turn on the tiny stack carries `true_report_rank` with `of` 
 
 Commit `"P6-D: matching reports, own-rank badge, test-split picker"`.
 
-- [ ] **P6-E** Viewer: full screen, single or side by side (query and the selected match), zoom, pan, brightness, contrast, keyboard, focus trap.
+- [x] **P6-E** Viewer: full screen, single or side by side (query and the selected match), zoom, pan, brightness, contrast, keyboard, focus trap.
 
 **Files:** create `app/static/viewer.js`, `tests/frontend/viewer.test.mjs`; modify `app/static/styles.css`.
 
