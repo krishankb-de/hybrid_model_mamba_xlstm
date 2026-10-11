@@ -1011,7 +1011,7 @@ echo "=== seconds per report: (wall(cached_a) - wall(cached_1)) / (N - 1); uncac
 Pre-registered decision tree (user decision U7: the target is 8 s per turn, and a GPU job takes over automatically when CPU cannot meet it):
 
 - Estimated turn = cached CPU seconds per report + 1.0 s (encode, retrieve, label). **≤ 8 s → serve on CPU** (`scripts/serve_chat_h100.sh`).
-- **> 8 s, or `cached_a ≠ cached_b` → serve on GPU** (`scripts/serve_chat_gpu_h100.sh`, P7-B): no further question. On GPU the uncached path reproduces the published dump exactly (P2-E), and the drift note says so.
+- **> 8 s, or `cached_a ≠ cached_b` → serve on GPU** (`scripts/serve_chat_gpu_h100.sh`, P7-B): no further question. On GPU the uncached path reproduces the published dump exactly (P2-E). The served default is `cached_decode` true, so a card claims equality with the published dump only for a turn run under the published protocol (P5-E's `live_equals_published`; P7-B fix 1 aligned the GPU wrapper's header with this).
 - `compile` is not offered on CPU (`--allow-compile` off), because E7 verified it on GPU only and Inductor's CPU build cost is unmeasured. On GPU it may be allowed after P2-E's GPU arm.
 - If CPU vs GPU differs on k of 20 with k > 0, every card's provenance says: "CPU decode; differs from the published GPU decode on k/20 probe studies". If k = 0, it says "matched the published GPU decode on 20/20 probe studies".
 
@@ -3761,7 +3761,7 @@ Parity test: CPU directives, ga03 exclusion, both `PYTHONPATH=` overlays, and no
 
 **Result (2026-10-10), as predicted:** job 2632776 COMPLETED in 50 s on gx14 (sync c516e4e clean). `app.server` imports with fastapi 0.142.2; `app.labeler` imports with transformers 4.57.6; the chexbert label order is equal (true) with f1chexbert 0.0.2.
 
-- [ ] **P7-B** `scripts/serve_chat_h100.sh` and the `python -m app.server` CLI: labeller and API, free port, endpoint file, token file, SIGTERM handling, requeue.
+- [x] **P7-B** `scripts/serve_chat_h100.sh` and the `python -m app.server` CLI: labeller and API, free port, endpoint file, token file, SIGTERM handling, requeue.
 
 CLI: `python -m app.server --engine tiny|real --mode private|public --home DIR [--device cpu|cuda] [--gallery DIR] [--labeler URL|rule|none] [--host 127.0.0.1] [--port 0] [--endpoint-file PATH] [--token-file PATH] [--models m3[,13d]] [--threads 8] [--drift-note TEXT] [--allow-compile]`. It picks a free port when `--port 0`, writes `<hostname>:<port>` to the endpoint file once uvicorn has started, reads the token from `--token-file` (never from the command line or the environment, so it stays out of `scontrol show job` and shell history), and on shutdown marks running turns `error` with `server_restart`.
 
@@ -3870,7 +3870,7 @@ done
 
 Record: the requeue time, the new node, the time until `tunnel.sh` re-attached, the stored status of the interrupted turn, and that the SQLite file opened cleanly on the new node (D22). If the database is reported locked after the move, record it and switch the DB to `journal_mode=DELETE` (rollback journal) as the documented fallback.
 
-- [ ] **P7-F** Parity tests for the new wrappers: partition, account and qos, ga03 exclusion, no `--gres`, requeue and append, HF offline, loopback labeller, token required for a non-loopback bind or public mode.
+- [x] **P7-F** Parity tests for the new wrappers: partition, account and qos, ga03 exclusion, no `--gres`, requeue and append, HF offline, loopback labeller, token required for a non-loopback bind or public mode.
 
 ```python
 def test_serve_chat_wrapper_follows_the_cluster_invariants_and_r6():
