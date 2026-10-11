@@ -79,10 +79,12 @@ def test_the_models_route_documents_its_features_and_its_example_has_the_real_ke
 def test_the_health_route_documents_its_answer_and_its_example_has_the_real_keys(client):
     op = client.get("/openapi.json").json()["paths"]["/healthz"]["get"]
     assert "`code_version`" in op["description"] and "`started_at`" in op["description"]   # P4-H A2: what tells a stale server
+    assert "`retention_days`" in op["description"] and "RETENTION_DAYS" in op["description"]   # P8-B: how long a session is kept
     example = op["responses"]["200"]["content"]["application/json"]["example"]
     live = client.get("/healthz").json()
     assert set(example) == set(live)                                  # the example cannot drift from the answer
     assert re.fullmatch(r"[0-9a-f]{7}", example["code_version"]) and example["started_at"].endswith("+00:00")
+    assert example["retention_days"] == live["retention_days"] == 45 and isinstance(example["retention_days"], int)
 
 
 def test_curl_walkthrough_options_validate():

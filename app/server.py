@@ -38,6 +38,7 @@ from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
 
+from app import retention
 from app.commands import COMMAND_HELP, parse_command
 from app.engine import REPO_ROOT, Engine, build_engine
 from app.gallery import Gallery, GalleryMismatch
@@ -110,9 +111,10 @@ MODELS_EXAMPLE = {"default_model": "hybrid_150m_m3_rrg", "mode": "private", "all
                   "models": [{"name": "hybrid_150m_m3_rrg", "prefix_k": 32, "cached_decode_available": True, "eos_trained": False,
                               "device": "cpu", "features": {"retrieval": False, "labels": False}}]}
 # GET /healthz as /docs shows it (test_app_openapi pins its keys to the real answer). code_version and started_at (P4-H A2) tell a server
-# that runs older code than the checkout: the dev server of 2026-10-09 had, and its turns ended "Internal error (ImportError)".
+# that runs older code than the checkout: the dev server of 2026-10-09 had, and its turns ended "Internal error (ImportError)". retention_days
+# (P8-B) is how long a session is kept: the page's banner says it. The public-demo tests of tests/test_chat_tunnel.py read this dict (its `mode`).
 HEALTHZ_EXAMPLE = {"status": "ok", "mode": "private", "default_model": "hybrid_150m_m3_rrg", "turns_in_flight": 0, "queue_cap": 4,
-                   "code_version": "a8e7efe", "started_at": "2026-10-09T14:24:00+00:00"}
+                   "retention_days": 45, "code_version": "a8e7efe", "started_at": "2026-10-09T14:24:00+00:00"}
 
 
 def _option_ranges() -> str:
@@ -596,8 +598,14 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
                allow_compile: bool = False, cors_origins: Sequence[str] = (),
                published_dirs: Optional[Dict[str, str]] = None, tiny_step_delay_s: float = 0.0,
                drift_note: str = "", gallery: Optional[Gallery] = None, labeler: Any = None,
-               tiny_gallery: bool = False, device: str = "cpu", threads: Optional[int] = None) -> FastAPI:
+               tiny_gallery: bool = False, device: str = "cpu", threads: Optional[int] = None,
+               retention_days: Optional[int] = None) -> FastAPI:
     """The app. It refuses to exist without a token on a non-loopback address or in public mode (R6, D9).
+
+    Sessions are deleted `retention_days` days after they were created (P8-B, app/retention.py): that argument, else RETENTION_DAYS from the
+    environment, else 45 days in private mode and 7 in public. Only a whole number from 1 to 3650 will do: anything else, 0 included (it would
+    delete every session at start-up), is a ValueError before anything is opened. A thread sweeps once when the server starts serving, after
+    the restart recovery below, and every 24 hours, for both modes: this mode's days for its own sessions, the default days for the other's.
 
     The retrieve, label and score stages (P5-E) get their gallery from `gallery` (an opened Gallery), else from gallery_dir
     (opened against the default engine's tower hash), and their labeller from `labeler` (anything with label and healthy),
@@ -623,9 +631,19 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         raise ValueError("models must be among {}, got {}".format(sorted(MODEL_CHECKPOINTS), list(models)))
     if queue_cap < 1:
         raise ValueError("queue_cap must be at least 1, got {}".format(queue_cap))
+    days = retention.resolve_days(mode, retention_days)   # a bad value stops the server here, before the database is opened
+    policy = retention.retention_policy(mode, days)
     store = Store(_chat_home(home))
     print("[server] sqlite journal_mode={}".format(store.journal_mode), flush=True)
     print("[server] recovered {} running turn(s)".format(store.recover_after_restart()), flush=True)
+
+    def report_sweep(purged: int, first: bool) -> None:
+        """The job log's line for a sweep (R7: counts and days only): the first one always, the daily ones when they purged something."""
+        if first or purged:
+            print("[server] retention: purged {} session(s) ({})".format(
+                purged, ", ".join("{} {} d".format(m, d) for m, d in sorted(policy.items()))), flush=True)
+
+    sweeper = retention.RetentionSweeper(store, policy, report=report_sweep)   # started with the server, in the lifespan
     try:
         engines = _engines(engine, models, tiny_step_delay_s, drift_note, device, threads)
         default_model = next(iter(engines))
@@ -650,16 +668,22 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        # P8-B: after the restart recovery above (a turn the last server died in is over, so its session can go), and before the first request:
+        # start-up waits for the first sweep, for FIRST_SWEEP_WAIT_S at most (a long backlog goes on in the background).
+        sweeper.start()
+        await run_in_threadpool(sweeper.wait_first, retention.FIRST_SWEEP_WAIT_S)
         yield
         # Queued and running turns stop at their next step and end as a server restart. The wait runs off the event
         # loop. uvicorn reaches this only once open connections close: the serving command line (app/cli.py, P7-B)
         # stops the turns as the shutdown begins, so their streams end, and sets timeout_graceful_shutdown.
+        await run_in_threadpool(sweeper.stop)   # before the store closes under it; its Event wait ends at once
         await run_in_threadpool(worker.shutdown)
         store.close()
 
     app = FastAPI(title="CXR report chat", description=API_DESCRIPTION, lifespan=lifespan)
     app.state.store, app.state.engines, app.state.worker = store, engines, worker
     app.state.mode, app.state.default_model = mode, default_model
+    app.state.retention_days, app.state.sweeper = days, sweeper
     app.state.gallery_dir, app.state.labeler_url, app.state.published_dirs = gallery_dir, labeler_url, published_dirs
     app.state.gallery, app.state.labeler, app.state.published = gallery, labeler, published
     configure_request_log()
@@ -721,12 +745,14 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     @app.get("/healthz", summary="Check the server",
              responses={200: {"description": "The server is up.", "content": {"application/json": {"example": HEALTHZ_EXAMPLE}}},
                         **_refusals({}, token=False, client_id=False)},
-             description="The server's mode, default model, turns in flight and queue cap, with `code_version` (the short git sha "
+             description="The server's mode, default model, turns in flight and queue cap, with `retention_days` (how many days a "
+                         "session is kept before the server deletes it: `RETENTION_DAYS` when that is set, else 45 in private mode and 7 "
+                         "in public mode), `code_version` (the short git sha "
                          "of the code it started from, which it runs until it restarts, with `-dirty` when that tree had changes; "
                          "null when it cannot tell, and in public mode) and `started_at` (ISO 8601, UTC). It needs no token.")
     def healthz():
         return {"status": "ok", "mode": mode, "default_model": default_model, "turns_in_flight": worker.in_flight,
-                "queue_cap": queue_cap, "code_version": code_version, "started_at": started_at}
+                "queue_cap": queue_cap, "retention_days": days, "code_version": code_version, "started_at": started_at}
 
     @app.get("/v1/models", summary="List models",
              responses={200: {"description": "The models, the default, and the stages this server runs.",

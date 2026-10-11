@@ -353,6 +353,12 @@ export function healthText(h) {
   return [mode, load].filter(Boolean).join(' · ') || 'server ok';
 }
 
+// How long the server keeps a session, as the banner says it: /healthz's retention_days (P8-B); '' for a payload with no usable number.
+export function retentionText(h) {
+  const days = Number.isInteger(h?.retention_days) && h.retention_days > 0 ? h.retention_days : null;
+  return days === null ? '' : `Sessions are deleted after ${days} ${days === 1 ? 'day' : 'days'}`;
+}
+
 // 10 s while the server answers, 30 s after three failed checks in a row, and 10 s again at the first answer.
 export const nextHealthDelay = (failures) => (failures >= HEALTH_SLOW_AFTER ? HEALTH_SLOW_MS : HEALTH_MS);
 
@@ -1267,6 +1273,17 @@ export function createApp(env) {
     if (down) ui.health.setAttribute('data-state', 'down'); else ui.health.removeAttribute('data-state');
   }
 
+  // How long sessions are kept (P8-B) has an element of its own after the strip, made here and not in index.html: it is a policy and not a load, and on a
+  // phone it takes one line of its own where, joined to the strip's text, it would wrap the whole strip and push the study list off a 320 x 568 screen.
+  const retention = el('span', { id: 'retention', class: 'note', hidden: true });
+  ui.health.parentNode.append(retention);
+
+  function setRetention(h) {
+    const sentence = retentionText(h);
+    if (retention.textContent !== sentence) retention.textContent = sentence;
+    retention.hidden = sentence === '';
+  }
+
   async function checkHealth() {
     const controller = new AbortController();
     const timer = later(() => controller.abort(), HEALTH_TIMEOUT_MS);   // a half-open tunnel never answers and never fails by itself
@@ -1277,6 +1294,7 @@ export function createApp(env) {
       state.healthFailures = 0;
       if (text(h?.mode)) ui.badge.textContent = h.mode;
       setHealth(healthText(h), false);
+      setRetention(h);
     } catch {
       state.healthFailures += 1;
       setHealth('server restarting…', true);

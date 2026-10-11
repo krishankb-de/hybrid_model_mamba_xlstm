@@ -7494,6 +7494,17 @@ def test_the_request_hardening_module_imports_only_the_standard_library_starlett
     assert first_party == {"app.schemas"}, first_party
 
 
+def test_the_retention_module_imports_only_the_standard_library():
+    """P8-B. app/retention.py (the retention days and the sweep thread) is imported by app/server.py and by app/cli.py's argument check, which
+    runs before anything is loaded: the standard library only and no first-party module, so reading RETENTION_DAYS can never start a model or
+    open the database."""
+    if not hasattr(sys, "stdlib_module_names"):
+        pytest.skip("sys.stdlib_module_names needs Python 3.10")
+    roots, first_party = _imports_of(REPO_ROOT / "app" / "retention.py")
+    assert roots <= set(sys.stdlib_module_names), sorted(roots - set(sys.stdlib_module_names))
+    assert not first_party, first_party
+
+
 # ── CHAT_UI_PLAN.md P5-C: the gallery labelling wrappers ──────────────────────
 # Static pins on scripts/label_gallery_reports_h100.sh (one GPU job with a canary), scripts/label_gallery_reports_cpu_h100.sh (the sharded
 # CPU fallback and its merge) and the scripts/label_gallery_reports.py they run. Their behaviour (guards, R7 output, the canary, shards and

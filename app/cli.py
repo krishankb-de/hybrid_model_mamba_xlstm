@@ -12,6 +12,8 @@ This is app.server's create_app behind a command line, plus what a serving proce
   written atomically (mode 0600) and removed first when the shutdown begins, so that a tunnel stops finding a server that is going away.
 * A serving process refuses what the factory tolerates: a gallery that will not open (unless --allow-no-gallery), a real engine asked to
   run on CUDA where there is none.
+* P8-B. RETENTION_DAYS, in the environment, is how many days a session is kept (45 private, 7 public when it is not set; app/retention.py).
+  A value that is not a whole number from 1 to 3650 is refused here, as one ERROR line and exit status 2, before anything is loaded.
 * Once uvicorn serves, SIGTERM and SIGINT end it cleanly: the endpoint file goes, no new connections, a running or queued turn ends as an
   error with server_restart (the worker's own shutdown, the ending a crash's recovery gives too), and the exit status is 0. uvicorn re-raises
   a signal it handled once it has shut down, which would end the process by that signal, so this module takes the two signals itself. While
@@ -46,6 +48,7 @@ import torch
 import uvicorn
 
 from app.labels import RuleLabeler
+from app.retention import resolve_days
 from app.server import MODEL_CHECKPOINTS, _is_loopback, create_app
 
 MODEL_ALIASES = {"m3": "hybrid_150m_m3_rrg", "13d": "hybrid_150m_v2_rrg"}   # --models m3,13d
@@ -201,6 +204,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         parser.error("public mode needs a token file (R6)")
     if not _is_loopback(args.host) and args.token is None:
         parser.error("a bind off loopback needs a token file (R6)")
+    try:   # RETENTION_DAYS (P8-B) is read by create_app; a bad one stops the start here, as one ERROR line, before anything is loaded
+        resolve_days(args.mode)
+    except ValueError as exc:
+        parser.error(str(exc))
     return args
 
 

@@ -153,6 +153,9 @@ def test_first_load_shows_the_banner_the_empty_chat_and_the_server_strip(ui):
     page.wait_for_function("document.querySelector('#health').textContent.includes('turns in flight')")
     assert page.text_content("#health") == "private · 0 of 4 turns in flight"
     assert page.get_attribute("#health", "data-state") is None   # not "server restarting…"
+    page.wait_for_function("!document.querySelector('#retention').hidden")   # P8-B: how long a session is kept, from /healthz, in the banner
+    assert page.inner_text("#retention") == "Sessions are deleted after 45 days"
+    assert page.evaluate("document.querySelector('.banner').contains(document.querySelector('#retention'))")
     composer = ui.composer()
     assert composer["chips"] == ["beam 3", "100 tok", "cached"]   # the page's defaults; no k: this server runs no retrieval
     assert (composer["preview"], composer["rerun"], composer["notice"], composer["send_disabled"]) == (None, None, None, False)

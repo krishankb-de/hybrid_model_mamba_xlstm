@@ -2290,6 +2290,80 @@ test('the health text is written only when it changes, and a mode in it fills th
   assert.equal($('mode-badge').textContent, 'public');
 });
 
+// ---- the banner says how long sessions are kept (P8-B) ----------------------------------------------------------------------------------
+
+test('retentionText says "Sessions are deleted after N days" for a usable retention_days, and nothing for any other payload', () => {
+  const { retentionText } = appModule;
+  assert.equal(retentionText({ retention_days: 45 }), 'Sessions are deleted after 45 days');
+  assert.equal(retentionText({ status: 'ok', mode: 'public', retention_days: 7 }), 'Sessions are deleted after 7 days');
+  assert.equal(retentionText({ retention_days: 1 }), 'Sessions are deleted after 1 day');
+  for (const bad of [undefined, null, 0, -3, 2.5, '45', NaN, Infinity, {}, [], true]) assert.equal(retentionText({ retention_days: bad }), '', String(bad));
+  for (const payload of [{}, null, undefined, 'ok', 5]) assert.equal(retentionText(payload), '');
+  assert.equal(healthText({ mode: 'private', turns_in_flight: 0, queue_cap: 4, retention_days: 45 }), 'private · 0 of 4 turns in flight');   // the strip is the load's
+});
+
+test('the banner has the retention sentence in an element of its own after the strip, from the /healthz answer', async () => {
+  let payload = { status: 'ok', mode: 'private', turns_in_flight: 0, queue_cap: 4, retention_days: 45 };
+  const h = harness({ routes: { 'GET /healthz': () => payload } });
+  assert.deepEqual([$('retention').hidden, $('retention').textContent], [true, '']);   // made with the page, empty until the server has answered
+  await h.app.start();
+  await flush();
+  const banner = $('health').parentNode;
+  assert.equal($('retention').textContent, 'Sessions are deleted after 45 days');
+  assert.equal($('retention').hidden, false);
+  assert.equal($('retention').getAttribute('class'), 'note');   // the muted note style the page already has: no new rule
+  assert.equal($('health').textContent, 'private · 0 of 4 turns in flight');   // the strip says what it said
+  assert.deepEqual(Array.from(banner.children).map((n) => n.id || n.getAttribute('class')), ['sidebar-toggle', 'disclaimer', 'mode-badge', 'health', 'retention']);
+
+  payload = { ...payload, retention_days: 7 };
+  h.timers.advance(10000);
+  await flush();
+  assert.equal($('retention').textContent, 'Sessions are deleted after 7 days');
+  payload = { ...payload, retention_days: 1 };
+  h.timers.advance(10000);
+  await flush();
+  assert.equal($('retention').textContent, 'Sessions are deleted after 1 day');
+});
+
+test('the retention sentence is hidden for a server that does not say it, and stays while the server restarts', async () => {
+  let payload = { status: 'ok', mode: 'public', turns_in_flight: 0, queue_cap: 4 };   // a server from before P8-B
+  let failing = false;
+  const h = harness({ routes: { 'GET /healthz': () => { if (failing) throw new TypeError('Failed to fetch'); return payload; } } });
+  await h.app.start();
+  await flush();
+  assert.deepEqual([$('retention').hidden, $('retention').textContent], [true, '']);
+  payload = { ...payload, retention_days: 7 };
+  h.timers.advance(10000);
+  await flush();
+  assert.deepEqual([$('retention').hidden, $('retention').textContent], [false, 'Sessions are deleted after 7 days']);
+  failing = true;
+  h.timers.advance(10000);
+  await flush();
+  assert.equal($('health').textContent, 'server restarting…');
+  assert.deepEqual([$('retention').hidden, $('retention').textContent], [false, 'Sessions are deleted after 7 days']);   // a policy: still true
+  failing = false;
+  payload = { status: 'ok', mode: 'public', turns_in_flight: 0, queue_cap: 4 };   // restarted on older code
+  h.timers.advance(10000);
+  await flush();
+  assert.deepEqual([$('retention').hidden, $('retention').textContent], [true, '']);
+});
+
+test('the retention sentence is written only when it changes, and one page has one #retention', async () => {
+  const h = harness({ routes: { 'GET /healthz': () => ({ status: 'ok', mode: 'private', turns_in_flight: 0, queue_cap: 4, retention_days: 45 }) } });
+  await h.app.start();
+  await flush();
+  const note = $('retention');
+  let writes = 0;
+  let value = note.textContent;
+  Object.defineProperty(note, 'textContent', { get: () => value, set: (v) => { value = v; writes += 1; } });
+  h.timers.advance(10000);
+  await flush();
+  h.timers.advance(10000);
+  await flush();
+  assert.equal(writes, 0);   // the same answer twice
+  assert.equal(qa(document.body, '#retention').length, 1);
+});
+
 // ---- scroll, focus, copy ---------------------------------------------------------------------------------------------------------------
 
 test('the page follows a streaming turn only while the reader is near the bottom of #conversation', async () => {

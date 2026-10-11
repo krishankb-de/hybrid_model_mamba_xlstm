@@ -1396,10 +1396,10 @@ def test_health_reports_mode_and_load_without_a_token(tmp_path, monkeypatch):
     monkeypatch.setattr(engine_module, "git_provenance", _provenance(GIT_SHA))
     with TestClient(create_app(engine="tiny", home=str(tmp_path), token="t", queue_cap=3)) as c:
         health = c.get("/healthz").json()
-    assert set(health) == {"status", "mode", "default_model", "turns_in_flight", "queue_cap", "code_version", "started_at"}
+    assert set(health) == {"status", "mode", "default_model", "turns_in_flight", "queue_cap", "retention_days", "code_version", "started_at"}
     health.pop("started_at")
     assert health == {"status": "ok", "mode": "private", "default_model": "tiny", "turns_in_flight": 0, "queue_cap": 3,
-                      "code_version": "0123456"}
+                      "retention_days": 45, "code_version": "0123456"}   # P8-B: how long a session is kept, which the page's banner says
 
 
 def test_health_says_which_code_the_server_started_from_and_when(tmp_path, monkeypatch):
