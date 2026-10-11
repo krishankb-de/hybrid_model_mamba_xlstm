@@ -26,6 +26,14 @@
 # and resample count that wrapper defaults to (0 and 1000); tests/test_willi_parity.py parses that wrapper and pins all of it. The
 # report is written beside the EOS dump. The two dumps must be the same studies: their refs.txt files must be byte-identical.
 #
+# A length-penalty arm (P9-G6) is the same three jobs on that arm's own directory, results/chat_report_eos_lp<NNN>_test_split_s42; the
+# submit lines for one are in the header of scripts/eval_report_eos_h100.sh. This job has no lever for the penalty, so there is none to
+# mistype: it reads the one the decode's own log records, the last `Length penalty: x` line of ${DUMP_DIR}/eval.log (no such line means
+# a dump from before the lever, decoded at 1.0), and names system A for it: eos_s42 for 1.0, eos_lp<NNN>_s42 for any other, NNN being
+# the penalty times 100 in three digits (eos_lp200_s42 for 2.0). The report is bootstrap_<system A>_vs_m3_s42.md beside that dump, so two
+# arms never share a system name or a report, and a finished report is never overwritten. A line it cannot name (more than two
+# decimals, or outside 0.5 to 3.0) stops the job before anything runs, and the refusal does not show it.
+#
 # WHAT IT PRINTS (RESULT lines, numbers and allowlisted names only; scripts/report_eos_stats.py says what each holds):
 #   the stats of A, then of B, then of the references (the baseline: some reference reports lack a final period too, and the length
 #   BLEU and ROUGE are scored against): mean words and GPT-2 tokens (null when the tokenizer is not cached offline), empty reports,
@@ -80,14 +88,10 @@ DUMP_DIR="${DUMP_DIR:-results/chat_report_eos_test_split_s42}"
 PUBLISHED_DIR="${PUBLISHED_DIR:-results/report_gen_m3_test_split_s42}"
 
 # --- the comparison (see the header): plain assignments, deliberately not ${VAR:-default} --------------------------------
-NAME_A=eos_s42
+NAME_A=eos_s42   # system A of the published penalty; an arm of another is named below, from its dump's own log
 NAME_B=m3_s42
 SAMPLES=1000
 SEED=0
-OUTPUT="${DUMP_DIR}/bootstrap_${NAME_A}_vs_${NAME_B}.md"
-
-echo "=== P9-G4 compare: ${NAME_A} against ${NAME_B}, paired bootstrap ${SAMPLES} resamples seed ${SEED}, per-label on ==="
-echo "=== job=${SLURM_JOB_ID:-local} restart=${SLURM_RESTART_COUNT:-0} node=$(hostname) ==="
 
 export HF_HOME="${SCRATCH_ROOT}/.hf"
 export HF_DATASETS_CACHE="${HF_HOME}/datasets"
@@ -109,6 +113,29 @@ need "${PUBLISHED_DIR}/hyps.txt" "the published dump has no hyps.txt"
 need "${PUBLISHED_DIR}/refs.txt" "the published dump has no refs.txt"
 need "${PUBLISHED_DIR}/chexbert_labels.json" "the published dump has no chexbert_labels.json"
 cmp -s "${DUMP_DIR}/refs.txt" "${PUBLISHED_DIR}/refs.txt" || fail "the two dumps have different refs.txt: they are not the same studies"
+
+# --- which arm this is (P9-G6, see the header): the penalty the decode's own log records, named after it -----------------------
+# lp_centi VALUE prints VALUE times 100 as an integer, or fails: one digit from 0 to 3, then at most two decimals (the decode job's own
+# rule). The log is read for its last `Length penalty: x` line, which starts at column 0 (the evaluator's lines about a study are all
+# prefixed), and none means a dump from before the lever, decoded at 1.0. A refusal never shows what was read: it came out of a log.
+lp_centi() {
+  local re='^([0-3])(\.([0-9]{1,2}))?$' frac
+  [[ "$1" =~ $re ]] || return 1
+  frac="${BASH_REMATCH[3]}00"
+  echo $(( ${BASH_REMATCH[1]} * 100 + 10#${frac:0:2} ))
+}
+LP_LOGGED=1.0
+if [ -f "${DUMP_DIR}/eval.log" ]; then
+  LP_LOGGED="$(grep -a '^Length penalty: [0-9.]*$' "${DUMP_DIR}/eval.log" 2>/dev/null | tail -n 1 | sed 's/^Length penalty: //' || true)"
+  LP_LOGGED="${LP_LOGGED:-1.0}"
+fi
+LP_CENTI="$(lp_centi "${LP_LOGGED}")" || fail "the length penalty in the dump's eval.log is not a number with at most two decimals"
+{ [ "${LP_CENTI}" -ge 50 ] && [ "${LP_CENTI}" -le 300 ]; } || fail "the length penalty in the dump's eval.log is outside 0.5 to 3.0"
+[ "${LP_CENTI}" -eq 100 ] || NAME_A="eos_lp$(printf '%03d' "${LP_CENTI}")_s42"
+OUTPUT="${DUMP_DIR}/bootstrap_${NAME_A}_vs_${NAME_B}.md"
+
+echo "=== P9-G4 compare: ${NAME_A} against ${NAME_B}, paired bootstrap ${SAMPLES} resamples seed ${SEED}, per-label on ==="
+echo "=== job=${SLURM_JOB_ID:-local} restart=${SLURM_RESTART_COUNT:-0} node=$(hostname) ==="
 if [ -e "${OUTPUT}" ]; then
   fail "the comparison report already exists: a finished comparison is never overwritten (R8)"
 fi

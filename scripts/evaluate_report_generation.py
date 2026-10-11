@@ -107,6 +107,12 @@ Usage:
         --checkpoint <run>/checkpoints/last.ckpt --model-config hybrid_150m_m3_rrg \\
         --parquet /sc/home/$USER/dataset/mimic_full/test.parquet \\
         --decode beam --beam-size 3 --max-new-tokens 200 --stop-at-eos --cached-decode
+
+    # P9-G6: the same, ranking by log-probability / length ** 1.5 instead of the published 1.0 (from 0.5 to 3.0, EOS-stop decoding only)
+    python scripts/evaluate_report_generation.py \\
+        --checkpoint <run>/checkpoints/last.ckpt --model-config hybrid_150m_m3_rrg \\
+        --parquet /sc/home/$USER/dataset/mimic_full/test.parquet \\
+        --decode beam --beam-size 3 --max-new-tokens 200 --stop-at-eos --cached-decode --length-penalty 1.5
 """
 
 import sys
@@ -126,6 +132,9 @@ import torch
 from hybrid_xmamba.models.configuration_hybrid import HybridConfig
 from hybrid_xmamba.models.hybrid_lm import HybridLanguageModel, StopDecoding
 from hybrid_xmamba.models.prefix_mapper import ImagePrefixMapper
+
+# P9-G6: what --length-penalty takes. 1.0 is the published exponent of the ranking; only the EOS-stop search (--stop-at-eos) takes another.
+LENGTH_PENALTY_RANGE = (0.5, 3.0)
 
 
 # ---------------------------------------------------------------------------
@@ -533,12 +542,15 @@ def generate_from_patch_grid_eos(
     max_new_tokens: int = 100,
     cached: bool = False,
     eos_token_id: int = 50256,
+    length_penalty: float = 1.0,
 ) -> Tuple[torch.Tensor, bool]:
     """`generate_from_patch_grid(decode="beam")` with the EOS-stop searches (CHAT_UI_PLAN.md P9-G2): (1, N) ids without the
     EOS, N from 1 to max_new_tokens (an EOS before the first token is skipped), and whether the report ended in the model's own
     EOS. Same empty input_ids, no BOS. Beam search
     only: a greedy run is the beam of one, which beam_size=1 gives. With cached=True it is `beam_search_cached_eos` and needs a
-    stack with a step path, as `generate_from_patch_grid` does."""
+    stack with a step path, as `generate_from_patch_grid` does. `length_penalty` (P9-G6) is the exponent both searches rank by,
+    log-probability / length ** length_penalty with the EOS counted in the length: 1.0, the default, is the published ranking, and a
+    larger one lets a longer report win over a shorter one that ended first."""
     prefix_embeds = module.prefix_mapper(patch_grid)
     input_ids = torch.zeros((patch_grid.shape[0], 0), dtype=torch.long, device=patch_grid.device)
     if cached:
@@ -549,9 +561,9 @@ def generate_from_patch_grid_eos(
                 "Re-run without it.")
         return module.decoder.beam_search_cached_eos(
             input_ids, prefix_embeds=prefix_embeds, beam_size=beam_size,
-            max_new_tokens=max_new_tokens, eos_token_id=eos_token_id)
+            max_new_tokens=max_new_tokens, length_penalty=length_penalty, eos_token_id=eos_token_id)
     return beam_search_decode_eos(module.decoder, input_ids, prefix_embeds=prefix_embeds, beam_size=beam_size,
-                                  max_new_tokens=max_new_tokens, eos_token_id=eos_token_id)
+                                  max_new_tokens=max_new_tokens, length_penalty=length_penalty, eos_token_id=eos_token_id)
 
 
 def write_hyps_refs(dump_dir: str, hyps: List[str], refs: List[str]) -> None:
@@ -685,9 +697,11 @@ def run_checkpoint_inspection(args) -> None:
         print("Decode path: O(1) recurrent cache (M6). Token-identical to the uncached path by "
               "test; the published numbers used the uncached path.")
     stop_at_eos = getattr(args, "stop_at_eos", False)
+    length_penalty = getattr(args, "length_penalty", 1.0)   # P9-G6: only the EOS search takes one; a caller that predates the flag ranks as before
     if stop_at_eos:
         print("Decode path: beam search that stops at the model's EOS (P9-G2). NOT the published protocol, which "
               "decodes the whole budget; meant for a model trained with dataset.report_eos_target.")
+        print(f"Length penalty: {length_penalty}")   # the line scripts/report_eos_stats.py reads back: the log vouches for the exponent
     df = pd.read_parquet(args.parquet)
     n = min(args.num_samples, len(df))
     print(f"Loaded {len(df)} rows from {args.parquet}; inspecting first {n}\n")
@@ -703,6 +717,7 @@ def run_checkpoint_inspection(args) -> None:
             out_ids, ended = generate_from_patch_grid_eos(
                 module, patch_grid, beam_size=args.beam_size, max_new_tokens=args.max_new_tokens,
                 cached=getattr(args, "cached_decode", False), eos_token_id=tokenizer.eos_token_id,
+                length_penalty=length_penalty,
             )
             ended_by_eos += int(ended)
         else:
@@ -1073,6 +1088,12 @@ def main():
                              "the published models never learned an EOS. Needs --checkpoint and --decode beam; with "
                              "--cached-decode it uses the cached twin. Off by default: the published protocol decodes the "
                              "whole budget.")
+    parser.add_argument("--length-penalty", type=float, default=1.0,
+                        help="P9-G6: the length exponent of the EOS-stop search's ranking: a hypothesis, one that ended or a live "
+                             "beam, ranks by log-probability / length ** this, the EOS counted in the length. 1.0 is the published "
+                             "ranking; above 1 favours longer reports, so a model that ends early writes fuller ones. From 0.5 to 3.0. "
+                             "Needs --stop-at-eos, because the published searches rank by 1.0 only: other than 1.0 without it is "
+                             "refused instead of ignored.")
     parser.add_argument("--beam-size", type=int, default=3,
                         help="Beam size when --decode beam (for --checkpoint mode)")
     parser.add_argument("--max-new-tokens", type=int, default=100,
@@ -1107,6 +1128,11 @@ def main():
                 else "--hyp-file/--ref-file metrics"))
         if args.decode != "beam":
             parser.error("--stop-at-eos needs --decode beam")
+
+    if not LENGTH_PENALTY_RANGE[0] <= args.length_penalty <= LENGTH_PENALTY_RANGE[1]:   # a nan fails the comparison too
+        parser.error("--length-penalty must be from {} to {}".format(*LENGTH_PENALTY_RANGE))
+    if args.length_penalty != 1.0 and not args.stop_at_eos:   # the published searches would ignore it, without a word
+        parser.error("--length-penalty other than 1.0 needs --stop-at-eos")
 
     if args.smoke_test:
         run_smoke_test()

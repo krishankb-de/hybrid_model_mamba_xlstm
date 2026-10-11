@@ -804,3 +804,126 @@ def test_the_inspection_run_without_the_flag_is_what_it_was(tmp_path, monkeypatc
     strip = lambda text: "\n".join(l for l in text.splitlines() if not l.startswith(("Loaded", "  Missing")))
     assert strip(plain) == strip(flagged)
     assert "EOS" not in plain
+
+
+# ---------------------------------------------------------------------------------------------------------
+# P9-G6: scripts/evaluate_report_generation.py --length-penalty
+#
+# Both EOS searches already rank by log-probability / length ** length_penalty and already take the exponent; the command line never set
+# it. The lever is for the EOS decode only (it is the one that can end a report early: a published search always decodes its whole
+# budget, so a different exponent there would change which beam survives, not how full the report is). The default is the published
+# exponent, 1.0, and with it a decode is what it was.
+# ---------------------------------------------------------------------------------------------------------
+
+# Beam 2. [0] + EOS ends at step 1 with ln(.55 * .6) = -1.109 over a length of 2. [1, 3, 5] + EOS ends at step 3 with
+# ln(.45 * .9 * .3 * .55) = -2.706 over a length of 4. Normalised by length ** lp:
+#     lp 1.0:  [0] -0.554 against [1, 3, 5] -0.676; the live beam [1, 3, 5, ...] is at -0.703 by step 2, below the finished [0], so the
+#              search stops at step 2 and the short report is the answer;
+#     lp 2.0:  [0] -0.277 against [1, 3, 5] -0.169; the live beam stays above [0] at step 2 (-0.234), the search goes on, and at step 3 the
+#              longer report finishes ahead of every live beam (-0.181) as well as of [0]: it is the answer.
+# No two candidates tie, so cached and uncached agree and the oracle is the expected answer.
+LP_CASE = {
+    (0, None): {0: .55, 1: .45},
+    (1, 0): {EOS: .6, 2: .4}, (1, 1): {3: .9, 4: .1},
+    (2, 3): {5: .3, 4: .25, 3: .23, 2: .22}, (2, 2): {5: .4, 4: .3, 3: .2, 2: .1},
+    (3, 5): {EOS: .55, 1: .45}, (3, 4): {2: .55, 1: .45},
+}
+
+
+def _parsed(monkeypatch, *argv):
+    """The namespace main() hands to the inspection run for these arguments (the run itself is replaced by a recorder)."""
+    import scripts.evaluate_report_generation as erg
+    seen = []
+    monkeypatch.setattr(erg, "run_checkpoint_inspection", seen.append)
+    _main(monkeypatch, "--checkpoint", "c.ckpt", "--parquet", "p.parquet", "--decode", "beam", *argv)
+    (args,) = seen
+    return args
+
+
+def test_the_length_penalty_is_the_published_1_unless_asked_and_a_1_changes_nothing(monkeypatch):
+    assert _parsed(monkeypatch, "--stop-at-eos").length_penalty == 1.0
+    assert _parsed(monkeypatch, "--stop-at-eos", "--length-penalty", "1.0").length_penalty == 1.0
+    assert _parsed(monkeypatch).length_penalty == 1.0                                # the published search: no flag, and 1.0
+    assert _parsed(monkeypatch, "--length-penalty", "1").length_penalty == 1.0      # 1.0 asked of a published search is what it does: no refusal
+    asked = ("0.5", "1.25", "1.5", "2", "3", "3.0")
+    assert [_parsed(monkeypatch, "--stop-at-eos", "--length-penalty", v).length_penalty for v in asked] == [0.5, 1.25, 1.5, 2.0, 3.0, 3.0]
+
+
+@pytest.mark.parametrize("extra", [["--stop-at-eos"], []])
+@pytest.mark.parametrize("value", ["0.49", "0.4999", "3.01", "0", "-1", "-0.5", "1e9", "nan", "inf", "-inf"])
+def test_a_length_penalty_outside_half_to_three_is_refused_before_the_run_starts(monkeypatch, capsys, value, extra):
+    import scripts.evaluate_report_generation as erg
+    monkeypatch.setattr(erg, "run_checkpoint_inspection", lambda args: pytest.fail("the run started"))
+    with pytest.raises(SystemExit) as stop:   # the joined form: argparse would take "-inf" for an option, and "-1" is fine either way
+        _main(monkeypatch, "--checkpoint", "c.ckpt", "--parquet", "p.parquet", "--decode", "beam", "--length-penalty=" + value, *extra)
+    err = capsys.readouterr().err
+    assert stop.value.code == 2 and "--length-penalty must be from 0.5 to 3.0" in err
+
+
+@pytest.mark.parametrize("value", ["0.5", "1.5", "2.0", "3.0", "1.01"])
+def test_a_length_penalty_other_than_1_needs_stop_at_eos_because_the_published_searches_do_not_take_it(monkeypatch, capsys, value):
+    import scripts.evaluate_report_generation as erg
+    monkeypatch.setattr(erg, "run_checkpoint_inspection", lambda args: pytest.fail("the run started"))
+    with pytest.raises(SystemExit) as stop:
+        _main(monkeypatch, "--checkpoint", "c.ckpt", "--parquet", "p.parquet", "--decode", "beam", "--length-penalty", value)
+    assert stop.value.code == 2 and "--length-penalty other than 1.0 needs --stop-at-eos" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_length_penalty_above_one_can_change_which_finished_hypothesis_wins(kind):
+    script, model, got = markov_script(LP_CASE, default=_strong), tiny_decoder(), {}
+    for length_penalty in (1.0, 2.0):
+        with scripted_decoder(model, script):
+            ids, ended = _eos(kind, model, EMPTY, _prefix(), 2, 12, eos=EOS, length_penalty=length_penalty)
+        got[length_penalty] = (ids[0].tolist(), ended)
+        assert got[length_penalty] == _oracle(script, EOS, 2, 12, length_penalty)[:2], length_penalty   # the rules, written the slow way
+    assert got == {1.0: ([0], True), 2.0: ([1, 3, 5], True)}      # both ended in EOS; the exponent chose which report
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_the_patch_grid_twin_takes_the_length_penalty_into_the_search_it_selects(cached):
+    from scripts.evaluate_report_generation import generate_from_patch_grid_eos
+    module, grid = _patch_grid_module(), _grid()
+    script = markov_script(LP_CASE, default=_strong)
+    answers = {}
+    with scripted_decoder(module.decoder, script):
+        for name, extra in (("absent", {}), ("one", {"length_penalty": 1.0}), ("two", {"length_penalty": 2.0})):
+            ids, ended = generate_from_patch_grid_eos(module, grid, beam_size=2, max_new_tokens=12, cached=cached, eos_token_id=EOS, **extra)
+            answers[name] = (ids[0].tolist(), ended)
+    assert answers == {"absent": ([0], True), "one": ([0], True), "two": ([1, 3, 5], True)}
+
+
+def _lp_inspect(tmp_path, monkeypatch, capsys, **flags):
+    """_inspect over LP_CASE with a beam of 2 (the EOS search on), whatever `flags` add or override."""
+    return _inspect(tmp_path, monkeypatch, capsys, markov_script(LP_CASE, default=_strong), **dict(dict(stop_at_eos=True, beam_size=2), **flags))
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_the_inspection_run_decodes_with_the_length_penalty_it_is_given_and_says_so_in_its_log(tmp_path, monkeypatch, capsys, cached):
+    absent, hyps_absent = _lp_inspect(tmp_path, monkeypatch, capsys, cached_decode=cached)               # args with no length_penalty at all
+    one, hyps_one = _lp_inspect(tmp_path, monkeypatch, capsys, cached_decode=cached, length_penalty=1.0)
+    two, hyps_two = _lp_inspect(tmp_path, monkeypatch, capsys, cached_decode=cached, length_penalty=2.0)
+    assert [len(h.split()) for h in hyps_absent] == [1, 1, 1] == [len(h.split()) for h in hyps_one]      # [0]: the short report
+    assert [len(h.split()) for h in hyps_two] == [3, 3, 3]                                                # [1, 3, 5]: the fuller one
+    assert "EOS stop: 3/3 reports ended at the end-of-report token, 0 were cut at max_new_tokens=30" in two
+    from scripts import report_eos_stats as stats
+    assert (stats.parse_length_penalty(absent), stats.parse_length_penalty(one), stats.parse_length_penalty(two)) == (1.0, 1.0, 2.0)
+
+
+def test_with_the_default_penalty_the_decode_and_its_log_are_what_they_were_with_no_flag_at_all(tmp_path, monkeypatch, capsys):
+    """The hard gate of P9-G6: `--length-penalty 1.0` and no flag give the same hyps and the same printed output, on a model that
+    ends its reports (scripted) and on real tiny weights that never reach the end (and on the cached search too)."""
+    strip = lambda text: "\n".join(l for l in text.splitlines() if not l.startswith(("Loaded", "  Missing")))
+    noisy = noise_script(5, EOS, lambda n, last: 40.0 if n == N else -1e4)
+    for cached in (False, True):
+        for script in (noisy, None):
+            plain, hyps_plain = _inspect(tmp_path, monkeypatch, capsys, script, stop_at_eos=True, cached_decode=cached)
+            flagged, hyps_flagged = _inspect(tmp_path, monkeypatch, capsys, script, stop_at_eos=True, cached_decode=cached, length_penalty=1.0)
+            assert hyps_plain == hyps_flagged and len(hyps_plain) == 3
+            assert strip(plain) == strip(flagged)
+
+
+def test_the_published_decode_prints_no_length_penalty_line(tmp_path, monkeypatch, capsys):
+    plain, _ = _inspect(tmp_path, monkeypatch, capsys)
+    flagged, _ = _inspect(tmp_path, monkeypatch, capsys, stop_at_eos=False, length_penalty=1.0)
+    assert "Length penalty" not in plain and "Length penalty" not in flagged

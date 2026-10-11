@@ -7204,8 +7204,9 @@ def test_eval_report_eos_wrappers_have_the_offline_environment_the_job_needs():
 def test_eval_report_eos_decode_is_the_published_eval_command_plus_the_eos_flags():
     """P9-G4. The command is the one submit_v3_chain.sh's eval stage gave inspect_report_generation_h100.sh for the published
     Mamba-3 runs (the wrapper's own defaults under the chain's overrides), with exactly three differences: --cached-decode,
-    --stop-at-eos and --max-new-tokens 200. Both published sources are parsed here, so this fails when either moves. The
-    values are plain assignments, not environment levers: sbatch exports the submitting shell."""
+    --stop-at-eos and --max-new-tokens 200; and, since P9-G6, one flag the published wrapper has no name for, --length-penalty, whose
+    lever defaults to the published 1.0. Both published sources are parsed here, so this fails when either moves. Everything else is a
+    plain assignment, not an environment lever: sbatch exports the submitting shell."""
     inspect_src = (REPO_ROOT / "scripts" / "inspect_report_generation_h100.sh").read_text()
     chain = (REPO_ROOT / "scripts" / "submit_v3_chain.sh").read_text()
     mine_src = _eval_text("decode")
@@ -7240,8 +7241,10 @@ def test_eval_report_eos_decode_is_the_published_eval_command_plus_the_eos_flags
     call = _command(mine_src, "python scripts/evaluate_report_generation.py")
     mine_flags = re.findall(r"--[a-z][a-z-]*", call.split(">>")[0])
     assert mine_flags == ["--checkpoint", "--model-config", "--prefix-k", "--cached-decode", "--stop-at-eos", "--parquet",
-                          "--num-samples", "--decode", "--beam-size", "--max-new-tokens", "--dump-dir"], mine_flags
-    assert set(mine_flags) - {"--stop-at-eos"} <= inspect_flags, "a flag the published wrapper cannot pass"
+                          "--num-samples", "--decode", "--beam-size", "--max-new-tokens", "--length-penalty", "--dump-dir"], mine_flags
+    # --stop-at-eos (P9-G2) and --length-penalty (P9-G6) are the two flags the published wrapper cannot pass: the EOS decode's own
+    assert set(mine_flags) - {"--stop-at-eos", "--length-penalty"} <= inspect_flags, "a flag the published wrapper cannot pass"
+    assert '--length-penalty "${LP_ARG}"' in call and call.index("--max-new-tokens") < call.index("--length-penalty") < call.index("--dump-dir")
     always = {"--checkpoint", "--model-config", "--parquet", "--num-samples", "--decode", "--beam-size", "--max-new-tokens"}
     assert always <= set(mine_flags), "a flag the published eval always passes"
     assert {"--prefix-k", "--dump-dir"} <= set(mine_flags), "the chain set PREFIX_K and DUMP_DIR"
@@ -7254,13 +7257,15 @@ def test_eval_report_eos_decode_is_the_published_eval_command_plus_the_eos_flags
     assert mine["MAX_NEW_TOKENS"] == "200" != published["MAX_NEW_TOKENS"] and '--max-new-tokens "${MAX_NEW_TOKENS}"' in call
     assert "--cached-decode --stop-at-eos " in call
 
-    # the three defaults the rulings name, and nothing else is a lever
+    # the three defaults the rulings name, the one lever of the decode itself (P9-G6), and nothing else is a lever. The default dump is the
+    # G4 directory for the published penalty and the penalty's own for any other: DUMP_DIR_DEFAULT is a plain value, never a lever.
     for line in ('CKPT="${CKPT:-${CHAT_HOME:-/sc/home/$USER/chat_sessions}/models/report_gen_m3_eos_s42/checkpoints/last.ckpt}"',
                  'PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/test.parquet}"',
-                 'DUMP_DIR="${DUMP_DIR:-results/chat_report_eos_test_split_s42}"'):
+                 'DUMP_DIR="${DUMP_DIR:-${DUMP_DIR_DEFAULT}}"', 'LENGTH_PENALTY="${LENGTH_PENALTY:-1.0}"'):
         assert line in mine_src, line
+    assert mine["DUMP_DIR_DEFAULT"] == "results/chat_report_eos_test_split_s42", "the G4 directory, for the published penalty"
     levers = set(re.findall(r'(?m)^([A-Z][A-Z0-9_]*)="\$\{\1:-', mine_src))
-    assert levers == {"SCRATCH_ROOT", "VENV_ACTIVATE", "CKPT", "PARQUET", "DUMP_DIR", "PUBLISHED_DIR"}, levers
+    assert levers == {"SCRATCH_ROOT", "VENV_ACTIVATE", "CKPT", "PARQUET", "LENGTH_PENALTY", "DUMP_DIR", "PUBLISHED_DIR"}, levers
     assert 'PUBLISHED_DIR="${PUBLISHED_DIR:-results/report_gen_m3_test_split_s42}"' in mine_src
 
 
@@ -7275,6 +7280,88 @@ def test_eval_report_eos_decode_header_says_two_hours_are_enough_for_the_expecte
     assert "even at the full" not in header and "holds the cached decode" not in header, "the sentence the arithmetic contradicts"
     for needle in ("--time=02:00:00", "6.35 ms", "12.7 ms", "1.4 h", "2.2 h", "TIMEOUT", "--time=04:00:00"):
         assert needle in time_paragraph, needle
+
+
+_LP_CHECK = ('LP_CENTI="$(lp_centi "${LENGTH_PENALTY}")" || fail "LENGTH_PENALTY is not a number with at most two decimals"',
+             '{ [ "${LP_CENTI}" -ge 50 ] && [ "${LP_CENTI}" -le 300 ]; } || fail "LENGTH_PENALTY is outside 0.5 to 3.0"')
+
+
+def test_eval_report_eos_decode_has_one_lever_of_the_decode_itself_the_length_penalty_validated_before_anything_runs():
+    """P9-G6. LENGTH_PENALTY (default 1.0, the published ranking) is a number from 0.5 to 3.0 with at most two decimals: the integer part
+    is one digit, so no arithmetic can wrap, and two values that print alike cannot name one directory twice. A refusal never echoes the
+    value (an environment variable of the submitting shell can hold anything), and it comes before the banner, the GPU probe and every
+    directory. The evaluator and the stats script both get the canonical LP_ARG; the default dump follows the penalty."""
+    src = _eval_text("decode")
+    code = "\n".join(_eos_wrapper_code(src))
+    assert 'LENGTH_PENALTY="${LENGTH_PENALTY:-1.0}"' in code
+    assert "local re='^([0-3])(\\.([0-9]{1,2}))?$' frac" in code and '[[ "$1" =~ $re ]] || return 1' in code
+    assert 'frac="${BASH_REMATCH[3]}00"' in code and "echo $(( ${BASH_REMATCH[1]} * 100 + 10#${frac:0:2} ))" in code
+    for line in _LP_CHECK:
+        assert line in code, line
+    assert 'LP_ARG="$((LP_CENTI / 100)).$(printf \'%02d\' $((LP_CENTI % 100)))"' in code
+    assert "LP_NNN=\"$(printf '%03d' \"${LP_CENTI}\")\"" in code
+    assert ('[ "${LP_CENTI}" -eq 100 ] || DUMP_DIR_DEFAULT="results/chat_report_eos_lp${LP_NNN}_test_split_s42"' in code
+            and code.index("LP_NNN=") < code.index("DUMP_DIR_DEFAULT=\"results/chat_report_eos_lp") < code.index('DUMP_DIR="${DUMP_DIR:-${DUMP_DIR_DEFAULT}}"'))
+    banner, first_guard = code.index('echo "=== P9-G4 decode:'), code.index('case "${DUMP_DIR}" in')
+    assert code.index(_LP_CHECK[0]) < code.index(_LP_CHECK[1]) < banner < first_guard, "the penalty is judged before the banner, which shows it"
+    assert code.index(_LP_CHECK[1]) < code.index("python -c") and code.index(_LP_CHECK[1]) < code.index('mkdir -p "${DUMP_DIR}"')
+    assert "length penalty ${LP_ARG} " in code[banner:code.index("\n", banner)]
+    stats_call = _command(src, "python scripts/report_eos_stats.py decode")
+    assert '--budget "${MAX_NEW_TOKENS}" --length-penalty "${LP_ARG}" --wall-s "${WALL_S}"' in stats_call
+    messages = [m for m in re.findall(r'\bfail "([^"]*)"', code) if "penalty" in m.lower()]
+    assert len(messages) == 2 and not [m for m in messages if "$" in m], messages   # static text: neither the lever nor LP_ARG is in a refusal
+
+
+def test_eval_report_eos_decode_header_documents_the_length_penalty_and_the_submit_lines_of_one_arm():
+    """P9-G6: the controller submits an arm from the decode wrapper's header. The three lines mirror the G4 chain (the compare wrapper's
+    header), one afterok on the one before, and the directory they name is the one the wrapper's own rule gives for 2.0."""
+    header = "\n".join(l for l in _eval_text("decode").splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))
+    arm = "results/chat_report_eos_lp200_test_split_s42"
+    decode = "DEC=$(bash scripts/chat_remote.sh submit scripts/eval_report_eos_h100.sh LENGTH_PENALTY=2.0 -- --time=04:00:00)"
+    chexbert = ("CHX=$(bash scripts/chat_remote.sh submit scripts/eval_report_eos_chexbert_h100.sh DUMP_DIR=" + arm
+                + " -- --dependency=afterok:${DEC%%;*})")
+    compare = ("CMP=$(bash scripts/chat_remote.sh submit scripts/eval_report_eos_compare_h100.sh DUMP_DIR=" + arm
+               + " PUBLISHED_DIR=results/report_gen_m3_test_split_s42 -- --dependency=afterok:${CHX%%;*})")
+    lines = [l.lstrip("# ").rstrip() for l in header.splitlines()]
+    for line in (decode, chexbert, compare):
+        assert lines.count(line) == 1, line
+    assert lines.index(decode) < lines.index(chexbert) < lines.index(compare)
+    assert lines.index("bash scripts/chat_remote.sh sync") < lines.index(decode), "sync first, as in the G4 chain"
+    for needle in ("LENGTH_PENALTY", "0.5 to 3.0", "two decimals", "default 1.0", "results/chat_report_eos_lp<NNN>_test_split_s42",
+                   "never overwritten", "chat_remote.sh summary logs/chat_eos_eval_", "Length penalty: x", "length_penalty"):
+        assert needle in header, needle
+    assert arm == "results/chat_report_eos_lp{:03d}_test_split_s42".format(round(2.0 * 100)), "the header's directory is the rule's for 2.0"
+    compare_header = "\n".join(l for l in _eval_text("compare").splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))
+    assert "eval_report_eos_h100.sh" in compare_header and "length-penalty arm" in compare_header and "eos_lp<NNN>_s42" in compare_header
+
+
+def test_eval_report_eos_compare_names_system_a_after_the_penalty_the_dumps_own_log_records():
+    """P9-G6. No lever and nothing to type twice: the penalty is read from the decode's own eval.log (its last `Length penalty: x` line,
+    which starts at column 0; none means a dump from before the lever, decoded at 1.0), judged as the decode job judges its lever, and
+    names system A and its report. A refusal does not quote what was read. Plain NAME_A=eos_s42 stays the published penalty's name."""
+    src = _eval_text("compare")
+    code = "\n".join(_eos_wrapper_code(src))
+    assert _plain_assignments(src)["NAME_A"] == "eos_s42"
+    assert "LENGTH_PENALTY" not in code, "the comparison has no lever for it: the dump's own log is the record"
+    assert "local re='^([0-3])(\\.([0-9]{1,2}))?$' frac" in code and 'frac="${BASH_REMATCH[3]}00"' in code
+    assert "grep -a '^Length penalty: [0-9.]*$' \"${DUMP_DIR}/eval.log\"" in code and "tail -n 1" in code
+    for needle in ('LP_LOGGED=1.0', 'if [ -f "${DUMP_DIR}/eval.log" ]; then', 'LP_LOGGED="${LP_LOGGED:-1.0}"',
+                   'LP_CENTI="$(lp_centi "${LP_LOGGED}")" || fail "the length penalty in the dump\'s eval.log is not a number with at most two decimals"',
+                   '{ [ "${LP_CENTI}" -ge 50 ] && [ "${LP_CENTI}" -le 300 ]; } || fail "the length penalty in the dump\'s eval.log is outside 0.5 to 3.0"',
+                   '[ "${LP_CENTI}" -eq 100 ] || NAME_A="eos_lp$(printf \'%03d\' "${LP_CENTI}")_s42"'):
+        assert needle in code, needle
+    guard, resolve = code.index('case "${DUMP_DIR}" in'), code.index("LP_LOGGED=1.0")
+    output = code.index('OUTPUT="${DUMP_DIR}/bootstrap_${NAME_A}_vs_${NAME_B}.md"')
+    banner, exists = code.index('echo "=== P9-G4 compare:'), code.index('if [ -e "${OUTPUT}" ]; then')
+    assert guard < resolve < code.index("NAME_A=\"eos_lp") < output < exists, "the log is read after DUMP_DIR passed its guard, the name before it is used"
+    assert code.index("NAME_A=\"eos_lp") < banner and exists < code.index("python scripts/bootstrap_compare.py")
+    messages = [m for m in re.findall(r'\bfail "([^"]*)"', code) if "penalty" in m.lower()]
+    assert len(messages) == 2 and not [m for m in messages if "$" in m], messages   # static text: what the log held is not in a refusal
+
+
+def test_eval_report_eos_chexbert_header_says_a_length_penalty_arms_dump_is_just_another_dump_directory():
+    header = "\n".join(l for l in _eval_text("chexbert").splitlines() if l.startswith("#") and not l.startswith("#SBATCH"))
+    assert "length-penalty arm" in header and "results/chat_report_eos_lp<NNN>_test_split_s42" in header and "DUMP_DIR" in header
 
 
 def test_eval_report_eos_decode_refuses_without_done_and_over_an_existing_dump_and_outside_results_chat():

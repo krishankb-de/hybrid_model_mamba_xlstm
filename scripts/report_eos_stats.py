@@ -2,11 +2,12 @@
 `RESULT {json}` lines, `ERROR ...` lines and the literal `=== ...` notes that say what a missing value means, and no other line
 (R7: anything an agent reads has left the cluster, which the DUA forbids for MIMIC text, study ids and paths). A RESULT line holds
 numbers under 10 million, flags, null, and strings only from an explicit allowlist (ALLOWED_NAMES: the wrapper's own constants, the
-metric names bootstrap_compare emits, the 14 CheXbert labels), so nothing read from a log or a file can reach one as text. An ERROR
+system names of the length-penalty arms, eos_lp<NNN>_s42, the metric names bootstrap_compare emits, the 14 CheXbert labels), so nothing
+read from a log or a file can reach one as text. An ERROR
 line holds literals and numbers it parsed as digits or computed, never text; the counts in the evaluator's EOS stop line and the
 line counts of a dump are such numbers.
 
-    decode   --log eval.log --dump-dir DIR --budget 200 --wall-s S                         job 1, scripts/eval_report_eos_h100.sh
+    decode   --log eval.log --dump-dir DIR --budget 200 [--length-penalty 1.0] --wall-s S  job 1, scripts/eval_report_eos_h100.sh
     chexbert --dump-dir DIR --wall-s S                                                      job 2, eval_report_eos_chexbert_h100.sh
     hyps     NAME=hyps.txt [NAME=hyps.txt ...] [--tokenizer gpt2|none]                      job 3, eval_report_eos_compare_h100.sh
     gate     --bootstrap report.md --name-a eos_s42 --name-b m3_s42                         job 3, after bootstrap_compare.py
@@ -16,7 +17,10 @@ decode. The counts come from the line evaluate_report_generation.py --stop-at-eo
 prints after its dump. Both are read from the LAST such line of eval.log, because a requeued job appends to the log of the attempt
 it replaces. The line is tied to the dump: B must be the budget the job asked for, k + m must be n, and hyps.txt and refs.txt must
 hold n lines each; a log that cannot vouch for its dump is an error, and the wrapper then fails the job so that the chain stops.
-    RESULT {"decode":"done","n":N,"ended_by_eos":k,"cut_at_budget":m,"share_cut":x,"budget":B,"wall_s":S,"rouge_l":x,"bleu_1":x,"bleu_4":x}
+The length penalty (P9-G6) is tied the same way: the `Length penalty: x` line the evaluator prints with --stop-at-eos must be the
+--length-penalty the job asked for, which is 1.0 unless the job says another, from 0.5 to 3.0. A log with no such line is the evaluator's
+of P9-G4, which could rank by 1.0 only: it vouches for a job that asked for 1.0 and for no other. The RESULT line carries the penalty.
+    RESULT {"decode":"done","n":N,"ended_by_eos":k,"cut_at_budget":m,"share_cut":x,"budget":B,"length_penalty":x,"wall_s":S,"rouge_l":x,"bleu_1":x,"bleu_4":x}
 
 chexbert. chexbert_metrics.json and chexbert_labels.json, written by score_chexbert_standalone.py, must agree with hyps.txt on n.
     RESULT {"chexbert":"done","n":N,"micro_14":x,"macro_14":x,"micro_5":x,"macro_5":x,"wall_s":S}
@@ -73,11 +77,15 @@ MAX_NUMBER = 10 ** 7                                  # 8 digits or more could b
 # The only strings a RESULT line may hold, as a value or as a list item (R7). A name is printed only if it is in ALLOWED_NAMES, so
 # report text, a study or subject id or a path cannot reach a line, whatever file or log it was read from.
 WRAPPER_NAMES = ("done", "paired", "pass", "fail", "eos_s42", "m3_s42", "refs")      # step results, verdicts, the systems compared
+LENGTH_PENALTY_RANGE = (0.5, 3.0)                     # what the decode job's LENGTH_PENALTY takes (P9-G6): the evaluator's own range
+# System A of a length-penalty arm (P9-G6): eos_lp<NNN>_s42, NNN the penalty times 100 in three digits (eos_lp200_s42 for 2.0). 1.00 is the
+# published penalty: its system is plain eos_s42, so it has no name here. Two decimals at most, so 0.50 to 3.00 is 250 names.
+ARM_NAMES = tuple("eos_lp{:03d}_s42".format(centi) for centi in range(50, 301) if centi != 100)
 BOOTSTRAP_METRICS = ("rouge_l", "bleu_1", "bleu_4", "chexbert_14_micro", "chexbert_14_macro", "chexbert_5_micro", "chexbert_5_macro",
                      "exact_match_accuracy_14", "exact_match_accuracy_5")           # bootstrap_compare's main table (a test reads it)
 CHEXBERT_14 = ("Enlarged Cardiomediastinum", "Cardiomegaly", "Lung Opacity", "Lung Lesion", "Edema", "Consolidation", "Pneumonia",
                "Atelectasis", "Pneumothorax", "Pleural Effusion", "Pleural Other", "Fracture", "Support Devices", "No Finding")
-ALLOWED_NAMES = frozenset(WRAPPER_NAMES + BOOTSTRAP_METRICS + CHEXBERT_14)    # CHEXBERT_14 is app/labels.py's (a test ties them)
+ALLOWED_NAMES = frozenset(WRAPPER_NAMES + ARM_NAMES + BOOTSTRAP_METRICS + CHEXBERT_14)    # CHEXBERT_14 is app/labels.py's (a test ties them)
 
 
 class ResultError(Exception):
@@ -128,6 +136,9 @@ def _read_text(path: Path) -> str:
 
 EOS_STOP = re.compile(r"^EOS stop: (\d+)/(\d+) reports ended at the end-of-report token, (\d+) were cut at max_new_tokens=(\d+)$")
 AGGREGATE = re.compile(r"^=== Aggregate over (\d+) samples ===$")
+# The line evaluate_report_generation.py --stop-at-eos prints for its length penalty (P9-G6): f"Length penalty: {length_penalty}", a Python
+# float, so digits and one point. It starts at column 0: the evaluator's lines about a study are all prefixed (GENERATED:, REFERENCE:).
+LENGTH_PENALTY_LINE = re.compile(r"^Length penalty: ([0-9]+(?:\.[0-9]+)?)$")
 TEXT_METRICS = ("rouge_l", "bleu_1", "bleu_4", "meteor")
 
 
@@ -138,6 +149,16 @@ def parse_eos_stop(text: str) -> Optional[Tuple[int, int, int, int]]:
         match = EOS_STOP.match(line)
         if match:
             found = tuple(int(group) for group in match.groups())
+    return found
+
+
+def parse_length_penalty(text: str) -> Optional[float]:
+    """The number of the last `Length penalty: x` line of the log (a requeued job appends to the log of the attempt it replaces), or None."""
+    found = None
+    for line in text.splitlines():
+        match = LENGTH_PENALTY_LINE.match(line)
+        if match:
+            found = float(match.group(1))
     return found
 
 
@@ -158,9 +179,13 @@ def parse_aggregate(text: str) -> Optional[Dict[str, Any]]:
     return payload if isinstance(payload, dict) else None
 
 
-def decode_result(log_text: str, dump_dir: Path, budget: int, wall_s: int) -> Tuple[Dict[str, Any], List[str]]:
+def decode_result(log_text: str, dump_dir: Path, budget: int, wall_s: int,
+                  length_penalty: float = 1.0) -> Tuple[Dict[str, Any], List[str]]:
     """(the RESULT payload, the === notes that explain what is missing from it). Raises ResultError for a log that cannot
-    vouch for the dump beside it."""
+    vouch for the dump beside it, the length penalty (P9-G6) included: a log with no penalty line is the evaluator's of P9-G4, which
+    ranked by 1.0, and vouches for a job that asked for 1.0 alone."""
+    if not LENGTH_PENALTY_RANGE[0] <= length_penalty <= LENGTH_PENALTY_RANGE[1]:   # a nan fails the comparison too
+        raise ResultError("the length penalty is not a number from {} to {}".format(*LENGTH_PENALTY_RANGE))
     eos = parse_eos_stop(log_text)
     if eos is None:
         raise ResultError("eval.log has no EOS stop line: the decoder did not run with --stop-at-eos")
@@ -169,6 +194,11 @@ def decode_result(log_text: str, dump_dir: Path, budget: int, wall_s: int) -> Tu
         raise ResultError("the EOS stop counts do not add up: {} ended and {} cut against n={}".format(ended, cut, n))
     if seen_budget != budget:
         raise ResultError("the EOS stop line says budget {}, this job asked for {}".format(seen_budget, budget))
+    seen_penalty = parse_length_penalty(log_text)
+    if seen_penalty is None:
+        seen_penalty = 1.0
+    if seen_penalty != length_penalty:
+        raise ResultError("the log says length penalty {:g}, this job asked for {:g}".format(seen_penalty, length_penalty))
     for name in ("hyps.txt", "refs.txt"):
         path = Path(dump_dir) / name
         if not path.is_file():
@@ -177,7 +207,8 @@ def decode_result(log_text: str, dump_dir: Path, budget: int, wall_s: int) -> Tu
         if lines != n:
             raise ResultError("{} has {} lines, the EOS stop line says n={}".format(name, lines, n))
     result: Dict[str, Any] = {"decode": "done", "n": n, "ended_by_eos": ended, "cut_at_budget": cut,
-                              "share_cut": round(cut / n, 4), "budget": budget, "wall_s": int(wall_s)}
+                              "share_cut": round(cut / n, 4), "budget": budget, "length_penalty": float(length_penalty),
+                              "wall_s": int(wall_s)}
     notes: List[str] = []
     aggregate = parse_aggregate(log_text)
     if aggregate is None:
@@ -353,7 +384,7 @@ def comparison_lines(parsed: Dict[str, Any], name_a: str, name_b: str) -> List[s
 # ── command line ──────────────────────────────────────────────────────────────
 
 def _cmd_decode(args: argparse.Namespace) -> List[str]:
-    result, notes = decode_result(_read_text(args.log), Path(args.dump_dir), args.budget, args.wall_s)
+    result, notes = decode_result(_read_text(args.log), Path(args.dump_dir), args.budget, args.wall_s, args.length_penalty)
     return [result_line(result)] + notes
 
 
@@ -393,6 +424,8 @@ def build_parser() -> argparse.ArgumentParser:
     decode.add_argument("--log", required=True, help="eval.log: the evaluator's raw stdout and stderr")
     decode.add_argument("--dump-dir", required=True, help="the directory holding hyps.txt and refs.txt")
     decode.add_argument("--budget", type=int, required=True, help="the --max-new-tokens the job asked for")
+    decode.add_argument("--length-penalty", type=float, default=1.0,
+                        help="the --length-penalty the job asked for, from 0.5 to 3.0 (default 1.0): the log must say the same")
     decode.add_argument("--wall-s", type=int, required=True, help="seconds the decoder ran")
     decode.set_defaults(run=_cmd_decode)
     chexbert = sub.add_parser("chexbert", help="the RESULT line of the CheXbert job")

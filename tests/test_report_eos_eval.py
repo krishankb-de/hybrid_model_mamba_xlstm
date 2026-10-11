@@ -1,5 +1,6 @@
-"""P9-G4 (CHAT_UI_PLAN.md): the EOS evaluation jobs. Two layers, both CPU-only, offline and synthetic (R7: no MIMIC data; the
-fixtures are made-up reports that merely look like the real thing).
+"""P9-G4 (CHAT_UI_PLAN.md): the EOS evaluation jobs, and since P9-G6 their length-penalty lever (the decode job's LENGTH_PENALTY, the
+`Length penalty: x` line of its log, the arm names of the comparison). Two layers, both CPU-only, offline and synthetic (R7: no MIMIC
+data; the fixtures are made-up reports that merely look like the real thing).
 
 * scripts/report_eos_stats.py, the numbers-only summaries the jobs print: unit tests on synthetic files, and its bootstrap
   parser against the real producer, scripts/bootstrap_compare.py, run on a few made-up studies.
@@ -56,19 +57,32 @@ def test_result_line_is_compact_json_of_numbers_flags_null_and_allowlisted_names
     assert line == 'RESULT {"decode":"done","n":5,"share":0.2,"ok":true,"gone":null,"worse":["rouge_l","Lung Lesion"]}'
 
 
-# Every string a RESULT line may carry (R7), written out here on purpose: the wrapper's own constants, the metric names
-# bootstrap_compare emits and the 14 CheXbert labels. A name is printed only if it is in this set, whatever file or log it came from.
-ALLOWED = {"done", "paired", "pass", "fail", "eos_s42", "m3_s42", "refs"} | set(MAIN_METRICS) | set(LABEL_NAMES)
+# Every string a RESULT line may carry (R7), written out here on purpose: the wrapper's own constants, the system names of the
+# length-penalty arms (P9-G6), the metric names bootstrap_compare emits and the 14 CheXbert labels. A name is printed only if it is in
+# this set, whatever file or log it came from.
+LP_NAMES = {"eos_lp%03d_s42" % centi for centi in range(50, 301) if centi != 100}   # the penalty times 100, 0.50 to 3.00; 1.00 is eos_s42
+ALLOWED = {"done", "paired", "pass", "fail", "eos_s42", "m3_s42", "refs"} | LP_NAMES | set(MAIN_METRICS) | set(LABEL_NAMES)
 
 
-def test_the_allowlist_is_exactly_the_wrapper_constants_the_bootstrap_metrics_and_the_14_labels():
-    assert stats.ALLOWED_NAMES == frozenset(ALLOWED) and len(ALLOWED) == 7 + 9 + 14
+def test_the_allowlist_is_exactly_the_wrapper_constants_the_arm_names_the_bootstrap_metrics_and_the_14_labels():
+    assert stats.ALLOWED_NAMES == frozenset(ALLOWED) and len(ALLOWED) == 7 + 250 + 9 + 14 and len(LP_NAMES) == 250
 
 
-@pytest.mark.parametrize("name", sorted(ALLOWED))
+@pytest.mark.parametrize("name", sorted(ALLOWED - LP_NAMES))
 def test_result_line_accepts_each_allowlisted_name_alone_and_in_a_list(name):
     assert stats.result_line({"x": name}) == 'RESULT {"x":"%s"}' % name
     assert stats.result_line({"x": [name, name]}) == 'RESULT {"x":["%s","%s"]}' % (name, name)
+
+
+def test_result_line_accepts_every_length_penalty_arm_name_and_the_names_next_to_them_are_not_names():
+    for name in sorted(LP_NAMES):
+        assert stats.result_line({"x": name}) == 'RESULT {"x":"%s"}' % name
+    for name in ("eos_lp200_s42", "eos_lp150_s42", "eos_lp050_s42", "eos_lp300_s42", "eos_lp125_s42"):
+        assert name in stats.ALLOWED_NAMES
+    for bad in ("eos_lp100_s42", "eos_lp049_s42", "eos_lp301_s42", "eos_lp20_s42", "eos_lp0200_s42", "eos_lp200_s43", "eos_lp2o0_s42",
+                "eos_lp200_s42\n", " eos_lp200_s42", "EOS_LP200_S42", "eos_lp-50_s42", "eos_lp٢٠٠_s42", "eos_lp2.0_s42"):
+        with pytest.raises(ValueError):
+            stats.result_line({"x": bad})
 
 
 def test_the_label_allowlist_is_the_apps_canonical_chexbert_14():
@@ -120,6 +134,12 @@ def test_the_module_docstring_describes_each_kind_of_line_the_module_prints():
 def test_result_line_keeps_the_numbers_a_job_prints():
     assert stats.result_line({"n": 2663, "wall_s": 14400, "big": 9999999, "m": -5.5, "tiny": 1e-05}) == (
         'RESULT {"n":2663,"wall_s":14400,"big":9999999,"m":-5.5,"tiny":1e-05}')
+
+
+def test_the_decode_result_line_with_its_penalty_still_fits_in_the_300_characters_the_summary_keeps():
+    widest = {"decode": "done", "n": 2663, "ended_by_eos": 2663, "cut_at_budget": 2663, "share_cut": 0.9999, "budget": 200,
+              "length_penalty": 2.75, "wall_s": 14400, "rouge_l": 0.1948, "bleu_1": 0.3412, "bleu_4": 0.0812}
+    assert len(stats.result_line(widest)) < 300
 
 
 def test_result_line_stays_under_the_300_characters_the_summary_keeps():
@@ -200,6 +220,7 @@ def test_the_decoder_cli_still_prints_the_lines_this_parser_reads():
             in src)
     assert 'f"max_new_tokens={args.max_new_tokens}")' in src
     assert 'print(f"=== Aggregate over {n} samples ===")' in src and "print(json.dumps(metrics, indent=2))" in src
+    assert 'print(f"Length penalty: {length_penalty}")' in src                      # P9-G6: the line parse_length_penalty reads
 
 
 def test_parse_eos_stop_reads_the_line_as_the_cli_prints_it():
@@ -211,6 +232,29 @@ def test_parse_eos_stop_reads_the_line_as_the_cli_prints_it():
 def test_parse_eos_stop_takes_the_last_line_of_a_log_that_holds_two_attempts():
     log = EOS_LINE.format(1, 5, 4, 200) + "\n--- sample 0 ---\n" + EOS_LINE.format(4, 5, 1, 200) + "\n"
     assert stats.parse_eos_stop(log) == (4, 5, 1, 200)
+
+
+def test_the_penalty_range_is_one_range_in_the_evaluator_the_stats_script_and_both_wrappers():
+    """The stats script is stdlib-only (the CheXbert venv runs it) and the wrappers are shell: each keeps its own copy of 0.5 to 3.0 and
+    of the two-decimal grid, so a test is what keeps them one range, and the arm names the stats script prints are the grid's."""
+    pytest.importorskip("torch")
+    from scripts import evaluate_report_generation as erg
+    assert erg.LENGTH_PENALTY_RANGE == stats.LENGTH_PENALTY_RANGE == (0.5, 3.0)
+    low, high = (round(x * 100) for x in stats.LENGTH_PENALTY_RANGE)
+    decode, compare = ((SCRIPTS / name).read_text() for name in ("eval_report_eos_h100.sh", "eval_report_eos_compare_h100.sh"))
+    for wrapper in (decode, compare):
+        assert '[ "${LP_CENTI}" -ge %d ] && [ "${LP_CENTI}" -le %d ]' % (low, high) in wrapper
+        assert "0.5 to 3.0" in wrapper
+    assert stats.ARM_NAMES == tuple("eos_lp%03d_s42" % c for c in range(low, high + 1) if c != 100) and len(set(stats.ARM_NAMES)) == 250
+
+
+def test_parse_length_penalty_reads_the_line_as_the_cli_prints_it_and_the_last_line_wins():
+    assert stats.parse_length_penalty("noise\nLength penalty: 2.0\nmore noise\n") == 2.0
+    assert stats.parse_length_penalty("Length penalty: 1.5\n--- sample 0 ---\nLength penalty: 2.0\n") == 2.0   # a requeue appends to the log
+    assert stats.parse_length_penalty("no such line\nLength penalty: lots\n") is None
+    for text in ("  Length penalty: 2.0", "Length penalty: 2.0 and more", "length penalty: 2.0", "Length penalty: -2.0", "Length penalty: 1e3",
+                 "Length penalty: 2.", "Length penalty: .5", "Length penalty: nan", "Length penalty:2.0", "GENERATED: Length penalty: 2.0"):
+        assert stats.parse_length_penalty(text + "\n") is None, text         # the line starts at column 0 and holds the number alone
 
 
 def real_aggregate_block(hyps: List[str], refs: List[str]) -> Tuple[str, Dict[str, Any]]:
@@ -265,8 +309,8 @@ def test_the_real_evaluator_cli_output_and_dump_are_what_the_parser_reads(tmp_pa
     ended = iter([True, False, True])
     asked = []
 
-    def fake_generate(module, patch_grid, beam_size, max_new_tokens, cached, eos_token_id):
-        asked.append((beam_size, max_new_tokens, cached, eos_token_id))
+    def fake_generate(module, patch_grid, beam_size, max_new_tokens, cached, eos_token_id, length_penalty):
+        asked.append((beam_size, max_new_tokens, cached, eos_token_id, length_penalty))
         return torch.tensor([[1, 2, 3]]), next(ended)
 
     monkeypatch.setattr(erg, "load_report_generation_module", lambda *args, **kwargs: FakeModule())
@@ -278,11 +322,13 @@ def test_the_real_evaluator_cli_output_and_dump_are_what_the_parser_reads(tmp_pa
                               chexbert=False)
     erg.run_checkpoint_inspection(args)
     out = capsys.readouterr().out
-    assert asked == [(3, 200, True, 50256)] * 3
+    assert asked == [(3, 200, True, 50256, 1.0)] * 3                 # args with no length_penalty: the published exponent, 1.0
     assert "study_id=50000000" in out and "GENERATED: The heart is normal." in out, "the stdout does carry text and study ids"
+    assert stats.parse_length_penalty(out) == 1.0, "and the line that says which exponent ranked these reports"
 
     result, notes = stats.decode_result(out, tmp_path / "dump", budget=200, wall_s=12)
     assert (result["n"], result["ended_by_eos"], result["cut_at_budget"], result["share_cut"], result["budget"]) == (3, 2, 1, 0.3333, 200)
+    assert result["length_penalty"] == 1.0
     assert set(result) >= {"rouge_l", "bleu_1", "bleu_4"} and notes == []
     assert stats.count_lines(tmp_path / "dump" / "hyps.txt") == 3, "a paragraph break inside a report did not split its line"
 
@@ -295,10 +341,15 @@ def write_dump(directory: Path, n: int, hyp_lines: Optional[Sequence[str]] = Non
     (directory / "refs.txt").write_text("\n".join(refs) + "\n")
 
 
-def decode_log(n: int = 40, ended: int = 36, budget: int = 200, aggregate: bool = True) -> Tuple[str, Dict[str, Any]]:
+def decode_log(n: int = 40, ended: int = 36, budget: int = 200, aggregate: bool = True,
+               length_penalty: Optional[float] = None) -> Tuple[str, Dict[str, Any]]:
+    """An eval.log. `length_penalty`, when given, is the line the evaluator prints for it (P9-G6); a log from before that has none."""
     hyps = ["The heart is normal. Report %d." % i for i in range(n)]
     refs = ["Findings: clear. Impression: none %d." % i for i in range(n)]
-    log = "Loaded checkpoint: /sc/home/x\n" + "".join("--- sample %d ---\nGENERATED: x\nREFERENCE: y\n" % i for i in range(n))
+    log = "Loaded checkpoint: /sc/home/x\n"
+    if length_penalty is not None:
+        log += "Length penalty: {}\n".format(length_penalty)
+    log += "".join("--- sample %d ---\nGENERATED: x\nREFERENCE: y\n" % i for i in range(n))
     log += EOS_LINE.format(ended, n, n - ended, budget) + "\n  Dumped %d hyp/ref pairs\n" % n
     metrics: Dict[str, Any] = {}
     if aggregate:
@@ -312,9 +363,49 @@ def test_decode_result_has_the_counts_the_share_the_wall_time_and_the_text_metri
     write_dump(tmp_path, 40)
     result, notes = stats.decode_result(log, tmp_path, budget=200, wall_s=3300)
     assert result == {"decode": "done", "n": 40, "ended_by_eos": 36, "cut_at_budget": 4, "share_cut": 0.1, "budget": 200,
-                      "wall_s": 3300, "rouge_l": round(metrics["rouge_l"], 4), "bleu_1": round(metrics["bleu_1"], 4),
-                      "bleu_4": round(metrics["bleu_4"], 4)}
+                      "length_penalty": 1.0, "wall_s": 3300, "rouge_l": round(metrics["rouge_l"], 4),
+                      "bleu_1": round(metrics["bleu_1"], 4), "bleu_4": round(metrics["bleu_4"], 4)}
     assert notes == [] and "meteor" not in result, "a null METEOR is left out, not printed"
+
+
+def test_decode_result_names_the_length_penalty_the_job_asked_for_when_the_log_confirms_it(tmp_path):
+    write_dump(tmp_path, 40)
+    for printed, asked in ((2.0, 2.0), (1.0, 1.0), (1.25, 1.25), (0.5, 0.5), (3.0, 3.0)):
+        log, _ = decode_log(n=40, ended=36, length_penalty=printed)
+        result, _ = stats.decode_result(log, tmp_path, budget=200, wall_s=1, length_penalty=asked)
+        assert result["length_penalty"] == asked and type(result["length_penalty"]) is float
+        assert '"length_penalty":{}'.format(asked) in stats.result_line(result)
+    log, _ = decode_log(n=40, ended=36, length_penalty=1.5)                # a requeue appended a second attempt, decoded at 2.0
+    log += "Length penalty: 2.0\n"
+    assert stats.decode_result(log, tmp_path, budget=200, wall_s=1, length_penalty=2.0)[0]["length_penalty"] == 2.0
+
+
+def test_a_log_with_no_length_penalty_line_was_decoded_at_1_and_vouches_for_1_alone(tmp_path):
+    """The evaluator of P9-G4 printed no such line, and could only rank by 1.0: its logs still tie to a 1.0 job, never to another."""
+    log, _ = decode_log(n=40, ended=36)
+    write_dump(tmp_path, 40)
+    assert stats.decode_result(log, tmp_path, budget=200, wall_s=1)[0]["length_penalty"] == 1.0
+    assert stats.decode_result(log, tmp_path, budget=200, wall_s=1, length_penalty=1.0)[0]["length_penalty"] == 1.0
+    with pytest.raises(stats.ResultError):
+        stats.decode_result(log, tmp_path, budget=200, wall_s=1, length_penalty=2.0)
+
+
+@pytest.mark.parametrize("printed, asked", [(1.5, 2.0), (2.0, 1.0), (1.0, 1.01), (3.0, 0.5)])
+def test_decode_result_refuses_a_log_that_ranked_with_another_length_penalty_than_the_job_asked_for(tmp_path, printed, asked):
+    log, _ = decode_log(n=40, ended=36, length_penalty=printed)
+    write_dump(tmp_path, 40)
+    with pytest.raises(stats.ResultError) as raised:
+        stats.decode_result(log, tmp_path, budget=200, wall_s=1, length_penalty=asked)
+    message = str(raised.value)
+    assert "length penalty" in message and "/" not in message and len(message) < 200, "literals and numbers: it is printed"
+
+
+@pytest.mark.parametrize("asked", [0.49, 3.01, 0.0, -1.0, 1e9, float("nan"), float("inf")])
+def test_decode_result_refuses_a_length_penalty_outside_half_to_three(tmp_path, asked):
+    log, _ = decode_log(n=40, ended=36)
+    write_dump(tmp_path, 40)
+    with pytest.raises(stats.ResultError):
+        stats.decode_result(log, tmp_path, budget=200, wall_s=1, length_penalty=asked)
 
 
 def test_decode_result_without_an_aggregate_leaves_the_text_metrics_out_and_says_so(tmp_path):
@@ -635,6 +726,40 @@ def test_cli_decode_prints_one_result_line(tmp_path):
     assert done.returncode == 0, done.stdout + done.stderr
     only_summary_lines(done.stdout)
     assert json.loads(done.stdout.splitlines()[0][len("RESULT "):])["wall_s"] == 77
+    assert json.loads(done.stdout.splitlines()[0][len("RESULT "):])["length_penalty"] == 1.0, "no flag: the published exponent"
+
+
+def test_cli_decode_takes_the_length_penalty_the_job_asked_for_and_prints_it(tmp_path):
+    log, _ = decode_log(n=40, ended=36, length_penalty=2.0)
+    (tmp_path / "eval.log").write_text(log)
+    write_dump(tmp_path, 40)
+    done = run_stats("decode", "--log", str(tmp_path / "eval.log"), "--dump-dir", str(tmp_path), "--budget", "200",
+                     "--length-penalty", "2.00", "--wall-s", "77")
+    assert done.returncode == 0, done.stdout + done.stderr
+    only_summary_lines(done.stdout)
+    assert json.loads(done.stdout.splitlines()[0][len("RESULT "):])["length_penalty"] == 2.0
+
+
+@pytest.mark.parametrize("asked", ["1.00", "1.50", "3.00"])
+def test_cli_decode_refuses_a_log_that_ranked_with_another_penalty_in_literals_and_numbers_only(tmp_path, asked):
+    log, _ = decode_log(n=40, ended=36, length_penalty=2.0)
+    (tmp_path / "eval.log").write_text(log)
+    write_dump(tmp_path, 40)
+    done = run_stats("decode", "--log", str(tmp_path / "eval.log"), "--dump-dir", str(tmp_path), "--budget", "200",
+                     "--length-penalty", asked, "--wall-s", "77")
+    assert done.returncode == 2 and done.stdout.startswith("ERROR ") and "RESULT" not in done.stdout, done.stdout
+    only_summary_lines(done.stdout)
+
+
+@pytest.mark.parametrize("value", ["0.49", "3.01", "nan", "inf", "-1", "0"])
+def test_cli_decode_refuses_a_length_penalty_outside_half_to_three(tmp_path, value):
+    log, _ = decode_log(n=40, ended=36)
+    (tmp_path / "eval.log").write_text(log)
+    write_dump(tmp_path, 40)
+    done = run_stats("decode", "--log", str(tmp_path / "eval.log"), "--dump-dir", str(tmp_path), "--budget", "200",
+                     "--length-penalty=" + value, "--wall-s", "1")
+    assert done.returncode == 2 and done.stdout.startswith("ERROR ") and "RESULT" not in done.stdout, done.stdout
+    only_summary_lines(done.stdout)
 
 
 def test_cli_decode_failure_prints_a_literal_error_and_exits_2_with_nothing_else(tmp_path):
@@ -743,6 +868,7 @@ ap = argparse.ArgumentParser()
 for flag in ("--checkpoint", "--model-config", "--prefix-k", "--parquet", "--num-samples", "--decode", "--beam-size",
              "--max-new-tokens", "--dump-dir"):
     ap.add_argument(flag)
+ap.add_argument("--length-penalty", type=float, default=1.0)      # as the real CLI: a float, 1.0 when it is not given
 for flag in ("--cached-decode", "--stop-at-eos"):
     ap.add_argument(flag, action="store_true")
 args = ap.parse_args()                      # an unknown flag fails here, as it would in the real CLI
@@ -750,6 +876,10 @@ mode = (stub / "eval.mode").read_text().strip()
 n = int((stub / "eval.n").read_text())
 ended = int((stub / "eval.ended").read_text())
 print("Decode path: O(1) recurrent cache (M6).")
+if mode == "badlp":                         # a log that says another exponent than the one it was asked for
+    print("Length penalty: {}".format(args.length_penalty + 0.25))
+elif mode != "nolpline":                    # "nolpline": the evaluator of P9-G4, which printed none
+    print("Length penalty: {}".format(args.length_penalty))
 print("Loaded checkpoint: /sc/home/someone/chat_sessions/models/x/checkpoints/last.ckpt")
 print("Loaded %d rows from %s; inspecting first %d\n" % (n, args.parquet, n))
 for i in range(n):
@@ -949,12 +1079,13 @@ def run_decode(box: Box, **extra: str) -> subprocess.CompletedProcess:
     return box.run(PARQUET=str(box.root / "data" / "test.parquet"), **extra)
 
 
-def expected_decode_argv(box: Box, ckpt: Optional[str] = None, parquet: Optional[str] = None, dump: str = DUMP) -> List[str]:
+def expected_decode_argv(box: Box, ckpt: Optional[str] = None, parquet: Optional[str] = None, dump: str = DUMP,
+                         length_penalty: str = "1.00") -> List[str]:
     ckpt = ckpt or str(box.chat / "models" / "report_gen_m3_eos_s42" / "checkpoints" / "last.ckpt")
     parquet = parquet or str(box.root / "data" / "test.parquet")
     return ["scripts/evaluate_report_generation.py", "--checkpoint", ckpt, "--model-config", "hybrid_150m_m3_rrg", "--prefix-k", "32",
             "--cached-decode", "--stop-at-eos", "--parquet", parquet, "--num-samples", "999999", "--decode", "beam",
-            "--beam-size", "3", "--max-new-tokens", "200", "--dump-dir", dump]
+            "--beam-size", "3", "--max-new-tokens", "200", "--length-penalty", length_penalty, "--dump-dir", dump]
 
 
 def test_a_clean_decode_prints_only_wrapper_lines_and_keeps_the_raw_output_in_eval_log(tmp_path):
@@ -967,9 +1098,10 @@ def test_a_clean_decode_prints_only_wrapper_lines_and_keeps_the_raw_output_in_ev
     assert lines[0] == "=== sync 3f2a9c41d7e86b05a1c4e9d3b7f60285ac9e1d47 clean ===", "the provenance comes first"
     assert lines[-1].startswith("=== END ")
     (result,) = results_of(lines)
-    assert set(result) == {"decode", "n", "ended_by_eos", "cut_at_budget", "share_cut", "budget", "wall_s", "rouge_l", "bleu_1", "bleu_4"}
+    assert set(result) == {"decode", "n", "ended_by_eos", "cut_at_budget", "share_cut", "budget", "length_penalty", "wall_s", "rouge_l",
+                           "bleu_1", "bleu_4"}
     assert {k: v for k, v in result.items() if k != "wall_s"} == {
-        "decode": "done", "n": 5, "ended_by_eos": 4, "cut_at_budget": 1, "share_cut": 0.2, "budget": 200,
+        "decode": "done", "n": 5, "ended_by_eos": 4, "cut_at_budget": 1, "share_cut": 0.2, "budget": 200, "length_penalty": 1.0,
         "rouge_l": 0.19, "bleu_1": 0.31, "bleu_4": 0.05}
     assert isinstance(result["wall_s"], int) and 0 <= result["wall_s"] < 600
     log = (box.dump / "eval.log").read_text()
@@ -1023,8 +1155,138 @@ def test_the_command_the_wrapper_builds_is_accepted_by_the_evaluators_own_parser
     args = grabbed[0].parse_args(call[1:])
     assert (args.stop_at_eos, args.cached_decode, args.decode, args.beam_size, args.max_new_tokens, args.prefix_k,
             args.num_samples, args.model_config) == (True, True, "beam", 3, 200, 32, 999999, "hybrid_150m_m3_rrg")
+    assert args.length_penalty == 1.0, "the real parser takes the flag the wrapper always passes (P9-G6)"
     assert args.checkpoint and args.parquet and args.dump_dir == DUMP and not args.chexbert and not args.compile_decoder
     assert not (args.smoke_test or args.retrieval_baseline), "--stop-at-eos would be refused otherwise"
+
+
+def lp_dump(nnn: str) -> str:
+    """The default dump directory of a length-penalty arm (P9-G6): the penalty times 100, three digits."""
+    return "results/chat_report_eos_lp{}_test_split_s42".format(nnn)
+
+
+def test_the_length_penalty_arms_command_is_accepted_by_the_evaluators_own_parser_with_the_penalty_in_it(tmp_path):
+    pytest.importorskip("torch")
+    import argparse
+    from unittest import mock
+    from scripts import evaluate_report_generation as erg
+
+    class Grabbed(Exception):
+        pass
+
+    grabbed = []
+
+    def grab(self, args=None, namespace=None):
+        grabbed.append(self)
+        raise Grabbed
+
+    with mock.patch.object(argparse.ArgumentParser, "parse_args", grab), mock.patch.object(sys, "argv", ["evaluate_report_generation.py"]):
+        with pytest.raises(Grabbed):
+            erg.main()
+    box = decode_box(tmp_path)
+    assert run_decode(box, LENGTH_PENALTY="1.5").returncode == 0
+    (call,) = box.calls_of("evaluate_report_generation.py")
+    args = grabbed[0].parse_args(call[1:])
+    assert args.length_penalty == 1.5 and args.stop_at_eos and args.dump_dir == lp_dump("150")
+
+
+@pytest.mark.parametrize("value, arg, nnn", [("2.0", "2.00", "200"), ("1.5", "1.50", "150"), ("1.25", "1.25", "125"), ("0.5", "0.50", "050"),
+                                             ("3", "3.00", "300"), ("3.0", "3.00", "300"), ("0.75", "0.75", "075"), ("1.05", "1.05", "105"),
+                                             ("2.50", "2.50", "250"), ("1.99", "1.99", "199")])
+def test_a_length_penalty_arm_decodes_into_a_directory_of_its_own_and_hands_the_evaluator_and_the_stats_its_penalty(tmp_path, value, arg, nnn):
+    box = decode_box(tmp_path)
+    done = run_decode(box, LENGTH_PENALTY=value)
+    lines = lines_of(done)
+    assert done.returncode == 0, done.stdout
+    assert_job_log_is_clean(lines)
+    arm = box.main / lp_dump(nnn)
+    (call,) = box.calls_of("evaluate_report_generation.py")
+    assert call == expected_decode_argv(box, dump=lp_dump(nnn), length_penalty=arg)
+    assert (arm / "hyps.txt").is_file() and (arm / "refs.txt").is_file() and (arm / "eval.log").is_file()
+    assert not box.dump.exists(), "the G4 dump's directory is neither written nor created"
+    (stats_call,) = box.calls_of("report_eos_stats.py")
+    assert stats_call[stats_call.index("--length-penalty") + 1] == arg and stats_call[stats_call.index("--dump-dir") + 1] == lp_dump(nnn)
+    assert stats_call[stats_call.index("--log") + 1] == lp_dump(nnn) + "/eval.log"
+    (result,) = results_of(lines)
+    assert result["length_penalty"] == float(arg) and result["n"] == 5
+    assert "length penalty {} ".format(arg) in "\n".join(l for l in lines if l.startswith("=== P9-G4 decode")), "the banner says which arm this is"
+
+
+@pytest.mark.parametrize("value", [None, "", "1.0", "1", "1.00"])   # unset and empty are one thing for every lever of these wrappers (${VAR:-default})
+def test_every_spelling_of_the_published_penalty_is_the_g4_arm_in_the_g4_directory(tmp_path, value):
+    box = decode_box(tmp_path)
+    done = run_decode(box, **({} if value is None else {"LENGTH_PENALTY": value}))
+    assert done.returncode == 0, done.stdout
+    (call,) = box.calls_of("evaluate_report_generation.py")
+    assert call == expected_decode_argv(box), "the command is the one with --length-penalty 1.00 and the G4 directory"
+    assert (box.dump / "hyps.txt").is_file() and not list((box.main / "results").glob("chat_report_eos_lp*"))
+
+
+def test_a_length_penalty_arm_may_still_name_its_own_dump_directory(tmp_path):
+    box = decode_box(tmp_path)
+    done = run_decode(box, LENGTH_PENALTY="2.0", DUMP_DIR="results/chat_report_eos_b")
+    assert done.returncode == 0, done.stdout
+    (call,) = box.calls_of("evaluate_report_generation.py")
+    assert call == expected_decode_argv(box, dump="results/chat_report_eos_b", length_penalty="2.00")
+    assert (box.main / "results" / "chat_report_eos_b" / "hyps.txt").is_file() and not (box.main / lp_dump("200")).exists()
+
+
+@pytest.mark.parametrize("value", ["0.49", "0.4", "0", "0.00", "3.01", "3.5", "4", "10", "-1", "abc", "2.0.0", "2,0", "1.234", "1.2345", "2.", ".5",
+                                   "1e0", "0x2", "03", "00.5", "99999999999999999999", "18446744073709551716", "nan", "inf", " ", " 2.0",
+                                   "2.0 ", "2.0\n", "2 .0", "2.0; echo hacked", "$(echo 2)", "SECRET-PENALTY-7", "2.0/../../x"])
+def test_a_length_penalty_that_is_not_a_number_from_half_to_three_is_refused_before_anything_runs_and_is_not_echoed(tmp_path, value):
+    box = decode_box(tmp_path)
+    before = snapshot(box.root, skip=AWAY)
+    done = run_decode(box, LENGTH_PENALTY=value)
+    lines = lines_of(done)
+    errors = [l for l in lines if l.startswith("ERROR")]
+    assert done.returncode == 1 and len(errors) == 1 and "LENGTH_PENALTY" in errors[0], lines
+    assert_job_log_is_clean(lines)
+    assert box.calls() == [] and snapshot(box.root, skip=AWAY) == before, "no GPU probe, no decode, no directory"
+    if any(c.isalpha() or c in "$;/" for c in value) or len(value) > 5:
+        assert value not in done.stdout, "a refusal never quotes the value it was given"
+    assert "SECRET" not in done.stdout and "hacked" not in done.stdout
+
+
+def test_the_penalty_refusals_come_before_the_banner_so_the_banner_shows_a_validated_penalty_only(tmp_path):
+    box = decode_box(tmp_path)
+    lines = lines_of(run_decode(box, LENGTH_PENALTY="SECRET-PENALTY-7"))
+    assert not [l for l in lines if l.startswith("=== P9-G4 decode")], lines
+    assert lines[0].startswith("=== sync ") and lines[-1].startswith("ERROR")
+
+
+def test_a_finished_dump_of_the_same_penalty_is_never_overwritten_and_one_of_another_penalty_does_not_stand_in_the_way(tmp_path):
+    box = decode_box(tmp_path)
+    box.dump.mkdir(parents=True)
+    (box.dump / "hyps.txt").write_text("the G4 dump\n")                  # the G4 arm is finished
+    done = run_decode(box, LENGTH_PENALTY="2.0")                          # another penalty: another directory, so it runs
+    assert done.returncode == 0, done.stdout
+    assert (box.dump / "hyps.txt").read_text() == "the G4 dump\n" and (box.main / lp_dump("200") / "hyps.txt").is_file()
+    again = run_decode(box, LENGTH_PENALTY="2.00")                        # the same arm again: refused, and nothing is touched
+    assert again.returncode == 1 and [l for l in lines_of(again) if l.startswith("ERROR") and "never overwritten" in l]
+    assert len(box.calls_of("evaluate_report_generation.py")) == 1
+    assert run_decode(box).returncode == 1, "and the G4 arm itself is still refused"
+
+
+@pytest.mark.parametrize("mode, asked", [("badlp", "2.0"), ("badlp", None), ("nolpline", "2.0")])
+def test_a_log_that_does_not_vouch_for_the_penalty_fails_the_job_so_the_chain_stops(tmp_path, mode, asked):
+    """The RESULT line's length_penalty is the evaluator's own, read back from its log: a log that ranked with another exponent than the job
+    asked for, or that says nothing about it for a penalty other than the published 1.0, fails the job, so that afterok stops the chain."""
+    box = decode_box(tmp_path, mode=mode)
+    done = run_decode(box, **({} if asked is None else {"LENGTH_PENALTY": asked}))
+    lines = lines_of(done)
+    assert done.returncode == 1, done.stdout
+    assert any(l.startswith("ERROR") and "length penalty" in l for l in lines) and not results_of(lines)
+    assert_job_log_is_clean(lines)
+
+
+def test_an_evaluator_that_prints_no_penalty_line_still_vouches_for_the_published_1(tmp_path):
+    """A decode of P9-G4 (and its log) has no line and was ranked by 1.0: the same job at 1.0 is as good as it was."""
+    box = decode_box(tmp_path, mode="nolpline")
+    done = run_decode(box)
+    assert done.returncode == 0, done.stdout
+    (result,) = results_of(lines_of(done))
+    assert result["length_penalty"] == 1.0
 
 
 def test_a_stray_environment_variable_cannot_change_the_decode(tmp_path):
@@ -1323,6 +1585,23 @@ def test_a_scorer_that_exits_0_without_the_label_matrices_fails_the_job(tmp_path
     assert_job_log_is_clean(lines)
 
 
+def test_the_scoring_takes_a_length_penalty_arms_dump_like_any_new_results_chat_directory(tmp_path):
+    """P9-G6: the CheXbert job needs no new lever for an arm of the length-penalty lever. Its DUMP_DIR is the directory the decode job made."""
+    box = chexbert_box(tmp_path)
+    arm = lp_dump("200")
+    write_dump(box.main / arm, 5)
+    done = box.run(DUMP_DIR=arm)
+    lines = lines_of(done)
+    assert done.returncode == 0, done.stdout
+    assert_job_log_is_clean(lines)
+    (call,) = box.calls_of("score_chexbert_standalone.py")
+    assert call == ["scripts/score_chexbert_standalone.py", "--hyp-file", arm + "/hyps.txt", "--ref-file", arm + "/refs.txt", "--output-dir", arm]
+    assert (box.main / arm / "chexbert_labels.json").is_file() and (box.main / arm / "chexbert_metrics.json").is_file()
+    assert not (box.dump / "chexbert_labels.json").exists(), "the G4 dump, scored by its own job, is not touched by this one"
+    (result,) = results_of(lines)
+    assert result["chexbert"] == "done" and result["n"] == 5
+
+
 # ── job 3: the comparison ─────────────────────────────────────────────────────
 
 COMPARE = "eval_report_eos_compare_h100.sh"
@@ -1393,6 +1672,110 @@ def test_a_failing_gate_is_a_finding_not_a_crash(tmp_path):
     assert_job_log_is_clean(lines)
     found = results_of(lines)
     assert found[-1] == {"gate": "fail", "worse": ["rouge_l", "bleu_4"], "label_worse": ["Lung Lesion"]}
+
+
+ARM_LOG = ("Decode path: O(1) recurrent cache (M6).\n{}Loaded checkpoint: /sc/home/someone/chat_sessions/models/x/checkpoints/last.ckpt\n"
+           "--- sample 0 (study_id=12345678) ---\nGENERATED: FAKE REPORT TEXT study_id=12345678\nREFERENCE: FAKE REFERENCE TEXT\n")
+
+
+def add_arm(box: Box, nnn: str, penalty_lines: Optional[str], names: Tuple[str, str] = ("eos_s42", "m3_s42")) -> Path:
+    """P9-G6: a second EOS dump beside the G4 one, in the directory the decode job makes for the penalty NNN / 100: the same studies as
+    the published dump and its own label matrices, and an eval.log that holds `penalty_lines` (None: no eval.log at all). The report
+    the fake bootstrap writes names the systems `names`."""
+    arm = box.main / lp_dump(nnn)
+    refs = ["Findings: clear. Impression: none %d." % i for i in range(5)]
+    write_dump(arm, 5, hyp_lines=["The heart is normal and clear. Report %d." % i for i in range(5)], ref_lines=refs)
+    (arm / "chexbert_labels.json").write_text(json.dumps({"y_true": [[0] * 14] * 5, "y_pred": [[0] * 14] * 5}))
+    if penalty_lines is not None:
+        (arm / "eval.log").write_text(ARM_LOG.format(penalty_lines))
+    (box.stubs / "bootstrap.md").write_text(rendered(FLAT, labels={"Lung Lesion": (0.1, 0.3, -0.2, -0.3, -0.1)}, names=names))
+    return arm
+
+
+def test_a_length_penalty_arm_is_named_by_its_penalty_in_the_comparison_and_writes_its_own_report(tmp_path):
+    box = compare_box(tmp_path)
+    arm = add_arm(box, "200", "Length penalty: 2.0\n", names=("eos_lp200_s42", "m3_s42"))
+    done = box.run(DUMP_DIR=lp_dump("200"))
+    lines = lines_of(done)
+    assert done.returncode == 0, done.stdout
+    assert_job_log_is_clean(lines)
+    found = results_of(lines)
+    assert [r.get("stats") for r in found[:3]] == ["eos_lp200_s42", "m3_s42", "refs"]
+    assert found[3] == {"bootstrap": "paired", "name_a": "eos_lp200_s42", "name_b": "m3_s42", "n": 2663, "samples": 1000, "seed": 0}
+    assert found[-1]["gate"] == "pass"
+    report = lp_dump("200") + "/bootstrap_eos_lp200_s42_vs_m3_s42.md"
+    (call,) = box.calls_of("bootstrap_compare.py")
+    assert call == ["scripts/bootstrap_compare.py", "--hyps-a", lp_dump("200") + "/hyps.txt", "--hyps-b", PUBLISHED + "/hyps.txt",
+                    "--refs", lp_dump("200") + "/refs.txt", "--name-a", "eos_lp200_s42", "--name-b", "m3_s42", "--bootstrap-samples", "1000",
+                    "--seed", "0", "--output", report,
+                    "--labels-a", lp_dump("200") + "/chexbert_labels.json", "--labels-b", PUBLISHED + "/chexbert_labels.json", "--per-label"]
+    (gate_call,) = [c for c in box.calls_of("report_eos_stats.py") if c[1] == "gate"]
+    assert gate_call[gate_call.index("--bootstrap") + 1] == report and gate_call[gate_call.index("--name-a") + 1] == "eos_lp200_s42"
+    (hyps_call,) = [c for c in box.calls_of("report_eos_stats.py") if c[1] == "hyps"]
+    assert hyps_call[2:] == ["eos_lp200_s42=" + lp_dump("200") + "/hyps.txt", "m3_s42=" + PUBLISHED + "/hyps.txt",
+                             "refs=" + lp_dump("200") + "/refs.txt"]
+    assert (arm / "bootstrap_eos_lp200_s42_vs_m3_s42.md").is_file() and not (arm / "bootstrap_eos_s42_vs_m3_s42.md").exists()
+    assert not (box.dump / "bootstrap_eos_lp200_s42_vs_m3_s42.md").exists(), "the report is beside the dump it compares"
+
+
+@pytest.mark.parametrize("nnn, penalty", [("050", "0.5"), ("125", "1.25"), ("150", "1.5"), ("200", "2.0"), ("205", "2.05"), ("300", "3.0")])
+def test_every_penalty_arm_has_a_system_name_and_a_report_name_of_its_own(tmp_path, nnn, penalty):
+    box = compare_box(tmp_path)
+    arm = add_arm(box, nnn, "Length penalty: {}\n".format(penalty), names=("eos_lp{}_s42".format(nnn), "m3_s42"))
+    done = box.run(DUMP_DIR=lp_dump(nnn))
+    assert done.returncode == 0, done.stdout
+    assert sorted(p.name for p in arm.glob("bootstrap_*.md")) == ["bootstrap_eos_lp{}_s42_vs_m3_s42.md".format(nnn)]
+    assert results_of(lines_of(done))[3]["name_a"] == "eos_lp{}_s42".format(nnn)
+
+
+def test_two_arms_never_overwrite_each_others_report(tmp_path):
+    box = compare_box(tmp_path)
+    assert box.run().returncode == 0                                            # the G4 arm: eos_s42, no penalty line in its log
+    first = sorted(p.name for p in box.dump.glob("bootstrap_*.md"))
+    arm = add_arm(box, "200", "Length penalty: 2.0\n", names=("eos_lp200_s42", "m3_s42"))
+    assert box.run(DUMP_DIR=lp_dump("200")).returncode == 0
+    assert first == ["bootstrap_eos_s42_vs_m3_s42.md"] and sorted(p.name for p in box.dump.glob("bootstrap_*.md")) == first
+    assert sorted(p.name for p in arm.glob("bootstrap_*.md")) == ["bootstrap_eos_lp200_s42_vs_m3_s42.md"]
+    again = box.run(DUMP_DIR=lp_dump("200"))
+    assert again.returncode == 1 and any(l.startswith("ERROR") and "never overwritten" in l for l in lines_of(again)), "the same arm: refused"
+
+
+@pytest.mark.parametrize("penalty_lines", [None, "", "Length penalty: 1.0\n", "Length penalty: 1.00\n",
+                                           "GENERATED: Length penalty: 3.0 in the middle of a line\n", " Length penalty: 3.0\n",
+                                           "length penalty: 3.0\n", "Length penalty: 3.0 \n"])
+def test_a_dump_of_the_published_penalty_keeps_the_g4_names_whatever_else_its_log_says(tmp_path, penalty_lines):
+    """A dump from before P9-G6 has no penalty line and was ranked by 1.0; a line must start at column 0 and hold the number alone to count
+    (the evaluator's text lines are prefixed, and a report is text)."""
+    box = compare_box(tmp_path)
+    if penalty_lines is not None:
+        (box.dump / "eval.log").write_text(ARM_LOG.format(penalty_lines))
+    done = box.run()
+    assert done.returncode == 0, done.stdout
+    assert results_of(lines_of(done))[3]["name_a"] == "eos_s42" and (box.dump / "bootstrap_eos_s42_vs_m3_s42.md").is_file()
+
+
+def test_the_last_penalty_line_of_a_requeued_log_is_the_one_that_names_the_dump(tmp_path):
+    box = compare_box(tmp_path)
+    add_arm(box, "200", "Length penalty: 1.5\n--- an attempt that was cut short ---\nLength penalty: 2.0\n", names=("eos_lp200_s42", "m3_s42"))
+    done = box.run(DUMP_DIR=lp_dump("200"))
+    assert done.returncode == 0, done.stdout
+    assert results_of(lines_of(done))[3]["name_a"] == "eos_lp200_s42"
+
+
+@pytest.mark.parametrize("line", ["Length penalty: 9.99", "Length penalty: 0.25", "Length penalty: 3.01", "Length penalty: 1.234",
+                                  "Length penalty: 20.0", "Length penalty: 00.5", "Length penalty: 1.2.3", "Length penalty: ...", "Length penalty: ."])
+def test_a_log_whose_penalty_the_job_cannot_name_stops_the_comparison_before_anything_runs_and_is_not_echoed(tmp_path, line):
+    box = compare_box(tmp_path)
+    add_arm(box, "200", line + "\n")
+    before = snapshot(box.root, skip=AWAY)
+    done = box.run(DUMP_DIR=lp_dump("200"))
+    lines = lines_of(done)
+    errors = [l for l in lines if l.startswith("ERROR")]
+    assert done.returncode == 1 and len(errors) == 1 and "length penalty" in errors[0], lines
+    assert_job_log_is_clean(lines)
+    assert box.calls() == [] and snapshot(box.root, skip=AWAY) == before
+    value = line.split(": ")[1]
+    assert len(value) < 3 or value not in "\n".join(errors), "the value read out of a log is not quoted"
 
 
 @pytest.mark.parametrize("what", ["no_published_dump", "no_published_labels", "no_eos_labels", "no_eos_hyps", "refs_differ",

@@ -17,6 +17,10 @@
 #   defaults to 0 exactly as in score_chexbert_h100.sh, the wrapper that scored the published dumps. Override it to 1 from
 #   outside if you want to be sure no network call is made.
 #
+# DUMP_DIR is any new results/chat_* directory that holds a finished decode, so a length-penalty arm's (P9-G6: the decode job's
+# results/chat_report_eos_lp<NNN>_test_split_s42, whose submit lines are in the header of scripts/eval_report_eos_h100.sh) is scored by
+# this same job, with no lever of its own.
+#
 # It refuses (an `ERROR ...` line, exit 1) when: DUMP_DIR is not a new results/chat_* directory (R8); hyps.txt or refs.txt is
 # missing or they differ in length; the venv is missing; or the scoring is already finished (chexbert_labels.json exists: the
 # scorer writes chexbert_metrics.json first and chexbert_labels.json last, so only the second marks a finished scoring; a

@@ -8,14 +8,35 @@
 #
 # THE DECODE IS FIXED HERE, NOT AN ENVIRONMENT LEVER. It is the command submit_v3_chain.sh's eval stage gave
 # inspect_report_generation_h100.sh for the published Mamba-3 runs (hybrid_150m_m3_rrg, prefix_k 32, beam 3, the whole test split,
-# empty input_ids, fp32) with exactly three differences:
-#   --cached-decode    token-identical to the uncached path by test, and equal to the published GPU dump on 20 of 20 reports (P1-C);
+# empty input_ids, fp32) with exactly three differences (and, since P9-G6, one flag the published wrapper has no name for: --length-penalty,
+# below):
+#   --cached-decode   token-identical to the uncached path by test, and equal to the published GPU dump on 20 of 20 reports (P1-C);
 #   --stop-at-eos      P9-G2: a beam that ends in the EOS the model learned in P9-G3 is set aside, and the search stops when the
 #                      best hypothesis, finished or live, is a finished one;
 #   --max-new-tokens 200   a ceiling, so that it is the model that ends a report; the published run is cut at 100.
 # tests/test_willi_parity.py parses both published sources and pins all of it. sbatch exports the submitting shell, so a BEAM_SIZE
 # or MAX_NEW_TOKENS left in it must not be able to change a decode. The levers are the paths, as the rulings name them (CKPT,
-# PARQUET, DUMP_DIR), and the published dump this one is checked against (PUBLISHED_DIR).
+# PARQUET, DUMP_DIR), the published dump this one is checked against (PUBLISHED_DIR) and, since P9-G6, the one knob of the decode
+# itself, LENGTH_PENALTY (next paragraph).
+#
+# THE LENGTH PENALTY (P9-G6). The EOS model ends its reports and writes shorter ones than the references, which costs CheXbert F1.
+# The length exponent of the ranking, log-probability / length ** x, is what can make the finished reports fuller without a new
+# training. LENGTH_PENALTY is the evaluator's --length-penalty, default 1.0, the published ranking, so that no lever is the G4 decode
+# byte for byte, and above 1 favours longer reports. It is a number from 0.5 to 3.0 with at most two decimals (one digit, a point,
+# two digits at most): anything else is refused in one ERROR line that does not show the value, before the banner, the GPU probe and
+# every directory. The default dump is the G4 directory for 1.0 and results/chat_report_eos_lp<NNN>_test_split_s42 for any other,
+# NNN being the penalty times 100 in three digits (lp150, lp200, lp050), so that an arm never lands in the G4 dump and a finished
+# dump is never overwritten; DUMP_DIR can still be set by hand. The log vouches for the penalty as it does for the budget: the
+# evaluator prints `Length penalty: x`, the stats script compares it with what this job asked for (a log with none was decoded by
+# the evaluator of P9-G4, at 1.0), and the RESULT line carries `length_penalty`. One arm, the three jobs chained as the G4 ones are
+# (the header of scripts/eval_report_eos_compare_h100.sh), for the penalty 2.0:
+#   bash scripts/chat_remote.sh sync
+#   DEC=$(bash scripts/chat_remote.sh submit scripts/eval_report_eos_h100.sh LENGTH_PENALTY=2.0 -- --time=04:00:00)
+#   CHX=$(bash scripts/chat_remote.sh submit scripts/eval_report_eos_chexbert_h100.sh DUMP_DIR=results/chat_report_eos_lp200_test_split_s42 -- --dependency=afterok:${DEC%%;*})
+#   CMP=$(bash scripts/chat_remote.sh submit scripts/eval_report_eos_compare_h100.sh DUMP_DIR=results/chat_report_eos_lp200_test_split_s42 PUBLISHED_DIR=results/report_gen_m3_test_split_s42 -- --dependency=afterok:${CHX%%;*})
+# Jobs 2 and 3 need no lever of their own: the scoring takes the arm's directory, and the comparison reads the penalty from the
+# dump's own log and names system A for it (eos_lp200_s42; plain eos_s42 for 1.0). Read the jobs as the G4 ones are read:
+# `bash scripts/chat_remote.sh summary logs/chat_eos_eval_<jobid>.log` (and chat_eos_chexbert_, chat_eos_compare_ for the others).
 #
 # TIME. --time=02:00:00 is enough for the expected decode and thin at the full budget. The cached step costs 6.35 ms per token on
 # an H100 (analysis/mamba3_results.md, section 6: batch 1; the beams here ride the batch axis of one cache). Allow the same again
@@ -80,8 +101,27 @@ SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"
 CKPT="${CKPT:-${CHAT_HOME:-/sc/home/$USER/chat_sessions}/models/report_gen_m3_eos_s42/checkpoints/last.ckpt}"
 PARQUET="${PARQUET:-/sc/home/$USER/dataset/mimic_full/test.parquet}"
-DUMP_DIR="${DUMP_DIR:-results/chat_report_eos_test_split_s42}"
+LENGTH_PENALTY="${LENGTH_PENALTY:-1.0}"
 PUBLISHED_DIR="${PUBLISHED_DIR:-results/report_gen_m3_test_split_s42}"
+
+# --- the length penalty (P9-G6, see the header): judged before anything is printed or created ---------------------------------
+# lp_centi VALUE prints VALUE times 100 as an integer, or fails: VALUE is one digit from 0 to 3, then at most two decimals. One digit,
+# so that no arithmetic can wrap; two decimals, so that two values that print alike cannot be one directory twice. A refusal never
+# shows the value: an environment variable of the submitting shell can hold anything.
+lp_centi() {
+  local re='^([0-3])(\.([0-9]{1,2}))?$' frac
+  [[ "$1" =~ $re ]] || return 1
+  frac="${BASH_REMATCH[3]}00"
+  echo $(( ${BASH_REMATCH[1]} * 100 + 10#${frac:0:2} ))
+}
+LP_CENTI="$(lp_centi "${LENGTH_PENALTY}")" || fail "LENGTH_PENALTY is not a number with at most two decimals"
+{ [ "${LP_CENTI}" -ge 50 ] && [ "${LP_CENTI}" -le 300 ]; } || fail "LENGTH_PENALTY is outside 0.5 to 3.0"
+LP_ARG="$((LP_CENTI / 100)).$(printf '%02d' $((LP_CENTI % 100)))"   # what the evaluator and the stats script are given: 1.00, 2.00, 1.25
+LP_NNN="$(printf '%03d' "${LP_CENTI}")"                             # what names an arm's directory: 100, 200, 125
+# The default dump: the G4 directory for the published penalty and the arm's own for any other, so that no arm lands in the G4 dump.
+DUMP_DIR_DEFAULT=results/chat_report_eos_test_split_s42
+[ "${LP_CENTI}" -eq 100 ] || DUMP_DIR_DEFAULT="results/chat_report_eos_lp${LP_NNN}_test_split_s42"
+DUMP_DIR="${DUMP_DIR:-${DUMP_DIR_DEFAULT}}"
 
 # --- the decode (see the header): plain assignments, deliberately not ${VAR:-default} -------------------------------------
 MODEL_CONFIG=hybrid_150m_m3_rrg
@@ -91,7 +131,7 @@ BEAM_SIZE=3
 MAX_NEW_TOKENS=200
 NUM_SAMPLES=999999
 
-echo "=== P9-G4 decode: ${MODEL_CONFIG} EOS-stop ${DECODE} ${BEAM_SIZE} budget ${MAX_NEW_TOKENS} cached, every study of the test split ==="
+echo "=== P9-G4 decode: ${MODEL_CONFIG} EOS-stop ${DECODE} ${BEAM_SIZE} budget ${MAX_NEW_TOKENS} length penalty ${LP_ARG} cached, every study of the test split ==="
 echo "=== job=${SLURM_JOB_ID:-local} restart=${SLURM_RESTART_COUNT:-0} node=$(hostname) ==="
 
 export HF_HOME="${SCRATCH_ROOT}/.hf"
@@ -141,6 +181,7 @@ python scripts/evaluate_report_generation.py \
   --decode "${DECODE}" \
   --beam-size "${BEAM_SIZE}" \
   --max-new-tokens "${MAX_NEW_TOKENS}" \
+  --length-penalty "${LP_ARG}" \
   --dump-dir "${DUMP_DIR}" >> "${DUMP_DIR}/eval.log" 2>&1 || rc=$?
 WALL_S="${SECONDS}"
 if [ "${rc}" -ne 0 ]; then
@@ -151,7 +192,7 @@ fi
 # --- the result: whether the log vouches for the dump. R7: the stats script's stdout is cut down to the three line shapes before
 # it reaches the log, and its stderr goes to a file. Its failure fails the job, so that the chained jobs do not run on this dump.
 rc=0
-RESULT_OUT="$(python scripts/report_eos_stats.py decode --log "${DUMP_DIR}/eval.log" --dump-dir "${DUMP_DIR}" --budget "${MAX_NEW_TOKENS}" --wall-s "${WALL_S}" 2>> "${DUMP_DIR}/result.err")" || rc=$?
+RESULT_OUT="$(python scripts/report_eos_stats.py decode --log "${DUMP_DIR}/eval.log" --dump-dir "${DUMP_DIR}" --budget "${MAX_NEW_TOKENS}" --length-penalty "${LP_ARG}" --wall-s "${WALL_S}" 2>> "${DUMP_DIR}/result.err")" || rc=$?
 printf '%s\n' "${RESULT_OUT}" | grep -aE '^(=== |RESULT |ERROR)' || true
 [ "${rc}" -eq 0 ] || fail "result exit=${rc}: the log does not vouch for the dump"
 
