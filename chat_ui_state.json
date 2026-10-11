@@ -400,7 +400,7 @@
     },
     "P5": {
       "title": "Labels and retrieval backend",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "P5-A": {
           "done": true,
@@ -423,7 +423,7 @@
           "desc": "Pipeline stages retrieve, label, score (and app/scoring.py); POST /v1/retrieve, POST /v1/label, GET /v1/test-studies; skipped semantics; redaction of the new..."
         },
         "P5-F": {
-          "done": false,
+          "done": true,
           "desc": "Live-path gates job scripts/chat_retrieval_gates.py with _h100.sh (CPU): self-retrieval, live own-rank vs the build's rank, labeller service vs the published..."
         }
       },
@@ -440,7 +440,7 @@
         "p5f_commits": "f39857f,7117cab",
         "p5f_tests": "tests/test_chat_retrieval_gates.py (158) + 12 pins",
         "p5f_review": "opus approve -> fix round 1 (6 minors) -> sonnet re-review clean",
-        "p5f_job": "not submitted (needs 2632531 + P5-C labels)",
+        "p5f_job": "2637397",
         "p5b_job": "2632531",
         "p5b_node": "gx12",
         "p5b_wall_s": "1346",
@@ -465,7 +465,14 @@
         "p5c_test_rows_sharing_a_text": "23",
         "p5c_labels_status": "done",
         "p5c_shard_wall_min": "34",
-        "p5c_sync": "a0afdb2"
+        "p5c_sync": "a0afdb2",
+        "p5f_self_retrieval": "50/50",
+        "p5f_own_rank_equal": "50/50",
+        "p5f_own_rank_dedup_equal": "50/50",
+        "p5f_labeller_equal": "100/100",
+        "p5f_label_names_ok": "true",
+        "p5f_wall_s": "151",
+        "p5f_sync": "f72bade"
       },
       "verdict": null
     },
@@ -522,7 +529,7 @@
           "desc": "scripts/serve_chat_h100.sh and the python -m app.server CLI: labeller and API, free port, endpoint file, token file, SIGTERM handling, requeue."
         },
         "P7-C": {
-          "done": false,
+          "done": true,
           "desc": "app/tunnel/tunnel.sh (a forward loop that re-discovers the node) and app/tunnel/public_demo.sh (cloudflared, public mode only)."
         },
         "P7-D": {
@@ -548,26 +555,28 @@
         "p7b_tests": "tests/test_chat_server_cli.py (104), tests/test_chat_server_job.py (105, both wrappers), 14 pins",
         "p7b_review": "opus approve (10 minors) -> fix 1 (7 items) done; re-review PENDING",
         "p7c_commit": "chat_ui 86af48d (cherry-pick of worktree b44755a)",
-        "p7c_tests": "tests/test_chat_tunnel.py (120) + 8 pins",
+        "p7c_tests": "196",
         "p7c_review": "sonnet approve; open Important: dead-target forward never re-reads endpoint",
         "p7b_rereview": "clean",
         "p7b_tests_cli": "104",
         "p7b_tests_job": "105",
         "p7f_tests": "5_passed",
-        "p7f_head": "a0afdb2"
+        "p7f_head": "a0afdb2",
+        "p7c_commits": "86af48d,98c596c",
+        "p7c_rereview": "clean"
       },
       "verdict": null
     },
     "P8": {
       "title": "Hardening",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "P8-A": {
-          "done": false,
+          "done": true,
           "desc": "Request limits (413 above 21 MB before parsing), structured request-id logs, the error envelope everywhere, a per-client rate limit in public mode."
         },
         "P8-B": {
-          "done": false,
+          "done": true,
           "desc": "Retention: a sweep at start-up and daily; RETENTION_DAYS per mode; the banner states it."
         },
         "P8-C": {
@@ -587,7 +596,12 @@
           "desc": "Non-functional targets measured: first byte ≤ 300 ms, full turn (P1-D target), 375 px, no external requests from the page, no EventSource in static/."
         }
       },
-      "evidence": {},
+      "evidence": {
+        "p8ab_commits": "c8ab0f9,ec1111c",
+        "p8ab_review": "approved",
+        "p8ab_pytest": "3731",
+        "p8ab_e2e": "21"
+      },
       "verdict": null
     },
     "P9": {
@@ -736,9 +750,12 @@
     "P7-F: delivered inside P7-B (reviewed there): the plan's assertions are all held by test_serve_chat_wrappers_follow_the_cluster_invariants (partition/account/qos/ga03 exclusion/requeue/append, no --gres; GPU twin --gpus=1 without --qos), _start_the_labeller_on_loopback_in_the_chexbert_environment (env -u HF_HOME, --host 127.0.0.1), _refuse_before_they_start_anything (token needed for public or non-loopback bind, --token-file), _prepare_like_the_other_chat_wrappers (HF_HUB_OFFLINE=1) and the GPU-twin identity pin: 5 passed on a0afdb2.",
     "P6-B/C/D complete: images row + model input (P6-B), similar X-rays grid with n/14 agree and private no-store gallery route (P6-C), ranked matching reports + own-rank badge + test-split picker (P6-D). Review: spec B/C ok, D failed on picker keyboard; fix round 1 (9 items) re-review clean 2026-10-11 (real-Chrome probes; new tests red on pre-fix code; layout 226/0, browser 10/10, e2e 21).",
     "P5-C: CheXbert labels for gallery g13d_m3_v1 — CPU array 2636349 (8 shards, ~34 min each, gx14) + merge 2636350 (sync a0afdb2 clean): rows 194125, groups 184686, test 2663, refs_mismatch 0, labels_mismatch 0, test_rows_sharing_a_text 23, labels_status=done, withheld 0. As predicted (0 mismatches; CPU shards, faster than ~1 h).",
-    "P9-G4: evaluation done, gate FAIL (a finding, pre-registered). EOS stop works: 2662/2663 end at EOS (share_cut 0.0004), 44.2 words vs 58.5 published vs 72.3 refs, repeats/report 0.02 vs 0.16, unterminated 21.1% vs 77.4%. Worse (CI below 0): BLEU-1 -0.0557, BLEU-4 -0.0105, CheXbert-14 micro -0.0197 (0.4464 vs 0.4661), 14-macro -0.0218, 5-micro -0.0188, 5-macro -0.0230. ROUGE-L better +0.0028 [0.0003,0.0053]; exact match ties. Default-model choice is the user's (P9-G5)."
+    "P9-G4: evaluation done, gate FAIL (a finding, pre-registered). EOS stop works: 2662/2663 end at EOS (share_cut 0.0004), 44.2 words vs 58.5 published vs 72.3 refs, repeats/report 0.02 vs 0.16, unterminated 21.1% vs 77.4%. Worse (CI below 0): BLEU-1 -0.0557, BLEU-4 -0.0105, CheXbert-14 micro -0.0197 (0.4464 vs 0.4661), 14-macro -0.0218, 5-micro -0.0188, 5-macro -0.0230. ROUGE-L better +0.0028 [0.0003,0.0053]; exact match ties. Default-model choice is the user's (P9-G5).",
+    "P5-F: live-path gates job 2637397 (gx14, CPU 8 threads, 151 s, sync f72bade clean): self_retrieval 50/50, own_rank equal 50/50 (dedup 50/50, max_diff 0), labeller 100/100 (pred 50 + true 50), label_names_ok true; gallery 191462 images / 194125 report rows / 184686 groups, towers_identical, labels_status done; labeller ready after 40 s. As predicted (R4: 50/50, >=48/50, 100/100). P5 complete.",
+    "P8-A (413 before parsing on every route, request ids + JSON request log without query, error envelope everywhere, public rate limit 6/10 min) and P8-B (retention sweep at start-up + daily, RETENTION_DAYS 1-3650, both-mode policy, /healthz retention_days, banner line): review approved (0 critical/important; 5 minors -> carried P8-followup/P8-E); merged c8ab0f9, ec1111c; gates on ec1111c: validate All gates passed (pytest 3731 passed, 1 skipped, 26 deselected, 21 xfailed), e2e 21/21.",
+    "P7-C complete: tunnel.sh (forward loop, endpoint re-check every RECHECK_S=60, ::1 bind test, quoted known_hosts) + public_demo.sh (public-mode gate + watchdog every DEMO_RECHECK_S=10); review approved, fix round 1 re-review clean (1 minor parked); merged 86af48d + 98c596c; tunnel tests 196."
   ],
-  "last_updated": "2026-10-11T16:35:59+02:00",
+  "last_updated": "2026-10-11T17:08:09+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -823,13 +840,22 @@
     ],
     "P6-C": [],
     "P7-C": [
-      "OPEN Important (plan-mandated): a forward that is up but points at a dead target is never noticed (requeue -> new --port 0 port; ExitOnForwardFailure covers only the local bind) -> periodic re-read of chat_sessions/endpoint every ~60 s while forwarding; kill the forward when host/port changed or the file is gone; fake-ssh test where the second read differs",
-      "bind test sees only a 127.0.0.1 listener: a 0.0.0.0/:: or ::1 dev server reads free -> add a ::1 bind test, document the wildcard limit, test an SO_REUSEADDR listener",
-      "public_demo.sh checks the mode once at start (P9-D: /healthz watchdog or REQUIRE_MODE=public in tunnel.sh)",
-      "missing-cloudflared test relies on /usr/bin:/bin lacking cloudflared -> assert/skip or build PATH from symlinks",
-      "test_chat_tunnel.py wall-clock bound 1.5 <= elapsed < 2.9 may flake under load -> loosen",
-      "endpoint read lacks </dev/null (SIGTTIN when backgrounded from an interactive shell)",
-      "UserKnownHostsFile=${HOME}/... breaks on a HOME with whitespace"
+      "parked: the endpoint re-read has only ConnectTimeout; a read that connects then stalls blinds the watch loop -> add -o ServerAliveInterval=5 -o ServerAliveCountMax=2 to the read (pinned argv changes)"
+    ],
+    "P8-followup": [
+      "text-only non-command public turns (no model run) spend rate-limit tokens -> refund turns that ran no model; app.js errorMessage shows every 429 as 'server is busy' -> show error.type rate_limited's message + Retry-After",
+      "app.js request() (create chat, list, delete, export) has no fetch timeout (P8-A covered api.js only)",
+      "422 API description: 'never repeats a value that was sent' (key names are echoed, values never)",
+      "413 example text on every route is the image message 'Image is larger than 20 MB.' -> a request-size message for _Guard/_capped; chunked bodies are refused after ~21 MB is read"
+    ],
+    "P8-E": [
+      "R8 heads-up: the first P8-B start on the cluster CHAT_HOME runs the retention sweep (public sessions > 7 d, private > 45 d, soft-deleted sessions, orphan upload dirs) -> the user is told before the first cluster start; the runbook says so",
+      "runbook: RECHECK_S=60 / DEMO_RECHECK_S=10; requeue followed within ~RECHECK_S; MAX_ATTEMPTS counts attempts only; macOS wildcard listener reads free; safe to background; demo closes itself (exit 1) when the server stops saying public; after a demo check pgrep cloudflared (a SIGKILLed public_demo.sh leaves it running)",
+      "runbook (P8-A/B): RETENTION_DAYS (env, 1-3650; other mode keeps its default), rate limit (public, 6 turns / client / 10 min, Retry-After), JSON request log on stderr (no query), X-Request-Id, 413 above 21 MB"
+    ],
+    "P9-D": [
+      "verify how fast the public link closes after the watchdog's SIGTERM (cloudflared grace period)",
+      "/healthz must answer within 5 s under CPU-bound generation, or the demo watchdog closes the link"
     ]
   }
 }

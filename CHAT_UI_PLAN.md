@@ -3515,7 +3515,7 @@ Commit `"P5-E: retrieve/label/score stages + endpoints"`.
   - the browser check's reload step races under load (pre-existing), to be hardened in P6-F or P8-F.
 - **Carried to P7-B:** a serving start must refuse an unopenable gallery unless explicitly allowed.
 
-- [ ] **P5-F** Live-path gates job `scripts/chat_retrieval_gates.py` with `_h100.sh` (CPU): self-retrieval, live own-rank vs the build's rank, labeller service vs the published labels on 50 + 50.
+- [x] **P5-F** Live-path gates job `scripts/chat_retrieval_gates.py` with `_h100.sh` (CPU): self-retrieval, live own-rank vs the build's rank, labeller service vs the published labels on 50 + 50.
 
 **Files:** create `scripts/chat_retrieval_gates.py`, `scripts/chat_retrieval_gates_h100.sh`; modify `tests/test_willi_parity.py`.
 
@@ -3825,7 +3825,7 @@ kill -TERM ${LABELER_PID} 2>/dev/null || true
 
 `DRIFT_NOTE` carries the P1-D sentence. `scripts/serve_chat_gpu_h100.sh` is the same file except: `#SBATCH --gpus=1`, no `--qos` line (as every GPU wrapper in the repo), `--mem=48G`, job name `chat_server_gpu`, and `DEVICE=cuda`. Which of the two serves is P1-D's decision (U7). Tests: CLI argument parsing (a unit test of the parser and of the token-file reader); the endpoint file is written after start-up (tiny engine, real uvicorn); parity: both wrappers use the overlays and `env -u HF_HOME`, the GPU one has `--gpus=1` and `DEVICE=cuda`. Commit `"P7-B: server CLI + CPU/GPU serve jobs"`.
 
-- [ ] **P7-C** `app/tunnel/tunnel.sh` (a forward loop that re-discovers the node) and `app/tunnel/public_demo.sh` (cloudflared, public mode only).
+- [x] **P7-C** `app/tunnel/tunnel.sh` (a forward loop that re-discovers the node) and `app/tunnel/public_demo.sh` (cloudflared, public mode only).
 
 ```bash
 #!/bin/bash
@@ -3893,7 +3893,7 @@ Commit `"P7-F: parity tests for the chat wrappers"`.
 
 Gate: the chaos checklist passes; the non-functional targets are measured.
 
-- [ ] **P8-A** Request limits (413 above 21 MB before parsing), structured request-id logs, the error envelope everywhere, a per-client rate limit in public mode.
+- [x] **P8-A** Request limits (413 above 21 MB before parsing), structured request-id logs, the error envelope everywhere, a per-client rate limit in public mode.
 
 Middleware rejects `Content-Length` > 21 MB with 413 before the multipart parser runs. Every request logs one JSON line (`ts, request_id, method, path, status, ms, client`), and `X-Request-Id` is echoed on every response (a caller's own id is kept). All errors use `error_body`. Public mode: at most 6 turns per client per 10 minutes (token bucket) → 429 `rate_limited`.
 
@@ -3928,7 +3928,7 @@ def test_public_rate_limit_is_per_client(tmp_path):
 
 Commit `"P8-A: limits, request ids, rate limit"`.
 
-- [ ] **P8-B** Retention: a sweep at start-up and daily; `RETENTION_DAYS` per mode; the banner states it.
+- [x] **P8-B** Retention: a sweep at start-up and daily; `RETENTION_DAYS` per mode; the banner states it.
 
 A daemon thread runs `store.sweep(days)` at start and every 24 h; `days` = `RETENTION_DAYS` or 45 (private, U6) / 7 (public). `/healthz` reports `retention_days`; the banner shows "Sessions are deleted after N days".
 
