@@ -3636,7 +3636,7 @@ The send path clears the preview only after the server accepts the turn (HTTP 20
 
 Commit `"P6-A: image intake (click/drag/paste) with preview"`.
 
-- [ ] **P6-B** Your image in the chat: upload variants stored; `GET /v1/messages/{id}/image`; the thumbnail survives reload and reopen; the 224×224 model input beside the original.
+- [x] **P6-B** Your image in the chat: upload variants stored; `GET /v1/messages/{id}/image`; the thumbnail survives reload and reopen; the 224×224 model input beside the original.
 
 **Files:** modify `app/pipeline.py` (store variants during preprocess), `app/server.py`, `app/static/render.js`, `app/static/state.js`; create `tests/test_app_images.py`.
 
@@ -3648,7 +3648,7 @@ Tests: after a turn, each variant returns 200 with the right content type, and `
 
 Commit `"P6-B: persisted upload variants + images in the card"`.
 
-- [ ] **P6-C** Similar X-rays: a neighbour grid with similarity and "n/14 labels agree" (with the differing positives); `GET /v1/gallery/images/{row}` private-only with `no-store`.
+- [x] **P6-C** Similar X-rays: a neighbour grid with similarity and "n/14 labels agree" (with the differing positives); `GET /v1/gallery/images/{row}` private-only with `no-store`.
 
 **Files:** modify `app/server.py`, `app/static/render.js`, `app/static/styles.css`; extend `tests/test_app_images.py`.
 
@@ -3659,7 +3659,7 @@ Tests: the endpoint's 403/404/200 and headers; the redacted public retrieve deta
 
 Commit `"P6-C: similar X-rays grid with label agreement"`.
 
-- [ ] **P6-D** Matching reports: a ranked report list (13D encoders), the own-report rank badge for test studies, and the test-split picker (private).
+- [x] **P6-D** Matching reports: a ranked report list (13D encoders), the own-report rank badge for test studies, and the test-split picker (private).
 
 **Files:** modify `app/static/render.js`, `app/static/app.js`; extend `tests/test_app_retrieval_stages.py`.
 

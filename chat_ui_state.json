@@ -461,22 +461,22 @@
     },
     "P6": {
       "title": "Image experience (the user's five additions)",
-      "status": "pending",
+      "status": "in_progress",
       "checkboxes": {
         "P6-A": {
           "done": false,
           "desc": "Taking an image: click, drag-drop and paste into the image well; a preview (thumbnail, name, pixel size, MB, remove) before sending; client-side checks."
         },
         "P6-B": {
-          "done": false,
+          "done": true,
           "desc": "Your image in the chat: upload variants stored; GET /v1/messages/{id}/image; the thumbnail survives reload and reopen; the 224×224 model input beside the ori..."
         },
         "P6-C": {
-          "done": false,
+          "done": true,
           "desc": "Similar X-rays: a neighbour grid with similarity and \"n/14 labels agree\" (with the differing positives); GET /v1/gallery/images/{row} private-only with no-st..."
         },
         "P6-D": {
-          "done": false,
+          "done": true,
           "desc": "Matching reports: a ranked report list (13D encoders), the own-report rank badge for test studies, and the test-split picker (private)."
         },
         "P6-E": {
@@ -491,7 +491,11 @@
       "evidence": {
         "p6bcd_commits": "d1aa5ad,1db1f0b,70bcce6,37f7a53",
         "p6bcd_tests": "tests/test_app_images.py; node 366; e2e 21/21; browser 10/10; layout 226/0",
-        "p6bcd_review": "opus: P6-B ok, P6-C ok, P6-D 2 Important (picker Escape, stale Enter) -> fix 1 37f7a53; re-review PENDING"
+        "p6bcd_review": "opus: P6-B ok, P6-C ok, P6-D 2 Important (picker Escape, stale Enter) -> fix 1 37f7a53; re-review PENDING",
+        "p6bcd_rereview": "clean",
+        "p6bcd_layout_cases": "226",
+        "p6bcd_browser": "10/10",
+        "p6bcd_e2e": "21"
       },
       "verdict": null
     },
@@ -704,9 +708,10 @@
     "P9-G3: EOS training job 2632173 (gx07, 4 H100, sync c516e4e clean) DONE: 12000 steps, wall 4704 s (1.31 h), val_loss 1.02 vs published 1.0188 (+0.0012), ckpt_exists true; preflight code eos_flag/module_in_cwd true, recipe ok with exactly the 6 root keys changed + dataset.report_eos_target added. All as predicted (R4).",
     "2026-10-11: 2026-10-11 resume: P5-B + P9-G3 ticked; sync a0afdb2; submitted G4 chain 2636346 -> 2636347 -> 2636348 and P5-C labels array 2636349 -> merge 2636350; re-reviews of P6-B/C/D fix 1 and P7-B fix 1 and the P7-C fix round dispatched.",
     "P7-B complete (laptop part): CLI app/cli.py + serve_chat_h100.sh / serve_chat_gpu_h100.sh; review approved (10 minors), fix round 1 (7 items) re-review clean 2026-10-11 (3 minors parked to final_review: argparse residual echoes, SIGINT doc, reap_group coverage). The real serve job runs in P7-D.",
-    "P7-F: delivered inside P7-B (reviewed there): the plan's assertions are all held by test_serve_chat_wrappers_follow_the_cluster_invariants (partition/account/qos/ga03 exclusion/requeue/append, no --gres; GPU twin --gpus=1 without --qos), _start_the_labeller_on_loopback_in_the_chexbert_environment (env -u HF_HOME, --host 127.0.0.1), _refuse_before_they_start_anything (token needed for public or non-loopback bind, --token-file), _prepare_like_the_other_chat_wrappers (HF_HUB_OFFLINE=1) and the GPU-twin identity pin: 5 passed on a0afdb2."
+    "P7-F: delivered inside P7-B (reviewed there): the plan's assertions are all held by test_serve_chat_wrappers_follow_the_cluster_invariants (partition/account/qos/ga03 exclusion/requeue/append, no --gres; GPU twin --gpus=1 without --qos), _start_the_labeller_on_loopback_in_the_chexbert_environment (env -u HF_HOME, --host 127.0.0.1), _refuse_before_they_start_anything (token needed for public or non-loopback bind, --token-file), _prepare_like_the_other_chat_wrappers (HF_HUB_OFFLINE=1) and the GPU-twin identity pin: 5 passed on a0afdb2.",
+    "P6-B/C/D complete: images row + model input (P6-B), similar X-rays grid with n/14 agree and private no-store gallery route (P6-C), ranked matching reports + own-rank badge + test-split picker (P6-D). Review: spec B/C ok, D failed on picker keyboard; fix round 1 (9 items) re-review clean 2026-10-11 (real-Chrome probes; new tests red on pre-fix code; layout 226/0, browser 10/10, e2e 21)."
   ],
-  "last_updated": "2026-10-11T11:55:46+02:00",
+  "last_updated": "2026-10-11T12:02:53+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -723,7 +728,9 @@
       "'Cancel upload' (abort-only Stop before accept) and an 'Uploading...' status between Send and accept",
       "empty 'New chat' left after a refused first turn; command text becomes the chat title (title from note minus commands, else filename); health strip lags while streaming (refresh /healthz on accept/settle)",
       "clearNotice() focuses the prompt after a tapped Retry/Dismiss (opens the phone keyboard): use the focus-visible handoff",
-      "whitespace drift between server and page command parsing (U+001C-1F, U+0085, U+FEFF)"
+      "whitespace drift between server and page command parsing (U+001C-1F, U+0085, U+FEFF)",
+      "P6 re-review minor: render.js:665-672 open a report, widen the window, click Show less -> the row stays visible and Show all reveals nothing until the next paint/resize; re-measure that row in the close branch",
+      "stale comment tests/frontend/app.test.mjs:386 ('no image URL until P6-B')"
     ],
     "P6-B": [
       "tests/test_app_openapi.py pins the full route set: every new route adds an entry plus summary/description/responses"
@@ -771,7 +778,9 @@
       "P5-F parked: labeller starts after .venv activation (D24 explicit on the env line); suite cost ~110 s for test_chat_retrieval_gates.py",
       "P7-B re-review minor: app/cli.py:80 echoes an unrecognized argument that starts with '-' (`--token -SECRET` prints -SECRET; base64url tokens can start with '-') and app/cli.py:73 misses argparse's \"ignored explicit argument 'VALUE'\" (`--allow-compile=SECRET`); both contradict the docstring 'a refusal never quotes a value it was given' (app/cli.py:23-24) -> print only names matching ^--[a-z][a-z0-9-]*$ and strip explicit-argument values; extend test_no_refusal_ever_echoes_the_value_of_an_argument",
       "P7-B re-review minor: app/cli.py:17-20 'default action' is exact for SIGTERM only; SIGINT during load raises KeyboardInterrupt -> 'ERROR interrupted while starting', exit 130 (wrapper forwards only SIGTERM: docs only)",
-      "P7-B re-review minor: tests/test_chat_server_job.py reap_group does not cover box.run() runs (tests at :668, :692, :789, incl. the exit-status test) -> register them or run them in their own session"
+      "P7-B re-review minor: tests/test_chat_server_job.py reap_group does not cover box.run() runs (tests at :668, :692, :789, incl. the exit-status test) -> register them or run them in their own session",
+      "P6 re-review minor: app/server.py REFUSALS[403] shared text says \"an upload's original\" on four routes (three can never send it); the image route's 403 example shows only the test-split message (docs only)",
+      "P6 re-review minor: api.js:184 keeps every refusal for the view incl. 502/503/504 -> a transient gateway error leaves a placeholder until chat switch/reload; consider treating 502-504 as transport failures (not cached)"
     ],
     "P9-G5": [
       "UI copy for eos_trained models: render.js \"full budget\" chip and app.js:1360 stop-switch hint (\"always decodes the whole token budget\") are wrong for an EOS model",
@@ -785,11 +794,7 @@
     "P5-C": [
       "extract the JobBox wrapper-rehearsal harness from tests/test_build_retrieval_gallery.py into a shared helper when P5-C needs it"
     ],
-    "P6-C": [
-      "drawer retrieval note per-model (app.js:1426)",
-      "state.js labelsPending shows 'labelling…' while features.labels is false",
-      "decide whether public mode shows 'agreement pending'"
-    ],
+    "P6-C": [],
     "P7-C": [
       "OPEN Important (plan-mandated): a forward that is up but points at a dead target is never noticed (requeue -> new --port 0 port; ExitOnForwardFailure covers only the local bind) -> periodic re-read of chat_sessions/endpoint every ~60 s while forwarding; kill the forward when host/port changed or the file is gone; fake-ssh test where the second read differs",
       "bind test sees only a 127.0.0.1 listener: a 0.0.0.0/:: or ::1 dev server reads free -> add a ::1 bind test, document the wildcard limit, test an SO_REUSEADDR listener",
