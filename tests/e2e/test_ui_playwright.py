@@ -1027,6 +1027,58 @@ def test_the_picker_by_keyboard_runs_the_study_typed_and_escape_closes_the_drawe
     ui.assert_clean()
 
 
+# ---- 21 (P6-E) --------------------------------------------------------------------------------------------------------------------
+
+# The viewer as the user sees it: whether it is open, what it says it shows, its panes (footer, source, the server path it shows, loaded, zoom),
+# the page behind it, and what has the focus (a card control by its data-key).
+VIEWER_JS = """() => {
+  const v = document.querySelector('#viewer');
+  const a = document.activeElement;
+  return { hidden: v.hidden, label: v.getAttribute('aria-label'), held: document.body.classList.contains('viewer-open'),
+           inert: ['.banner', '.layout', '#composer'].map((s) => document.querySelector(s).hasAttribute('inert')),
+           panes: [...v.querySelectorAll('.viewer-pane')].map((p) => { const img = p.querySelector('img');
+             return { footer: p.querySelector('figcaption').textContent, src: img.getAttribute('src') || '', path: img.getAttribute('data-src'),
+                      loaded: img.complete && img.naturalWidth > 0, scale: Number(p.querySelector('.viewer-stage').getAttribute('data-scale')) }; }),
+           focus: a && a !== document.body ? (a.getAttribute('data-key') || a.getAttribute('class') || a.id) : 'body' };
+}"""
+
+
+@pytest.mark.parametrize("ui", [{"tiny_gallery": True}], indirect=True, ids=["tiny_gallery"])
+def test_the_viewer_opens_a_similar_xray_beside_yours_zooms_in_and_escape_gives_the_focus_back(ui, images):
+    """P6-E on a tiny_gallery server: a similar X-ray of the card opens the viewer side by side, the turn's own X-ray (its original) on the
+    left and the match on the right, each loaded through the page's auth (object URLs, never a server path as a src) and footed with its pixel
+    size; the page behind is inert. + zooms both panes (linked), the wheel zooms further at the cursor, and Esc closes the viewer, frees the
+    page and puts the focus back on the button that opened it."""
+    page = ui.open()
+    card = ui.turn(images["xray_a.png"])
+    assert card["status"] == "done"
+    page.wait_for_function(NEIGHBOURS_LOADED)
+    opener = page.locator("section.neighbors button[data-action='view']").first
+    key = opener.get_attribute("data-key")
+    assert key == "neighbor:1"
+    opener.click()
+    page.wait_for_function("!document.querySelector('#viewer').hidden && document.querySelectorAll('#viewer img').length === 2"
+                           " && [...document.querySelectorAll('#viewer img')].every((i) => i.complete && i.naturalWidth > 0)")
+    shown = page.evaluate(VIEWER_JS)
+    assert shown["label"] == "Image viewer: Your X-ray beside Similar X-ray #1"
+    assert [p["footer"] for p in shown["panes"]] == ["Your X-ray · 320×320 px", "Similar X-ray #1 · 320×320 px (stored gallery size)"]
+    assert all(p["src"].startswith("blob:") for p in shown["panes"]), shown
+    assert shown["panes"][0]["path"].endswith("/image?variant=original") and shown["panes"][1]["path"].startswith("/v1/gallery/images/")
+    assert shown["held"] and shown["inert"] == [True, True, True] and [p["scale"] for p in shown["panes"]] == [1, 1]
+    ui.shot("viewer_side_by_side_1280x900_light.png")
+    page.keyboard.press("+")   # zoom in, both panes (linked)
+    assert [p["scale"] for p in page.evaluate(VIEWER_JS)["panes"]] == [1.25, 1.25]
+    stage = page.locator("#viewer .viewer-stage").first.bounding_box()
+    page.mouse.move(stage["x"] + stage["width"] / 3, stage["y"] + stage["height"] / 3)
+    page.mouse.wheel(0, -240)   # and further, at the cursor
+    page.wait_for_function("Number(document.querySelector('#viewer .viewer-stage').getAttribute('data-scale')) > 1.25")
+    page.keyboard.press("Escape")
+    closed = page.evaluate(VIEWER_JS)
+    assert closed["hidden"] and not closed["held"] and closed["inert"] == [False, False, False] and closed["panes"] == []
+    assert closed["focus"] == key   # back on the similar X-ray that opened it
+    ui.assert_clean()
+
+
 # ---- the harness itself ----------------------------------------------------------------------------------------------------------
 
 PROBE_CONFTEST = """\

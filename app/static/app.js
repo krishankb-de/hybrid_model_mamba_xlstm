@@ -14,7 +14,8 @@
 // stream and does not poll: coming back finds the turn running and polls it from its last seq.
 //
 // The image intake (click, drag-drop, paste, the preview) is composer.js's (P6-A): this file attaches it and spends what it holds once the
-// server has accepted the turn it went with.
+// server has accepted the turn it went with. A picture of a card opens viewer.js over the page (P6-E); while it is open it is the topmost
+// layer: Escape closes it and nothing under it, and the focus goes back to the picture's button.
 //
 // The settings drawer is a form that ends in Save (P4-G). A number applies as it is typed while it is a whole number inside its
 // bounds; anything else is left as typed, with a line under the field that says what it takes, and is never clamped, applied or stored.
@@ -26,6 +27,7 @@
 import * as realApi from './api.js';
 import { attachComposer } from './composer.js';
 import { applyEvent, initialView } from './state.js';
+import { openViewer as showViewer } from './viewer.js';
 import {
   detailTable, el, focusKey, optionChips, renderAssistantCard, renderUserTurn, restoreFocus, scheduleRender, settleClamps, statusText,
 } from './render.js';
@@ -476,6 +478,7 @@ export function createApp(env) {
     loading: false,          // a session is being fetched
     file: null,              // the attached image, not yet sent (composer.js says which)
     composer: null,          // composer.js's intake: { get, clear }
+    viewer: null,            // viewer.js's handle while the viewer is open (P6-E)
     said: '',                // the last text written to the status region
     gen: 0,                  // bumped by every route change, so a late answer can tell it is stale
     ticker: null,
@@ -552,6 +555,7 @@ export function createApp(env) {
   // model: the one the turn ran on (its options say), whose features decide whether a user turn shows the k it never used.
   const cardCtx = (n, model) => ({
     loadImage: (url) => api.loadImage(url, auth()),
+    openViewer: (spec, opener) => openViewer(spec, opener),   // a picture of the card (P6-E)
     copy,
     showModels: () => openDrawer({ models: true }),
     labelNames: Array.isArray(state.models?.label_names) ? state.models.label_names : undefined,
@@ -560,6 +564,9 @@ export function createApp(env) {
     ui: state.session.ui,
     turn: n,
   });
+
+  // A user turn's own thumbnail is a picture and no more: the card's images row opens the same X-ray at full size (P6-E).
+  const userCtx = (n, model) => ({ ...cardCtx(n, model), openViewer: undefined });
 
   function copy(value) {
     const clipboard = win.navigator?.clipboard;
@@ -612,7 +619,7 @@ export function createApp(env) {
 
   function refreshUserBubble(turn, options) {
     if (!turn.userEl) return;
-    const next = renderUserTurn({ text: turn.text, image: turn.image, options }, cardCtx(turn.n, options?.model));
+    const next = renderUserTurn({ text: turn.text, image: turn.image, options }, userCtx(turn.n, options?.model));
     turn.userEl.replaceWith(next);
     turn.userEl = next;
   }
@@ -801,7 +808,7 @@ export function createApp(env) {
       // A note the server will not run (no file, no command) uses no settings, so its turn shows no chips (P4-H).
       const ran = runsTheModel(note, file) || Number.isInteger(options.test_row);   // a picked study runs whatever the note says
       turn.userEl = renderUserTurn({ text: note, image: turn.image, options: ran ? options : null },
-                                   cardCtx(turn.n, options.model));
+                                   userCtx(turn.n, options.model));
       session.turns.push(turn);
       ui.conversation.append(turn.userEl);
       scroller.toEnd(turn.userEl);
@@ -1030,6 +1037,7 @@ export function createApp(env) {
   // ---- sessions: the view, the sidebar, the routes ------------------------------------------------------------------------
 
   function resetView(id) {
+    state.viewer?.close({ restore: false });   // the viewer shows a picture of the chat that is going
     leaveTurn();
     api.clearImageCache();
     for (const url of state.session.blobUrls) urls.revokeObjectURL(url);
@@ -1108,7 +1116,7 @@ export function createApp(env) {
         turn.text = shown.text;      // a turn that was still queued has no events: its message_start rebuilds this bubble,
         turn.image = shown.image;    // and rebuilds it from these
         turn.testRow = Number.isInteger(u.test_row) ? u.test_row : null;   // a test study: what the re-run hint names (P6-D)
-        turn.userEl = renderUserTurn(shown, cardCtx(turn.n, shown.options?.model));
+        turn.userEl = renderUserTurn(shown, userCtx(turn.n, shown.options?.model));
         nodes.push(turn.userEl);
       }
       if (a) {
@@ -1400,6 +1408,11 @@ export function createApp(env) {
 
   function onKeydown(event) {
     if (event.key !== 'Escape') return;
+    if (state.viewer) {   // the topmost layer (P6-E): Escape closes it and nothing under it, wherever the focus is
+      state.viewer.close();
+      event.preventDefault();
+      return;
+    }
     if (!ui.picker.hidden && ui.picker.contains(doc.activeElement)) {   // the study list is Escape's only when the focus is in it (P6 fix 1)
       closePicker();
       event.preventDefault();
@@ -1408,6 +1421,36 @@ export function createApp(env) {
     const drawer = closeDrawer();
     const sidebar = closeSidebar({ restore: !drawer });
     if (drawer || sidebar) event.preventDefault();
+  }
+
+  // ---- the viewer (P6-E) -------------------------------------------------------------------------------------------------------------
+
+  // A picture of a card opens viewer.js over the page: its pictures come through api.js's loadImage with this page's auth (and its refusals
+  // kept), and the full-size original, which no card shows, is let go of when it closes (api.js forgetImage). Closed, it gives the focus back
+  // to the control that opened it, or, where the card has been drawn again meanwhile (a turn that ran on), to the same control of the new card.
+  function openViewer(spec, opener = null) {
+    const from = opener && doc.body.contains(opener) ? opener : doc.activeElement;
+    const key = from ? focusKey(from) : null;
+    const messageId = from?.closest?.('article.card')?.getAttribute('data-message-id') ?? null;
+    const handle = showViewer(spec, {
+      document: doc, root: ui.viewer, window: win, ResizeObserver: env.ResizeObserver,
+      loadImage: (url) => api.loadImage(url, auth()),
+      forgetImage: (url) => api.forgetImage?.(url),
+      onClose: ({ restore }) => {
+        if (state.viewer === handle) state.viewer = null;
+        if (restore) giveFocusBack(from, messageId, key);
+      },
+    });
+    if (handle) state.viewer = handle;   // nothing to show opens nothing, and leaves an open viewer as it is
+  }
+
+  function giveFocusBack(from, messageId, key) {
+    if (from && from !== doc.body && doc.body.contains(from)) {
+      from.focus();
+      return;
+    }
+    const card = messageId ? qa(ui.conversation, 'article.card').find((c) => c.getAttribute('data-message-id') === messageId) : null;
+    if (card && key) restoreFocus(card, key);
   }
 
   // ---- the settings drawer ----------------------------------------------------------------------------------------------------------

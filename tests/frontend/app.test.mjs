@@ -764,7 +764,7 @@ test('start with no hash opens the newest session and replays it: its user turn,
   assert.deepEqual(texts(qa(user, '.options .chip')), ['beam 3', '16 tok', 'cached', 'k 4/3', 'raw text', 'full budget']);   // the options the assistant row carries (this turn ran with Display repair and the stop switch off)
   assert.equal(user.getAttribute('aria-label'), 'Your message, turn 1');
   const replayed = fixture.reduce(applyEvent, initialView(botId));
-  const fresh = renderAssistantCard(replayed, { copy() {}, showModels() {}, loadImage: h.api.loadImage, turn: 1, ui: new Map() });   // P6-B: its images too
+  const fresh = renderAssistantCard(replayed, { copy() {}, showModels() {}, loadImage: h.api.loadImage, openViewer() {}, turn: 1, ui: new Map() });   // P6-B: its images too, P6-E: as viewer buttons
   await flush();
   assert.equal(serialize(card), serialize(fresh));   // the same builders over the same log: the same card
   assert.equal(h.fetch.calls.every((c) => c.headers['X-Client-Id'] && !c.headers.Authorization || c.url === '/healthz'), true);
@@ -4786,7 +4786,7 @@ test('a turn that starts closes the study list: it is for starting one', async (
 
 // ---- P6 fix 1: the picker's keyboard, and Show all by real overflow ---------------------------------------------------------------
 
-test('with the study list and the drawer both open, Escape closes the drawer and gives the focus back to Settings (P6 fix 1)', async () => {
+test('with the study list and the drawer both open, Escape closes the drawer and gives the focus back to Settings (P6 fix 1); a viewer over them is Escape\'s first (P6-E)', async () => {
   await ready({ options: { models: GALLERY_MODELS }, routes: studyRoutes() });
   pickButton().click();
   await flush();
@@ -4796,6 +4796,17 @@ test('with the study list and the drawer both open, Escape closes the drawer and
                    [false, true, 'false', 'drawer-close']);
   const escape = press(document.activeElement, 'Escape');
   assert.deepEqual([escape.defaultPrevented, $('drawer').hidden, document.activeElement.id], [true, true, 'settings']);
+  // P6-E: the viewer is the topmost layer. Over the open drawer, Escape closes the viewer alone, back to the picture that opened it; the next
+  // Escape is the drawer's, as above.
+  await pictured(studyRoutes());
+  $('settings').click();
+  viewerButton('image:model_input').click();
+  await flush();
+  const first = press(document.activeElement, 'Escape');
+  assert.deepEqual([first.defaultPrevented, $('viewer').hidden, $('drawer').hidden, document.activeElement.getAttribute('data-key')],
+                   [true, true, false, 'image:model_input']);
+  const second = press(document.activeElement, 'Escape');
+  assert.deepEqual([second.defaultPrevented, $('drawer').hidden, document.activeElement.id], [true, true, 'settings']);
 });
 
 test('Escape closes the study list only from inside it, and the sidebar opening closes it too (P6 fix 1)', async () => {
@@ -5354,4 +5365,146 @@ test('opening the drawer again takes a confirmation that is still showing down, 
   assert.equal(h.timers.timeouts.filter((t) => t.ms === 4000).length, 0);
   $('drawer-close').click();
   assert.equal($('saved').textContent, '');   // closing says nothing: it is not a Save
+});
+
+// ---- P6-E: the viewer, opened from a card's pictures ----------------------------------------------------------------------------------
+
+const VIEW_URLS = { original: '/v1/messages/u_v/image?variant=original', thumb: '/v1/messages/u_v/image?variant=thumb',
+                    model_input: '/v1/messages/u_v/image?variant=model_input' };
+// The events of a turn with pictures, 1..6: its own X-ray (an upload: original, thumbnail, model input) and two similar X-rays.
+function picturedTurn(id = 'm_v') {
+  resetEvents();
+  const neighbours = [1, 2].map((rank) => ({ rank, similarity: 0.9 - 0.05 * rank, gallery_row: 100 + rank, image_url: `/v1/gallery/images/${100 + rank}`,
+                                             study_id: 50000000 + rank, labels: null }));
+  return [startEv({ message_id: id, image: { sha256: SHA, filename: 'chest.png', source: 'upload', urls: VIEW_URLS } }),
+          stageStartEv('preprocess', 0), stageEndEv('preprocess', 2, { input_px: [2544, 3056], source: 'upload' }),
+          stageStartEv('retrieve', 2), stageEndEv('retrieve', 3, { image_neighbors: neighbours, report_matches: [], gallery: { images: 200 } }),
+          stopEv('done', { message_id: id, report: 'Findings: clear.', display_report: 'Findings: clear.' })];
+}
+// A chat whose one turn has pictures; the fake api also records what the viewer lets go of (api.js forgetImage).
+async function pictured(routes = {}) {
+  const h = harness({ models: GALLERY_MODELS, sessions: [sess('s_v', 'chest.png', 1)], routes: {
+    'GET /v1/sessions/s_v': { ...sess('s_v', 'chest.png', 1), messages: [{ ...userMsg('u_v', '', 'chest.png'), image_urls: VIEW_URLS },
+                                                                        botMsg('m_v', 'done', START_DATA.options)] },
+    'GET /v1/messages/m_v': { ...botMsg('m_v'), events: rows(picturedTurn()) },
+    ...routes } });
+  h.api.forgotten = [];
+  h.api.forgetImage = (url) => h.api.forgotten.push(url);
+  h.api.loaded = [];
+  const load = h.api.loadImage;
+  h.api.loadImage = (url, auth) => { h.api.loaded.push([url, auth]); return load(url, auth); };
+  await h.app.start();
+  await flush();
+  return h;
+}
+const viewerButton = (key) => qa(cardOf(), 'button[data-action="view"]').find((b) => b.getAttribute('data-key') === key);
+const viewerPanes = () => qa($('viewer'), '.viewer-pane');
+const viewerShows = () => viewerPanes().map((pane) => q(pane, 'img').getAttribute('data-src'));
+
+test('every picture of a card opens the viewer: your X-ray at full size, what the model saw, a similar X-ray beside yours (P6-E)', async () => {
+  const h = await pictured();
+  assert.equal($('viewer').hidden, true);
+  for (const [key, shows] of [['image:thumb', [VIEW_URLS.original]], ['image:model_input', [VIEW_URLS.model_input]],
+                              ['neighbor:1', [VIEW_URLS.original, '/v1/gallery/images/101']], ['neighbor:2', [VIEW_URLS.original, '/v1/gallery/images/102']]]) {
+    const opener = viewerButton(key);
+    assert.equal(opener.localName, 'button', key);   // Enter and Space open it as a click does
+    opener.focus();
+    opener.click();
+    await flush();
+    assert.equal($('viewer').hidden, false, key);
+    assert.deepEqual(viewerShows(), shows, key);
+    assert.ok(qa($('viewer'), 'img').every((img) => img.getAttribute('src') === `blob:fake/${img.getAttribute('data-src')}`), key);   // through loadImage: never a server path as a src
+    press(document.activeElement, 'Escape');
+    assert.equal($('viewer').hidden, true, key);
+    assert.equal(document.activeElement, viewerButton(key), key);   // the focus is back on the control that opened it
+  }
+  assert.deepEqual(new Set(h.api.loaded.map(([, auth]) => JSON.stringify(auth))).size, 1);
+  assert.equal(typeof h.api.loaded[0][1].clientId, 'string');   // with the page's own auth, as every picture of the page
+  assert.equal(q(q($('conversation'), '.turn.user'), 'button'), null);   // a user turn's thumbnail is a picture: the card's own opens the viewer
+});
+
+test('with the viewer open, Esc closes it and nothing under it: the drawer and the study list stay open, and the next Esc is theirs (P6-E)', async () => {
+  await pictured(studyRoutes());
+  $('settings').click();   // the drawer, beside the conversation
+  viewerButton('neighbor:2').click();
+  await flush();
+  const escape = press(document.activeElement, 'Escape');
+  assert.deepEqual([escape.defaultPrevented, $('viewer').hidden, $('drawer').hidden], [true, true, false]);
+  assert.equal(document.activeElement, viewerButton('neighbor:2'));
+  press(document.activeElement, 'Escape');   // now the drawer's, as P6 fix 1 has it: closed, back to Settings
+  assert.deepEqual([$('drawer').hidden, document.activeElement.id], [true, 'settings']);
+  pickButton().click();   // the study list
+  await flush();
+  viewerButton('image:thumb').click();
+  await flush();
+  press(document.activeElement, 'Escape');
+  assert.deepEqual([$('viewer').hidden, $('picker').hidden], [true, false]);
+  viewerButton('image:thumb').click();
+  await flush();
+  assert.equal(press(document.body, 'Escape').defaultPrevented, true);   // an Escape from outside the viewer still closes only the viewer
+  assert.deepEqual([$('viewer').hidden, $('picker').hidden, $('drawer').hidden], [true, false, true]);
+});
+
+test('while the viewer is open the page behind is inert, its focus is trapped, and the original no card shows is let go of at the close (P6-E)', async () => {
+  const h = await pictured();
+  viewerButton('neighbor:1').click();
+  await flush();
+  assert.deepEqual(['.banner', '.layout', '#composer'].map((s) => document.querySelector(s).hasAttribute('inert')), [true, true, true]);
+  assert.equal(document.body.classList.contains('viewer-open'), true);
+  const controls = qa($('viewer'), 'button, input, [tabindex]');
+  controls.at(-1).focus();
+  press(controls.at(-1), 'Tab');
+  assert.equal(document.activeElement, controls[0]);
+  q($('viewer'), '[data-viewer="close"]').click();
+  assert.deepEqual(h.api.forgotten, [VIEW_URLS.original]);   // the gallery picture is the card's too: kept
+  assert.deepEqual(['.banner', '.layout', '#composer'].map((s) => document.querySelector(s).hasAttribute('inert')), [false, false, false]);
+  assert.equal(document.body.classList.contains('viewer-open'), false);
+  assert.equal(document.activeElement, viewerButton('neighbor:1'));
+});
+
+test('the viewer\'s brightness and contrast change its own pictures only: the card, the composer and what is sent are untouched (P6-E)', async () => {
+  await pictured();
+  viewerButton('image:model_input').click();
+  await flush();
+  const range = q($('viewer'), '[data-viewer="brightness"]');
+  range.value = '200';
+  range.dispatchEvent(new ShimEvent('input', { bubbles: true }));
+  assert.equal(q($('viewer'), 'img').style.filter, 'brightness(200%) contrast(100%)');
+  assert.deepEqual(qa(document.body, '[style]').filter((n) => !$('viewer').contains(n) && !n.classList.contains('sim-fill')), []);
+  press(document.activeElement, 'Escape');
+  assert.deepEqual(qa(cardOf(), 'img').map((i) => i.getAttribute('style')), qa(cardOf(), 'img').map(() => null));
+});
+
+test('leaving the chat closes the viewer with it (P6-E)', async () => {
+  const h = await pictured();
+  viewerButton('image:thumb').click();
+  await flush();
+  h.win.location.hash = '#/new';
+  await flush();
+  assert.deepEqual([$('viewer').hidden, $('viewer').children.length, document.body.classList.contains('viewer-open')], [true, 0, false]);
+  assert.equal(document.querySelector('.layout').hasAttribute('inert'), false);
+});
+
+test('a card drawn again while the viewer is open (its turn runs on) gets the focus back on the same control of the new card (P6-E)', async () => {
+  const h = await ready({ options: { models: GALLERY_MODELS } });
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_v');
+  await flush();
+  run.channel.push(...picturedTurn('m_v').slice(0, 5));   // up to the similar X-rays; the turn runs on
+  await flush();
+  nextFrame();
+  const opener = viewerButton('neighbor:1');
+  opener.click();
+  await flush();
+  run.channel.push(stageStartEv('generate', 3), snapEv('Findings: so far.'));   // seq 7 and 8
+  await flush();
+  nextFrame();
+  assert.equal(document.body.contains(opener), false);   // the card was drawn again under the viewer
+  press(document.activeElement, 'Escape');
+  assert.equal(document.activeElement, viewerButton('neighbor:1'));
+  run.channel.push(stopEv('done', { message_id: 'm_v', report: 'Findings: so far.', display_report: 'Findings: so far.' }));
+  run.channel.end();
+  await turn;
 });

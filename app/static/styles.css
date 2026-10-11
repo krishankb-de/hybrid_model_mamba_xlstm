@@ -12,7 +12,8 @@
  * sidebar; a click on its scrim lands on the body), #image-well.dragging, ol.timeline li[data-state] and li.open,
  * .provisional, and the .card and .chip helpers (render.js). app.js builds the rows of #session-list, #exports,
  * #session-more, #notice, #rerun-hint (under the image well), #saved (under the chips), the contents of #drawer (a form that ends in Save)
- * and #health[data-state="down"], styled below.
+ * and #health[data-state="down"], styled below. composer.js builds #preview's thumbnail, line and Remove (P6-A); viewer.js builds the
+ * contents of #viewer (.viewer-*), and sets body.viewer-open, the inert attribute of the page behind it and --viewer-top (P6-E).
  *
  * System fonts only and no url(): the page makes no request but to its own /static/ files.
  */
@@ -632,7 +633,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 #models-section table { table-layout: fixed; }   /* a long checkpoint path wraps in its cell instead of widening the drawer */
 #models-section th { width: 42%; overflow-wrap: anywhere; }
 
-/* ---- viewer: a full-pane overlay under the banner; P6-E fills it ---------------------------------------------- */
+/* ---- viewer: a full-pane overlay under the banner (P6-E, viewer.js) ------------------------------------------- */
 
 #viewer {
   grid-area: 2 / 1 / -1 / -1;
@@ -644,6 +645,43 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   overflow: hidden;
   background: #0b0b0a;   /* dark in both themes: an X-ray is read against a dark ground */
   color: #ece9e1;
+}
+body.viewer-open { overflow: hidden; }   /* where the page scrolls (a short viewport) it stays where it is under the viewer */
+#viewer :focus-visible { outline-color: #e8926f; }   /* the dark ground's accent, in both themes: 8:1 against it */
+.viewer-bar { display: flex; flex: none; align-items: flex-start; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #3e3c38; }
+.viewer-tools { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; }
+#viewer button { min-height: 36px; padding: 4px 10px; border-color: #85827a; background: #2b2a28; color: #ece9e1; }
+#viewer button:hover:not(:disabled) { background: #3e3c38; }
+.viewer-check, .viewer-range { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8125rem; white-space: nowrap; }
+.viewer-check input, .viewer-range input { margin: 0; accent-color: #e8926f; }
+.viewer-range input { width: 112px; }
+.viewer-value { min-width: 3.25em; font-variant-numeric: tabular-nums; }   /* "300%" and "40%" take the same room */
+.viewer-panes { display: flex; flex: 1 1 auto; gap: 2px; min-height: 0; }
+.viewer-pane { display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; margin: 0; }
+.viewer-panes:not([data-linked]) .viewer-pane[data-active] .viewer-stage { box-shadow: inset 0 0 0 2px #e8926f; }   /* unlinked: where the buttons act */
+.viewer-stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; cursor: grab; touch-action: none; user-select: none; }
+.viewer-stage.dragging { cursor: grabbing; }
+.viewer-stage img {   /* at its natural size, drawn where viewer.js puts it (transform) and as bright as the sliders say (filter) */
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: none;
+  height: auto;
+  transform-origin: 0 0;
+}
+.viewer-state { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; padding: 12px; color: #a8a59c; font-size: 0.875rem; text-align: center; }
+.viewer-footer {   /* "Similar X-ray #2 · 320×320 px (stored gallery size)": one line */
+  flex: none;
+  padding: 4px 10px;
+  overflow: hidden;
+  color: #a8a59c;
+  font-size: 0.8125rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 699.98px) {   /* below 700 px the two pictures are stacked, the turn's own on top */
+  .viewer-panes { flex-direction: column; }
 }
 
 /* ---- narrow: one column, the sidebar and the drawer overlay it ------------------------------------------------ */
@@ -704,6 +742,14 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   #conversation, #sidebar, #drawer { min-height: auto; overflow: visible; }
   #composer { overflow: visible; }
   .drawer-actions { position: static; margin: 16px 0 0; padding: 0; border-top: 0; }   /* the page scrolls, and Save is at the end of the form */
+  /* The viewer stays on the screen, under the banner (viewer.js says where the banner ends), and scrolls inside itself: each picture keeps a
+     height of its own, so that its pane and every control can be scrolled to however little room the page has. */
+  #viewer { position: fixed; top: var(--viewer-top, 0px); right: 0; bottom: 0; left: 0; overflow-y: auto; }
+  .viewer-panes, .viewer-stage { flex: none; }
+  .viewer-stage { height: max(120px, 60vh); }
+}
+@media (max-height: 480px) and (max-width: 699.98px) {
+  .viewer-pane { flex: none; }   /* stacked, in a viewer that scrolls: each pane is as tall as its picture and its footer */
 }
 
 /* ---- motion: none for a reader who asked for less ------------------------------------------------------------- */

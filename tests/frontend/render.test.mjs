@@ -1313,21 +1313,28 @@ test('with nothing to show the images row is hidden: no loader, no image, no usa
   assert.deepEqual(qa(failing, 'img').map((i) => [i.hasAttribute('data-failed'), i.getAttribute('src')]), [[true, null], [false, 'blob:ok']]);
 });
 
-test('with ctx.openViewer each picture is a button that opens it: your X-ray at full size, what the model saw at 224 (the hook P6-E fills)', () => {
+test('with ctx.openViewer each picture is a button that opens it in viewer.js: your X-ray at full size, what the model saw (P6-E)', () => {
   const { loadImage } = loader();
   const opened = [];
-  const ctx = { loadImage, openViewer: (spec) => opened.push(spec), turn: 2 };
+  const ctx = { loadImage, openViewer: (spec, opener) => opened.push([spec, opener]), turn: 2 };
   const section = renderImages(viewOf([imageStart(), PREPROCESSED]), ctx);
   const buttons = qa(section, 'button[data-action="view"]');
   assert.deepEqual(buttons.map((b) => b.getAttribute('aria-label')), ['Open your X-ray in the viewer, turn 2', 'Open what the model saw in the viewer, turn 2']);
-  assert.ok(buttons.every((b) => q(b, 'img') && b.getAttribute('type') === 'button'));
+  assert.ok(buttons.every((b) => q(b, 'img') && b.getAttribute('type') === 'button'));   // a button: Enter and Space open it too
   buttons.forEach((b) => b.click());
-  assert.deepEqual(opened, [{ images: [{ url: URLS.original, label: 'Your X-ray · 2544×3056 px' }] },
-                            { images: [{ url: URLS.model_input, label: 'What the model saw (224×224)' }] }]);
+  // A side for viewer.js: the size is the loaded picture's own (ruling 10), so a label is a name; the original, which no card shows, is
+  // transient: the viewer lets go of it when it closes.
+  assert.deepEqual(opened.map(([spec]) => spec), [{ left: { url: URLS.original, label: 'Your X-ray', note: '', transient: true } },
+                                                  { left: { url: URLS.model_input, label: 'What the model saw', note: '', transient: false } }]);
+  assert.deepEqual(opened.map(([, opener]) => opener), buttons);   // and the control it was opened from, for the focus to go back to
   opened.length = 0;
   const pub = renderImages(viewOf([imageStart({ urls: { thumb: URLS.thumb, model_input: URLS.model_input } })]), ctx);
   q(pub, 'button').click();
-  assert.deepEqual(opened, [{ images: [{ url: URLS.thumb, label: 'Your X-ray' }] }]);   // no original in public mode: the thumbnail
+  assert.deepEqual(opened[0][0], { left: { url: URLS.thumb, label: 'Your X-ray', note: '(thumbnail)', transient: false } });   // no original in public mode: what the card shows
+  opened.length = 0;
+  const study = renderImages(viewOf([imageStart({ source: 'test_split', filename: null }), stageEnd('preprocess', 1, { input_px: [320, 320] })]), ctx);
+  q(study, 'button').click();
+  assert.deepEqual(opened[0][0], { left: { url: URLS.original, label: 'Test-split X-ray', note: '(stored gallery size)', transient: true } });   // a 320 px JPEG
 });
 
 test('the card shows the images row after the labels when the page can load images, and is the card it always was without a loader', () => {
@@ -1498,17 +1505,23 @@ test('a neighbour that is the upload itself, byte for byte, says so', () => {
   assert.deepEqual(badges(gridView()), [null, null]);
 });
 
-test('with ctx.openViewer a similar X-ray opens beside your X-ray, the neighbour labelled with the stored gallery size (the P6-E hook)', () => {
+test('with ctx.openViewer a similar X-ray opens beside your X-ray, its note the stored gallery size (P6-E)', () => {
   const { loadImage } = loader();
   const opened = [];
-  const section = renderNeighbors(gridView(), { loadImage, openViewer: (spec) => opened.push(spec), turn: 3 });
+  const section = renderNeighbors(gridView(), { loadImage, openViewer: (spec, opener) => opened.push([spec, opener]), turn: 3 });
   const buttons = qa(section, 'button[data-action="view"]');
   assert.deepEqual(buttons.map((b) => b.getAttribute('aria-label')),
                    ['Open similar X-ray #1 beside your X-ray in the viewer, turn 3', 'Open similar X-ray #2 beside your X-ray in the viewer, turn 3']);
   buttons[0].click();
-  assert.deepEqual(opened, [{ images: [{ url: URLS.original, label: 'Your X-ray · 2544×3056 px' },
-                                       { url: '/v1/gallery/images/101', label: 'Similar X-ray #1 · 320×320 px (stored gallery size)' }] }]);
+  assert.deepEqual(opened, [[{ left: { url: URLS.original, label: 'Your X-ray', note: '', transient: true },
+                               right: { url: '/v1/gallery/images/101', label: 'Similar X-ray #1', note: '(stored gallery size)', transient: false } },
+                             buttons[0]]]);
   assert.equal(qa(section, 'li > button').length, 0);   // the button is inside the figure, not a child of the list item
+  opened.length = 0;
+  const alone = renderNeighbors(viewOf([imageStart({ urls: {} }), stageStart('retrieve', 2), retrieved([neighbour(1)])]), { loadImage, openViewer: (spec) => opened.push(spec) });
+  q(alone, 'button[data-action="view"]').click();   // nothing of the turn's own to set beside it: the similar X-ray alone
+  assert.deepEqual(opened, [{ left: { url: '/v1/gallery/images/101', label: 'Similar X-ray #1', note: '(stored gallery size)', transient: false } }]);
+  assert.equal(q(alone, 'button').getAttribute('aria-label'), 'Open similar X-ray #1 in the viewer');
 });
 
 test('the card puts the similar X-rays after the images row; a skipped retrieve or k 0 leaves the section out', () => {

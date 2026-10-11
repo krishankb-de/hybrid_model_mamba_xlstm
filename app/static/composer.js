@@ -98,7 +98,9 @@ export function attachComposer({ well, input, preview, onChange, onError, doc = 
     doc.addEventListener(t, (e) => { if (Array.from(e.dataTransfer?.types ?? []).includes('Files')) e.preventDefault(); });
   }
   // A paste is the document's, wherever the focus is. Only an image is taken, and only then is the paste the page's: text pastes as text.
+  // A composer made inert (the viewer is open over the page, P6-E) takes none.
   doc.addEventListener('paste', (e) => {
+    if (well.closest?.('[inert]')) return;
     const f = pickImageFromClipboard(e.clipboardData && e.clipboardData.items);
     if (f) { e.preventDefault(); set(f); }
   });

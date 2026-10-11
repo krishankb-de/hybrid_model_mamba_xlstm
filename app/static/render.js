@@ -16,8 +16,9 @@
 // callback hides its control.
 //   loadImage(path) -> Promise<object URL>   api.js loadImage with the page's auth: a user turn's thumbnail, the card's pictures
 //   openViewer(image)                        a click on the thumbnail; image is what renderUserTurn was given. A click on a picture of
-//                                            the card passes { images: [{ url, label }, ...] } instead: one picture, or the query and a
-//                                            match side by side (the viewer is P6-E's; without openViewer a picture is not a control)
+//                                            the card passes viewer.js's { left, right? } instead, each side { url, label, note, transient },
+//                                            and the button it came from: one picture, or the turn's own X-ray and a similar one side by side
+//                                            (P6-E; without openViewer a picture is not a control)
 //   copy(text)                               the report's Copy button; a throw or a rejected promise shows "Copy failed"
 //   showModels()                             the provenance link, which opens /v1/models in the drawer
 //   labelNames: [14 names]                   CHEXBERT_14 order, from /v1/models; else the order of view.labels
@@ -526,22 +527,28 @@ function cardPicture(path, alt, open, spec, cx, key) {
   const img = loadedImage(path, cx, { class: 'picture', alt });
   if (typeof cx.openViewer !== 'function') return img;
   return el('button', { type: 'button', class: 'picture-button', 'data-action': 'view', 'data-key': key, 'aria-label': named(open, cx),
-                        onclick: () => cx.openViewer(spec) }, img);
+                        onclick: (event) => cx.openViewer(spec, event.currentTarget) }, img);   // the opener: where the focus goes back to
 }
 
 // ---- the images row: the turn's own X-ray and what the model saw (P6-B) ---------------------------------------------------
 
 const MODEL_SAW = 'What the model saw (224×224)';
+const GALLERY_NOTE = '(stored gallery size)';   // what the viewer's footer says after a gallery or test-split picture's size: a 320 px JPEG
 
-// The turn's own X-ray: its image URLs, whether it is a test study's, its name, its label ("Your X-ray · 2544×3056 px") and the path the
-// viewer is given, its original where the mode sends one (public mode sends none, app/redact.py), else its thumbnail.
+// The turn's own X-ray: its image URLs, whether it is a test study's, its name, its label ("Your X-ray · 2544×3056 px"), the path the
+// viewer is given, its original where the mode sends one (public mode sends none, app/redact.py), else its thumbnail, and that path as a
+// side of viewer.js (P6-E): the viewer's footer has the pixel size of what it loaded, so the label is a name; a thumbnail says so; and the
+// original, which no card shows, is transient (the viewer lets go of it when it closes).
 function ownXray(v, cx) {
   const image = isObject(v.image) ? v.image : {};
   const urls = isObject(image.urls) ? image.urls : {};
   const study = image.source === 'test_split';
   const name = study ? 'Test-split X-ray' : 'Your X-ray';
   const size = pixelSize(v);
-  return { urls, study, name, label: size ? `${name} · ${size}` : name, full: fetchable(urls.original, cx) ? urls.original : urls.thumb };
+  const original = fetchable(urls.original, cx);
+  const full = original ? urls.original : urls.thumb;
+  const note = study ? GALLERY_NOTE : original ? '' : '(thumbnail)';
+  return { urls, study, name, label: size ? `${name} · ${size}` : name, full, side: { url: full, label: name, note, transient: original } };
 }
 
 // "2544×3056 px", the size preprocess read (after the EXIF orientation), from its detail; '' when it has none to read.
@@ -562,17 +569,16 @@ export function renderImages(view, ctx) {
   const own = ownXray(v, cx);
   const tiles = [
     tile(cardPicture(own.urls.thumb, own.name, own.study ? 'Open the test-split X-ray in the viewer' : 'Open your X-ray in the viewer',
-                     { images: [{ url: own.full, label: own.label }] }, cx, 'image:thumb'), own.label),
+                     { left: own.side }, cx, 'image:thumb'), own.label),
     tile(cardPicture(own.urls.model_input, 'What the model saw', 'Open what the model saw in the viewer',
-                     { images: [{ url: own.urls.model_input, label: MODEL_SAW }] }, cx, 'image:model_input'), MODEL_SAW),
+                     { left: { url: own.urls.model_input, label: 'What the model saw', note: '', transient: false } }, cx, 'image:model_input'),
+         MODEL_SAW),
   ].filter(Boolean);
   return el('section', { class: 'images', 'aria-label': named('Images', cx), hidden: !tiles.length },
     el('h3', { class: 'section-title' }, 'Images'), el('div', { class: 'image-row' }, ...tiles));
 }
 
 // ---- similar X-rays: the gallery's nearest training images, and how many labels each shares with the report (P6-C) --------
-
-const GALLERY_SIZE = '320×320 px (stored gallery size)';
 
 // "#3 · 0.913": a retrieval list's rank and similarity, what public mode keeps of them (U2). A part it lacks is left out.
 const scoreText = (rank, similarity) => [Number.isInteger(rank) ? `#${rank}` : null, isNum(similarity) ? similarity.toFixed(3) : null]
@@ -617,7 +623,8 @@ function neighbourItem(n, i, v, cx, { pub, own, left, identical }) {
   const path = pub ? '' : str(n.image_url);   // public mode: never a gallery image, whatever the detail holds (R1)
   const spoken = `${name.charAt(0).toLowerCase()}${name.slice(1)}`;
   const open = left ? `Open ${spoken} beside ${own.study ? 'the test-split X-ray' : 'your X-ray'} in the viewer` : `Open ${spoken} in the viewer`;
-  const spec = { images: [...(left ? [left] : []), { url: path, label: `${name} · ${GALLERY_SIZE}` }] };
+  const side = { url: path, label: name, note: GALLERY_NOTE, transient: false };   // a card shows it: the viewer leaves it in the page's cache
+  const spec = left ? { left, right: side } : { left: side };
   const picture = (path && cardPicture(path, name, open, spec, cx, `neighbor:${rank ?? i}`))
     || el('div', { class: 'neighbor-placeholder', 'aria-hidden': 'true' });
   return el('li', { class: 'neighbor', 'data-rank': rank },
@@ -639,7 +646,7 @@ export function renderNeighbors(view, ctx) {
   const neighbours = done && Array.isArray(v.neighbors) ? v.neighbors.filter(isObject) : [];
   const pub = v.mode === 'public';
   const own = ownXray(v, cx);
-  const left = fetchable(own.full, cx) ? { url: own.full, label: own.label } : null;
+  const left = fetchable(own.full, cx) ? own.side : null;   // the turn's own X-ray, on the left of the viewer
   const items = neighbours.map((n, i) => neighbourItem(n, i, v, cx, { pub, own, left, identical: identicalRow(v) }));
   return el('section', { class: 'neighbors', 'aria-label': named('Similar X-rays', cx), hidden: !items.length },
     el('h3', { class: 'section-title' }, 'Similar X-rays (13D tower)'),

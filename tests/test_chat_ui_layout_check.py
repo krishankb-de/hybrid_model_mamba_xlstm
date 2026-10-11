@@ -781,6 +781,79 @@ def test_the_composer_cases_are_the_carried_widths_with_the_drawer_open_and_320_
     assert layout.COMPOSER_STATES == ["hint", "preview"] and len(layout.LONG_FILE) > 100 and " " not in layout.LONG_FILE
 
 
+def _viewer(width: int = 1280, height: int = 900, pair: bool = True) -> Dict[str, Any]:
+    """What MEASURE_VIEWER_JS reports for a viewer in order (check l, P6-E): under a 40 px banner, a 50 px bar, then one pane, or two side by
+    side (stacked below 700 px), each picture loaded and drawn whole inside its stage, its footer naming its size, and every control hit at its
+    centre."""
+    top, bar = 40.0, 90.0
+    if pair and width >= 700:
+        boxes = [[0.0, bar, width / 2 - 1, float(height)], [width / 2 + 1, bar, float(width), float(height)]]
+    elif pair:
+        middle = (bar + height) / 2
+        boxes = [[0.0, bar, float(width), middle - 1], [0.0, middle + 1, float(width), float(height)]]
+    else:
+        boxes = [[0.0, bar, float(width), float(height)]]
+    panes = [{"box": b, "stage": [b[0], b[1], b[2], b[3] - 24], "img": {"box": [b[0] + 8, b[1] + 8, b[2] - 8, b[3] - 32], "loaded": True},
+              "footer": "Your X-ray · 512×640 px"} for b in boxes]
+    controls = [{"name": n, "ok": True} for n in ("[out]", "[in]", "[fit]", "[actual]", "[reset]", "[brightness]", "[contrast]", "[close]")]
+    controls += [{"name": "viewer-stage", "ok": True} for _ in boxes]
+    return {"doc": [width, width], "viewer": {"box": [0.0, top, float(width), float(height)], "sw": width, "cw": width}, "panes": panes,
+            "controls": controls}
+
+
+def test_a_viewer_in_order_has_no_failures_single_or_side_by_side():   # P6-E
+    for width, height in ((1280, 900), (800, 568), (375, 812), (320, 568)):
+        for pair in (False, True):
+            assert layout.check_viewer(_viewer(width, height, pair), width, height, pair) == [], (width, height, pair)
+
+
+def test_the_viewer_case_fails_on_overflow_a_control_out_of_reach_or_a_picture_not_drawn():   # P6-E
+    wide = _viewer(320, 568)
+    wide["doc"] = [400, 320]
+    assert any("documentElement overflows horizontally" in f for f in layout.check_viewer(wide, 320, 568, True))
+    inside = _viewer(320, 568)
+    inside["viewer"]["sw"] = 360
+    assert any("#viewer overflows horizontally" in f for f in layout.check_viewer(inside, 320, 568, True))
+    lost = _viewer(320, 568)
+    lost["controls"][7] = {"name": "[close]", "ok": False, "got": "header"}
+    assert any("[close] cannot be reached: its centre hits header" in f for f in layout.check_viewer(lost, 320, 568, True))
+    flat = _viewer(320, 568)
+    flat["panes"][1]["stage"][3] = flat["panes"][1]["stage"][1] + 10   # a stage 10 px tall: no picture to look at
+    assert any("pane 2 is 320x10 px" in f for f in layout.check_viewer(flat, 320, 568, True))
+    blank = _viewer()
+    blank["panes"][0]["img"]["loaded"] = False
+    assert any("pane 1's picture has not loaded" in f for f in layout.check_viewer(blank, 1280, 900, True))
+    spill = _viewer()
+    spill["panes"][0]["img"]["box"][2] += 400   # drawn past its stage: not whole at the fit
+    assert any("pane 1's picture is not whole inside its stage" in f for f in layout.check_viewer(spill, 1280, 900, True))
+    unsized = _viewer()
+    unsized["panes"][1]["footer"] = "Similar X-ray #1"
+    assert any("pane 2's footer gives no pixel size" in f for f in layout.check_viewer(unsized, 1280, 900, True))
+    assert layout.check_viewer(dict(_viewer(), viewer=None), 1280, 900, True) == ["the viewer is not open"]
+    assert any("1 pane(s), not 2" in f for f in layout.check_viewer(_viewer(pair=False), 1280, 900, True))
+
+
+def test_two_pictures_are_side_by_side_from_700_px_and_stacked_below():   # P6-E
+    stacked = _viewer(1280, 900)
+    stacked["panes"] = _viewer(375, 900)["panes"]
+    assert any("side by side at 1280 px" in f for f in layout.check_viewer(stacked, 1280, 900, True))
+    beside = _viewer(375, 812)
+    beside["panes"] = _viewer(1280, 812)["panes"]
+    for pane in beside["panes"]:   # within the 375 px page, as two columns would be
+        pane["box"] = [pane["box"][0] * 375 / 1280, pane["box"][1], pane["box"][2] * 375 / 1280, pane["box"][3]]
+        pane["stage"] = [pane["box"][0], pane["box"][1], pane["box"][2], pane["box"][3] - 24]
+        pane["img"]["box"] = [pane["box"][0] + 4, pane["box"][1] + 8, pane["box"][2] - 4, pane["box"][3] - 32]
+    assert any("stacked below 700 px" in f for f in layout.check_viewer(beside, 375, 812, True))
+
+
+def test_where_the_page_scrolls_a_pane_may_run_below_the_viewport_if_it_can_be_scrolled_to():   # P6-E
+    tall = _viewer(320, 256)
+    tall["panes"][1]["box"][3] = tall["panes"][1]["stage"][3] = 700.0   # under the fold of a viewer that scrolls inside
+    tall["panes"][1]["img"]["box"][3] = 660.0
+    assert layout.check_viewer(tall, 320, 256, True, scroll=True) == []
+    assert any("leaves the viewport" in f for f in layout.check_viewer(tall, 320, 256, True))
+
+
 def test_a_card_section_that_is_missing_wide_or_holds_a_bad_picture_fails():
     first = layout.SECTIONS[0]
     gone = _sections()
@@ -839,6 +912,7 @@ class FakePage:
         self.opened = 0
         self.sections_drawn, self.sections_measured, self.picker_measured = 0, 0, 0
         self.composer_set_up, self.composer_measured = [], 0
+        self.viewers_opened, self.viewer_measured = [], 0
 
     def open(self, url: str, width: int, height: int, scheme: str) -> None:
         self.width, self.height, self.drawer, self.stop = width, height, False, False
@@ -883,6 +957,12 @@ class FakePage:
         if function == layout.MEASURE_COMPOSER_JS:
             self.composer_measured += 1
             return _composer(self.width, self.height, self.state)
+        if function == layout.INJECT_VIEWER_JS:
+            self.viewers_opened.append((self.width, self.height, argument["pair"]))
+            self.pair = argument["pair"]
+        if function == layout.MEASURE_VIEWER_JS:
+            self.viewer_measured += 1
+            return _viewer(self.width, self.height, self.pair)
         return True
 
 
@@ -895,8 +975,9 @@ def test_the_loop_runs_every_case_and_passes_on_a_page_in_order():
                 + viewports * len(layout.SCHEMES)    # P4-G: one more case for each viewport in each scheme, for the Save button
                 + viewports * len(layout.SCHEMES)    # P6-B: and one for the card's own sections
                 + viewports * len(layout.SCHEMES)    # P6 fix 1: and one with the test-split picker open
-                + len(layout.COMPOSER_CASES) * len(layout.SCHEMES) * len(layout.COMPOSER_STATES))   # P6-A: the composer's rows
-    assert cases == expected == 254
+                + len(layout.COMPOSER_CASES) * len(layout.SCHEMES) * len(layout.COMPOSER_STATES)    # P6-A: the composer's rows
+                + viewports * len(layout.SCHEMES) * len(layout.VIEWER_STATES))   # P6-E: the viewer open, one picture and two
+    assert cases == expected == 342
     assert failures == []
     assert page.opened == ((len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)) * len(layout.SCHEMES)
                            + len(layout.TALL_WIDTHS) * len(layout.SCHEMES)
@@ -908,17 +989,20 @@ def test_the_loop_runs_every_case_and_passes_on_a_page_in_order():
     assert {(w, h, drawer, state) for w, h, drawer, state, _ in page.composer_set_up} == {
         (w, h, drawer, state) for w, h, drawer in layout.COMPOSER_CASES for state in layout.COMPOSER_STATES}
     assert {name for *_, name in page.composer_set_up} == {layout.LONG_FILE}   # every case with the long file name
+    assert page.viewer_measured == viewports * len(layout.SCHEMES) * len(layout.VIEWER_STATES)
+    assert {(w, h) for w, h, _ in page.viewers_opened} == {(w, h) for h in layout.HEIGHTS for w in layout.WIDTHS} | set(layout.SHORT_VIEWPORTS)
+    assert sorted({pair for *_, pair in page.viewers_opened}) == [False, True]
 
 
 def test_the_loop_reports_a_stop_button_that_never_renders_in_the_cases_that_show_it():
     cases, failures = layout.run_checks(FakePage(stop_renders=False), "http://x/")
     assert failures and all("#stop is not rendered, but the case shows it" in f and "stop=shown" in f for f in failures)
-    assert cases == 254
+    assert cases == 342
 
 
 def test_the_loop_reports_a_save_button_that_never_renders_in_the_save_cases_only():
     cases, failures = layout.run_checks(FakePage(save_renders=False), "http://x/")
-    assert cases == 254 and len(failures) == len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)   # once per viewport: both schemes fail alike
+    assert cases == 342 and len(failures) == len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)   # once per viewport: both schemes fail alike
     assert all("light+dark" in f and "save" in f and "#drawer-save is not rendered" in f for f in failures), failures
 
 

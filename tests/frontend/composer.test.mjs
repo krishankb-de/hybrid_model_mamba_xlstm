@@ -243,3 +243,13 @@ test('clear() empties the preview, resets the file input and says so; a size tha
   assert.equal(line(p), 'pasted image · 1 KB');
   assert.equal(p.preview.querySelector('img').getAttribute('alt'), 'Preview of pasted image');
 });
+
+test('a composer made inert takes no paste: the viewer over the page has made the page behind it inert (P6-E)', () => {
+  const p = page();
+  p.form.setAttribute('inert', '');
+  const pasted = fire(document.body, 'paste', { clipboardData: clipboard(fileOf('behind.png')) });
+  assert.deepEqual([pasted.defaultPrevented, p.composer.get(), p.preview.hidden], [false, null, true]);
+  p.form.removeAttribute('inert');   // the viewer closed: a paste attaches again
+  assert.equal(fire(document.body, 'paste', { clipboardData: clipboard(fileOf('back.png')) }).defaultPrevented, true);
+  assert.match(line(p), /^back\.png/);
+});

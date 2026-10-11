@@ -288,6 +288,23 @@ def test_the_preview_puts_a_long_name_on_a_line_of_its_own_cut_short_and_keeps_t
     assert re.search(r"display:\s*none", rules["#preview .preview-sep"])
 
 
+def test_the_viewer_stacks_below_700px_holds_the_page_still_and_stays_on_a_short_screen():
+    """P6-E: two panes side by side, stacked below 700 px; the page behind does not scroll while it is open; and where the page scrolls (480
+    px tall or less) the viewer is fixed under the banner and scrolls inside itself, each picture with a height of its own, so that every
+    control can be reached (scripts/chat_ui_layout_check.py, check l, measures it)."""
+    stacked = _media(r"@media\s*\(\s*max-width:\s*699\.98px\s*\)")
+    assert any(h == ".viewer-panes" and re.search(r"flex-direction:\s*column", b) for h, b in stacked)
+    held = " ".join(b for h, b in _stylesheet() if h == "body.viewer-open")
+    assert re.search(r"overflow:\s*hidden", held)
+    short = _media(r"@media\s*\(\s*max-height:\s*480px\s*\)")
+    viewer = " ".join(b for h, b in short if h == "#viewer")
+    for declaration in (r"position:\s*fixed", r"top:\s*var\(--viewer-top", r"overflow-y:\s*auto"):
+        assert re.search(declaration, viewer), declaration
+    assert any(h == ".viewer-stage" and re.search(r"(?<![\w-])height:\s*max\(", b) for h, b in short)
+    both = _media(r"@media\s*\(\s*max-height:\s*480px\s*\)\s*and\s*\(\s*max-width:\s*699\.98px\s*\)")
+    assert any(h == ".viewer-pane" and re.search(r"flex:\s*none", b) for h, b in both)   # stacked in a viewer that scrolls: a pane is its content
+
+
 def test_the_hidden_attribute_beats_display_rules():
     hidden = [b for h, b in _stylesheet() if h == "[hidden]"]   # else `#drawer { display: ... }` would show it
     assert hidden and re.search(r"display:\s*none\s*!important", hidden[0])

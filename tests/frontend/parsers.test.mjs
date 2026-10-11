@@ -824,6 +824,44 @@ test('a refused image fetch rejects with its status, and is remembered until cle
   assert.equal(calls.length, 3);
 });
 
+test('forgetImage lets go of one image: its object URL is revoked and the next load fetches it again; others and refusals are kept (P6-E)', async (t) => {
+  const { forgetImage } = api;   // read off the namespace: a missing export fails this test only
+  assert.equal(typeof forgetImage, 'function', 'api.js exports forgetImage');
+  const { revoked } = stubObjectUrls(t);
+  const gone = envelope('not_found_error', 'The image is no longer stored.');
+  const calls = stubFetch(t, (n, url) => (String(url).endsWith('gone') ? json(gone, 404) : new Response(new Blob(['png']))));
+  const original = '/v1/messages/u1/image?variant=original';
+  const thumb = '/v1/messages/u1/image?variant=thumb';
+  const big = await loadImage(original, {});
+  const small = await loadImage(thumb, {});
+  forgetImage(original);   // the viewer closed: no card shows the original
+  await Promise.resolve();
+  assert.deepEqual(revoked, [big]);   // its object URL, and only its
+  assert.equal(await loadImage(thumb, {}), small);   // what a card shows is still there, with no fetch
+  assert.equal(calls.length, 2);
+  assert.notEqual(await loadImage(original, {}), big);   // asked again (an upload comes back from the browser's own cache)
+  assert.equal(calls.length, 3);
+  await assert.rejects(loadImage('/img/gone', {}), refusedWith(404, gone));
+  forgetImage('/img/gone');   // a refusal stays kept: the next load does not ask again
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(loadImage('/img/gone', {}), refusedWith(404, gone));
+  assert.equal(calls.length, 4);
+  let land;
+  const later = '/img/later';
+  stubFetch(t, () => new Promise((resolve) => { land = () => resolve(new Response(new Blob(['png']))); }));
+  const pending = loadImage(later, {});
+  await Promise.resolve();
+  forgetImage(later);   // let go of while still on its way: revoked once it lands
+  land();
+  const landed = await pending;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(revoked.at(-1), landed);
+  forgetImage('/never/asked');   // nothing held: nothing happens
+  forgetImage(undefined);
+  clearImageCache();
+  assert.equal(new Set(revoked).size, revoked.length);   // and nothing is revoked twice
+});
+
 test('an image whose body is cut off is a failure of the transport: not kept, and marked as the network\'s (P6 fix 1)', async (t) => {
   stubObjectUrls(t);
   let n = 0;

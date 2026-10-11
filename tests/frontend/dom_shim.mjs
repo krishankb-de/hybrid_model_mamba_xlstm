@@ -19,7 +19,9 @@
 // It follows the DOM where a test could tell: append turns a string into a text node and never parses it (so a report
 // that contains markup stays text), and a value that is not a node is made a string, so an `undefined` or `false`
 // that slips into a card shows up as that word. An event that bubbles out of the body reaches the document's own
-// listeners (P6-A: a paste is the document's, wherever the focus is).
+// listeners (P6-A: a paste is the document's, wherever the focus is). An element's style is a small CSSOM (P6-E: the
+// viewer's zoom and filters): a property set on it, by name or with setProperty, is written to the style attribute as a
+// browser shows it, and removeProperty takes it out again.
 //
 // The HTML-string APIs are tripwires: reading or writing them throws, so a renderer that reached for one fails its
 // test instead of passing on a shim that quietly accepts it. serialize(node) is the test's own way to look at markup:
@@ -120,6 +122,43 @@ function classListOf(element) {
     [Symbol.iterator]: () => read()[Symbol.iterator](),
   };
   return list;
+}
+
+// The style of an element as declarations in its style attribute: style.transform = 'x' (camelCase names are written in
+// kebab-case), style.setProperty('--viewer-top', '40px'), style.removeProperty(name), style.getPropertyValue(name).
+function styleOf(element) {
+  const read = () => new Map((element.getAttribute('style') ?? '').split(';').map((d) => d.trim()).filter(Boolean).map((d) => {
+    const i = d.indexOf(':');
+    return [d.slice(0, i).trim(), d.slice(i + 1).trim()];
+  }));
+  const write = (declarations) => {
+    const text = [...declarations].map(([k, v]) => `${k}: ${v}`).join('; ');
+    if (text) element.setAttribute('style', text); else element.removeAttribute('style');
+  };
+  const kebab = (name) => (name.startsWith('--') ? name : name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`));
+  const css = {
+    setProperty(name, value) {
+      const declarations = read();
+      if (value === '' || value == null) declarations.delete(kebab(name)); else declarations.set(kebab(name), String(value));
+      write(declarations);
+    },
+    removeProperty(name) {
+      const declarations = read();
+      const old = declarations.get(kebab(name)) ?? '';
+      declarations.delete(kebab(name));
+      write(declarations);
+      return old;
+    },
+    getPropertyValue: (name) => read().get(kebab(name)) ?? '',
+  };
+  return new Proxy(css, {
+    get: (target, prop) => (prop in target ? target[prop] : typeof prop === 'string' ? (read().get(kebab(prop)) ?? '') : undefined),
+    set: (target, prop, value) => {
+      if (typeof prop !== 'string' || prop in target) return false;
+      target.setProperty(prop, value);
+      return true;
+    },
+  });
 }
 
 // ---- selectors -----------------------------------------------------------------------------------------------------
@@ -242,6 +281,7 @@ class ShimElement extends ShimNode {
   }
   get id() { return this.getAttribute('id') ?? ''; }
   get className() { return this.getAttribute('class') ?? ''; }
+  get style() { if (!this.cssom) this.cssom = styleOf(this); return this.cssom; }
   get hidden() { return this.hasAttribute('hidden'); }
   set hidden(on) { if (on) this.setAttribute('hidden', ''); else this.removeAttribute('hidden'); }
   get disabled() { return this.hasAttribute('disabled'); }

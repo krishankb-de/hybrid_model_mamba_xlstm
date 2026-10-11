@@ -31,6 +31,11 @@ page); six chips and a 140-character unbroken word are injected, and Stop is sho
      the other the image preview (P6-A's, made by the page from a pasted file), as the page shows one or the other: the row is rendered
      inside the composer, the other is not, nothing overflows horizontally, the report keeps its 120 px, and Send lies inside the
      composer's box and the viewport with nothing scrolled (never below the composer's fold), its centre hitting it
+  l  (P6-E, two more cases for every viewport in every scheme) the image viewer open, with one picture and with two: neither the page nor
+     the viewer overflows horizontally, the viewer lies inside the viewport's width, each pane's picture has loaded and is drawn whole
+     inside its stage, each stage is at least 40 px each way, each footer gives its picture's pixel size, two panes are side by side from
+     700 px and stacked below, and every control of the viewer (its buttons, sliders, its link switch and each stage) can be reached: once
+     scrolled into view (the viewer scrolls inside itself where the page is short), its centre hits it
 
 On the short viewports, where the page scrolls instead (667x375, 320x256), c and d give way to: the report keeps its
 natural height (no scroller of its own, at least 120 px), the composer is not capped, the banner stays at the top of
@@ -85,6 +90,9 @@ PICKER_STUDIES = 60        # check j's list: more studies than the list shows, s
 COMPOSER_CASES = [(801, 568, True), (801, 650, True), (820, 568, True), (820, 650, True), (834, 568, True), (320, 568, False), (320, 568, True)]
 COMPOSER_STATES = ["hint", "preview"]   # the page shows the re-run hint only with no image attached, and the preview only with one
 LONG_FILE = "chest_xray_" + "a1b2c3d4" * 11 + ".png"   # 103 characters with no space: the widest name a row must take
+VIEWER_STATES = ["single", "pair"]   # check l (P6-E): the viewer with one picture, and with the turn's X-ray beside a similar one
+MIN_STAGE_PX = 40                    # a pane's picture area, each way: something to look at
+STACK_BELOW_PX = 700                 # below this width the two panes are stacked
 
 
 def section_events() -> List[Dict[str, Any]]:
@@ -468,6 +476,101 @@ def check_composer(m: Dict[str, Any], width: int, height: int, state: str) -> Li
     return failures
 
 
+# Check l (P6-E): the page's own viewer.js opened over the page with generated pictures (data: URLs, so nothing is fetched): a 512x640 one, and
+# a 320x320 one beside it. It resolves once each picture has decoded and the viewer has drawn it.
+INJECT_VIEWER_JS = """async (args) => {
+  const viewer = await import('/static/viewer.js');
+  if (window.__layoutViewer) window.__layoutViewer.close({ restore: false });
+  const picture = (w, h, shade) => {
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const g = c.getContext('2d');
+    g.fillStyle = shade;
+    g.fillRect(0, 0, w, h);
+    g.fillStyle = '#dddddd';
+    g.fillRect(w / 4, h / 4, w / 2, h / 2);
+    return c.toDataURL('image/png');
+  };
+  const left = { url: picture(512, 640, '#555555'), label: 'Your X-ray', note: '' };
+  const right = { url: picture(320, 320, '#333333'), label: 'Similar X-ray #1', note: '(stored gallery size)' };
+  window.__layoutViewer = viewer.openViewer(args.pair ? { left, right } : { left }, { root: document.querySelector('#viewer'), document, window });
+  const imgs = [...document.querySelectorAll('#viewer img')];
+  for (let i = 0; i < 50 && imgs.some((img) => !img.complete || !img.naturalWidth); i++) await new Promise((r) => setTimeout(r, 10));
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  return imgs.length === (args.pair ? 2 : 1) && imgs.every((img) => img.naturalWidth > 0);
+}"""
+
+MEASURE_VIEWER_JS = """() => {
+  const q = (s) => document.querySelector(s);
+  const doc = document.documentElement, viewer = q('#viewer');
+  const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+  const name = (e) => !e ? null : e.id ? '#' + e.id : e.getAttribute('data-viewer') ? '[' + e.getAttribute('data-viewer') + ']'
+    : (e.getAttribute('class') || e.tagName.toLowerCase());
+  if (viewer.hidden) return { doc: [doc.scrollWidth, doc.clientWidth], viewer: null, panes: [], controls: [] };
+  viewer.scrollTop = 0;
+  const panes = [...viewer.querySelectorAll('.viewer-pane')].map((p) => {
+    const img = p.querySelector('img');
+    return { box: box(p), stage: box(p.querySelector('.viewer-stage')), img: { box: box(img), loaded: img.complete && img.naturalWidth > 0 },
+             footer: p.querySelector('figcaption').textContent };
+  });
+  const controls = [...viewer.querySelectorAll('button, input, [tabindex]')].map((c) => {
+    c.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const b = box(c), x = (b[0] + b[2]) / 2, y = (b[1] + b[3]) / 2, top = document.elementFromPoint(x, y);
+    return { name: name(c), ok: !!top && (top === c || c.contains(top)), got: name(top) };
+  });
+  viewer.scrollTop = 0;
+  return { doc: [doc.scrollWidth, doc.clientWidth], viewer: { box: box(viewer), sw: viewer.scrollWidth, cw: viewer.clientWidth }, panes, controls };
+}"""
+
+
+def check_viewer(m: Dict[str, Any], width: int, height: int, pair: bool, scroll: bool = False) -> List[str]:
+    """The failures in one measurement of the open viewer (check l): no horizontal overflow, the viewer inside the viewport's width, a pane per
+    picture, each picture loaded and whole inside its stage, each stage big enough to look at and inside the viewer (and the viewport, where
+    the page does not scroll: there the viewer scrolls inside itself, and a pane below its fold is fine if it can be scrolled to), each footer
+    with its pixel size, two panes side by side from 700 px and stacked below, and every control reachable."""
+    failures = []
+    if m["doc"][0] > m["doc"][1]:
+        failures.append("documentElement overflows horizontally: scrollWidth {} > clientWidth {}".format(*m["doc"]))
+    viewer = m["viewer"]
+    if viewer is None:
+        return failures + ["the viewer is not open"]
+    if viewer["sw"] > viewer["cw"]:
+        failures.append("#viewer overflows horizontally: scrollWidth {} > clientWidth {}".format(viewer["sw"], viewer["cw"]))
+    vbox = viewer["box"]
+    if vbox[0] < -0.5 or vbox[2] > width + 0.5:
+        failures.append("#viewer leaves the viewport's width: left {:.0f}, right {:.0f}, viewport {}".format(vbox[0], vbox[2], width))
+    panes = m["panes"]
+    if len(panes) != (2 if pair else 1):
+        failures.append("{} pane(s), not {}".format(len(panes), 2 if pair else 1))
+    for n, pane in enumerate(panes, start=1):
+        stage, img = pane["stage"], pane["img"]
+        w, h = stage[2] - stage[0], stage[3] - stage[1]
+        if w < MIN_STAGE_PX - 0.5 or h < MIN_STAGE_PX - 0.5:
+            failures.append("pane {} is {:.0f}x{:.0f} px, under {} px each way".format(n, w, h, MIN_STAGE_PX))
+        if stage[0] < vbox[0] - 0.5 or stage[2] > vbox[2] + 0.5:
+            failures.append("pane {} leaves the viewer's width".format(n))
+        if not scroll and (stage[1] < -0.5 or stage[3] > height + 0.5):
+            failures.append("pane {} leaves the viewport: top {:.0f}, bottom {:.0f}, viewport {}".format(n, stage[1], stage[3], height))
+        if not img["loaded"]:
+            failures.append("pane {}'s picture has not loaded".format(n))
+        elif img["box"][0] < stage[0] - 1 or img["box"][1] < stage[1] - 1 or img["box"][2] > stage[2] + 1 or img["box"][3] > stage[3] + 1:
+            failures.append("pane {}'s picture is not whole inside its stage at the fit: {} in {}".format(
+                n, [round(v) for v in img["box"]], [round(v) for v in stage]))
+        if " px" not in pane["footer"]:
+            failures.append("pane {}'s footer gives no pixel size: {!r}".format(n, pane["footer"]))
+    if pair and len(panes) == 2:
+        a, b = panes[0]["box"], panes[1]["box"]
+        if width >= STACK_BELOW_PX and not (b[0] >= a[2] - 1 and abs(b[1] - a[1]) <= 1):
+            failures.append("the two panes are not side by side at {} px".format(width))
+        if width < STACK_BELOW_PX and not (b[1] >= a[3] - 1 and abs(b[0] - a[0]) <= 1):
+            failures.append("the two panes are not stacked below 700 px ({} px)".format(width))
+    for control in m["controls"]:
+        if not control["ok"]:
+            failures.append("{} cannot be reached: its centre hits {}".format(control["name"], control.get("got") or "nothing"))
+    return failures
+
+
 def check_picker(m: Dict[str, Any], width: int, height: int, scroll: bool = False) -> List[str]:
     """The failures in a page whose test-split picker is open (check j): no horizontal overflow; the button and the list rendered inside the
     viewport's width, the list inside its height too where the composer is pinned rather than scrolled with the page, and the button reachable
@@ -609,9 +712,9 @@ def check_tall(m: Dict[str, Any], height: int) -> List[str]:
 
 def run_checks(browser: Browser, url: str) -> Tuple[int, List[str]]:
     """Every viewport in every scheme, drawer closed and open, Stop hidden and shown. A case is a viewport in a scheme
-    with the drawer closed or open, or (one case each) its Save button and its card sections in both drawer states, and its picker open,
-    or (P6-A) one state of the composer's rows at a composer case's viewport. -> (cases, failures); a failure seen in both schemes is
-    reported once."""
+    with the drawer closed or open, or (one case each) its Save button and its card sections in both drawer states, its picker open, and
+    (P6-E) the viewer open with one picture and with two, or (P6-A) one state of the composer's rows at a composer case's viewport.
+    -> (cases, failures); a failure seen in both schemes is reported once."""
     cases = 0
     seen = {}   # type: Dict[Tuple[str, str, str], List[str]]   # (viewport, state, failure) -> schemes
     viewports = [(w, h, False) for h in HEIGHTS for w in WIDTHS] + [(w, h, True) for w, h in SHORT_VIEWPORTS]
@@ -650,6 +753,15 @@ def run_checks(browser: Browser, url: str) -> Tuple[int, List[str]]:
             browser.run(INJECT_PICKER_JS, {"studies": PICKER_STUDIES})
             for failure in check_picker(browser.run(MEASURE_PICKER_JS, None), width, height, scroll):
                 seen.setdefault(("{}x{}".format(width, height), "picker open", failure), []).append(scheme)
+            for state in VIEWER_STATES:   # the viewer open over it all (P6-E), with one picture and with two
+                cases += 1
+                pair = state == "pair"
+                where = ("{}x{}".format(width, height), "viewer {}".format(state))
+                if not browser.run(INJECT_VIEWER_JS, {"pair": pair}):
+                    seen.setdefault(where + ("the viewer did not open with its pictures",), []).append(scheme)
+                    continue
+                for failure in check_viewer(browser.run(MEASURE_VIEWER_JS, None), width, height, pair, scroll):
+                    seen.setdefault(where + (failure,), []).append(scheme)
     for width, height, drawer in COMPOSER_CASES:   # the composer's rows where its column is narrowest (P6-A)
         for scheme in SCHEMES:
             serial += 1

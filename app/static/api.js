@@ -235,3 +235,18 @@ export function clearImageCache() {
   objectUrls.clear();
   images.clear();
 }
+
+// Lets go of one image (P6-E): its object URL is revoked and the next loadImage of it fetches it again (an upload comes back from the
+// browser's own cache: the server sends it private, max-age=3600). The viewer does this, when it closes, for the full-size original that no
+// card shows, so that it is not held for the rest of the chat. A refusal stays kept, as loadImage keeps it; an image still on its way is let
+// go of once it lands; a path the cache does not hold is left alone.
+export function forgetImage(url) {
+  const loading = images.get(url);
+  if (!loading) return;
+  images.delete(url);
+  loading.then((objectUrl) => {
+    if (objectUrls.delete(objectUrl)) URL.revokeObjectURL(objectUrl);
+  }, (err) => {
+    if (err?.transport !== true && !images.has(url)) images.set(url, loading);   // a refusal stays kept
+  });
+}
