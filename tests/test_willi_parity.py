@@ -9127,6 +9127,276 @@ def test_the_realturn_probe_keeps_nothing_of_a_frame_but_numbers_booleans_and_fi
             assert isinstance(parent, ast.Call) and ast.unparse(parent.func) == "type", ast.unparse(handler) + " uses " + handler.name
 
 
+# ── CHAT_UI_PLAN.md P7-E: the requeue drill ───────────────────────────────────
+# Static pins on scripts/chat_requeue_drill.py, the drill the laptop runs against the cluster's live server through the tunnel: it sends one turn, has
+# the job requeued while the turn runs, and prints numbers only because that server streams MIMIC-derived text (R7). Its behaviour (the line, the exit
+# statuses, the refusals, the fixed codes, the sentinel, both signals against a real server process) is run for real in tests/test_chat_requeue_drill.py.
+# These pins hold what a later edit could break without a test noticing: what it imports, where its token comes from, the one class that touches the
+# cluster and the two commands it may build, the ports it never names, and what can reach its two output streams.
+
+_REQUEUE = REPO_ROOT / "scripts" / "chat_requeue_drill.py"
+
+
+def _requeue_tree():
+    """-> (the script's syntax tree, a map from each node to its parent)."""
+    tree = ast.parse(_REQUEUE.read_text(encoding="utf-8"))
+    return tree, {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+
+def _requeue_docstrings(tree):
+    """The constant nodes that are the docstrings of the module, its classes and its functions."""
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                found.add(first.value)
+    return found
+
+
+def _requeue_assigned(node, target):
+    """Every Assign in `node` that sets `target` (a dotted name, alone or in a tuple): -> the unparsed values."""
+    values = []
+    for found in ast.walk(node):
+        if isinstance(found, ast.Assign):
+            names = [t for t in found.targets for t in (t.elts if isinstance(t, ast.Tuple) else [t])]
+            if any(ast.unparse(t) == target for t in names):
+                values.append(ast.unparse(found.value))
+    return values
+
+
+def test_the_requeue_drill_imports_httpx_the_standard_library_and_the_drill_and_the_probe_beside_it_and_nothing_else():
+    """P7-E. Like the drill and the probe it runs on the laptop, in the venv, beside the tunnel, with the server's code absent: httpx and the standard
+    library, no other HTTP client, nothing of the app or the model stack, and of its own repository only the load drill and the probe, whose helpers
+    it imports (the URL check, the token, the cleartext guard, the picture, the one write, the session calls, the stream reader, the fixed words).
+    `subprocess` is the one import the others do not have: the real cluster runs ssh with it, in one class (the next pin). One httpx client is made, in
+    main, which goes straight to the URL it was given (no proxy named in the environment, no redirect, no connection kept alive); httpx's module-level
+    functions build a client of their own with the defaults, so none is called."""
+    if not hasattr(sys, "stdlib_module_names"):
+        pytest.skip("sys.stdlib_module_names needs Python 3.10")
+    roots, first_party = _imports_of(_REQUEUE)
+    allowed = {"argparse", "json", "os", "re", "subprocess", "sys", "threading", "time", "dataclasses", "typing", "httpx", "scripts"}
+    assert roots <= allowed, sorted(roots - allowed)
+    assert roots - {"httpx", "scripts"} <= set(sys.stdlib_module_names)
+    assert not first_party and not roots & {"app", "tests", "hybrid_xmamba", "torch", "numpy", "PIL"}, sorted(roots)
+    stdlib_http = {"urllib", "http", "socket", "ssl", "ftplib", "smtplib", "xmlrpc", "asyncio", "selectors", "socketserver", "wsgiref", "logging",
+                   "traceback", "pickle", "shutil", "tempfile", "pathlib", "io", "pprint"}
+    assert not roots & stdlib_http, sorted(roots & stdlib_http)
+    tree, parents = _requeue_tree()
+    from_scripts = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "scripts"]
+    assert sorted([(a.name, a.asname) for a in n.names] for n in from_scripts) == [[("chat_load_drill", "drill")], [("chat_realturn_probe", "probe")]], \
+        "the drill and the probe, and no other script"
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Import) and any(a.name.split(".")[0] == "scripts" for a in n.names)]
+    clients = _probe_calls(tree, "httpx.Client")
+    assert len(clients) == 1 and _probe_outer(clients[0], parents) == "main", "one client, for everything it sends"
+    settings = {k.arg: ast.unparse(k.value) for k in clients[0].keywords}
+    assert settings["trust_env"] == "False" and settings["follow_redirects"] == "False", settings
+    assert settings["limits"] == "httpx.Limits(max_keepalive_connections=0)", "a poll never reuses a connection the old server left in the pool"
+    functions = {"httpx." + name for name in ("get", "post", "put", "patch", "delete", "head", "options", "request", "stream")}
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) in functions]
+    # the one use of os is the path arithmetic that puts the repository's root on sys.path; sys is the path, the two streams and the exit status
+    assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "os"} == {"path"}
+    assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and ast.unparse(n.value) == "os.path"} == {"dirname", "abspath"}
+    assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "sys"} == {
+        "path", "stdout", "stderr", "exit"}
+
+
+def test_the_requeue_drill_reads_its_token_only_through_the_drills_find_token_from_chat_token_or_a_token_file():
+    """P7-E. A token on the command line shows in `ps` and in the shell history. The drill reads no environment variable and no argument itself: the
+    one read of the token is the load drill's find_token, which takes CHAT_TOKEN or the file named by --token-file (the one option that names a
+    token); the one positional is the URL; the parser takes no abbreviation (`--token abc` must not become `--token-file abc`); the URL goes through the
+    drill's check (the dev server's port refused), and a token is not sent over plain http to a host that is not loopback: that refusal is raised in
+    main, on exactly that condition, before the client that would send it is built. The URL must also be a loopback address, which is checked there
+    as well. The bearer is made in main from the token, and the client id is fixed."""
+    tree, parents = _requeue_tree()
+    assert _drill_constants(tree).get("CLIENT_ID") == "chat-requeue-drill"
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in ("environ", "environb", "getenv", "argv")]
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module in ("os", "sys")]
+    assert not _probe_calls(tree, "drill.read_token") and not _drill_calls(tree, "read_token")
+    finds = _probe_calls(tree, "drill.find_token")
+    assert len(finds) == 1 and ast.unparse(finds[0].args[0]) == "args.token_file" and _probe_outer(finds[0], parents) == "main"
+    checks = _probe_calls(tree, "drill.check_url")
+    assert len(checks) == 1 and ast.unparse(checks[0].args[0]) == "args.url" and _probe_outer(checks[0], parents) == "main"
+    adds = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "add_argument"]
+    added = [[a.value for a in n.args if isinstance(a, ast.Constant) and isinstance(a.value, str)] for n in adds]
+    assert [names[0] for names in added if not names[0].startswith("-")] == ["url"], "no positional but the URL"
+    assert sorted(name for names in added for name in names if name.startswith("-")) == sorted(
+        ["--job", "--token-file", "--wait", "-h", "--help"]), "the only option that takes a token is --token-file"
+    assert not [k for call in adds for k in call.keywords if k.arg == "dest"], "no option under another name"
+    parsers = _probe_calls(tree, "drill._Parser")
+    assert len(parsers) == 1 and [k.value.value for k in parsers[0].keywords if k.arg == "allow_abbrev"] == [False]
+    guards = [n for n in _probe_calls(tree, "drill.Refused") if n.args and ast.unparse(n.args[0]) == "drill.CLEARTEXT_REFUSAL"]
+    assert len(guards) == 1 and _probe_outer(guards[0], parents) == "main", "one guard, in main"
+    guard = parents[parents[guards[0]]]                   # Refused(...) <- raise <- if
+    assert isinstance(guard, ast.If) and ast.unparse(guard.test) == "token is not None and drill.sends_token_in_clear(base)"
+    loopback = [n for n in _probe_calls(tree, "drill.Refused") if n.args and ast.unparse(n.args[0]) == "LOOPBACK_REFUSAL"]
+    assert len(loopback) == 1 and _probe_outer(loopback[0], parents) == "main"
+    where = parents[parents[loopback[0]]]
+    assert isinstance(where, ast.If) and ast.unparse(where.test) == "not drill.is_loopback(httpx.URL(base).host)"
+    clients = _probe_calls(tree, "httpx.Client")
+    assert len(clients) == 1 and guards[0].lineno < loopback[0].lineno < clients[0].lineno, "both refusals come before the client exists"
+    bearers = [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.startswith("Bearer")]
+    assert len(bearers) == 1 and _probe_outer(bearers[0], parents) == "main" and ast.unparse(parents[bearers[0]]) == "'Bearer ' + token"
+    headers = [n for n in ast.walk(tree) if isinstance(n, ast.Dict) and any(isinstance(k, ast.Constant) and k.value == "X-Client-Id" for k in n.keys)]
+    assert len(headers) == 1 and ast.unparse(headers[0]) == "{'X-Client-Id': CLIENT_ID}", "the client id is fixed"
+
+
+def test_the_requeue_drill_names_ssh_and_starts_a_process_in_one_class_and_builds_exactly_two_commands():
+    """P7-E. The cluster is injected. The one class that touches it, SshCluster, is the only place in the script where ssh, the scheduler's commands or
+    `subprocess` appear (a docstring aside); it runs one `subprocess.run` with an argument list, no shell, nothing on stdin and a time limit; and the
+    argument lists it builds are exactly the two the plan allows: `squeue -j JOB -h -o %N` and `scontrol requeue JOB` behind `ssh -o BatchMode=yes
+    hpi-hpc`. The drill's own code asks the cluster for the node in one function and requeues once, after the third delta, and the real cluster is made in main,
+    as the default of the argument."""
+    tree, parents = _requeue_tree()
+    docstrings = _requeue_docstrings(tree)
+    cluster = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "SshCluster")
+    inside = set(ast.walk(cluster))
+    words = ("ssh", "squeue", "scontrol", "sbatch", "scancel", "sacct")
+    strings = [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str) and n not in docstrings]
+    assert not [n.value for n in strings if any(w in n.value.lower() for w in words) and n not in inside], "ssh and the scheduler are named in SshCluster only"
+    assert _drill_constants(tree)["CLUSTER_HOST"] == "hpi-hpc"
+    uses = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == "subprocess"]
+    assert uses and all(n in inside for n in uses), "subprocess is used in SshCluster only"
+    runs = _probe_calls(tree, "subprocess.run")
+    assert len(runs) == 1 and _probe_outer(runs[0], parents) == "_run" and [ast.unparse(a) for a in runs[0].args] == ["argv"]
+    assert {k.arg: ast.unparse(k.value) for k in runs[0].keywords} == {
+        "stdin": "subprocess.DEVNULL", "capture_output": "True", "text": "True", "errors": "'replace'", "timeout": "SSH_TIMEOUT_S"}, "no shell, no input"
+    assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "subprocess"} == {
+        "run", "DEVNULL", "TimeoutExpired"}, "no Popen, no check_output, no other way to start a process"
+    lists = [n for n in ast.walk(tree) if isinstance(n, ast.List) and n.elts and isinstance(n.elts[0], ast.Constant) and n.elts[0].value == "ssh"]
+    assert sorted(ast.unparse(n) for n in lists) == sorted(_normalized(shape) for shape in (
+        '["ssh", "-o", "BatchMode=yes", CLUSTER_HOST, "squeue", "-j", job, "-h", "-o", "%N"]',
+        '["ssh", "-o", "BatchMode=yes", CLUSTER_HOST, "scontrol", "requeue", job]')), "the two commands, and no third"
+    assert sorted(_probe_outer(n, parents) for n in lists) == ["node", "requeue"]
+    raised = [n for n in ast.walk(cluster) if isinstance(n, ast.Call) and ast.unparse(n.func) == "ClusterError"]
+    assert sorted(ast.unparse(n.args[0]) for n in raised) == sorted(repr(w) for w in ("bad_job", "timeout", "not_run", "failed")), "fixed words only"
+    made = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == "SshCluster"]
+    assert len(made) == 1 and _probe_outer(made[0], parents) == "main" and ast.unparse(parents[made[0]]) == "SshCluster() if cluster is None else cluster"
+    asked = _probe_calls(tree, "cluster.node")
+    assert [_probe_outer(n, parents) for n in asked] == ["ask_node"], "the node is asked for in one function"
+    requeued = _probe_calls(tree, "cluster.requeue")
+    assert [_probe_outer(n, parents) for n in requeued] == ["run_drill"] and len(requeued) == 1, "one requeue"
+    drill_fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run_drill")
+    waits = _probe_calls(drill_fn, "reader.enough.wait")
+    enough = [n for n in ast.walk(drill_fn) if isinstance(n, ast.If) and ast.unparse(n.test) == "reader.stream.deltas < MIN_DELTAS"]
+    nodes = [n for n in ast.walk(drill_fn) if isinstance(n, ast.Call) and ast.unparse(n.func) == "ask_node"]
+    sessions = _probe_calls(drill_fn, "drill.create_session")
+    assert len(waits) == len(enough) == len(sessions) == 1 and len(nodes) == 2
+    assert nodes[0].lineno < sessions[0].lineno < waits[0].lineno < enough[0].lineno < requeued[0].lineno < nodes[1].lineno, \
+        "the node, the session and the turn, three deltas, the requeue, the node again"
+    assert isinstance(enough[0].body[-1], ast.Return), "a turn that has not streamed three deltas is not interrupted"
+
+
+def test_the_requeue_drill_never_says_either_of_the_ports_of_the_users_own_servers():
+    """P7-E. 8000 is the dev server's and 8010 the controller's tunnel (app/README.md). The drill is the load drill's own in what it refuses (the URL check
+    refuses the first), and no number or address of either is written anywhere in it: not in a constant, not in a message, not in the docstring."""
+    source = _REQUEUE.read_text(encoding="utf-8")
+    assert not re.search(r"\b(8000|8010)\b", source)
+    tree, _ = _requeue_tree()
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value in (8000, 8010)]
+    plain = {t.id: ast.unparse(n.value) for n in tree.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)}
+    assert plain["MODEL"] == "probe.PUBLISHED_MODEL" and plain["MAX_NEW_TOKENS"] == "200" and plain["MIN_DELTAS"] == "3"
+    assert plain["POLL_S"] == "5.0" and plain["DEFAULT_WAIT_S"] == "1800.0" and plain["DELTA"] == "'content_block_delta'"
+    options = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "turn_options")
+    assert [ast.unparse(r.value) for r in ast.walk(options) if isinstance(r, ast.Return)] == ["probe.turn_options(model=MODEL, max_new_tokens=MAX_NEW_TOKENS)"]
+
+
+def test_the_requeue_drill_prints_and_writes_nothing_but_result_lines_help_and_its_fixed_refusals():
+    """P7-E, R7. No print, no logging, no traceback, no file opened or written: every write is the load drill's one `_write`, and it has three callers in
+    main: the help text, a refusal (`ERROR ` and the text of a Refused, which is fixed) and the RESULT line, made by the probe's result_line out of the
+    payload that `payload` built from the drill's findings. json.dumps is called for the options a turn sends (a dict the script built), and in no
+    other place."""
+    tree, parents = _requeue_tree()
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id in ("print", "open", "breakpoint", "exec", "eval", "input", "compile", "__import__")]
+    writers = {"write", "writelines", "write_text", "write_bytes", "dump", "flush", "truncate", "mkdir", "unlink", "rename"}
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in writers], "its own writes are the load drill's, through one call"
+    sinks = _probe_calls(tree, "drill._write")
+    assert {_probe_outer(s, parents) for s in sinks} == {"main"}
+    assert sorted((ast.unparse(s.args[0]), ast.unparse(s.args[1])) for s in sinks) == sorted((stream, _normalized(shape)) for stream, shape in (
+        ("stderr", '"ERROR " + str(exc)'), ("stdout", 'parser.format_help().rstrip("\\n")'), ("stdout", "probe.result_line(result)")))
+    refusal = next(s for s in sinks if ast.unparse(s.args[1]) == _normalized('"ERROR " + str(exc)'))
+    handler = parents[refusal]
+    while not isinstance(handler, ast.ExceptHandler):
+        handler = parents[handler]
+    assert ast.unparse(handler.type) == "drill.Refused" and handler.name == "exc", "the text of a refusal is that of a Refused"
+    texts = [n.args[0] for n in _probe_calls(tree, "drill.Refused")]
+    assert sorted(ast.unparse(t) for t in texts) == sorted(["drill.URL_MISSING", "JOB_MISSING", "drill.CLEARTEXT_REFUSAL", "LOOPBACK_REFUSAL"]), \
+        "the text of a refusal is written in a constant, here or in the load drill"
+    assert _requeue_assigned(next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main"), "result") == ["payload(run)"]
+    dumps = _probe_calls(tree, "json.dumps")
+    assert [_probe_outer(n, parents) for n in dumps] == ["_read"] and [ast.unparse(n.args[0]) for n in dumps] == ["turn_options()"]
+    streams = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "sys"
+               and n.attr in ("stdout", "stderr")]
+    assert {_probe_outer(n, parents) for n in streams} == {"main"} and len(streams) == 2, "the process's own streams are main's defaults"
+
+
+def test_the_requeue_drill_keeps_nothing_of_a_frame_or_an_answer_but_names_counts_and_fixed_words_and_names_exceptions_by_class():
+    """P7-E, R7. The data of a frame is parsed in one place, `error_kind`, for an `error` event's kind, which leaves it as a word of the probe's list or
+    `unknown`; the data of a delta, which holds a snapshot of the report, is never parsed. Every answer is read through the load drill's one JSON reader,
+    in two places, and what is kept of it is a status, the name of an event, an error's kind (each from a closed list by the probe's `_word`) and a count.
+    What the stream, the stored turn and the drill hold is typed as numbers, booleans and words, every word put into them is chosen from a fixed list or
+    written in the script, and the text of an exception is never used: every handler but the ones of Refused and DrillError, whose texts are written in the
+    load drill, names its class."""
+    tree, parents = _requeue_tree()
+    functions = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    assert [_probe_outer(n, parents) for n in _probe_calls(tree, "json.loads")] == ["error_kind"]
+    assert sorted(ast.unparse(r.value) for r in ast.walk(functions["error_kind"]) if isinstance(r, ast.Return)) == sorted([
+        "'unknown'", _normalized("probe._word(error.get('type') if isinstance(error, dict) else None, probe.ERROR_KINDS)")])
+    frames = _probe_calls(tree, "probe.frames")
+    assert [_probe_outer(n, parents) for n in frames] == ["count_frames"]
+    uses = [n for n in ast.walk(functions["count_frames"]) if isinstance(n, ast.Name) and n.id == "text"]
+    assert [ast.unparse(parents[n]) for n in uses if isinstance(n.ctx, ast.Load)] == ["error_kind(text)"], "a frame's data goes to error_kind and nowhere else"
+    assert sorted(_probe_outer(n, parents) for n in _probe_calls(tree, "drill._json_or_none")) == ["read_health", "read_stored"]
+    safe = {"int", "bool", "Optional[int]", "Optional[float]", "Optional[bool]", "Optional[str]", "Stream", "Stored"}
+    for name in ("Stream", "Stored", "Drill"):
+        fields = {s.target.id: ast.unparse(s.annotation) for s in next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == name).body
+                  if isinstance(s, ast.AnnAssign)}
+        assert fields and set(fields.values()) <= safe, {k: v for k, v in fields.items() if v not in safe}
+    words = lambda owner, field: sorted(v for fn in functions.values() for v in _requeue_assigned(fn, owner + "." + field))   # noqa: E731
+    assert sorted(words("stream", "end") + words("self.stream", "end")) == sorted(_normalized(s) for s in (
+        '"timeout"', '"timeout"', '"reset"', '"error_event" if stream.error_event else "closed"', 'self.stream.end or "reset"')), \
+        "how a stream ended: one of four words"
+    assert words("stream", "error_kind") == ["error_kind(text)"]
+    for field in ("status", "error", "last_event"):
+        assert all(v.startswith("probe._word(") for v in words("stored", field)) and words("stored", field), field
+    errors = sorted(_requeue_assigned(functions["run_drill"], "run.error"))
+    assert errors == sorted(_normalized(s) for s in (
+        '"interrupted"', "str(exc)", '"internal_" + type(exc).__name__', '"not_back"', '"requeue_failed"', "read_health(client)",
+        "read_stored(client, reader.stream.message_id)", '"node_failed" if not answered else "job_not_running"',
+        '"turn_http_{}".format(status) if status not in (None, 200) else "no_deltas"')), "every code the drill gives, written here"
+    codes = sorted(ast.unparse(n.value.elts[1]) for name in ("read_health", "read_stored") for n in ast.walk(functions[name])
+                   if isinstance(n, ast.Return) and isinstance(n.value, ast.Tuple))
+    assert codes == sorted(_normalized(s) for s in (   # the codes a helper returns: a fixed sentence, a status or a class name, never an answer's text
+        '"healthz_" + type(exc).__name__', '"healthz_http_{}".format(response.status_code)', '"stored_turn_no_id"',
+        '"stored_turn_" + type(exc).__name__', '"stored_turn_http_{}".format(response.status_code)', '"stored_turn_bad_answer"', "None"))
+    assert [ast.unparse(n.value) for n in ast.walk(functions["read_health"]) if isinstance(n, ast.Return) and isinstance(n.value, ast.IfExp)] == [
+        _normalized('(started, None) if isinstance(started, str) else (None, "healthz_bad_answer")')]
+    caught = [n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler) and n.name]
+    assert caught, "the pin looks at something"
+    for handler in caught:
+        if ast.unparse(handler.type) in ("drill.Refused", "drill.DrillError"):
+            continue   # their text is written in the load drill, and pinned there
+        for use in (n for stmt in handler.body for n in ast.walk(stmt) if isinstance(n, ast.Name) and n.id == handler.name):
+            parent = parents[use]   # `type(exc)`: the class, never the text
+            assert isinstance(parent, ast.Call) and ast.unparse(parent.func) == "type", ast.unparse(handler) + " uses " + handler.name
+
+
+def test_the_requeue_drill_reads_the_stream_on_one_daemon_thread_that_never_raises_and_always_lets_the_wait_go():
+    """P7-E. The requeue is sent from the main thread while one other thread reads the turn's stream, so that the polling of /healthz starts at once. That
+    thread is a daemon (a stream that hangs does not keep the process alive), its body catches every Exception (one that escaped it would be printed,
+    with its text, on stderr), and whatever happens it sets `enough`, the event the main thread waits on."""
+    tree, parents = _requeue_tree()
+    threads = _probe_calls(tree, "threading.Thread")
+    assert len(threads) == 1 and _probe_outer(threads[0], parents) == "__init__"
+    assert {k.arg: ast.unparse(k.value) for k in threads[0].keywords} == {"target": "self._run", "name": "'turn'", "daemon": "True"}
+    reader = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "TurnReader")
+    run = next(n for n in reader.body if isinstance(n, ast.FunctionDef) and n.name == "_run")
+    tries = [n for n in run.body if isinstance(n, ast.Try)]
+    assert len(tries) == 1 and [ast.unparse(h.type) for h in tries[0].handlers] == ["Exception"]
+    assert [ast.unparse(s) for s in tries[0].finalbody] == ["self.enough.set()"]
+
+
 # ── CHAT_UI_PLAN.md P8-F (part 1): the decode timing job ──────────────────────
 # Static pins on scripts/chat_decode_timing.py and its wrapper scripts/chat_decode_timing_h100.sh. Their behaviour (the seven arms, the lines, the
 # exit statuses, the refusals, the R7 sentinel, the wrapper rehearsed in a temp tree, the allowlist run through grep) is exercised for real in
