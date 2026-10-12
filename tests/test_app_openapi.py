@@ -1,6 +1,8 @@
 """CHAT_UI_PLAN.md P3-E: the chat server's OpenAPI reference (/docs), on the tiny engine."""
 import json
 import re
+import shlex
+import subprocess
 from pathlib import Path
 from typing import Annotated
 
@@ -99,29 +101,110 @@ REPO = Path(__file__).resolve().parent.parent
 README = REPO / "app" / "README.md"   # the runbook (P8-E); its section 9 is the curl walkthrough
 
 
+def _readme_walkthrough_calls(readme=None):
+    """The curl calls of the README's section 9, as written: method, path template ($S as {session_id}), query, -F fields,
+    -d body and the status a trailing `# NNN` comment promises."""
+    section = (readme or README).read_text(encoding="utf-8").split("## 9.", 1)[1]
+    block = re.search(r"```bash\n(.*?)```", section, re.S).group(1)
+    calls = []
+    for line in block.splitlines():
+        if "curl " not in line:
+            continue
+        promised = re.search(r"\s#\s*(\d{3})\s*$", line)
+        argv = shlex.split(line[line.index("curl "):].split(" | ", 1)[0], comments=True)   # the S=$(...) line pipes into python3
+        method, url, forms, body, args = None, None, [], None, iter(argv[1:])
+        for arg in args:
+            if arg == "-X":
+                method = next(args)
+            elif arg == "-F":
+                forms.append(next(args))
+            elif arg == "-d":
+                body = next(args)
+            elif arg in ("-H", "-o", "-w"):
+                next(args)
+            elif arg.startswith("$B/"):
+                url = arg
+        path, _, query = url[len("$B"):].partition("?")
+        calls.append({"method": method or ("POST" if forms or body is not None else "GET"),
+                      "path": path.replace("$S", "{session_id}"), "query": query, "forms": forms, "body": body,
+                      "status": int(promised.group(1)) if promised else 200})
+    return calls
+
+
 def _readme_walkthrough_options():
-    """The options the README's walkthrough sends: the JSON of its one `-F 'options=...'` argument."""
-    found = re.findall(r"-F 'options=(\{.*?\})'", README.read_text(encoding="utf-8"))
+    """The options the README's walkthrough sends: the JSON of its one `-F 'options=...'` field."""
+    found = [f.partition("=")[2] for call in _readme_walkthrough_calls() for f in call["forms"] if f.startswith("options=")]
     assert len(found) == 1, found
     return json.loads(found[0])
 
 
-def test_the_readme_walkthrough_sends_the_published_protocol_and_runs(client):
-    options = _readme_walkthrough_options()
-    assert options == WALKTHROUGH_OPTIONS   # the dict test_curl_walkthrough_options_validate pins
-    sid = client.post("/v1/sessions", json={}).json()["id"]   # then the walkthrough's steps, in its order, on the tiny engine
-    r = client.post(MESSAGES.format(session_id=sid), files={"image": ("xray.png", png_bytes(), "image/png")},
-                    data={"options": json.dumps(options)})
-    assert r.status_code == 200
-    frames = list(iter_sse([r.text]))
-    assert frames[0]["event"] == "message_start" and frames[-1]["event"] == "message_stop"
-    assert frames[-1]["data"]["status"] == "done"
-    assert client.get("/v1/sessions/{}/export".format(sid), params={"format": "md"}).status_code == 200
-    assert client.delete("/v1/sessions/{}".format(sid)).status_code == 204
+def test_the_readme_walkthrough_sends_the_published_protocol():
+    assert _readme_walkthrough_options() == WALKTHROUGH_OPTIONS   # the dict test_curl_walkthrough_options_validate pins
+
+
+def _walkthrough_problems(client, readme=None):
+    """What is wrong with the README's walkthrough on this server: [] when every call is a real route with real form fields
+    and the calls, run in the README's order on the tiny engine, answer what the README says they answer."""
+    calls = _readme_walkthrough_calls(readme)
+    if not calls or (calls[0]["method"], calls[0]["path"]) != ("POST", "/v1/sessions"):
+        return ["the walkthrough does not start by creating the session the other calls use"]
+    routes = {(method, route.path) for route in client.app.routes if isinstance(route, APIRoute) for method in route.methods}
+    spec, sid, problems = client.get("/openapi.json").json(), None, []
+    for call in calls:
+        where = "{} {}".format(call["method"], call["path"])
+        if (call["method"], call["path"]) not in routes:
+            problems.append("no route " + where)
+            continue
+        files, data = {}, {}
+        for field in call["forms"]:
+            name, _, value = field.partition("=")
+            if name not in _body_schema(spec, call["path"])["properties"]:
+                problems.append("no form field {} on {}".format(name, where))
+            elif value.startswith("@"):
+                files[name] = (value[1:], png_bytes(), "image/png")
+            else:
+                data[name] = value
+        url = call["path"].format(session_id=sid) + ("?" + call["query"] if call["query"] else "")
+        extra = {} if call["body"] is None else {"content": call["body"], "headers": {"Content-Type": "application/json"}}
+        r = client.request(call["method"], url, files=files or None, data=data or None, **extra)
+        if r.status_code != call["status"]:
+            problems.append("{} answered {}, the README says {}".format(where, r.status_code, call["status"]))
+            continue
+        if sid is None:
+            sid = r.json()["id"]   # what the README's python3 line reads
+        if files:
+            frames = list(iter_sse([r.text]))
+            if frames[-1]["event"] != "message_stop" or frames[-1]["data"]["status"] != "done":
+                problems.append("the turn did not end done")
+    return problems
+
+
+def test_the_readme_walkthrough_runs_as_written(client):
+    assert _walkthrough_problems(client) == []
+
+
+@pytest.mark.parametrize("old, new", [
+    ('/messages"', '/message"'),                                    # a route the server does not have
+    ("-X DELETE", "-X PUT"),                                        # a method it does not have
+    ("-F 'image=", "-F 'img="),                                     # a form field it does not take
+    ("format=md", "format=pdf"),                                    # a request it refuses (422)
+    ("'%{http_code}\\n'   # 204", "'%{http_code}\\n'   # 200"),  # a status it does not answer
+])
+def test_a_drifted_walkthrough_is_caught(client, tmp_path, old, new):
+    good = README.read_text(encoding="utf-8")
+    assert good.count(old) == 1, old
+    drifted = tmp_path / "README.md"
+    drifted.write_text(good.replace(old, new), encoding="utf-8")
+    assert _walkthrough_problems(client, drifted), old
 
 
 def test_the_readme_is_allow_listed_past_the_md_rule():
-    assert "!app/README.md" in (REPO / ".gitignore").read_text(encoding="utf-8").splitlines()
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True)
+
+    if git("rev-parse", "--git-dir").returncode != 0:
+        pytest.skip("not a git checkout")
+    assert git("check-ignore", "-q", "--no-index", "app/README.md").returncode == 1   # 1: no rule ignores it, tracked or not
 
 
 # ---- beyond the brief: what makes /docs a reference rather than a list of function names ----------------------------
