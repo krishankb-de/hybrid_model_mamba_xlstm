@@ -1343,11 +1343,13 @@ export function createApp(env) {
     return undefined;
   }
 
+  // -> whether the list was read (a failure is the notice's to say).
   async function refreshSessions({ more = false } = {}) {
     const shown = state.sessions.length;
     const onMore = more && doc.activeElement === ui.more;
+    let read = false;
     if (more) {
-      if (state.loadingMore) return;   // a double click asks once
+      if (state.loadingMore) return read;   // a double click asks once
       state.loadingMore = true;
       ui.more.disabled = true;
     }
@@ -1359,6 +1361,7 @@ export function createApp(env) {
       state.nextCursor = page.next_cursor ?? null;
       state.sessionsLoaded = true;
       renderSessions();
+      read = true;
     } catch (err) {
       state.sessionsLoaded = true;
       showNotice(errorMessage(err));
@@ -1369,6 +1372,7 @@ export function createApp(env) {
         if (onMore) (ui.more.hidden ? qa(ui.list, 'li a')[shown] : ui.more)?.focus();   // More keeps focus; the last page hands it to its first new row
       }
     }
+    return read;
   }
 
   const rowOf = (id) => qa(ui.list, 'li').find((li) => li.getAttribute('data-session') === id);   // an id is compared, never put into a selector
@@ -1942,6 +1946,7 @@ export function createApp(env) {
     ui.chips.replaceChildren(...optionChips(options, outcome).map((c) => el('span', {}, c)));
   }
 
+  // -> whether the models were read (a failure is the notice's to say).
   async function refreshModels() {
     try {
       state.models = await request('/v1/models');
@@ -1949,18 +1954,23 @@ export function createApp(env) {
       ui.testBadge.hidden = state.models.default_model !== TEST_MODEL;   // "test model" while the server's default is the random-weights engine (P9-G5b)
       fillModels();
       renderChips();
+      return true;
     } catch (err) {
       showNotice(errorMessage(err));
+      return false;
     }
   }
 
   // A new token, or a new client id, can change what the server shows: everything is fetched again, and what the old
-  // identity had open (images, a running stream) is dropped first.
+  // identity had open (images, a running stream) is dropped first. When the new one is let in (the models and the chats both come), the notice
+  // is over: it was the old identity's, and "Enter the access token in Settings" must not stay on a page that works again (P8-D, chaos item 4;
+  // an open chat clears it as it is drawn again, an empty one never did). One that is refused again raises its notice again, and keeps it.
   async function reloadAll() {
     leaveTurn();
     api.clearImageCache();
     const id = state.session.id;
-    await Promise.all([refreshModels(), refreshSessions()]);
+    const loaded = await Promise.all([refreshModels(), refreshSessions()]);
+    if (loaded.every(Boolean)) clearNotice();
     if (id) await openSession(id); else await handleRoute();
   }
 

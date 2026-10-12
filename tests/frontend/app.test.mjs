@@ -2091,6 +2091,30 @@ test('a new access token is stored, clears the image cache, drops a running stre
   assert.equal(h.fetch.calls.length, calls);
 });
 
+// P8-D (chaos item 4): the notice that asks for the token is taken down once the token is given and accepted. It stayed (on an empty chat, the
+// only place a token is asked for before a chat exists), so that a page which worked again still said "Enter the access token in Settings".
+test('a new access token takes down the notice that asked for it, and one the server still refuses brings it back', async () => {
+  const needs = (answer) => (url, init) => (init.headers?.Authorization === 'Bearer s3cret' ? answer : refused(401, 'Missing or wrong token'));
+  const h = harness({ routes: { 'GET /v1/models': needs(MODELS), 'GET /v1/sessions': needs({ sessions: [], next_cursor: null }) } });
+  await h.app.start();
+  await flush();
+  assert.equal(q($('notice'), 'p').textContent, 'Enter the access token in Settings');
+  $('settings').click();
+  const token = q($('drawer'), 'input[type="password"]');
+  token.value = 'wrong-token';
+  token.dispatchEvent(new ShimEvent('change', { bubbles: true }));
+  await flush(12);
+  assert.equal($('notice').hidden, false);   // refused again: said again
+  assert.equal(q($('notice'), 'p').textContent, 'Enter the access token in Settings');
+  token.value = 's3cret';
+  token.dispatchEvent(new ShimEvent('change', { bubbles: true }));
+  await flush(12);
+  assert.equal(h.fetch.to('GET', '/v1/models').at(-1).headers.Authorization, 'Bearer s3cret');
+  assert.equal($('notice').hidden, true);   // accepted: nothing is asked for any more
+  assert.equal(q($('notice'), 'p').textContent, '');
+  assert.equal($('send').disabled, false);
+});
+
 // ---- the drawer ----------------------------------------------------------------------------------------------------------------------
 
 const saved = (h) => JSON.parse(h.storage.data.get(SETTINGS_KEY));
