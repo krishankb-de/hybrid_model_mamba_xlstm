@@ -102,8 +102,8 @@ README = REPO / "app" / "README.md"   # the runbook (P8-E); its section 9 is the
 
 
 def _readme_walkthrough_calls(readme=None):
-    """The curl calls of the README's section 9, as written: method, path template ($S as {session_id}), query, -F fields,
-    -d body and the status a trailing `# NNN` comment promises."""
+    """The curl calls of the README's section 9, as written: method, path template ($S as {session_id}), query, headers,
+    -F fields, -d body, the key its python3 line reads the session id from, and the status a trailing `# NNN` promises."""
     section = (readme or README).read_text(encoding="utf-8").split("## 9.", 1)[1]
     block = re.search(r"```bash\n(.*?)```", section, re.S).group(1)
     calls = []
@@ -111,22 +111,27 @@ def _readme_walkthrough_calls(readme=None):
         if "curl " not in line:
             continue
         promised = re.search(r"\s#\s*(\d{3})\s*$", line)
+        id_key = re.search(r"json\.load\(sys\.stdin\)\[\"(\w+)\"\]", line)
         argv = shlex.split(line[line.index("curl "):].split(" | ", 1)[0], comments=True)   # the S=$(...) line pipes into python3
-        method, url, forms, body, args = None, None, [], None, iter(argv[1:])
+        method, url, headers, forms, body, args = None, None, {}, [], None, iter(argv[1:])
         for arg in args:
             if arg == "-X":
                 method = next(args)
+            elif arg == "-H":
+                name, _, value = next(args).partition(":")
+                headers[name.strip()] = value.strip()
             elif arg == "-F":
                 forms.append(next(args))
             elif arg == "-d":
                 body = next(args)
-            elif arg in ("-H", "-o", "-w"):
+            elif arg in ("-o", "-w"):
                 next(args)
             elif arg.startswith("$B/"):
                 url = arg
         path, _, query = url[len("$B"):].partition("?")
         calls.append({"method": method or ("POST" if forms or body is not None else "GET"),
-                      "path": path.replace("$S", "{session_id}"), "query": query, "forms": forms, "body": body,
+                      "path": path.replace("$S", "{session_id}"), "query": query, "headers": headers, "forms": forms,
+                      "body": body, "id_key": id_key.group(1) if id_key else None,
                       "status": int(promised.group(1)) if promised else 200})
     return calls
 
@@ -144,10 +149,11 @@ def test_the_readme_walkthrough_sends_the_published_protocol():
 
 def _walkthrough_problems(client, readme=None):
     """What is wrong with the README's walkthrough on this server: [] when every call is a real route with real form fields
-    and the calls, run in the README's order on the tiny engine, answer what the README says they answer."""
+    and query names, and the calls, run in the README's order with its own headers, bodies and session-id key on the tiny
+    engine, answer what the README says they answer."""
     calls = _readme_walkthrough_calls(readme)
-    if not calls or (calls[0]["method"], calls[0]["path"]) != ("POST", "/v1/sessions"):
-        return ["the walkthrough does not start by creating the session the other calls use"]
+    if not calls or (calls[0]["method"], calls[0]["path"]) != ("POST", "/v1/sessions") or not calls[0]["id_key"]:
+        return ["the walkthrough does not start by creating the session the other calls use, and reading its id"]
     routes = {(method, route.path) for route in client.app.routes if isinstance(route, APIRoute) for method in route.methods}
     spec, sid, problems = client.get("/openapi.json").json(), None, []
     for call in calls:
@@ -155,6 +161,11 @@ def _walkthrough_problems(client, readme=None):
         if (call["method"], call["path"]) not in routes:
             problems.append("no route " + where)
             continue
+        params = {p["name"] for p in spec["paths"][call["path"]][call["method"].lower()].get("parameters", [])
+                  if p["in"] == "query"}
+        for name in [pair.partition("=")[0] for pair in call["query"].split("&") if pair]:
+            if name not in params:
+                problems.append("no query parameter {} on {}".format(name, where))
         files, data = {}, {}
         for field in call["forms"]:
             name, _, value = field.partition("=")
@@ -165,13 +176,15 @@ def _walkthrough_problems(client, readme=None):
             else:
                 data[name] = value
         url = call["path"].format(session_id=sid) + ("?" + call["query"] if call["query"] else "")
-        extra = {} if call["body"] is None else {"content": call["body"], "headers": {"Content-Type": "application/json"}}
-        r = client.request(call["method"], url, files=files or None, data=data or None, **extra)
+        extra = {} if call["body"] is None else {"content": call["body"]}
+        r = client.request(call["method"], url, headers=call["headers"], files=files or None, data=data or None, **extra)
         if r.status_code != call["status"]:
             problems.append("{} answered {}, the README says {}".format(where, r.status_code, call["status"]))
             continue
         if sid is None:
-            sid = r.json()["id"]   # what the README's python3 line reads
+            sid = r.json().get(call["id_key"])
+            if sid is None:
+                return problems + ["the session's answer has no {!r}".format(call["id_key"])]
         if files:
             frames = list(iter_sse([r.text]))
             if frames[-1]["event"] != "message_stop" or frames[-1]["data"]["status"] != "done":
@@ -189,6 +202,10 @@ def test_the_readme_walkthrough_runs_as_written(client):
     ("-F 'image=", "-F 'img="),                                     # a form field it does not take
     ("format=md", "format=pdf"),                                    # a request it refuses (422)
     ("'%{http_code}\\n'   # 204", "'%{http_code}\\n'   # 200"),  # a status it does not answer
+    ("-H 'Content-Type: application/json' ", ""),                   # a JSON body sent without its content type (422)
+    ("application/json", "text/plain"),                             # ... or with the wrong one
+    ('json.load(sys.stdin)["id"]', 'json.load(sys.stdin)["session_id"]'),   # a session-id key the answer does not have
+    ("format=md", "fmt=md"),                                        # a query name the route does not take
 ])
 def test_a_drifted_walkthrough_is_caught(client, tmp_path, old, new):
     good = README.read_text(encoding="utf-8")

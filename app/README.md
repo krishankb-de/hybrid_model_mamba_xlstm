@@ -37,7 +37,7 @@ The app runs as one SLURM job on the cluster. You reach it from the laptop throu
 **Once per laptop.** Copy `scripts/chat_cluster.env.example` to `scripts/chat_cluster.env` and fill it in.
 
 **Once per cluster account.**
-- Run `bash scripts/chat_remote.sh submit scripts/chat_cluster_setup_h100.sh MAIN_REPO=<thesis checkout>`. It is additive: it creates symlinks and installs the web dependencies into overlay directories.
+- Run `bash scripts/chat_remote.sh sync` first, which creates the cluster checkout. Then run `bash scripts/chat_remote.sh submit scripts/chat_cluster_setup_h100.sh MAIN_REPO=<thesis checkout>`. It is additive: it creates symlinks and installs the web dependencies into overlay directories.
 - The gallery is built once per image tower. See the headers of `scripts/build_retrieval_gallery_h100.sh` and `scripts/label_gallery_reports_cpu_h100.sh`.
 
 **Every start**, from the laptop, in this repository:
@@ -136,7 +136,7 @@ Open `http://localhost:<LOCAL_PORT>`. If the server has a token, enter it in Set
 
 1. Create the token file once, on the cluster:
    ```bash
-   (umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > ~/chat_sessions/app_token)
+   (umask 077; head -c 32 /dev/urandom | base64 > ~/chat_sessions/app_token)
    ```
    The file is mode 0600, owned by you, and never printed by the server. Once it exists, the server requires the token in private mode too.
 2. Cancel the private job, which holds the session database (section 2). Then submit with `MODE=public` and start the tunnel.
@@ -144,13 +144,13 @@ Open `http://localhost:<LOCAL_PORT>`. If the server has a token, enter it in Set
    - It refuses unless the server's `/healthz` says `"mode": "public"`.
    - It opens a cloudflared quick tunnel and checks the mode again every `DEMO_RECHECK_S` seconds (default 10).
    - It closes the link and exits 1 if the server stops saying public, or does not answer within 5 s.
-4. Give visitors the token out of band. They enter it in Settings → Access token.
+4. Give visitors the token out of band. Read it with `cat ~/chat_sessions/app_token` in your own terminal, and never paste it into a log or a chat. Visitors enter it in Settings → Access token.
 5. When the demo ends, stop the script (Ctrl-C). Anyone with the link reaches the server until you do. Then:
    - run `pgrep cloudflared`, because a `public_demo.sh` killed with SIGKILL leaves cloudflared running;
    - cancel the public job and start the private one again.
 
 How public mode works:
-- **Tokens.** Every `/v1` route needs `Authorization: Bearer <token>` and an `X-Client-Id` header; the page sends its own. `/healthz`, the page and `/docs` need neither.
+- **Tokens.** Every `/v1` route needs `Authorization: Bearer <token>`. The session and message routes also need an `X-Client-Id` header. The page sends both. `/healthz`, the page and `/docs` need neither.
 - **Rate limit.** 6 turns per client per 10 minutes. The 429 says when to try again (`Retry-After`), and a text-only note that runs no model spends nothing. The limit is keyed on the client's own `X-Client-Id`, so it is a courtesy, not a defence. The hard bound is the queue: 4 turns running or waiting at once.
 - **Retention.** 7 days for public sessions.
 
@@ -194,7 +194,8 @@ The API also:
 ## 9. API walkthrough (curl)
 
 This walkthrough uses a private server with no `app_token`, through the tunnel; set `B` to the tunnel's `LOCAL_PORT`.
-- Public mode adds two headers to every `/v1` request: `Authorization: Bearer <token>` and `X-Client-Id`. Keep the Authorization header in a file of mode 0600 and pass it with `-H @<file>`, so the token never appears on a command line.
+- A server with an `app_token` needs `Authorization: Bearer <token>` on every `/v1` request. That covers public mode, and private mode once the token file exists. Keep the header in a file of mode 0600 and pass it with `-H @<file>`, so the token never appears on a command line.
+- Public mode also needs an `X-Client-Id` header on the session and message routes.
 - The options below are the published protocol.
 - The stream prints MIMIC-derived text to your terminal (section 1).
 
@@ -209,7 +210,7 @@ curl -s -X DELETE "$B/v1/sessions/$S" -o /dev/null -w '%{http_code}\n'   # 204
 The turn streams Server-Sent Events, in this order:
 1. `message_start`.
 2. For each stage, `stage_start` and then `stage_end`.
-   - A skipped stage sends only its `stage_end`, with a `skipped` reason.
+   - A stage skipped before it starts sends only its `stage_end`, with a `skipped` reason. A label stage whose labeller fails after it started sends `stage_start`, then a skipped `stage_end`.
    - In public mode the score stage sends nothing.
    - Inside the generate stage come `content_block_start`, one `content_block_delta` per decode step (a `beam_snapshot`), and `content_block_stop`.
 3. `message_stop`, which carries the report.
