@@ -17,6 +17,8 @@ from app.commands import parse_command
 from app.labels import CHEXBERT_14
 from app.server import create_app
 from scripts import chat_ui_browser_check as check
+from scripts import chat_ui_cdp
+from tests import chat_ui_url_cases as url_cases
 from tests.app_helpers import iter_sse, png_bytes
 
 SCRIPT = Path(check.__file__)
@@ -146,6 +148,34 @@ def test_only_runs_no_evidence_because_a_part_of_the_checklist_would_replace_all
     assert refused.value.code == 2 and "--no-evidence" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         check.parse_args(["--only", "nonesuch", "--no-evidence"])
+
+
+# ---- a --url: the app is someone else's, so nothing of this run is evidence, and it is the tiny app or it is refused (P6-F fix 1) ---------
+
+def test_a_url_needs_no_evidence_because_the_pictures_and_the_checklist_would_be_evidence_of_an_app_the_check_did_not_start(capsys):
+    with pytest.raises(SystemExit) as refused:
+        check.parse_args(["--url", "http://127.0.0.1:51234/"])
+    assert refused.value.code == 2
+    assert chat_ui_cdp.URL_NEEDS_NO_EVIDENCE in capsys.readouterr().err
+    assert check.parse_args(["--url", "http://127.0.0.1:51234/", "--no-evidence"]).url == "http://127.0.0.1:51234/"
+    assert check.parse_args([]).url is None
+
+
+@pytest.mark.parametrize("port", [8000, 8010])
+def test_the_browser_check_refuses_the_dev_servers_and_the_tunnels_port_before_it_sends_or_starts_anything(monkeypatch, capsys, port):
+    url_cases.refuses_a_port(check, monkeypatch, capsys, port, ("--no-evidence",))
+
+
+def test_the_browser_check_refuses_an_address_that_is_not_this_machines_loopback_before_it_sends_or_starts_anything(monkeypatch, capsys):
+    url_cases.refuses_a_host(check, monkeypatch, capsys, ("--no-evidence",))
+
+
+def test_the_browser_check_refuses_an_app_that_is_not_the_tiny_one_with_a_fixed_line_before_its_warm_up_turn(monkeypatch, capsys):
+    url_cases.refuses_a_server_that_is_not_the_tiny_app(check, monkeypatch, capsys, ("--no-evidence",))
+
+
+def test_the_browser_check_goes_on_with_the_tiny_app(monkeypatch, capsys):
+    url_cases.goes_on_with_the_tiny_app(check, monkeypatch, capsys, ("--no-evidence",))
 
 
 # ---- the reload step holds its turn instead of racing it ------------------------------------------------------------------------------

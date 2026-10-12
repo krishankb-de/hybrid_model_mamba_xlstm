@@ -60,10 +60,13 @@ The tall-composer cases (one per width and scheme, 568 px tall) put a composer t
 the report's 120 px floor: #conversation keeps its 120 px, the composer stays inside the viewport and scrolls inside itself,
 and Settings and Send are still reachable by scrolling it.
 
-    venv/bin/python scripts/chat_ui_layout_check.py [--url http://127.0.0.1:8000/]
+    venv/bin/python scripts/chat_ui_layout_check.py [--url http://127.0.0.1:PORT/]
 
 Prints one `FAIL ...` line per failure, then `RESULT {"cases": N, "failures": [...]}`. Exits 1 on any failure and 2 when
-Chrome or the app cannot be started. Chrome is $CHROME, else /Applications/Google Chrome.app/..., else one on PATH.
+Chrome or the app cannot be started, or when --url is refused. It writes no file (no screenshot, no checklist), so a --url needs no
+--no-evidence here; it is refused all the same unless it is a tiny app on this machine's loopback (scripts/chat_ui_cdp.py url_problem
+and tiny_only_problem: the dev server's port and the tunnel's, any other host, and any app whose /v1/models is not the tiny engine's),
+before Chrome or anything else is started. Chrome is $CHROME, else /Applications/Google Chrome.app/..., else one on PATH.
 Standard library only.
 """
 import argparse
@@ -77,7 +80,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from app.labels import CHEXBERT_14  # noqa: E402  (standard library only, like this script)
-from scripts.chat_ui_cdp import App, Browser, exit_on_sigterm, find_chrome  # noqa: E402
+from scripts.chat_ui_cdp import App, Browser, exit_on_sigterm, find_chrome, tiny_only_problem, url_problem  # noqa: E402
 
 WIDTHS = [320, 375, 800, 801, 820, 834, 900, 925, 1024, 1280]
 HEIGHTS = [568, 900]
@@ -959,9 +962,13 @@ def run_checks(browser: Browser, url: str) -> Tuple[int, List[str]]:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Geometry check for the chat page, in headless Chrome.")
-    parser.add_argument("--url", help="check this running app instead of starting one (its page URL, e.g. "
-                                      "http://127.0.0.1:8000/)")
+    parser.add_argument("--url", help="check this running tiny app instead of starting one (its page URL, e.g. http://127.0.0.1:PORT/)")
     args = parser.parse_args(argv)
+    if args.url:   # before anything is started or sent: the address, then the app's own answer about itself
+        problem = url_problem(args.url) or tiny_only_problem(args.url)
+        if problem:
+            print("ERROR --url refused: " + problem)
+            return 2
     exit_on_sigterm()   # a SIGTERM runs the finally below, which stops Chrome and the app
     chrome = find_chrome()
     if chrome is None:

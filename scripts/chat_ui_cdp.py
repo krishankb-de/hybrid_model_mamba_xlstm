@@ -1,9 +1,16 @@
-"""What the two Chrome-driven checks of the chat page share (CHAT_UI_PLAN.md P4-A, P4-E): a DevTools websocket client, a
-private headless Chrome with one page, and the tiny app on a free loopback port. Local development tools: nothing here is
-imported by the app or run by validate.sh.
+"""What the Chrome-driven checks of the chat page share (CHAT_UI_PLAN.md P4-A, P4-E, P6-F): a DevTools websocket client, a
+private headless Chrome with one page, the tiny app on a free loopback port, and the refusals of a --url. Local development
+tools: nothing here is imported by the app or run by validate.sh.
 
-    scripts/chat_ui_layout_check.py    geometry at many viewports
+    scripts/chat_ui_layout_check.py    geometry at many viewports (writes nothing)
     scripts/chat_ui_browser_check.py   the browser checklist, with screenshots
+    scripts/chat_ui_features_check.py  the five image features, with screenshots
+
+A --url is an app that someone else started, and each check sends it uploads and turns or loads its page, and the two that write
+evidence screenshot what it shows. So each refuses one first, before it starts or sends anything, with a fixed line and the status 2:
+an address that is not http on this machine's loopback with a port of its own, or that has one of REFUSED_PORTS (url_problem), and an
+app whose own /v1/models is not the tiny engine's without a checkpoint (tiny_only_problem, models_problem); the two that write evidence
+also refuse a --url without --no-evidence (url_needs_no_evidence). Nothing the server says is in a refusal.
 
 Every process this module starts runs in a session of its own, so stopping it reaches the whole group (Chrome's helpers
 included) and nothing outlives a failure path. It is stopped politely first, and killed last: Chrome is asked to close over
@@ -20,6 +27,7 @@ the reap, whatever the order of the calls. Standard library only: the websocket 
 """
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import shutil
@@ -41,6 +49,20 @@ WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 KEEP_EVENTS = 5000   # DevTools events kept per Browser (Browser.events): the oldest go first
 CLOSE_WAIT_S = 3.0   # how long, in all, Chrome has to answer the DevTools Browser.close and to exit, before it is sent SIGTERM
 TERM_WAIT_S = 5.0    # how long a process has to exit after SIGTERM, before it is sent SIGKILL
+
+# What a --url may not be (see url_problem, tiny_only_problem). The two ports are the laptop's dev server and the tunnel to the cluster's private
+# server: the checks send uploads and turns, and screenshot what an app shows, and neither may be the app. No other script names these numbers.
+REFUSED_PORTS = (8000, 8010)
+TINY_MODEL = "tiny"                    # app.engine.TinyEngine.name: the one model of the app a check may be given with --url
+TINY_NOTE = "tiny random-init model"   # app.engine.TinyEngine.drift_note: what that engine says of itself in its card
+MODELS_BYTES = 1024 * 1024             # the most of a /v1/models answer that is read (the tiny app's is under 2 KB)
+MODELS_UNREADABLE = ("the app at this address did not answer GET /v1/models with JSON (no answer, an error status, a redirect, or something "
+                     "else), so it cannot be shown to be the tiny app; these checks run on the tiny app only")
+NOT_THE_TINY_APP = ("the app at this address is not the tiny app: its /v1/models names a model that is not the tiny engine with no checkpoint. "
+                    "These checks send an app uploads and turns and screenshot what it shows, so they run on the tiny stack (random weights, "
+                    "no checkpoint, no data) only")
+URL_NEEDS_NO_EVIDENCE = ("--url needs --no-evidence: the pictures and the checklist of a run are evidence of the tiny stack that the check "
+                         "started itself, and an app that someone else started is not that")
 
 # What Chrome is started with, besides its profile, its DevTools port and the blank page. A fresh profile is not a quiet one: some seconds after
 # Chrome starts it installs its default apps and extensions into it (its log shows web-app and extension installs, a burst of about 70 ms), and a
@@ -278,6 +300,86 @@ def find_chrome() -> Optional[str]:
         if candidate and os.path.exists(candidate):
             return candidate
     return None
+
+
+# ---- the refusals of a --url: one implementation, called by the three checks -----------------------------------------------------
+
+def url_problem(url: str) -> Optional[str]:
+    """Why a --url is refused, or None: it must be an http address on this machine's loopback with a port of its own, and not one of
+    REFUSED_PORTS. Pure: nothing is sent to it. The reason names the address or the ports, never what an app says."""
+    try:
+        parts = urlparse(url)
+        port = parts.port
+    except ValueError:
+        return "not a URL: {!r}".format(url)
+    if parts.scheme != "http" or not parts.hostname:
+        return "not an http URL: {!r}".format(url)
+    host = parts.hostname
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == "localhost"
+    if not loopback:
+        return "{} is not a loopback address: these checks talk to an app on this machine only".format(host)
+    if port is None or port == 0:
+        return "the URL names no port: give the port of the app, as in http://127.0.0.1:PORT/"
+    if port in REFUSED_PORTS:
+        return "port {} is refused: {} are the dev server's port and the tunnel's to the cluster's server, and these checks send uploads and turns".format(
+            port, " and ".join(str(p) for p in REFUSED_PORTS))
+    return None
+
+
+def models_problem(models: Any) -> Optional[str]:
+    """Why a /v1/models answer is not the tiny app's (NOT_THE_TINY_APP, a fixed line), or None. The default model and every model listed must be
+    the tiny engine with no checkpoint, which its card says by five fields, each there: name is TINY_MODEL, checkpoint, checkpoint_sha256 and
+    train_experiment are null (a real engine has a path or a file name, a hash and its run, and public mode keeps None as None and cuts a path to
+    its file name), and drift_note is what the tiny engine says of itself, TINY_NOTE. A field that is missing, a card that is not an object and an
+    answer that lists no model are refused: nothing is taken on trust."""
+    cards = models.get("models") if isinstance(models, dict) else None
+    if not isinstance(cards, list) or not cards or models.get("default_model") != TINY_MODEL:
+        return NOT_THE_TINY_APP
+    for card in cards:
+        if not isinstance(card, dict) or card.get("name") != TINY_MODEL or card.get("drift_note") != TINY_NOTE:
+            return NOT_THE_TINY_APP
+        if any(key not in card or card[key] is not None for key in ("checkpoint", "checkpoint_sha256", "train_experiment")):
+            return NOT_THE_TINY_APP
+    return None
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:   # an answer that sends the reader elsewhere is not an answer of this address
+        return None
+
+
+# No proxy (an app on this machine is asked directly, whatever the environment says) and no redirect.
+_MODELS_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+
+
+def tiny_only_problem(url: str, timeout: float = 10.0) -> Optional[str]:
+    """Why the app at this --url is not the tiny app, as a fixed line, or None: asks it for GET /v1/models, and nothing else, and holds the answer
+    to models_problem. An app that does not answer with status 200 and JSON of at most MODELS_BYTES is refused (MODELS_UNREADABLE) as one that is
+    not the tiny app, and so is one whose JSON is not the tiny app's (NOT_THE_TINY_APP). Nothing the app says, and no error it raises, is in the
+    line. An address that url_problem refuses is refused here first, with its reason, and nothing is sent to it: the dev server's port is no
+    more asked for its models than for a turn."""
+    problem = url_problem(url)
+    if problem:
+        return problem
+    base = url if url.endswith("/") else url + "/"
+    try:
+        with _MODELS_OPENER.open(base + "v1/models", timeout=timeout) as response:
+            raw = response.read(MODELS_BYTES + 1)
+            if response.status != 200 or len(raw) > MODELS_BYTES:
+                return MODELS_UNREADABLE
+            models = json.loads(raw)
+    except Exception:   # an error status, a refused connection, a timeout, a redirect, text that is not JSON: all the same refusal
+        return MODELS_UNREADABLE
+    return models_problem(models)
+
+
+def url_needs_no_evidence(parser: Any, args: Any) -> None:
+    """For a check that writes evidence: a --url without --no-evidence is a usage error (the parser's, status 2), the way --only without it is."""
+    if args.url and not args.no_evidence:
+        parser.error(URL_NEEDS_NO_EVIDENCE)
 
 
 class Browser:

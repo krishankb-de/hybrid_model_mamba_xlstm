@@ -1,5 +1,6 @@
-"""CHAT_UI_PLAN.md P6-F: the parts of the features check (scripts/chat_ui_features_check.py) that are plain Python: its arguments, the
-refusal of the ports that are not its to use, the checklist writer, the words and numbers it expects of the page (read off the
+"""CHAT_UI_PLAN.md P6-F: the parts of the features check (scripts/chat_ui_features_check.py) that are plain Python: its arguments, what its
+main() refuses of a --url (the refusals themselves are scripts/chat_ui_cdp.py's, tested in tests/test_chat_ui_layout_check.py), the
+checklist writer and the environment it writes (read from the app), the words and numbers it expects of the page (read off the
 sources of the page, so that a rename is caught here), and the consistency of its own lists. No Chrome and no app process.
 
 The run itself needs Chrome and is a local tool (venv/bin/python scripts/chat_ui_features_check.py); validate.sh does not run it.
@@ -16,7 +17,9 @@ import pytest
 from PIL import Image
 
 from app.labels import CHEXBERT_14
+from scripts import chat_ui_cdp
 from scripts import chat_ui_features_check as check
+from tests import chat_ui_url_cases as url_cases
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATIC = REPO_ROOT / "app" / "static"
@@ -52,28 +55,34 @@ def test_an_unknown_argument_is_refused(capsys):
     assert refused.value.code == 2
 
 
-# ---- the ports that are not the script's to use --------------------------------------------------------------------------------------
+# ---- a --url: the app is someone else's, so nothing of this run is evidence, and it is the tiny app or it is refused (P6-F fix 1) ---------
+# The address and the app's own answer about itself are refused by scripts/chat_ui_cdp.py (url_problem, tiny_only_problem), which tests/test_chat_ui_layout_check.py
+# tests as a harness; these are the cases of this check's own arguments and main().
 
-@pytest.mark.parametrize("url", ["http://127.0.0.1:8000/", "http://127.0.0.1:8000", "http://127.0.0.1:8010/", "http://localhost:8000/",
-                                 "http://localhost:8010/chat", "http://[::1]:8010/", "http://[::1]:8000/", "HTTP://127.0.0.1:8000/"])
-def test_the_dev_server_and_the_tunnel_are_refused(url):
-    problem = check.url_problem(url)
-    assert problem and ("8000" in problem and "8010" in problem), problem   # it says which two, and why
-
-
-@pytest.mark.parametrize("url", ["http://example.com:5000/", "http://192.168.1.5:51234/", "http://0.0.0.0:51234/", "https://127.0.0.1:51234/",
-                                 "ftp://127.0.0.1:51234/", "file:///tmp/x", "127.0.0.1:51234", "http://127.0.0.1/", "http://127.0.0.1:0/", ""])
-def test_a_url_that_is_not_an_http_loopback_address_with_a_port_is_refused(url):
-    assert check.url_problem(url)
+def test_a_url_needs_no_evidence_because_the_pictures_and_the_checklist_would_be_evidence_of_an_app_the_check_did_not_start(capsys):
+    with pytest.raises(SystemExit) as refused:
+        check.parse_args(["--url", "http://127.0.0.1:51234/"])
+    assert refused.value.code == 2
+    assert chat_ui_cdp.URL_NEEDS_NO_EVIDENCE in capsys.readouterr().err
+    assert check.parse_args(["--url", "http://127.0.0.1:51234/", "--no-evidence"]).url == "http://127.0.0.1:51234/"
+    assert check.parse_args([]).url is None
 
 
-@pytest.mark.parametrize("url", ["http://127.0.0.1:51234/", "http://127.0.0.1:51234", "http://localhost:49999/", "http://[::1]:51234/x"])
-def test_a_loopback_url_on_another_port_is_accepted(url):
-    assert check.url_problem(url) is None
+@pytest.mark.parametrize("port", [8000, 8010])
+def test_the_features_check_refuses_the_dev_servers_and_the_tunnels_port_before_it_sends_or_starts_anything(monkeypatch, capsys, port):
+    url_cases.refuses_a_port(check, monkeypatch, capsys, port, ("--no-evidence",))
 
 
-def test_the_ports_the_script_refuses_are_the_two_it_was_told_never_to_use():
-    assert check.REFUSED_PORTS == (8000, 8010)
+def test_the_features_check_refuses_an_address_that_is_not_this_machines_loopback_before_it_sends_or_starts_anything(monkeypatch, capsys):
+    url_cases.refuses_a_host(check, monkeypatch, capsys, ("--no-evidence",))
+
+
+def test_the_features_check_refuses_an_app_that_is_not_the_tiny_one_with_a_fixed_line_before_it_starts_anything(monkeypatch, capsys):
+    url_cases.refuses_a_server_that_is_not_the_tiny_app(check, monkeypatch, capsys, ("--no-evidence",))
+
+
+def test_the_features_check_goes_on_with_the_tiny_app(monkeypatch, capsys):
+    url_cases.goes_on_with_the_tiny_app(check, monkeypatch, capsys, ("--no-evidence",))
 
 
 def test_a_server_that_cannot_show_the_features_is_named():
@@ -143,6 +152,44 @@ def test_each_page_rule_is_a_function_body_that_returns_and_reads_the_page_only(
         assert "return " in rule, key
         assert "http" not in rule and "innerHTML" not in rule and "fetch" not in rule, key   # a rule looks at the page; it changes and asks nothing
         assert rule.count("(") == rule.count(")") and rule.count("'") % 2 == 0, key
+
+
+# ---- the environment of a run: what the app said of itself, read from it (P6-F fix 1) ------------------------------------------------
+
+class _Version:
+    def call(self, method: str, **params: Any) -> Dict[str, Any]:
+        assert method == "Browser.getVersion"
+        return {"product": "Chrome/1.2.3"}
+
+
+GALLERY = {"build_id": "b-1", "images": 200, "report_rows": 240, "report_groups": 190, "towers_identical": True}
+
+
+def test_the_environment_states_what_the_app_said_of_itself_and_no_fixed_words_about_it():
+    models = url_cases.tiny_models(True)
+    env = check.environment(_Version(), True, models, GALLERY)
+    card = models["models"][0]
+    assert env["models"] == [{key: card[key] for key in check.CARD_FACTS}] and set(check.CARD_FACTS) <= set(card)
+    assert env["server"] == {"started_by_the_check": True, "mode": "private", "default_model": "tiny", "features": {"retrieval": True, "labels": True}}
+    assert env["gallery"] == GALLERY
+    assert "engine" not in env and "synthetic tiny gallery" not in json.dumps(env) and "no checkpoint, no data" not in json.dumps(env)
+
+
+def test_the_words_of_the_environment_change_with_what_the_app_says():
+    models = url_cases.tiny_models(False)
+    models["mode"], models["default_model"], models["features"] = "public", "other", {"retrieval": False, "labels": False}
+    models["models"][0].update(name="other", checkpoint="last.ckpt", drift_note="a note", device="cuda")
+    env = check.environment(_Version(), False, models, None)
+    assert env["server"] == {"started_by_the_check": False, "mode": "public", "default_model": "other", "features": {"retrieval": False, "labels": False}}
+    assert [(c["name"], c["checkpoint"], c["drift_note"], c["device"]) for c in env["models"]] == [("other", "last.ckpt", "a note", "cuda")]
+    assert env["gallery"] is None
+    assert "tiny" not in json.dumps([env["server"], env["models"], env["gallery"]])   # none of the facts about the app is a word of the script's
+
+
+def test_the_gallery_facts_are_the_retrieve_stages_own_five_fields():
+    from app.gallery import Gallery
+    assert set(GALLERY) == {"build_id", "images", "report_rows", "report_groups", "towers_identical"}
+    assert all(name in Gallery.facts.__doc__ for name in GALLERY)   # the fields the stage's `gallery` detail has
 
 
 # ---- the words and numbers the page is expected to show, as the page builds them ------------------------------------------------------
@@ -293,21 +340,15 @@ def test_main_stops_the_app_and_removes_its_work_even_when_a_step_of_its_clean_u
 
 
 def test_main_does_not_start_a_browser_for_an_app_that_lacks_the_gallery(monkeypatch, capsys):
-    """An app without the gallery (a --url run against the wrong server) is named and refused at once, before Chrome is started."""
+    """A tiny app without the gallery (a --url run against the wrong tiny app) is named and refused at once, before Chrome is started."""
     started = []
     monkeypatch.setattr(check, "find_chrome", lambda: "chrome")
-    monkeypatch.setattr(check, "get_json", lambda url: {"mode": "private", "features": {"retrieval": False, "labels": False}})
     monkeypatch.setattr(check, "Browser", lambda *a, **k: started.append("browser"))
-    import signal
-    before = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGALRM)
-    try:
-        assert check.main(["--url", "http://127.0.0.1:51234/", "--no-evidence"]) == 2
-    finally:
-        signal.signal(signal.SIGTERM, before[0])
-        signal.signal(signal.SIGALRM, before[1])
-        signal.alarm(0)
+    with url_cases.stub_app(url_cases.tiny_models(False)) as stub, url_cases.keeping_signals():
+        assert check.main(["--url", stub.url, "--no-evidence"]) == 2
     out = capsys.readouterr().out
     assert started == [] and out.startswith("ERROR the app cannot show these features: ") and "no retrieval gallery" in out and "no labeller" in out, out
+    assert stub.requests == [("GET", "/v1/models")] * 2   # the refusal's read of the app, and the check's own
 
 
 # ---- hygiene -----------------------------------------------------------------------------------------------------------------------

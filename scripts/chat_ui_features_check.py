@@ -36,17 +36,19 @@ Nothing is MIMIC-derived. No check passes while the page logged a console error 
 (a DOM rule per picture, true before and after the capture), go to docs/chat_ui/evidence/p6f/ with checklist.json (the result, the
 environment and, for each item, its name, its status and the facts it measured); --no-evidence runs without writing anything.
 
-    venv/bin/python scripts/chat_ui_features_check.py [--url http://127.0.0.1:PORT/] [--out DIR] [--no-evidence] [--timeout S]
+    venv/bin/python scripts/chat_ui_features_check.py [--url http://127.0.0.1:PORT/ --no-evidence] [--out DIR] [--no-evidence] [--timeout S]
 
 Prints `RESULT {"checks": 5, "failures": [...]}` last. Exits 1 on any failed item and 2 when Chrome or the app cannot be started, when --url
-is refused, or when the run overruns --timeout. It never talks to port 8000 (the dev server) or 8010 (the tunnel to the cluster): --url
-names a loopback address with a port of its own, and those two are refused. Every process it starts is killed on exit.
+is refused, or when the run overruns --timeout. A --url is an app that someone else started, so it is taken only with --no-evidence (the
+pictures and the checklist are evidence of the tiny stack that the check starts itself), and only when it is a tiny app on this machine's
+loopback with the gallery: scripts/chat_ui_cdp.py refuses (url_problem, tiny_only_problem) the dev server's port and the tunnel's, any other
+host, and any app whose /v1/models is not the tiny engine with no checkpoint, with one fixed line and no word of what the app said, before
+Chrome starts or anything is sent. Every process it starts is killed on exit.
 """
 import argparse
 import base64
 import datetime
 import io
-import ipaddress
 import json
 import math
 import os
@@ -59,7 +61,6 @@ import tempfile
 import time
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
-from urllib.parse import urlparse
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -71,14 +72,14 @@ from PIL import Image  # noqa: E402
 from app.imaging import TOO_SMALL_MSG  # noqa: E402
 from app.labels import CHEXBERT_14  # noqa: E402
 from scripts.chat_ui_browser_check import CARD_JS, Failure, Overrun, expect, one_line, warm_up  # noqa: E402
-from scripts.chat_ui_cdp import App, Browser, exit_on_sigterm, find_chrome  # noqa: E402
+from scripts.chat_ui_cdp import (App, Browser, exit_on_sigterm, find_chrome, tiny_only_problem, url_needs_no_evidence,  # noqa: E402
+                                 url_problem)
 
 EVIDENCE_DIR = os.path.join(REPO_ROOT, "docs", "chat_ui", "evidence", "p6f")
 STEP_DELAY_S = 0.02            # between two decoding steps of the tiny engine
 DESKTOP = (1280, 900)
 TALL = (1280, 2300)            # tall enough for a whole card above the composer: the images row, the similar X-rays, the matching reports
 MAX_SHOT_BYTES = 400 * 1024    # the limit of the committed pictures (tests/e2e/conftest.py MAX_SHOT_BYTES)
-REFUSED_PORTS = (8000, 8010)   # the dev server, and the tunnel to the cluster's: this check sends uploads and turns, and never to either
 
 # What the page says, as the page says it (the tests read the page's sources for every one of them).
 NOT_AN_IMAGE = "Use a PNG, JPEG or WEBP image."
@@ -104,31 +105,8 @@ EVIDENCE_FILES = ["attach_preview_1280x900_light.png", "attach_refused_1280x900_
                   "checklist.json"]   # what a full run writes, and the only files it replaces
 
 
-# ---- pure parts: arguments, ports, the checklist ----------------------------------------------------------------------------------
-
-def url_problem(url: str) -> Optional[str]:
-    """Why --url is refused, or None: an http address on this machine's loopback with a port of its own, and not the dev server's (8000) or
-    the tunnel's (8010)."""
-    try:
-        parts = urlparse(url)
-        port = parts.port
-    except ValueError:
-        return "not a URL: {!r}".format(url)
-    if parts.scheme != "http" or not parts.hostname:
-        return "not an http URL: {!r}".format(url)
-    host = parts.hostname
-    try:
-        loopback = ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        loopback = host == "localhost"
-    if not loopback:
-        return "{} is not a loopback address: this check talks to an app on this machine only".format(host)
-    if port is None or port == 0:
-        return "the URL names no port: give the port of the app, as in http://127.0.0.1:51234/"
-    if port in REFUSED_PORTS:
-        return "port {} is refused: 8000 is the dev server's and 8010 the tunnel to the cluster's, and this check sends uploads and turns".format(port)
-    return None
-
+# ---- pure parts: arguments, the checklist -----------------------------------------------------------------------------------------
+# (what a --url may be, and the refusal of one that is not, are scripts/chat_ui_cdp.py's: url_problem, tiny_only_problem, url_needs_no_evidence)
 
 def missing_features(models: Dict[str, Any]) -> Optional[str]:
     """What the app lacks for these features, said for /v1/models, or None: a private-mode app (the test-split picker and the neighbours'
@@ -146,11 +124,13 @@ def missing_features(models: Dict[str, Any]) -> Optional[str]:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="The five image features of the chat page, checked in headless Chrome on the tiny stack.")
-    parser.add_argument("--url", help="check this running tiny app with a gallery instead of starting one (http://127.0.0.1:PORT/; never 8000 or 8010)")
+    parser.add_argument("--url", help="check this running tiny app with a gallery instead of starting one (http://127.0.0.1:PORT/); needs --no-evidence")
     parser.add_argument("--out", default=EVIDENCE_DIR, help="where screenshots and checklist.json go (default: docs/chat_ui/evidence/p6f)")
     parser.add_argument("--no-evidence", action="store_true", help="run the checks and write no screenshots and no checklist.json")
     parser.add_argument("--timeout", type=int, default=420, help="seconds the whole run may take (default 420)")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    url_needs_no_evidence(parser, args)   # an app that someone else started is not what the evidence is of
+    return args
 
 
 def clear_evidence(out_dir: str) -> None:
@@ -456,6 +436,7 @@ class Context:
         self.serial = 0
         self.shots = []  # type: List[Dict[str, Any]]
         self.console = []  # type: List[str]
+        self.gallery = None  # type: Optional[Dict[str, Any]]   # the retrieve stage's own account of the gallery it searched, as the first turn gave it
         self.images = {}  # type: Dict[str, str]
         self.sizes = {"a": (320, 320), "b": (288, 256), "c": (256, 224)}
         for name, (w, h) in self.sizes.items():
@@ -825,6 +806,7 @@ def check_similar(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     expect(card["status"] == "done", "the turn ended {}".format(card["status"]))
     turn = ctx.stored(card["id"])
     retrieve, label = turn["stages"]["retrieve"].get("detail") or {}, turn["stages"]["label"].get("detail") or {}
+    ctx.gallery = retrieve.get("gallery") if isinstance(retrieve.get("gallery"), dict) else ctx.gallery   # what environment() says of the gallery
     neighbours, agreement = retrieve.get("image_neighbors") or [], label.get("neighbor_agreement") or []
     k = turn["start"]["options"]["k_images"]
     expect(len(neighbours) == k and len(agreement) == k and k > 0, "the server stored {} neighbours and {} agreements for k_images {}".format(len(neighbours), len(agreement), k))
@@ -1280,12 +1262,21 @@ def get_json(url: str) -> Any:
         return json.load(response)
 
 
-def environment(browser: Browser, own_app: bool, models: Dict[str, Any]) -> Dict[str, Any]:
+CARD_FACTS = ("name", "checkpoint", "checkpoint_sha256", "train_experiment", "drift_note", "device", "prefix_k", "eos_trained",
+              "cached_decode_available")   # what the checklist keeps of a model's card: which engine it is, and whether it has a checkpoint
+
+
+def environment(browser: Browser, own_app: bool, models: Dict[str, Any], gallery: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The checklist's environment. What it says of the app is what the app said of itself, read and not written here: the mode, the default model
+    and the features of its /v1/models, each model's card (CARD_FACTS: name, checkpoint, hash, run, the note it gives of itself, device...), and
+    the retrieve stage's own account of the gallery it searched (build_id, images, report_rows, report_groups, towers_identical). The words
+    "synthetic" and "no checkpoint" are in it only when the app's own answer says them."""
+    cards = [card for card in models["models"] if isinstance(card, dict)] if isinstance(models.get("models"), list) else []
     return {"date": datetime.date.today().isoformat(), "browser": browser.call("Browser.getVersion")["product"] + " (headless)", "python": platform.python_version(),
-            "os": platform.system(), "server": "create_app(engine='tiny', tiny_gallery=True), started by the check on a free loopback port" if own_app
-            else "an app that was already running (--url)", "server_mode": models.get("mode"), "server_features": models.get("features"),
-            "engine": "tiny (random weights, toy vocabulary; no checkpoint, no data)",
-            "gallery": "the synthetic tiny gallery: 200 train images, 40 test studies, 14-label vectors, 320 px gray JPEGs; the keyword labeller",
+            "os": platform.system(),
+            "server": {"started_by_the_check": own_app, "mode": models.get("mode"), "default_model": models.get("default_model"),
+                       "features": models.get("features")},
+            "models": [{key: card.get(key) for key in CARD_FACTS} for card in cards], "gallery": gallery,
             "uploaded_pictures": "phantoms drawn by the check (scripts/chat_ui_features_check.py phantom_png); nothing is from a patient or from MIMIC",
             "viewports": {"desktop": list(DESKTOP), "tall (the whole card)": list(TALL)},
             "notes": ["The serving command (python -m app.server --engine tiny --gallery DIR --labeler rule) cannot serve the tiny gallery: its manifest names a "
@@ -1302,8 +1293,8 @@ def environment(browser: Browser, own_app: bool, models: Dict[str, Any]) -> Dict
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
-    if args.url:
-        problem = url_problem(args.url)
+    if args.url:   # before anything is started or sent (the warm-up turn is a POST): the address, then the app's own answer about itself
+        problem = url_problem(args.url) or tiny_only_problem(args.url)
         if problem:
             print("ERROR --url refused: " + problem)
             return 2
@@ -1331,9 +1322,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             app = App(step_delay_s=STEP_DELAY_S, tiny_gallery=True)
             base = app.url
-            port = urlparse(base).port
-            if port in REFUSED_PORTS:   # a port the OS gave: never one of these, but this check does not take its chance
-                raise RuntimeError("the app came up on port {}, which this check never uses".format(port))
+            problem = url_problem(base)   # a port the OS gave: never a refused one, but this check does not take its chance
+            if problem:
+                raise RuntimeError("the app came up where this check does not go: " + problem)
         models = get_json(base + "v1/models")
         lacking = missing_features(models)
         if lacking:
@@ -1342,7 +1333,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         warm_up(base)
         browser = Browser(chrome, label="chat_ui_features_chrome")
         results, ctx = run_all(browser, base, work, out_dir)
-        env = environment(browser, app is not None, models)
+        env = environment(browser, app is not None, models, ctx.gallery if ctx is not None else None)
     except Overrun as exc:
         print("ERROR {}".format(exc))
         return 2

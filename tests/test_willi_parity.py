@@ -9906,35 +9906,39 @@ def test_the_features_check_imports_only_the_standard_library_numpy_pillow_and_t
     assert from_scripts == {"scripts.chat_ui_browser_check", "scripts.chat_ui_cdp"}, sorted(from_scripts)
 
 
-def test_the_features_check_names_the_dev_servers_port_and_the_tunnels_in_one_place_and_refuses_them_before_it_starts_anything():
-    """P6-F. Port 8000 is the laptop's dev server and 8010 the tunnel to the cluster's private server: a check that uploads pictures and sends turns
-    must never reach either. The two numbers are written once, as REFUSED_PORTS; the only strings that name them are the refusal, its help text and
-    the module's docstring; and main looks at --url before it installs the SIGTERM handler, looks for Chrome or starts the app."""
+def test_the_features_check_names_no_port_and_refuses_a_url_before_it_starts_anything():
+    """P6-F, P6-F fix 1. Port 8000 is the laptop's dev server and 8010 the tunnel to the cluster's private server: a check that uploads pictures
+    and sends turns must never reach either. The two numbers are written once, as REFUSED_PORTS in scripts/chat_ui_cdp.py, with the refusals
+    that read them; the features check imports those (url_problem, tiny_only_problem, url_needs_no_evidence) and names no port. In its main
+    the two refusals of a --url come before the SIGTERM handler, the look for Chrome, the app and the browser."""
     tree, parents = _features_tree()
-    numbers = [(n.value, _features_outer(n, parents)) for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value in (8000, 8010) and not isinstance(n.value, bool)]
-    assert numbers == [(8000, None), (8010, None)], numbers   # both at module level: the REFUSED_PORTS tuple
-    [refused] = [n for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "REFUSED_PORTS" for t in n.targets)]
-    assert ast.unparse(refused.value) == "(8000, 8010)"
-    named = {fn for text, fn in _features_strings(tree, parents) if "8000" in text or "8010" in text}
-    assert named <= {"url_problem", "parse_args"}, named
+    numbers = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value in (8000, 8010) and not isinstance(n.value, bool)]
+    assert numbers == [], numbers
+    assert not [text for text, fn in _features_strings(tree, parents) if "8000" in text or "8010" in text]
+    imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "scripts.chat_ui_cdp" for a in n.names}
+    assert {"url_problem", "tiny_only_problem", "url_needs_no_evidence"} <= imported, sorted(imported)
     main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
 
     def first_line(name):
         return min(n.lineno for n in ast.walk(main) if isinstance(n, ast.Call) and ast.unparse(n.func) == name)
 
+    assert first_line("url_problem") == first_line("tiny_only_problem")   # one statement: the address, then the app
     assert first_line("url_problem") < first_line("exit_on_sigterm") < first_line("find_chrome") < first_line("App") < first_line("Browser")
 
 
 @pytest.mark.parametrize("url", ["http://127.0.0.1:8000/", "http://127.0.0.1:8010/", "http://localhost:8010/chat", "http://[::1]:8000/"])
 def test_the_features_check_refuses_those_ports_with_one_error_line_and_status_2_having_started_nothing(monkeypatch, capsys, url):
-    """P6-F. The pin above is about the code's shape; this one runs main: nothing that starts a process or opens a connection is ever called."""
+    """P6-F. The pin above is about the code's shape; this one runs main: nothing that starts a process or opens a connection is ever called, and
+    not the read of the app's /v1/models either (a refused port might be the dev server's: nothing is sent to it, not even a GET)."""
+    import socket
     from scripts import chat_ui_features_check as check
 
     def forbidden(*args, **kwargs):
         raise AssertionError("the check started something for a refused URL")
 
-    for name in ("find_chrome", "App", "Browser", "exit_on_sigterm", "warm_up", "get_json"):
+    for name in ("find_chrome", "App", "Browser", "exit_on_sigterm", "warm_up", "get_json", "tiny_only_problem"):
         monkeypatch.setattr(check, name, forbidden)
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
     assert check.main(["--url", url, "--no-evidence"]) == 2
     out = capsys.readouterr().out
     assert out.startswith("ERROR --url refused: ") and "8000" in out and "8010" in out and out.count("\n") == 1, out

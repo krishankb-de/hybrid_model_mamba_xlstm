@@ -41,13 +41,16 @@ with tiny_gallery (P5-E: the synthetic gallery and the keyword labeller), its no
 and scored and every chip says whether it agrees. Screenshots go to docs/chat_ui/evidence/p4e/ with checklist.json (the result
 and each check's measurements); --no-evidence runs without writing anything.
 
-    venv/bin/python scripts/chat_ui_browser_check.py [--url http://127.0.0.1:8000/] [--out DIR] [--no-evidence] [--only CHECK[,CHECK...]]
+    venv/bin/python scripts/chat_ui_browser_check.py [--url http://127.0.0.1:PORT/ --no-evidence] [--out DIR] [--no-evidence] [--only CHECK[,CHECK...]]
 
 Prints `RESULT {"checks": N, "failures": [...]}` last. Exits 1 on any failed check and 2 when Chrome or the app cannot be
-started (or the run overruns --timeout seconds). With --url the app should pace its decoding (create_app's
+started, when --url is refused (or the run overruns --timeout seconds). With --url the app should pace its decoding (create_app's
 tiny_step_delay_s), or the stop check has no time to press Stop, and the reload step cannot hold its turn (the app is not the
 check's), so that step is as sensitive to the load of the machine as it was. --only runs the named checks, and only without evidence.
-Every process it starts is killed on exit.
+A --url is an app that someone else started, so it is taken only with --no-evidence, and only when it is a tiny app on this machine's
+loopback (scripts/chat_ui_cdp.py url_problem and tiny_only_problem: the dev server's port and the tunnel's, any other host, and any app whose
+/v1/models is not the tiny engine's are refused, before Chrome starts and before the warm-up turn is sent). Every process it starts is
+killed on exit.
 """
 import argparse
 import datetime
@@ -69,7 +72,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from scripts.chat_ui_cdp import App, Browser, exit_on_sigterm, find_chrome  # noqa: E402
+from scripts.chat_ui_cdp import (App, Browser, exit_on_sigterm, find_chrome, tiny_only_problem, url_needs_no_evidence,  # noqa: E402
+                                 url_problem)
 from scripts.repair_generations import split_sentences  # noqa: E402
 from tests.app_helpers import png_bytes  # noqa: E402
 
@@ -1707,13 +1711,14 @@ def environment(browser: Browser, app: Optional[App], warm: Optional[float]) -> 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="The browser checklist for the chat page, in headless Chrome.")
-    parser.add_argument("--url", help="check this running app instead of starting one (its page URL, e.g. http://127.0.0.1:8000/)")
+    parser.add_argument("--url", help="check this running tiny app instead of starting one (its page URL, e.g. http://127.0.0.1:PORT/); needs --no-evidence")
     parser.add_argument("--out", default=EVIDENCE_DIR, help="where screenshots and checklist.json go (default: docs/chat_ui/evidence/p4e)")
     parser.add_argument("--no-evidence", action="store_true", help="run the checks and write no screenshots and no checklist.json")
     parser.add_argument("--only", metavar="CHECK[,CHECK...]",
                         help="run only these checks (names as printed, in the order of the checklist); needs --no-evidence")
     parser.add_argument("--timeout", type=int, default=420, help="seconds the whole run may take (default 420)")
     args = parser.parse_args(argv)
+    url_needs_no_evidence(parser, args)   # an app that someone else started is not what the evidence is of
     if args.only is not None:
         if not args.no_evidence:   # a part of the checklist would replace the pictures and checklist.json of the whole of it
             parser.error("--only needs --no-evidence: the evidence of a partial run would replace that of the full one")
@@ -1726,6 +1731,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    if args.url:   # before anything is started or sent (the warm-up turn is a POST): the address, then the app's own answer about itself
+        problem = url_problem(args.url) or tiny_only_problem(args.url)
+        if problem:
+            print("ERROR --url refused: " + problem)
+            return 2
     exit_on_sigterm()   # a SIGTERM runs the finally below, which stops Chrome and the app
     chrome = find_chrome()
     if chrome is None:

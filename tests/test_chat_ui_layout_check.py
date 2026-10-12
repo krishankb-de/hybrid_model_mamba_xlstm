@@ -6,7 +6,9 @@ The harness bugs these pin were found by the P4-A re-review: a Chrome orphaned w
 started, `display: none` mutants of #stop and #drawer that passed, and a report floor that could be deleted unseen. The P4-E
 follow-up (the final review's carried items) adds: a close() that an interrupt cuts short still stops Chrome, the websocket's send
 keeps the deadline, the SIGTERM handler is one-shot, what a Chrome leaves in its session when it goes is swept, and the fakes'
-clean-up fixture is proven to call its clean-up.
+clean-up fixture is proven to call its clean-up. P6-F fix 1 adds the refusals of a --url that the three checks share (the dev server's
+port and the tunnel's, any host that is not this machine's loopback, an app that is not the tiny one), and each check's main() refusing
+with them (tests/chat_ui_url_cases.py).
 """
 import importlib
 import json
@@ -27,6 +29,7 @@ import pytest
 from scripts import chat_ui_layout_check as layout
 from scripts import chat_ui_cdp
 from scripts.chat_ui_cdp import Browser, kill_group
+from tests import chat_ui_url_cases as url_cases
 
 
 def _alive(pid: int) -> bool:
@@ -826,6 +829,126 @@ def test_a_check_goes_on_stopping_what_it_started_when_a_step_of_its_clean_up_is
         signal.alarm(0)
     assert calls == ["app started", "browser started", "browser closed", "app stopped"], calls
     assert not work.exists(), "the work directory was left behind"
+
+
+# ---- the refusals of a --url: one implementation, called by the three checks (P6-F fix 1) -----------------------------------------------
+
+def test_the_ports_that_are_refused_are_the_dev_servers_and_the_tunnels():
+    assert chat_ui_cdp.REFUSED_PORTS == (8000, 8010)
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8000/", "http://127.0.0.1:8000", "http://127.0.0.1:8010/", "http://localhost:8000/",
+                                 "http://localhost:8010/chat", "http://[::1]:8010/", "http://[::1]:8000/", "HTTP://127.0.0.1:8000/"])
+def test_the_dev_server_and_the_tunnel_are_refused_on_every_spelling_of_this_machine(url):
+    problem = chat_ui_cdp.url_problem(url)
+    assert problem and ("8000" in problem and "8010" in problem), problem   # it says which two, and why
+
+
+@pytest.mark.parametrize("url", ["http://example.com:5000/", "http://192.168.1.5:51234/", "http://0.0.0.0:51234/", "https://127.0.0.1:51234/",
+                                 "ftp://127.0.0.1:51234/", "file:///tmp/x", "127.0.0.1:51234", "http://127.0.0.1/", "http://127.0.0.1:0/", ""])
+def test_a_url_that_is_not_an_http_loopback_address_with_a_port_is_refused(url):
+    assert chat_ui_cdp.url_problem(url)
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:51234/", "http://127.0.0.1:51234", "http://localhost:49999/", "http://[::1]:51234/x"])
+def test_a_loopback_url_on_another_port_is_accepted(url):
+    assert chat_ui_cdp.url_problem(url) is None
+
+
+def test_the_models_the_refusal_compares_with_are_the_tiny_engines_own():
+    from app.engine import TinyEngine
+    assert (chat_ui_cdp.TINY_MODEL, chat_ui_cdp.TINY_NOTE) == (TinyEngine.name, TinyEngine.drift_note)
+
+
+@pytest.mark.parametrize("gallery", [False, True], ids=["no-gallery", "tiny-gallery"])
+def test_the_live_tiny_apps_own_models_are_taken_for_the_tiny_app(gallery):
+    assert chat_ui_cdp.models_problem(url_cases.tiny_models(gallery)) is None
+
+
+@pytest.mark.parametrize("why", url_cases.NOT_TINY_WHY)
+def test_what_is_not_the_tiny_engine_without_a_checkpoint_is_refused_with_one_fixed_message(why):
+    """The default model and every listed model must be the tiny engine (name, the note it gives of itself) with no checkpoint, no checkpoint
+    hash and no training run, each of those fields there and null: a card that leaves one out, or is not an object, is refused as well."""
+    assert chat_ui_cdp.models_problem(url_cases.not_tiny_answer(why)) == chat_ui_cdp.NOT_THE_TINY_APP
+
+
+def test_a_refusal_says_the_same_thing_whatever_the_server_said():
+    answer = url_cases.tiny_models(True)
+    answer["models"][0].update(checkpoint=url_cases.MARKER, name=url_cases.MARKER)
+    answer["default_model"] = url_cases.MARKER
+    assert chat_ui_cdp.models_problem(answer) == chat_ui_cdp.NOT_THE_TINY_APP and url_cases.MARKER not in chat_ui_cdp.NOT_THE_TINY_APP
+    assert url_cases.MARKER not in chat_ui_cdp.MODELS_UNREADABLE
+
+
+def test_the_app_is_asked_for_its_models_and_for_nothing_else():
+    with url_cases.stub_app(url_cases.tiny_models(True)) as stub:
+        assert chat_ui_cdp.tiny_only_problem(stub.url) is None
+        assert chat_ui_cdp.tiny_only_problem(stub.url.rstrip("/")) is None   # with or without the slash
+        assert stub.requests == [("GET", "/v1/models")] * 2, stub.requests
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8000/", "http://localhost:8010/", "http://example.com:5000/", "https://127.0.0.1:51234/", ""])
+def test_an_address_that_is_refused_is_not_asked_for_its_models_either(monkeypatch, url):
+    """tiny_only_problem is the one function that sends anything to a --url, so it refuses what url_problem refuses before it connects: a caller
+    that forgot the first refusal could not send a GET to the dev server's port."""
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a connection was made for a refused address")
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    assert chat_ui_cdp.tiny_only_problem(url) == chat_ui_cdp.url_problem(url) and chat_ui_cdp.url_problem(url)
+
+
+def test_a_redirect_is_not_followed_to_an_app_that_the_address_did_not_name():
+    with url_cases.stub_app(url_cases.tiny_models(True)) as elsewhere, url_cases.stub_app(location=elsewhere.url + "v1/models") as stub:
+        assert chat_ui_cdp.tiny_only_problem(stub.url) == chat_ui_cdp.MODELS_UNREADABLE
+        assert elsewhere.requests == [], elsewhere.requests
+
+
+def test_a_proxy_in_the_environment_is_not_used_for_the_app_on_this_machine(monkeypatch):
+    for name in ("http_proxy", "HTTP_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:{}/".format(chat_ui_cdp.free_port()))   # nothing answers there
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.setenv(name, "")
+    with url_cases.stub_app(url_cases.tiny_models()) as stub:
+        assert chat_ui_cdp.tiny_only_problem(stub.url) is None
+        assert stub.requests == [("GET", "/v1/models")]
+
+
+def test_an_answer_of_more_than_a_megabyte_is_not_read_to_its_end():
+    body = json.dumps(url_cases.tiny_models(True)).encode("utf-8") + b" " * (2 * 1024 * 1024)
+    with url_cases.stub_app(body=body) as stub:
+        assert chat_ui_cdp.tiny_only_problem(stub.url) == chat_ui_cdp.MODELS_UNREADABLE
+
+
+def test_a_url_with_no_evidence_is_the_only_url_that_is_taken_where_evidence_is_written(capsys):
+    import argparse
+    parser = argparse.ArgumentParser(prog="check")
+    parser.add_argument("--url")
+    parser.add_argument("--no-evidence", action="store_true")
+    chat_ui_cdp.url_needs_no_evidence(parser, parser.parse_args([]))
+    chat_ui_cdp.url_needs_no_evidence(parser, parser.parse_args(["--no-evidence"]))
+    chat_ui_cdp.url_needs_no_evidence(parser, parser.parse_args(["--url", "http://127.0.0.1:51234/", "--no-evidence"]))
+    with pytest.raises(SystemExit) as refused:
+        chat_ui_cdp.url_needs_no_evidence(parser, parser.parse_args(["--url", "http://127.0.0.1:51234/"]))
+    assert refused.value.code == 2
+    assert chat_ui_cdp.URL_NEEDS_NO_EVIDENCE in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("port", [8000, 8010])
+def test_the_layout_check_refuses_the_dev_servers_and_the_tunnels_port_before_it_sends_or_starts_anything(monkeypatch, capsys, port):
+    url_cases.refuses_a_port(layout, monkeypatch, capsys, port)
+
+
+def test_the_layout_check_refuses_an_address_that_is_not_this_machines_loopback_before_it_sends_or_starts_anything(monkeypatch, capsys):
+    url_cases.refuses_a_host(layout, monkeypatch, capsys)
+
+
+def test_the_layout_check_refuses_an_app_that_is_not_the_tiny_one_with_a_fixed_line_before_it_starts_anything(monkeypatch, capsys):
+    url_cases.refuses_a_server_that_is_not_the_tiny_app(layout, monkeypatch, capsys)
+
+
+def test_the_layout_check_goes_on_with_the_tiny_app(monkeypatch, capsys):
+    url_cases.goes_on_with_the_tiny_app(layout, monkeypatch, capsys)
 
 
 # ---- the geometry check, on measurements ----------------------------------------------------------------------------------------------
