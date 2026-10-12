@@ -6,7 +6,7 @@
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P5",
   "status": "P0-P3 complete; P4 7/8 (P4-H Playwright e2e added 2026-10-09). P9-G1/G2 done; P9-G3 job 2632173 submitted (EOS training). Parallel worktrees off a8e7efe: P9-G4 laptop part, P5-A, P5-B, P4-H.",
-  "next_action": "STOPPED by the user 2026-10-12 (all agents stopped; record only). Resume at the last 'RESUME HERE' block of the SDD ledger .superpowers/sdd/CHAT_UI_PLAN/progress.md. In flight, each with uncommitted work in its worktree and a backup under .superpowers/sdd/CHAT_UI_PLAN/wip/: (1) P8-F timing job fix round 1 (worktree agent-ada88ca862a48bedc, HEAD f30a770 approved) -> resume that agent, re-review, merge, submit chat_decode_timing_h100.sh NODE=gx14 -- --nodelist=gx14; (2) P6-F (worktree agent-ab5ebd5da76cbdce8, base a07b695; commit 1 edits uncommitted) -> resume that agent; (3) P8-D (worktree agent-a77c4cda3db9f00f1, base a07b695; app.js fix + chaos tests uncommitted; never commit tests/e2e/test_scratch_probe.py) -> resume that agent. P8-E done in code (a07b695), tick after a clean validate. Cluster: serve 2647167 running (gx14, 610fe8f, MODELS=m3eos,m3); P9-G6 LP2.0 chain 2638782-84 pending. Then P7-E (tell the user first), P9-C, P9-E, final review. New worktree agents: empty-status check, then git reset --keep <tip> alone.",
+  "next_action": "STOPPED by the user 2026-10-12 night, after P6-F and the P7-E drill script were reviewed, merged and gated (user: \"when the current process finish, check it out and see if it needs a review and merge it if all is good and then do not start any new process or tasks\"). Nothing is in flight. On the user's go-ahead, resume in this order: (1) P8-F part 3 — dispatch an implementer with .superpowers/sdd/CHAT_UI_PLAN/task-P8-F-part3-rulings.md (fill TIP_PLACEHOLDER with the chat_ui tip; engines built/loaded/warmed on the Worker's thread, no torch kernel on any other thread) → task review → merge → gates; (2) chat_remote.sh sync, then run the P7-E drill against the live serve job (its requeue deploys part 3; see carried_items.P7-E) and tell the user when the server goes down/up; (3) the R7-safe probe: speed vs the prediction (published generate 2.9-3.5 s per 100 tokens, 80%) and equality (published 5/5, EOS 6/6) → tick P7-E and P8-F; (4) the P8-D follow-up (task-P8-D-followup-rulings.md); (5) P9-C; (6) P9-G6 when chain 2638782-84 runs (queued, ReqNodeNotAvail); (7) P9-B, P9-F (user: last); (8) final review (carried_items.final_review); (9) P9-E. The cluster checkout is still d283b69: the app.js token-notice fix (9705d60) reaches the live page with the sync in step 2. Push only when the user asks.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -480,7 +480,7 @@
     },
     "P6": {
       "title": "Image experience (the user's five additions)",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "P6-A": {
           "done": true,
@@ -503,7 +503,7 @@
           "desc": "Viewer: full screen, single or side by side (query and the selected match), zoom, pan, brightness, contrast, keyboard, focus trap."
         },
         "P6-F": {
-          "done": false,
+          "done": true,
           "desc": "End-to-end check of the five features on the tiny stack, with screenshots; the cluster re-check is part of P7-D."
         }
       },
@@ -519,7 +519,12 @@
         "p6ae_pytest": "4214",
         "p6ae_e2e": "22",
         "p6ae_layout": "356/0",
-        "p6ae_browser": "10/0"
+        "p6ae_browser": "10/0",
+        "p6f_commits": "62250fd 7e343c8 b0b6545 102516d a6e213c 17afc31 606fc6b (picks of 036886e 67ce118 b382751 1105fd7 9cf1bbe 600e43e 6cd7b15)",
+        "p6f_checklist": "docs/chat_ui/evidence/p6f/checklist.json: 5/5 PASS (attach, reload, similar, matches, viewer), no console errors; 11 PNGs <= 400 KB; p4e (11) + p4h (7) evidence regenerated",
+        "p6f_flake": "Cannot-reach-the-server flake: Chrome fresh-profile background work (fetch never reached the network stack); 5 Chrome flags: 10/30 fail without vs 0/30 with, alternating; 30/30 consecutive then 5/5 after fix 1; which flag matters not established",
+        "p6f_review": "task review (opus) Needs fixes (features --url could write MIMIC evidence labelled synthetic; browser/layout --url refused nothing) -> fix 1 -> scoped re-review (sonnet): all 8 findings addressed",
+        "p6f_gates": "606fc6b: validate All gates passed (5214 passed, 1 skipped, 21 xfailed), e2e 36 passed, layout 366/0, browser 10/0, features 5/0"
       },
       "verdict": null
     },
@@ -801,9 +806,11 @@
     "P8-E runbook: app/README.md (40a7239) + review fixes 038a59d, a07b695; review + two scoped re-reviews, all findings addressed; validate clean on 967b536",
     "P8-D chaos checklist merged (9705d60 fix: the token notice goes once the right token is accepted; 473245b checklist); review Approved; gates on 473245b green",
     "P8-F timing job 2647689: the live turn's 3x is the worker thread itself (D 3.11x; store/NFS/HTTP add nothing); part 2 (proposed, on the user's go-ahead) diagnoses it with three no-code-change runs (MALLOC_ARENA_MAX=1, one CPU, OMP_WAIT_POLICY=PASSIVE)",
-    "P8-F part 2: J1 (malloc arena) no effect, J2 (1 CPU) and J3 (passive waits) remove the worker-thread penalty -> root cause = a second libgomp pool throttles OpenMP spinning; fix = engines built and warmed on the worker thread (part 3). User approved P7-E (drill) and P9-B + P9-F (scheduled last)."
+    "P8-F part 2: J1 (malloc arena) no effect, J2 (1 CPU) and J3 (passive waits) remove the worker-thread penalty -> root cause = a second libgomp pool throttles OpenMP spinning; fix = engines built and warmed on the worker thread (part 3). User approved P7-E (drill) and P9-B + P9-F (scheduled last).",
+    "P6-F: the five image features checked end to end on the tiny stack (scripts/chat_ui_features_check.py, evidence docs/chat_ui/evidence/p6f/), browser-check hardening, --url refusals in all three checks; merged 62250fd..606fc6b; gates green on 606fc6b",
+    "P6-F ticked: features check (5 items) + browser-check hardening merged (62250fd..606fc6b); --url in all three checks refuses 8000/8010, other hosts and non-tiny servers and needs --no-evidence (review finding: a tunnel could have written MIMIC evidence labelled synthetic). P7-E drill script merged (4ae8633, cfc1709); its box waits for the drill. Stopped per the user."
   ],
-  "last_updated": "2026-10-12T19:46:22+02:00",
+  "last_updated": "2026-10-13T00:07:41+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -827,11 +834,7 @@
     "P6-B": [
       "tests/test_app_openapi.py pins the full route set: every new route adds an entry plus summary/description/responses"
     ],
-    "P6-F": [
-      "as its own first commit 'P4-E follow-up': try/finally in Browser.close; _arm() at the top of WebSocket.send; widen the trap-order test margin; one-shot SIGTERM handler; straggler sweep of the Chrome session after a graceful exit; test that the autouse fixture calls _kill_the_fakes()",
-      "browser check reload step races under load (mid-turn 150-token turn can finish before the reload): harden",
-      "browser check a11y item assumes the no-gallery app's three stage buttons -> fails on a --url run against a tiny_gallery server (pre-existing)"
-    ],
+    "P6-F": [],
     "P7-B": [
       "pass RealEngine cache_dir so the 2.4 GB checkpoint is not re-hashed at every start",
       "uvicorn timeout_graceful_shutdown",
@@ -886,7 +889,11 @@
       "P8-D minors: near-duplicate test helpers (free_port, kill_group, FakeLabeler, closed_port_url) → hoist to tests/app_helpers.py; the API chaos file has no SIGTERM→teardown guard; the e2e ui fixture builds the server before its try",
       "pre-existing: pytest.ini uses [tool:pytest], which pytest ignores in a pytest.ini, so --strict-markers/--disable-warnings are likely inactive — check what pytest loads",
       "P8-F timing minors: worker.shutdown() waits without bound after turn_deadline; http_turn deadline up to one ping (15 s) late, a silent stream ends as ReadTimeout at 120 s; the mount-table sentinel does not assert absence of every SECRET-* string; the deadline's nested wait_for was tested only on py3.14 (cluster 3.11)",
-      "P8-D's page fix (app.js token notice, 9705d60) is not on the cluster yet: the live serve job serves app/static from CLUSTER_REPO, so sync it together with the next planned serve restart"
+      "P8-D's page fix (app.js token notice, 9705d60) is not on the cluster yet: the live serve job serves app/static from CLUSTER_REPO, so sync it together with the next planned serve restart",
+      "P6-F: the user-turn thumbnail is not a viewer opener (ruled 'accepted as built' at P6 fix 1; the card's 'Your X-ray' tile opens it) while CHAT_UI_SPEC.md:310 says clicking the upload opens the viewer — confirm with the user",
+      "P6-F (found by its fix round, predates it): at 320x568 on a gallery (private-mode) server the composer's nowrap button row gains 'Test-split study' (app/static/app.js:2021-2027, styles.css:501), wraps, and Send sits ~33 px below the composer's fold with a preview attached (6 layout-check lines, drawer open/closed, light/dark); the gate's app has no gallery, so the gate never sees it",
+      "P6-F minors: tests/chat_ui_url_cases.py:93 type comment uses List without importing it; chat_ui_cdp.py:72 and the flags-test docstring say \"Chrome's default flags (10 of 30)\" where the baseline arm was the four earlier flags; the tiny-only proof reads model cards only",
+      "P7-E minors: tests/test_chat_requeue_drill.py duplicates sibling helpers (the_result, offline, no_ambient_token, sse) and re-runs the load drill's refusal matrices (one case per refusal would prove the wiring); the ports pin is name-keyed and does not assert its 4 allowed tests stay process-free; a silent stream's 'timeout' could in theory be relabelled 'reset' (give TurnReader._read's two handlers stream.end = stream.end or ...)"
     ],
     "P9-G5": [],
     "P5-D": [
@@ -917,6 +924,9 @@
     "P8-D-followup": [
       "store failure mid-turn (sqlite 'database or disk is full'): today the stream ends with no error/message_stop and the message stays running until the next start, so the page polls forever; fix per .superpowers/sdd/CHAT_UI_PLAN/task-P8-D-followup-rulings.md (error{store_failed} + message_stop emitted unstored with contiguous seq; one in-memory overlay applied by every read; chaos item 8 + e2e) — not started (user stop 2026-10-12)",
       "P8-D review minors folded into that task: test_app_chaos.py docstring '1 MB image' (is ~103 KB) and 'refused before parsed' unshown; the refused-CLI test promises 'no endpoint file' without passing --endpoint-file; e2e TokenServer.direct_url unused; token file needs os.fchmod(fd, 0o600); 6c test needs a baseline 200 before the rmtree"
+    ],
+    "P7-E": [
+      "drill script merged (4ae8633 + cfc1709, reviewed: R7 traced, waits bounded, requeue at most once). Run it on the cluster AFTER P8-F part 3 is merged and synced, since the requeue restarts the serve job onto that code: venv/bin/python scripts/chat_requeue_drill.py http://localhost:8010 --job <serve job> --token-file <token file>; tell the user when the live server goes down and comes back; read the D22 lines ([server] sqlite journal_mode=..., [server] recovered N running turn(s)) via chat_remote.sh summary logs/chat_server_<job>.log; record node, requeue_s, back_s (includes queue wait + load + tunnel re-attach), turn status; then tick P7-E"
     ]
   }
 }

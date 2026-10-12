@@ -3711,7 +3711,7 @@ Tests (`node --test`): `zoomAt` keeps the point under the cursor fixed and clamp
 
 Commit `"P6-E: full-screen viewer (side by side, zoom, pan, brightness, contrast)"`.
 
-- [ ] **P6-F** End-to-end check of the five features on the tiny stack, with screenshots; the cluster re-check is part of P7-D.
+- [x] **P6-F** End-to-end check of the five features on the tiny stack, with screenshots; the cluster re-check is part of P7-D.
 
 Run `venv/bin/python -m app.server --engine tiny --gallery <tiny gallery dir> --labeler rule` and check each feature: (1) click, drag-drop and paste each attach with a preview, and refused files show the message; (2) after a reload and after reopening the session, the X-ray and the 224×224 model input are both shown; (3) the similar-X-rays grid shows scores and "n/14 labels agree"; (4) the matching-reports list and, for a picked test study, the own-rank badge; (5) the viewer opens from every image, side by side for a neighbour, with zoom, pan, brightness and contrast working by mouse and keyboard. Record screenshots and the checklist in the evidence. Commit `"P6-F: five image features checked end to end (tiny)"`.
 
