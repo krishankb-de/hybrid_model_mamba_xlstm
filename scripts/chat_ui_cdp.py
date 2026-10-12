@@ -42,6 +42,14 @@ KEEP_EVENTS = 5000   # DevTools events kept per Browser (Browser.events): the ol
 CLOSE_WAIT_S = 3.0   # how long, in all, Chrome has to answer the DevTools Browser.close and to exit, before it is sent SIGTERM
 TERM_WAIT_S = 5.0    # how long a process has to exit after SIGTERM, before it is sent SIGKILL
 
+# What Chrome is started with, besides its profile, its DevTools port and the blank page. A fresh profile is not a quiet one: some seconds after
+# Chrome starts it installs its default apps and extensions into it (its log shows web-app and extension installs, a burst of about 70 ms), and a
+# fetch that a page makes in that moment fails inside Chrome: TypeError "Failed to fetch" after 1 ms, net::ERR_ABORTED with canceled set, no
+# request in the NetLog and none at the server, while the same document's other fetches work. The features check's first click fetches about 7 s
+# after Chrome starts, and that fetch failed in about one run of three (10 of 30; with these flags 0 of 30, runs alternating). They are the flags
+# that automation tools start Chrome with, to keep it to what it was asked to do.
+CHROME_FLAGS = ("--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--disable-extensions", "--disable-default-apps",
+                "--disable-background-networking", "--disable-component-update", "--disable-sync")
 HOLD_FILE = "hold"   # in the app's home: while it exists, the turns of the tiny engine wait (App.hold, hold_turns)
 
 # The app as the checks run it. The uvicorn CLI cannot pass create_app its arguments (the step delay of the tiny engine is
@@ -285,8 +293,7 @@ class Browser:
         self.events_seen: Deque[Dict[str, Any]] = deque(maxlen=KEEP_EVENTS)
         try:   # a failure from here on closes what was opened: no Chrome left running, no profile directory left behind
             self.proc = subprocess.Popen(
-                [chrome, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-                 "--remote-debugging-port=0", "--user-data-dir=" + self.profile, "about:blank"],
+                [chrome, *CHROME_FLAGS, "--remote-debugging-port=0", "--user-data-dir=" + self.profile, "about:blank"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             self.ws = WebSocket(self._page_url())
             self.call("Page.enable")

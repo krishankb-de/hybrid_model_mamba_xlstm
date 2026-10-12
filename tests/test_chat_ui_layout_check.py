@@ -125,6 +125,23 @@ def test_a_devtools_connection_that_fails_after_chrome_started_closes_chrome(tmp
         listener.close()
 
 
+def test_chrome_is_started_without_the_default_apps_extensions_and_background_work_it_does_in_a_fresh_profile(tmp_path):
+    """P6-F. A fresh profile is not a quiet one: some seconds after Chrome starts it installs its default apps and extensions into it, and a fetch
+    that a page makes in the moments that takes fails inside Chrome (TypeError: Failed to fetch, net::ERR_ABORTED, canceled; no request in the
+    NetLog, nothing at the server). A check that happened to click then (the features check's picker, at about 7 s) failed about one run in three,
+    and none failed with these flags (30 runs each, alternating). The test reads the arguments the process was really started with."""
+    script = tmp_path / "chrome"
+    script.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "{}"\nexec sleep 30\n'.format(tmp_path / "argv"))
+    script.chmod(0o755)
+    with pytest.raises(RuntimeError, match="did not open a DevTools page"):   # this Chrome never opens one: it is the arguments that are looked at
+        Browser(str(script), startup_timeout=1.0)
+    started_with = (tmp_path / "argv").read_text().split("\n")
+    for flag in ("--disable-extensions", "--disable-default-apps", "--disable-background-networking", "--disable-component-update", "--disable-sync"):
+        assert flag in started_with, "Chrome was started without {}: {}".format(flag, started_with)
+    assert "--headless=new" in started_with and "--remote-debugging-port=0" in started_with   # and what it always had
+    assert any(a.startswith("--user-data-dir=") for a in started_with) and started_with[-2] == "about:blank"
+
+
 def test_a_chrome_that_exits_at_once_leaves_no_profile_directory(tmp_path):
     script = tmp_path / "chrome"
     script.write_text('#!/bin/sh\nfor a in "$@"; do case "$a" in --user-data-dir=*) echo "${a#--user-data-dir=}" > "%s";; esac; done\nexit 3\n'
