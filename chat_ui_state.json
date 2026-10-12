@@ -626,7 +626,11 @@
         "p8f_timing_job": "2647689 (gx14, code d283b69, exit 0, 5:45)",
         "p8f_timing_means_ms": "A 2960, B 2994, C 3003, D 9193, E 8999, E-local 9186, F 8329, A-end 2946",
         "p8f_timing_first_over_1_5x": "D (3.11x); same_report all arms; prediction right",
-        "p8f_timing_env": "Xeon Platinum 8480CL, affinity 8, cores 4, fs_local xfs, fs_home nfs, threads 8/8, load 8.9 -> 12.2"
+        "p8f_timing_env": "Xeon Platinum 8480CL, affinity 8, cores 4, fs_local xfs, fs_home nfs, threads 8/8, load 8.9 -> 12.2",
+        "p8f_diag_J1": "2649955 MALLOC_ARENA_MAX=1: A 3083 ms, D 3.19x (not the cause; prediction wrong)",
+        "p8f_diag_J2": "2649956 one CPU: A 9235 ms, D 0.98x, all arms ~1.0 (prediction right)",
+        "p8f_diag_J3": "2649957 OMP_WAIT_POLICY=PASSIVE: A 9521 ms, D 0.98x (spinning is what makes A fast)",
+        "p8f_root_cause": "two libgomp pools (main thread from engine load + worker) -> managed 16 > 8 CPUs -> spin throttled to 100 -> passive -> 8 threads as slow as 1"
       },
       "verdict": null
     },
@@ -796,9 +800,10 @@
     "2026-10-12: stopped by the user with P8-F fix 1, P6-F and P8-D in flight (uncommitted work kept in their worktrees and backed up in the SDD workspace wip/); P8-E committed and reviewed (tick after a clean validate); probe run 2 on 610fe8f: gate ok, EOS default turn mean 5.9 s.",
     "P8-E runbook: app/README.md (40a7239) + review fixes 038a59d, a07b695; review + two scoped re-reviews, all findings addressed; validate clean on 967b536",
     "P8-D chaos checklist merged (9705d60 fix: the token notice goes once the right token is accepted; 473245b checklist); review Approved; gates on 473245b green",
-    "P8-F timing job 2647689: the live turn's 3x is the worker thread itself (D 3.11x; store/NFS/HTTP add nothing); part 2 (proposed, on the user's go-ahead) diagnoses it with three no-code-change runs (MALLOC_ARENA_MAX=1, one CPU, OMP_WAIT_POLICY=PASSIVE)"
+    "P8-F timing job 2647689: the live turn's 3x is the worker thread itself (D 3.11x; store/NFS/HTTP add nothing); part 2 (proposed, on the user's go-ahead) diagnoses it with three no-code-change runs (MALLOC_ARENA_MAX=1, one CPU, OMP_WAIT_POLICY=PASSIVE)",
+    "P8-F part 2: J1 (malloc arena) no effect, J2 (1 CPU) and J3 (passive waits) remove the worker-thread penalty -> root cause = a second libgomp pool throttles OpenMP spinning; fix = engines built and warmed on the worker thread (part 3). User approved P7-E (drill) and P9-B + P9-F (scheduled last)."
   ],
-  "last_updated": "2026-10-12T16:01:22+02:00",
+  "last_updated": "2026-10-12T19:46:22+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -904,6 +909,7 @@
     ],
     "P8-F": [
       "LOCATED (timing job 2647689, gx14): the live generate's ~3x over P1-C is the worker thread itself — D (generate on a ThreadPoolExecutor thread) 3.11x A, while store/NFS/emit/HTTP add nothing (E 3.04x, E-local 3.10x, F 2.81x); store commits were already ruled out (WAL exclusive, 0.007 ms)",
+      "ROOT CAUSE (J1-J3): two libgomp pools throttle spin-waiting; fix = one pool: build, load and warm every engine on the worker thread, no torch op on the main thread (P8-F part 3), then acceptance by the probe (~30 ms/step) and a worker-only timing mode",
       "the EOS (default) model's turn time: probe pass 3 records it from the P7-D follow-up on (eos_turn_ms_max)",
       "part 2 (proposed, on the user's go-ahead): diagnose the worker-thread 3x with the same job, no code change — J1 MALLOC_ARENA_MAX=1, J2 --cpus-per-task=1, J3 OMP_WAIT_POLICY=PASSIVE (predictions in the plan + predictions[P8-F-diag]); then fix (likely a wrapper env line or an allocator), redeploy the serve job, re-run the probe",
       "then tick P8-F: record first byte (probe ≤ 144 ms), full turn (EOS default 5.9 s mean, published ~8 s; after the fix, re-measured), 375 px (layout check), no external requests + no EventSource (static tests)"

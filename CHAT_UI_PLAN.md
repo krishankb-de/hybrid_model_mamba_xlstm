@@ -4042,6 +4042,23 @@ The aim is to find where the live per-step cost (77-88 ms against P1-C's ~30 ms)
   - **J2 `--cpus-per-task=1`.** One thread, so no OpenMP team.
   - **J3 `OMP_WAIT_POLICY=PASSIVE`.** OpenMP threads do not spin while they wait.
 - **Prediction (R4, recorded 2026-10-12, before any of these runs):** J1 MALLOC_ARENA_MAX=1: D/A ≤ 1.3 55%. J2 one CPU: A 6-12 s per report; D/A ≤ 1.3 45% (≈1 points at the OpenMP team or TLB shootdowns; ≥1.5 points at per-thread allocation or thread-local state). J3 OMP_WAIT_POLICY=PASSIVE: A within ±25% of 2.96 s 70%; D/A ≤ 1.3 20%.
+- **Result, part 2 (jobs 2649955, 2649956 and 2649957; gx14, code d283b69).** Every arm produced the same report.
+  - **J1, `MALLOC_ARENA_MAX=1`:** A 3083 ms, D 3.19×. The malloc arenas are not the cause; the prediction was wrong.
+  - **J2, one CPU:** A 9235 ms, D 0.98×, and every arm about 1.0×. With one thread there is no worker-thread penalty; the prediction was right.
+  - **J3, `OMP_WAIT_POLICY=PASSIVE`:** A 9521 ms and D 0.98×. Without spin-waiting even the main thread is as slow as one thread. The prediction for A was wrong, since A tripled. D/A ≤ 1.3 happened, but because A slowed down.
+- **Root cause.** It is consistent with all four runs and with libgomp's `do_spin`.
+  - The fast path needs OpenMP threads to spin-wait between the thousands of tiny parallel regions of a beam-3 decode step.
+  - Every thread that calls into OpenMP gets its own libgomp pool. The main thread's pool is made while the engine loads, and it stays alive.
+  - A worker thread's pool then brings `gomp_managed_threads` to 16, above `gomp_available_cpus` (8). libgomp then throttles spinning to 100 spins (`OMP_WAIT_POLICY` unset), which is in effect passive waiting.
+  - So every region pays a futex wake-up, and 8 threads are no faster than 1. D (≈ 9.2-9.8 s) matches J2's A and J3's A.
+  - A-end recovers because a finished arm's worker thread exits and frees its pool.
+  - The live server has the same shape: its engines are built on the main thread, which runs the event loop, and its turns run on the worker thread.
+- **Part 3: the fix.** Each process keeps one OpenMP pool: every engine is built, loaded and warmed on the worker thread, and no torch op runs on the main thread. A test pins this.
+  - Acceptance on the cluster: the probe's live per-step cost is about 30 ms (generate about 3.0 s per 100 tokens), and a worker-only timing mode gives D/A ≈ 1.
+  - Rejected alternatives:
+    - `OMP_NUM_THREADS` set to half the CPUs: brittle, and slower;
+    - 16 CPUs for 8 threads: it wastes a reservation;
+    - `GOMP_SPINCOUNT`: it does not lift the throttle.
 
 
 ### P9 — Demo and close
