@@ -1,0 +1,723 @@
+{
+  "result": {
+    "checks": 5,
+    "failures": []
+  },
+  "environment": {
+    "date": "2026-10-12",
+    "browser": "Chrome/146.0.7680.178 (headless)",
+    "python": "3.14.3",
+    "os": "Darwin",
+    "server": "create_app(engine='tiny', tiny_gallery=True), started by the check on a free loopback port",
+    "server_mode": "private",
+    "server_features": {
+      "retrieval": true,
+      "labels": true
+    },
+    "engine": "tiny (random weights, toy vocabulary; no checkpoint, no data)",
+    "gallery": "the synthetic tiny gallery: 200 train images, 40 test studies, 14-label vectors, 320 px gray JPEGs; the keyword labeller",
+    "uploaded_pictures": "phantoms drawn by the check (scripts/chat_ui_features_check.py phantom_png); nothing is from a patient or from MIMIC",
+    "viewports": {
+      "desktop": [
+        1280,
+        900
+      ],
+      "tall (the whole card)": [
+        1280,
+        2300
+      ]
+    },
+    "notes": [
+      "The serving command (python -m app.server --engine tiny --gallery DIR --labeler rule) cannot serve the tiny gallery: its manifest names a tower whose hash is not the tiny engine's, and the server refuses a gallery it cannot match to its engine ('the gallery was built with another image tower', exit 1). The check starts the app as the laptop's dev server does, create_app(tiny_gallery=True).",
+      "Real input: the click on the well (Chrome's file chooser is intercepted and answered with a file: a headless Chrome has no dialog), the file dropped from disk (Input.dispatchDragEvent), the mouse and the keyboard of the viewer. Not real: the paste, which is a ClipboardEvent made in the page that holds a File or text, because a headless Chrome has no clipboard of its own and a real Cmd+V would read the user's.",
+      "Brightness and contrast are measured on pixels: a screenshot of the left picture's box, its luma mean (brightness) and spread (contrast). Zoom and pan are measured on the picture's drawn box, and compared with the page's own data-scale.",
+      "The user turn's own thumbnail is a picture and no more by design (render.js userCtx has no viewer): the card's images row opens the same X-ray.",
+      "Every screenshot was confirmed by the page itself (a DOM rule per picture, true before and after the capture)."
+    ]
+  },
+  "checks": [
+    {
+      "name": "attach",
+      "claim": "click, drag-drop and paste each attach with a preview, and a refused file shows its message",
+      "status": "PASS",
+      "detail": "click, drop and paste each attached a picture with its preview (name, pixel size, size on disk; Remove puts the focus back on the well); the drag showed on the well; a drop beside it and a paste of text did nothing; the page refused a GIF, a DICOM name and 21 MB without a request, and showed the server's 422 for a 32 px picture and deleted its chat",
+      "seconds": 0.7,
+      "data": {
+        "well_text": "Drop, paste or click to attach an X-ray (PNG, JPEG, WEBP)",
+        "click": {
+          "chooser": {
+            "mode": "selectSingle"
+          },
+          "preview": {
+            "name": "xray_a.png",
+            "sizes": "320×320 px · 57 KB",
+            "natural": [
+              320,
+              320
+            ],
+            "alt": "Preview of xray_a.png",
+            "remove": "Remove image",
+            "title": "xray_a.png · 320×320 px · 57 KB"
+          },
+          "after_remove": {
+            "shown": false,
+            "focus": "image-well"
+          }
+        },
+        "drop": {
+          "drag_shown_on_the_well": true,
+          "preview": {
+            "name": "xray_b.png",
+            "sizes": "288×256 px · 41 KB",
+            "natural": [
+              288,
+              256
+            ]
+          },
+          "beside_the_well": {
+            "navigated": false,
+            "attached": false
+          }
+        },
+        "paste": {
+          "text_taken": false,
+          "picture_taken": true,
+          "mechanism": "a ClipboardEvent made in the page (headless Chrome has no clipboard)",
+          "preview": {
+            "name": "image.png",
+            "sizes": "256×224 px · 32 KB",
+            "natural": [
+              256,
+              224
+            ]
+          }
+        },
+        "refused_by_the_page": {
+          "gif": {
+            "message": "Use a PNG, JPEG or WEBP image.",
+            "role": "alert",
+            "attached_image_kept": "image.png"
+          },
+          "dicom": {
+            "message": "DICOM is not supported. Export the image as PNG or JPEG first.",
+            "role": "alert",
+            "attached_image_kept": "image.png"
+          },
+          "over_20_mb": {
+            "message": "Image is larger than 20 MB.",
+            "role": "alert",
+            "attached_image_kept": "image.png"
+          }
+        },
+        "turn_requests_after_them": 0,
+        "refused_by_the_server": {
+          "message": "Each side must be at least 64 pixels.",
+          "http_status": 422,
+          "image_kept": "small.png",
+          "chats_left_behind": 0
+        }
+      },
+      "console_errors": []
+    },
+    {
+      "name": "reload",
+      "claim": "after a reload, and after reopening the session, the X-ray and the 224×224 model input are both shown",
+      "status": "PASS",
+      "detail": "the X-ray (288x256 px) and the 224x224 model input were shown, loaded, inside the card, live, after a reload and after reopening the chat from the sidebar; the model input's brightness is the X-ray's",
+      "seconds": 2.2,
+      "data": {
+        "x_ray_px": [
+          288,
+          256
+        ],
+        "live": {
+          "captions": [
+            "Your X-ray · 288×256 px",
+            "What the model saw (224×224)"
+          ],
+          "natural": [
+            [
+              288,
+              256
+            ],
+            [
+              224,
+              224
+            ]
+          ],
+          "paths": [
+            "/v1/messages/m_01a1316ff75b0000ebd111/image?variant=thumb",
+            "/v1/messages/m_01a1316ff75b0000ebd111/image?variant=model_input"
+          ],
+          "user_turn_picture": "preview",
+          "luma_mean_std": [
+            [
+              90.7,
+              31.8
+            ],
+            [
+              90.7,
+              31.8
+            ]
+          ],
+          "x_ray_luma_mean": 90.7
+        },
+        "after_reload": {
+          "captions": [
+            "Your X-ray · 288×256 px",
+            "What the model saw (224×224)"
+          ],
+          "natural": [
+            [
+              288,
+              256
+            ],
+            [
+              224,
+              224
+            ]
+          ],
+          "paths": [
+            "/v1/messages/m_01a1316ff75b0000ebd111/image?variant=thumb",
+            "/v1/messages/m_01a1316ff75b0000ebd111/image?variant=model_input"
+          ],
+          "user_turn_picture": "server",
+          "luma_mean_std": [
+            [
+              90.7,
+              31.8
+            ],
+            [
+              90.7,
+              31.8
+            ]
+          ],
+          "x_ray_luma_mean": 90.7
+        },
+        "after_reopening": {
+          "captions": [
+            "Your X-ray · 288×256 px",
+            "What the model saw (224×224)"
+          ],
+          "natural": [
+            [
+              288,
+              256
+            ],
+            [
+              224,
+              224
+            ]
+          ],
+          "paths": [
+            "/v1/messages/m_01a1316ff75b0000ebd111/image?variant=thumb",
+            "/v1/messages/m_01a1316ff75b0000ebd111/image?variant=model_input"
+          ],
+          "user_turn_picture": "server",
+          "luma_mean_std": [
+            [
+              90.7,
+              31.8
+            ],
+            [
+              90.7,
+              31.8
+            ]
+          ],
+          "x_ray_luma_mean": 90.7
+        }
+      },
+      "console_errors": []
+    },
+    {
+      "name": "similar",
+      "claim": "the similar-X-rays grid shows scores and 'n/14 labels agree'",
+      "status": "PASS",
+      "detail": "4 similar X-rays, each with its stored 320 px picture, '#rank . similarity' and a bar of that length, and 'n/14 labels agree' (n recounted here from the labels, as the server says) with the chips of the labels that differ",
+      "seconds": 1.5,
+      "data": {
+        "k_images": 4,
+        "neighbours": [
+          {
+            "rank": 1,
+            "score": "#1 · 0.660",
+            "bar": "66%",
+            "agreement": "10/14 labels agree",
+            "chips": [
+              "neighbour: Lung Opacity",
+              "neighbour: Consolidation",
+              "neighbour: Fracture",
+              "report: Support Devices"
+            ],
+            "picture_px": [
+              320,
+              320
+            ],
+            "gallery_path": "/v1/gallery/images/26"
+          },
+          {
+            "rank": 2,
+            "score": "#2 · 0.630",
+            "bar": "63%",
+            "agreement": "12/14 labels agree",
+            "chips": [
+              "neighbour: Pleural Other",
+              "report: Support Devices"
+            ],
+            "picture_px": [
+              320,
+              320
+            ],
+            "gallery_path": "/v1/gallery/images/59"
+          },
+          {
+            "rank": 3,
+            "score": "#3 · 0.598",
+            "bar": "60%",
+            "agreement": "7/14 labels agree",
+            "chips": [
+              "neighbour: Enlarged Cardiomediastinum",
+              "neighbour: Lung Opacity",
+              "neighbour: Consolidation",
+              "neighbour: Pneumonia",
+              "neighbour: Atelectasis",
+              "neighbour: Pleural Effusion",
+              "neighbour: Fracture"
+            ],
+            "picture_px": [
+              320,
+              320
+            ],
+            "gallery_path": "/v1/gallery/images/142"
+          },
+          {
+            "rank": 4,
+            "score": "#4 · 0.520",
+            "bar": "52%",
+            "agreement": "7/14 labels agree",
+            "chips": [
+              "neighbour: Lung Opacity",
+              "neighbour: Edema",
+              "neighbour: Atelectasis",
+              "neighbour: Pneumothorax",
+              "neighbour: Pleural Effusion",
+              "neighbour: Pleural Other",
+              "report: Support Devices"
+            ],
+            "picture_px": [
+              320,
+              320
+            ],
+            "gallery_path": "/v1/gallery/images/45"
+          }
+        ],
+        "agreement_recounted_here": true,
+        "similarity_falling": true
+      },
+      "console_errors": []
+    },
+    {
+      "name": "matches",
+      "claim": "the matching-reports list and, for a picked test study, the own-rank badge",
+      "status": "PASS",
+      "detail": "3 matching reports (rank, similarity, group size, the stored text clamped to three lines, the positive labels) and no badge for an upload; a test study picked in the composer shows 'Own report: rank 4 of 40 test reports · R@10 hit'",
+      "seconds": 2.5,
+      "data": {
+        "k_reports": 3,
+        "upload": {
+          "reports": [
+            {
+              "rank": 1,
+              "score": "#1 · 0.543",
+              "group": "×2 identical reports",
+              "label_chips": [
+                "Enlarged Cardiomediastinum",
+                "Lung Opacity",
+                "Consolidation",
+                "Pneumonia",
+                "Atelectasis",
+                "Pleural Effusion",
+                "Fracture",
+                "Support Devices"
+              ],
+              "words": 12,
+              "show_all": null
+            },
+            {
+              "rank": 2,
+              "score": "#2 · 0.474",
+              "group": "×2 identical reports",
+              "label_chips": [
+                "Cardiomegaly",
+                "Lung Opacity",
+                "Lung Lesion",
+                "Pleural Effusion"
+              ],
+              "words": 12,
+              "show_all": null
+            },
+            {
+              "rank": 3,
+              "score": "#3 · 0.471",
+              "group": "×3 identical reports",
+              "label_chips": [
+                "Pleural Other"
+              ],
+              "words": 13,
+              "show_all": null
+            }
+          ],
+          "own_rank_badge": null,
+          "show_all_and_less": "not offered, as the page intends: no stored report is longer than its three lines at this width, and each row's Show all is shown exactly when its text overflows (checked for every report)"
+        },
+        "picked_study": {
+          "test_row": 3,
+          "badge": "Own report: rank 4 of 40 test reports · R@10 hit",
+          "tooltip": "Dedup-aware rank 4: every identical report counted once. Protocol: i2t, official test split, strict pairing: a tied copy counts in this report's favour, while compute_retrieval_metrics(groups=None) breaks such ties by array position.",
+          "stored_rank": {
+            "rank": 4,
+            "of": 40,
+            "rank_dedup": 4,
+            "hit_at_10": true
+          },
+          "user_turn": {
+            "image": "Test-split X-ray",
+            "chips": [
+              "beam 3",
+              "100 tok",
+              "cached",
+              "k 4/3",
+              "test row 3"
+            ],
+            "thumbIsOpener": false
+          },
+          "reports": [
+            {
+              "rank": 1,
+              "score": "#1 · 0.562",
+              "group": null,
+              "label_chips": [
+                "Lung Lesion",
+                "Fracture"
+              ],
+              "words": 12,
+              "show_all": null
+            },
+            {
+              "rank": 2,
+              "score": "#2 · 0.521",
+              "group": "×2 identical reports",
+              "label_chips": [
+                "Enlarged Cardiomediastinum",
+                "Consolidation",
+                "Atelectasis",
+                "Pneumothorax"
+              ],
+              "words": 12,
+              "show_all": null
+            },
+            {
+              "rank": 3,
+              "score": "#3 · 0.447",
+              "group": null,
+              "label_chips": [
+                "Consolidation",
+                "Fracture"
+              ],
+              "words": 15,
+              "show_all": null
+            }
+          ],
+          "studies_listed": 40
+        }
+      },
+      "console_errors": []
+    },
+    {
+      "name": "viewer",
+      "claim": "the viewer opens from every image, side by side for a neighbour, with zoom, pan, brightness and contrast working by mouse and by keyboard",
+      "status": "PASS",
+      "detail": "the viewer opened from all 6 pictures of the card (the X-ray, the model input, 4 similar X-rays: each closed to the picture that opened it) and, on a similar X-ray beside the turn's own, zoom (wheel about the cursor, + and -, the buttons, 1:1), pan (drag, arrows), brightness and contrast (a click, then the keys) all worked, measured on the pictures drawn and on their pixels",
+      "seconds": 5.9,
+      "data": {
+        "opens_from": [
+          "image:thumb",
+          "image:model_input",
+          "neighbor:1",
+          "neighbor:2",
+          "neighbor:3",
+          "neighbor:4"
+        ],
+        "user_turn_thumbnail_is_an_opener": false,
+        "user_turn_thumbnail_note": "a picture and no more, by design: the images row opens the same X-ray",
+        "each": {
+          "image:thumb": {
+            "label": "Image viewer: Your X-ray",
+            "footers": [
+              "Your X-ray · 320×320 px"
+            ],
+            "panes": 1,
+            "page_behind_inert": true,
+            "opened_by": "a click on the picture",
+            "closed_by": "Esc"
+          },
+          "image:model_input": {
+            "label": "Image viewer: What the model saw",
+            "footers": [
+              "What the model saw · 224×224 px"
+            ],
+            "panes": 1,
+            "page_behind_inert": true,
+            "opened_by": "Enter on the focused picture",
+            "closed_by": "its close button"
+          },
+          "neighbor:1": {
+            "label": "Image viewer: Your X-ray beside Similar X-ray #1",
+            "footers": [
+              "Your X-ray · 320×320 px",
+              "Similar X-ray #1 · 320×320 px (stored gallery size)"
+            ],
+            "panes": 2,
+            "page_behind_inert": true,
+            "opened_by": "a click on the picture",
+            "closed_by": "Esc"
+          },
+          "neighbor:2": {
+            "label": "Image viewer: Your X-ray beside Similar X-ray #2",
+            "footers": [
+              "Your X-ray · 320×320 px",
+              "Similar X-ray #2 · 320×320 px (stored gallery size)"
+            ],
+            "panes": 2,
+            "page_behind_inert": true,
+            "opened_by": "Enter on the focused picture",
+            "closed_by": "its close button"
+          },
+          "neighbor:3": {
+            "label": "Image viewer: Your X-ray beside Similar X-ray #3",
+            "footers": [
+              "Your X-ray · 320×320 px",
+              "Similar X-ray #3 · 320×320 px (stored gallery size)"
+            ],
+            "panes": 2,
+            "page_behind_inert": true,
+            "opened_by": "a click on the picture",
+            "closed_by": "Esc"
+          },
+          "neighbor:4": {
+            "label": "Image viewer: Your X-ray beside Similar X-ray #4",
+            "footers": [
+              "Your X-ray · 320×320 px",
+              "Similar X-ray #4 · 320×320 px (stored gallery size)"
+            ],
+            "panes": 2,
+            "page_behind_inert": true,
+            "opened_by": "Enter on the focused picture",
+            "closed_by": "its close button"
+          }
+        },
+        "side_by_side_controls": {
+          "wheel_zoom": {
+            "delta_y": -240,
+            "factor_drawn": 1.6161,
+            "factor_expected": 1.6161,
+            "linked_pane_factor": 1.6161,
+            "point_under_cursor_before_after": [
+              [
+                0.6,
+                0.377
+              ],
+              [
+                0.6,
+                0.377
+              ]
+            ]
+          },
+          "drag_pan": {
+            "dragged": [
+              60,
+              36
+            ],
+            "picture_moved": [
+              60.0,
+              36.0
+            ]
+          },
+          "keys": {
+            "arrow_left_moved": 48.0,
+            "arrow_down_moved": -48.0,
+            "plus_factor": 1.25,
+            "minus_undid_plus": true
+          },
+          "buttons": {
+            "in_factor": 1.25,
+            "one_to_one_px": [
+              [
+                320,
+                320
+              ],
+              [
+                320,
+                320
+              ]
+            ],
+            "fit_restored": true
+          },
+          "link_panes": {
+            "unlinked_zoom_left_only": true
+          },
+          "brightness": {
+            "click_at_75_percent": 235,
+            "mean_luma": {
+              "at_100": 90.3,
+              "by_click": 197.4,
+              "by_keys": 54.2
+            },
+            "keys": {
+              "tab_presses_to_reach_it": 8,
+              "arrow_presses": 35,
+              "value": 60
+            }
+          },
+          "contrast": {
+            "click_at_80_percent": 255,
+            "luma_spread": {
+              "at_100": 31.7,
+              "by_click": 61.6,
+              "by_keys": 15.9
+            },
+            "keys": {
+              "tab_presses_to_reach_it": 9,
+              "arrow_presses": 41,
+              "value": 50
+            }
+          }
+        }
+      },
+      "console_errors": []
+    }
+  ],
+  "screenshots": [
+    {
+      "file": "attach_preview_1280x900_light.png",
+      "shows": "the composer with an X-ray attached by a click on the well: its picture, name, pixel size and size on disk",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 63805,
+      "page_confirmed": true
+    },
+    {
+      "file": "attach_refused_1280x900_light.png",
+      "shows": "a refused file: the alert with the page's message, and the earlier attachment still in the composer",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 69415,
+      "page_confirmed": true
+    },
+    {
+      "file": "reopened_images_1280x900_light.png",
+      "shows": "the images row of a reopened chat: the X-ray with its size, and the 224x224 image the model saw",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 173248,
+      "page_confirmed": true
+    },
+    {
+      "file": "similar_xrays_1280x900_light.png",
+      "shows": "the grid of similar X-rays: each stored picture, its score and bar, and how many of the 14 labels agree",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 164406,
+      "page_confirmed": true
+    },
+    {
+      "file": "matches_1280x900_light.png",
+      "shows": "the matching reports of an upload: score, bar, group size, the clamped text, the positive labels, and no badge",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 153320,
+      "page_confirmed": true
+    },
+    {
+      "file": "own_rank_1280x900_light.png",
+      "shows": "a picked test study: the badge with where its own report ranks, above its matching reports",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 154982,
+      "page_confirmed": true
+    },
+    {
+      "file": "card_1280x2300_light.png",
+      "shows": "the whole card of the picked study: stages, report, labels, images, similar X-rays, matching reports with the own-rank badge, provenance",
+      "viewport": [
+        1280,
+        2300
+      ],
+      "scheme": "light",
+      "bytes": 328675,
+      "page_confirmed": true
+    },
+    {
+      "file": "card_1280x2300_dark.png",
+      "shows": "the same card in the dark colour scheme",
+      "viewport": [
+        1280,
+        2300
+      ],
+      "scheme": "dark",
+      "bytes": 334936,
+      "page_confirmed": true
+    },
+    {
+      "file": "viewer_side_by_side_1280x900_light.png",
+      "shows": "the viewer on a similar X-ray beside the turn's own, at its fit",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 310091,
+      "page_confirmed": true
+    },
+    {
+      "file": "viewer_adjusted_1280x900_light.png",
+      "shows": "the viewer zoomed, panned, brighter and with more contrast",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "light",
+      "bytes": 331322,
+      "page_confirmed": true
+    },
+    {
+      "file": "viewer_side_by_side_1280x900_dark.png",
+      "shows": "the same viewer in the dark colour scheme",
+      "viewport": [
+        1280,
+        900
+      ],
+      "scheme": "dark",
+      "bytes": 309931,
+      "page_confirmed": true
+    }
+  ]
+}

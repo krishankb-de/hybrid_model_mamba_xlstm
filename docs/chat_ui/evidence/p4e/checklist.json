@@ -4,14 +4,14 @@
     "failures": []
   },
   "environment": {
-    "date": "2026-10-10",
+    "date": "2026-10-12",
     "engine": "tiny (random weights, toy vocabulary; no checkpoint, no data)",
     "tiny_step_delay_s": 0.02,
     "image": "synthetic PNG (tests/app_helpers.png_bytes)",
     "browser": "Chrome/146.0.7680.178 (headless)",
     "python": "3.14.3",
     "os": "Darwin",
-    "warm_up_turn_s": 0.91,
+    "warm_up_turn_s": 1.07,
     "viewports": {
       "desktop": [
         1280,
@@ -35,8 +35,8 @@
     {
       "name": "stream",
       "status": "PASS",
-      "detail": "6 stages settled (3 done, 3 skipped); 30 snapshots, report 3 -> 205 chars; status ended on 'Report ready'; done in 1.2 s",
-      "seconds": 2.1,
+      "detail": "6 stages settled (3 done, 3 skipped); 30 snapshots, report 3 -> 205 chars; status ended on 'Report ready'; done in 1.3 s",
+      "seconds": 2.3,
       "data": {
         "stages": {
           "preprocess": "done",
@@ -56,6 +56,7 @@
         ],
         "frames_recorded": 35,
         "status_region": [
+          "Uploading…",
           "Queued",
           "generate running",
           "Report ready"
@@ -63,16 +64,16 @@
         "aria_busy": [
           [
             true,
-            25
+            28
           ],
           [
             false,
-            1190
+            1294
           ]
         ],
-        "card_done_ms": 1177,
+        "card_done_ms": 1281,
         "token_budget": 40,
-        "seconds": 1.19,
+        "seconds": 1.29,
         "settled_pair_from_a_default_turn": {
           "notes": [
             "Stopped when the model began repeating itself."
@@ -82,7 +83,7 @@
             "100 tok",
             "cached"
           ],
-          "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 21 tok · 578 ms · cpu · model detailstiny random-init model"
+          "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 21 tok · 638 ms · cpu · model detailstiny random-init model"
         }
       },
       "console_errors": []
@@ -90,11 +91,11 @@
     {
       "name": "reload",
       "status": "PASS",
-      "detail": "the card after Page.reload equals the live one (3976 characters of markup, the same six stage states); a reload mid-turn followed the running turn to the card another reload shows",
-      "seconds": 5.8,
+      "detail": "the card after Page.reload equals the live one (4977 characters of markup, the same six stage states); a reload mid-turn (the turn held while the page reloaded) followed the running turn to the card another reload shows",
+      "seconds": 6.7,
       "data": {
-        "markup_chars": 3976,
-        "text_chars": 897,
+        "markup_chars": 4977,
+        "text_chars": 1055,
         "stages": {
           "preprocess": "done",
           "encode": "done",
@@ -104,6 +105,11 @@
           "score": "skipped"
         },
         "mid_turn_reload": {
+          "turn_held": true,
+          "snapshots_while_held": [
+            1,
+            1
+          ],
           "found_running": {
             "send": false,
             "stop": true,
@@ -114,7 +120,7 @@
             "stop": true
           },
           "followed_equals_replayed": true,
-          "markup_chars": 4125
+          "markup_chars": 5127
         }
       },
       "console_errors": []
@@ -122,19 +128,19 @@
     {
       "name": "sessions",
       "status": "PASS",
-      "detail": "2 chats switched 4 times, each with its own card and user turn; leaving a running turn cancelled its stream (request aborted), nothing asked for it (46 samples), and it replays done",
-      "seconds": 7.1,
+      "detail": "2 chats switched 4 times, each with its own card and user turn; leaving a running turn cancelled its stream (request aborted), nothing asked for it (49 samples), and it replays done",
+      "seconds": 7.7,
       "data": {
         "sessions": [
-          "s_01a123b12924000004ef52",
-          "s_01a123b12c74000028c2aa"
+          "s_01a131759d6f0000fec911",
+          "s_01a13175a0e3000081189f"
         ],
         "messages": {
-          "a": "m_01a123b129450001ba10f1",
-          "b": "m_01a123b12c9500016fe03d",
-          "b2": "m_01a123b13224000144bd60"
+          "a": "m_01a131759d930001b15306",
+          "b": "m_01a13175a109000174a5af",
+          "b2": "m_01a13175a6e400018fd900"
         },
-        "samples_while_away": 46,
+        "samples_while_away": 49,
         "stream_request_cancelled": true,
         "report_chars_of_turn_finished_while_away": 171
       },
@@ -143,12 +149,12 @@
     {
       "name": "exports",
       "status": "PASS",
-      "detail": "JSON parses (34972 bytes, 4 messages, logs end in message_stop done); Markdown (1571 bytes) has '## Turn 1' and '## Turn 2'",
-      "seconds": 2.2,
+      "detail": "JSON parses (34973 bytes, 4 messages, logs end in message_stop done); Markdown (1572 bytes) has '## Turn 1' and '## Turn 2'",
+      "seconds": 2.4,
       "data": {
         "json": {
-          "file": "session-s_01a123b14501000007ba2c.json",
-          "bytes": 34972,
+          "file": "session-s_01a13175bb6200008861b0.json",
+          "bytes": 34973,
           "messages": 4,
           "events_per_turn": [
             34,
@@ -156,11 +162,11 @@
           ]
         },
         "markdown": {
-          "file": "session-s_01a123b14501000007ba2c.md",
-          "bytes": 1571,
+          "file": "session-s_01a13175bb6200008861b0.md",
+          "bytes": 1572,
           "headings": [
-            "## Turn 1 — 2026-10-10 02:43:02 UTC",
-            "## Turn 2 — 2026-10-10 02:43:03 UTC"
+            "## Turn 1 — 2026-10-12 18:52:41 UTC",
+            "## Turn 2 — 2026-10-12 18:52:42 UTC"
           ]
         }
       },
@@ -169,12 +175,12 @@
     {
       "name": "stop",
       "status": "PASS",
-      "detail": "stopped after 2 of 150 snapshots (1 more by the time the card said aborted, 0.06 s after the press); no more afterwards; note 'Turn stopped'",
-      "seconds": 0.8,
+      "detail": "stopped after 3 of 150 snapshots (1 more by the time the card said aborted, 0.06 s after the press); no more afterwards; note 'Turn stopped'",
+      "seconds": 0.9,
       "data": {
         "budget": 150,
-        "snapshots_when_pressed": 1,
-        "snapshots_total": 2,
+        "snapshots_when_pressed": 2,
+        "snapshots_total": 3,
         "seconds_to_aborted": 0.06,
         "note": "Turn stopped",
         "server_status": "aborted",
@@ -198,34 +204,36 @@
     {
       "name": "keyboard",
       "status": "PASS",
-      "detail": "Tab visits 29 controls in DOM order, each with a focus ring; Enter sends; Enter and Space toggle a stage; Enter opens the drawer and Esc closes it to Settings",
-      "seconds": 1.1,
+      "detail": "Tab visits 31 controls in DOM order, each with a focus ring; Enter sends; Enter and Space toggle a stage; Enter opens the drawer and Esc closes it to Settings",
+      "seconds": 1.5,
       "data": {
         "tab_stops": [
           "#new-session",
           "Export JSON",
           "Export Markdown",
-          "chat: tokens 20",
-          "Delete chat: tokens 20",
-          "chat: tokens 150",
-          "Delete chat: tokens 150",
-          "chat: tokens 24",
-          "Delete chat: tokens 24",
-          "chat: tokens 24",
-          "Delete chat: tokens 24",
-          "chat: tokens 24",
-          "Delete chat: tokens 24",
-          "chat: tokens 24",
-          "Delete chat: tokens 24",
           "chat: xray_a.png",
           "Delete chat: xray_a.png",
-          "chat: tokens 40",
-          "Delete chat: tokens 40",
+          "chat: xray_a.png",
+          "Delete chat: xray_a.png",
+          "chat: xray_a.png",
+          "Delete chat: xray_a.png",
+          "chat: xray_b.png",
+          "Delete chat: xray_b.png",
+          "chat: xray_a.png",
+          "Delete chat: xray_a.png",
+          "chat: xray_a.png",
+          "Delete chat: xray_a.png",
+          "chat: xray_a.png",
+          "Delete chat: xray_a.png",
+          "chat: xray_a.png",
+          "Delete chat: xray_a.png",
           "stage:preprocess",
           "stage:encode",
           "stage:generate",
           "Copy report, turn 1",
           "Show raw report, turn 1",
+          "Open your X-ray in the viewer, turn 1",
+          "Open what the model saw in the viewer, turn 1",
           "model details, turn 1",
           "#image-well",
           "#prompt",
@@ -236,22 +244,22 @@
         "every_stop_shows_a_focus_ring": true,
         "stops_to_note_field": [
           "#new-session",
-          "chat: tokens 150",
-          "Delete chat: tokens 150",
-          "chat: tokens 24",
-          "Delete chat: tokens 24",
-          "chat: tokens 24",
-          "Delete chat: tokens 24",
-          "chat: tokens 24",
-          "Delete chat: tokens 24",
-          "chat: tokens 24",
-          "Delete chat: tokens 24",
           "chat: xray_a.png",
           "Delete chat: xray_a.png",
-          "chat: tokens 40",
-          "Delete chat: tokens 40",
+          "chat: xray_a.png",
+          "Delete chat: xray_a.png",
+          "chat: xray_b.png",
+          "Delete chat: xray_b.png",
+          "chat: xray_a.png",
+          "Delete chat: xray_a.png",
+          "chat: xray_a.png",
+          "Delete chat: xray_a.png",
+          "chat: xray_a.png",
+          "Delete chat: xray_a.png",
+          "chat: xray_a.png",
+          "Delete chat: xray_a.png",
           "#image-well",
-          "Remove attached image",
+          "Remove image",
           "#prompt"
         ],
         "after_enter": {
@@ -289,7 +297,7 @@
       "name": "narrow",
       "status": "PASS",
       "detail": "no horizontal overflow at 375 px in 5 states (empty chat, settled card, stage details open, sidebar open, drawer open)",
-      "seconds": 0.9,
+      "seconds": 1.0,
       "data": {
         "viewport": [
           375,
@@ -374,7 +382,7 @@
       "name": "a11y",
       "status": "PASS",
       "detail": "stage buttons: their text, then state, with expanded, no glyph first; status region live=polite reads 'Report ready'; 14 chips of a live labelled turn read '<name>: positive|negative' and whether each agrees with the reference; every control named; no text under AA contrast in 4 states",
-      "seconds": 3.4,
+      "seconds": 3.5,
       "data": {
         "contrast_issues_under_aa": {
           "settled card, light": [],
@@ -382,12 +390,22 @@
           "drawer open, dark": [],
           "settled card, dark": []
         },
-        "focusable_controls_named": 33,
+        "focusable_controls_named": 35,
+        "focus_targets_left_out": [],
+        "server_features": {
+          "retrieval": false,
+          "labels": false
+        },
+        "stage_buttons_on_page": [
+          "preprocess",
+          "encode",
+          "generate"
+        ],
         "stage_buttons": [
           {
             "stage": "preprocess",
-            "visible": "preprocess · 3 ms",
-            "name": "preprocess · 3 ms, done, turn 1",
+            "visible": "preprocess · 2 ms",
+            "name": "preprocess · 2 ms, done, turn 1",
             "expanded": false
           },
           {
@@ -399,8 +417,8 @@
           },
           {
             "stage": "generate",
-            "visible": "generate · 590 ms",
-            "name": "generate · 590 ms, done, turn 1",
+            "visible": "generate · 651 ms",
+            "name": "generate · 651 ms, done, turn 1",
             "expanded": false
           }
         ],
@@ -410,10 +428,10 @@
           "score · skipped: no_reference"
         ],
         "stage_items_as_read": {
-          "preprocess": "preprocess · 3 ms",
+          "preprocess": "preprocess · 2 ms",
           "encode": "encode · 1 mspatch_grid197, 32pooled_dim16prefix_tokens4devicecpuone_passtrue",
           "retrieve": "retrieve · skipped: gallery_unavailable",
-          "generate": "generate · 590 ms",
+          "generate": "generate · 651 ms",
           "label": "label · skipped: labeler_unavailable",
           "score": "score · skipped: no_reference"
         },
@@ -421,6 +439,7 @@
           "live": "polite",
           "text": "Report ready",
           "history": [
+            "Uploading…",
             "Queued",
             "generate running",
             "Report ready"
@@ -448,8 +467,8 @@
     {
       "name": "error",
       "status": "PASS",
-      "detail": "a server 422 showed the alert 'Invalid options: max_new_tokens: Input should be less than …', kept the note and the image, dismissed to the note field; the same composer then sent",
-      "seconds": 0.9,
+      "detail": "a server 422 showed the alert 'Invalid options: max_new_tokens: Input should be less than …', kept the note and the image; a clicked Dismiss left the focus alone and a keyed one handed it to the note field; the same composer then sent",
+      "seconds": 1.0,
       "data": {
         "http_status": 422,
         "notice": "Invalid options: max_new_tokens: Input should be less than or equal to 200",
@@ -458,7 +477,11 @@
           "hidden": true,
           "prompt": "tokens 500",
           "preview": true,
-          "focus": "prompt"
+          "focus": "",
+          "keyboard": {
+            "hidden": true,
+            "focus": "prompt"
+          }
         }
       },
       "console_errors": []
@@ -467,7 +490,7 @@
       "name": "settings",
       "status": "PASS",
       "detail": "a click into the budget selected it and 1-2-0 typed over it read 120 (not 100120); Enter saved it, closed the drawer to Settings and the page said 'Settings saved.' for 4.0 s; 300 and 8 were refused with the line under the field (300 passed through the valid 30 and went back to the 120 it started from, 8 changed nothing, Enter changed nothing and left the text selected); a Tab then a click placed…",
-      "seconds": 10.9,
+      "seconds": 11.6,
       "data": {
         "drawer_before": {
           "server_features": {
@@ -814,7 +837,7 @@
             "card_notes": [
               "Stopped when the model began repeating itself."
             ],
-            "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 21 tok · 594 ms · cpu · model detailstiny random-init model",
+            "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 21 tok · 644 ms · cpu · model detailstiny random-init model",
             "truncated_mid_sentence": false,
             "raw_report_repeats": 1,
             "card_repeats": 0
@@ -893,15 +916,15 @@
             "cached",
             "full budget"
           ],
-          "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 200 tok · 5597 ms · cpu · model detailstiny random-init model",
+          "footer": "tiny · scan legacy/tfla exact · prefix_k 4 · beam 3 · 200 tok · 6153 ms · cpu · model detailstiny random-init model",
           "image": {
             "sha256": "6984124968a6154a82ee0a32057c2e8029e176ee959abd3784e63351d8f5fa24",
             "filename": "xray_a.png",
             "source": "previous",
             "urls": {
-              "original": "/v1/messages/m_01a123b17d960000e5f3e0/image?variant=original",
-              "thumb": "/v1/messages/m_01a123b17d960000e5f3e0/image?variant=thumb",
-              "model_input": "/v1/messages/m_01a123b17d960000e5f3e0/image?variant=model_input"
+              "original": "/v1/messages/m_01a13175f7ef0000206179/image?variant=original",
+              "thumb": "/v1/messages/m_01a13175f7ef0000206179/image?variant=thumb",
+              "model_input": "/v1/messages/m_01a13175f7ef0000206179/image?variant=model_input"
             }
           },
           "options": {
@@ -963,7 +986,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 107067,
+      "bytes": 193578,
       "page_confirmed": true
     },
     {
@@ -974,7 +997,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 119665,
+      "bytes": 196922,
       "page_confirmed": true
     },
     {
@@ -985,7 +1008,7 @@
         900
       ],
       "scheme": "dark",
-      "bytes": 121612,
+      "bytes": 198569,
       "page_confirmed": true
     },
     {
@@ -996,7 +1019,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 136332,
+      "bytes": 212030,
       "page_confirmed": true
     },
     {
@@ -1007,7 +1030,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 177812,
+      "bytes": 269752,
       "page_confirmed": true
     },
     {
@@ -1018,7 +1041,7 @@
         812
       ],
       "scheme": "light",
-      "bytes": 80072,
+      "bytes": 79540,
       "page_confirmed": true
     },
     {
@@ -1029,7 +1052,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 157347,
+      "bytes": 208583,
       "page_confirmed": true
     },
     {
@@ -1040,7 +1063,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 92951,
+      "bytes": 97269,
       "page_confirmed": true
     },
     {
@@ -1051,7 +1074,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 147176,
+      "bytes": 151196,
       "page_confirmed": true
     },
     {
@@ -1062,7 +1085,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 203935,
+      "bytes": 279435,
       "page_confirmed": true
     }
   ]

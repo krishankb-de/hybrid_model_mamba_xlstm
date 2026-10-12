@@ -9844,3 +9844,175 @@ def test_the_chaos_tests_never_name_the_dev_servers_ports():
                 assert node.value not in (8000, 8010), side
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 assert not re.search(r":(8000|8010)\b", node.value), (side, node.value)
+
+
+# ── CHAT_UI_PLAN.md P6-F: the features check ─────────────────────────────────
+# Static pins on scripts/chat_ui_features_check.py, the real-Chrome check of the five image features on the tiny stack (run by hand:
+# venv/bin/python scripts/chat_ui_features_check.py). Its pure parts are tested in tests/test_chat_ui_features_check.py, its harness in
+# tests/test_chat_ui_layout_check.py. These pins hold what a later edit could break without a test noticing: which modules it imports, which ports
+# it will never talk to, that it runs the tiny stack and nothing else, and where it can write.
+
+_FEATURES = REPO_ROOT / "scripts" / "chat_ui_features_check.py"
+
+
+def _features_tree():
+    """-> (the script's syntax tree, a map from each node to its parent)."""
+    tree = ast.parse(_FEATURES.read_text(encoding="utf-8"))
+    return tree, {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+
+def _features_outer(node, parents):
+    """The name of the nearest function a node is in, or None at module level."""
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return node.name
+    return None
+
+
+def _features_calls(tree, dotted):
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == dotted]
+
+
+def _features_strings(tree, parents):
+    """-> [(a string constant of the code, the function it is in)], the module's docstring left out."""
+    docstring = ast.get_docstring(tree, clean=False)
+    return [(n.value, _features_outer(n, parents)) for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value != docstring]
+
+
+def test_the_features_check_imports_only_the_standard_library_numpy_pillow_and_two_light_modules_of_the_app_and_the_two_checks_harness():
+    """P6-F. It runs on the laptop, in the venv, beside the browser check: of the standard library only what a check needs, numpy and PIL for the
+    pictures it draws and measures, the app's two light modules (the upload refusal's wording and the 14 label names: neither loads a model), and of
+    its own repository the Chrome harness and the pieces of the browser check it shares (Failure, expect, one_line, the warm-up turn, the card
+    reader). No second HTTP library, no browser-driving package, no model or thesis code, no test helper."""
+    if not hasattr(sys, "stdlib_module_names"):
+        pytest.skip("sys.stdlib_module_names needs Python 3.10")
+    tree, _ = _features_tree()
+    roots, from_scripts, from_app = set(), set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            roots.add((node.module or "").split(".")[0])
+            if node.module and node.module.startswith("scripts."):
+                from_scripts.add(node.module)
+            if node.module and node.module.startswith("app"):
+                from_app.add(node.module)
+    assert {"numpy", "PIL", "app", "scripts"} <= roots, roots
+    assert roots <= set(sys.stdlib_module_names) | {"numpy", "PIL", "app", "scripts"}, sorted(roots)
+    assert not roots & {"torch", "hybrid_xmamba", "tests", "httpx", "requests", "playwright", "selenium", "pyppeteer", "websockets"}, sorted(roots)
+    assert from_app == {"app.imaging", "app.labels"}, sorted(from_app)
+    assert from_scripts == {"scripts.chat_ui_browser_check", "scripts.chat_ui_cdp"}, sorted(from_scripts)
+
+
+def test_the_features_check_names_the_dev_servers_port_and_the_tunnels_in_one_place_and_refuses_them_before_it_starts_anything():
+    """P6-F. Port 8000 is the laptop's dev server and 8010 the tunnel to the cluster's private server: a check that uploads pictures and sends turns
+    must never reach either. The two numbers are written once, as REFUSED_PORTS; the only strings that name them are the refusal, its help text and
+    the module's docstring; and main looks at --url before it installs the SIGTERM handler, looks for Chrome or starts the app."""
+    tree, parents = _features_tree()
+    numbers = [(n.value, _features_outer(n, parents)) for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value in (8000, 8010) and not isinstance(n.value, bool)]
+    assert numbers == [(8000, None), (8010, None)], numbers   # both at module level: the REFUSED_PORTS tuple
+    [refused] = [n for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "REFUSED_PORTS" for t in n.targets)]
+    assert ast.unparse(refused.value) == "(8000, 8010)"
+    named = {fn for text, fn in _features_strings(tree, parents) if "8000" in text or "8010" in text}
+    assert named <= {"url_problem", "parse_args"}, named
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+
+    def first_line(name):
+        return min(n.lineno for n in ast.walk(main) if isinstance(n, ast.Call) and ast.unparse(n.func) == name)
+
+    assert first_line("url_problem") < first_line("exit_on_sigterm") < first_line("find_chrome") < first_line("App") < first_line("Browser")
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8000/", "http://127.0.0.1:8010/", "http://localhost:8010/chat", "http://[::1]:8000/"])
+def test_the_features_check_refuses_those_ports_with_one_error_line_and_status_2_having_started_nothing(monkeypatch, capsys, url):
+    """P6-F. The pin above is about the code's shape; this one runs main: nothing that starts a process or opens a connection is ever called."""
+    from scripts import chat_ui_features_check as check
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("the check started something for a refused URL")
+
+    for name in ("find_chrome", "App", "Browser", "exit_on_sigterm", "warm_up", "get_json"):
+        monkeypatch.setattr(check, name, forbidden)
+    assert check.main(["--url", url, "--no-evidence"]) == 2
+    out = capsys.readouterr().out
+    assert out.startswith("ERROR --url refused: ") and "8000" in out and "8010" in out and out.count("\n") == 1, out
+
+
+def test_the_features_check_runs_the_tiny_engine_and_the_tiny_gallery_and_names_no_model_checkpoint_or_dataset():
+    """P6-F. Everything it shows is synthetic: the app it starts is the tiny engine with the tiny gallery (create_app's laptop convenience; the
+    serving command cannot serve that gallery), and nothing in it can name a checkpoint, the MIMIC data or the cluster's session directory (R7, the
+    DUA). It does not import the engine, the server or the store, so it cannot load a model whatever it is given."""
+    tree, parents = _features_tree()
+    apps = _features_calls(tree, "App")
+    assert [(_features_outer(a, parents), sorted(k.arg for k in a.keywords)) for a in apps] == [("main", ["step_delay_s", "tiny_gallery"])]
+    assert {k.arg: ast.unparse(k.value) for k in apps[0].keywords}["tiny_gallery"] == "True"
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.keyword) and n.arg in ("engine", "models", "checkpoint", "gallery_dir", "home")]
+    modules = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)} | {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    assert not {m for m in modules if m and m.split(".")[0] in ("hybrid_xmamba", "torch")} and not {"app.engine", "app.server", "app.store", "app.gallery"} & modules
+    for text, fn in _features_strings(tree, parents):
+        assert not re.search(r"\.ckpt|\.parquet|\.pt\b|/sc/|mimic_full|chat_sessions|/home/", text), (fn, text[:80])
+
+
+def test_the_features_check_talks_only_to_the_app_it_started_or_the_url_it_was_given():
+    """P6-F. Every address it opens is built from the base of that app (`base`, `self.base`, `ctx.base`, `app.url`): a literal URL appears only in the
+    refusal's wording and the --url help text."""
+    tree, parents = _features_tree()
+    opened = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == "urllib.request.urlopen"]
+    assert opened, "the pin looks at something"
+    for call in opened:   # get_json is the one helper that is given the address; its callers are held to the same rule below
+        if _features_outer(call, parents) != "get_json":
+            assert re.search(r"\bbase\b|self\.base|ctx\.base", ast.unparse(call.args[0])), ast.unparse(call.args[0])
+    callers = _features_calls(tree, "get_json")
+    assert callers and all(re.search(r"\bbase\b", ast.unparse(c.args[0])) for c in callers), [ast.unparse(c) for c in callers]
+    assert {fn for text, fn in _features_strings(tree, parents) if re.search(r"https?://", text)} <= {"url_problem", "parse_args"}
+
+
+def test_the_features_check_can_write_only_its_evidence_and_the_files_it_makes_for_itself_in_its_own_temporary_directory():
+    """P6-F. Each way the script has of writing or removing is in one named place: the pictures and files it makes for itself in a temporary
+    directory (`_write`), its evidence (`write_checklist`, `clear_evidence`, `shot`: files of the evidence directory, by name), and the removal of that
+    temporary directory in main. A write anywhere else, or a delete of something it did not make, fails here."""
+    tree, parents = _features_tree()
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = ast.unparse(node.func)
+        if name == "open" and len(node.args) > 1 and isinstance(node.args[1], ast.Constant) and set(str(node.args[1].value)) & set("wax+"):
+            found.append(("open " + str(node.args[1].value), _features_outer(node, parents)))
+        elif name in ("os.remove", "os.unlink", "os.rename", "os.replace", "os.makedirs", "os.mkdir", "shutil.rmtree", "shutil.copy", "shutil.move",
+                      "tempfile.mkdtemp", "self.browser.screenshot", "json.dump", "Path.write_text", "Path.write_bytes"):
+            found.append((name, _features_outer(node, parents)))
+    assert sorted(found) == sorted([
+        ("open wb", "_write"), ("open w", "write_checklist"), ("json.dump", "write_checklist"), ("os.makedirs", "write_checklist"),
+        ("os.remove", "clear_evidence"), ("os.makedirs", "shot"), ("self.browser.screenshot", "shot"), ("os.remove", "shot"), ("os.remove", "shot"),
+        ("tempfile.mkdtemp", "main"), ("shutil.rmtree", "main")]), sorted(found)
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in ("write_text", "write_bytes")]
+
+
+def test_the_features_check_installs_the_sigterm_handler_before_anything_and_stops_what_it_started_whatever_is_interrupted(monkeypatch, tmp_path):
+    """P6-F. A SIGTERM must run the finally that stops Chrome and the app (each is in a session of its own, which the terminal's signals do not
+    reach): the handler is installed before anything is started, and the clean-up is one finally in the finally of the one before, so an
+    interrupt in the closing of the browser still stops the app and removes the work directory."""
+    import signal
+    from scripts import chat_ui_features_check as check
+    tree, parents = _features_tree()
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    lines = {name: min(n.lineno for n in ast.walk(main) if isinstance(n, ast.Call) and ast.unparse(n.func) == name) for name in ("exit_on_sigterm", "find_chrome")}
+    assert lines["exit_on_sigterm"] < lines["find_chrome"]
+    cleanup = [t for t in ast.walk(main) if isinstance(t, ast.Try) and t.finalbody and any(ast.unparse(c.func) == "signal.alarm" for s in t.finalbody for c in ast.walk(s) if isinstance(c, ast.Call))]
+    assert len(cleanup) == 1
+    depth, node = 0, cleanup[0]
+    while node is not None:
+        inner = [s for s in node.finalbody if isinstance(s, ast.Try)]
+        node = inner[0] if inner else None
+        depth += 1
+    assert depth == 3, "browser.close, app.stop and rmtree are not each in the finally of the one before"
+    monkeypatch.setattr(check, "find_chrome", lambda: None)
+    before = signal.getsignal(signal.SIGTERM)
+    try:
+        assert check.main([]) == 2 and signal.getsignal(signal.SIGTERM) is not before
+    finally:
+        signal.signal(signal.SIGTERM, before)
+        signal.alarm(0)
