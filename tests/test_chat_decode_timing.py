@@ -3,7 +3,8 @@
 The live server's `generate` stage takes 7.4 to 8.1 s for a decode that job 2590184 measured at 3.05 s on the same node. The job decodes the
 same five test rows seven ways, each adding one part of the live path to the one before: the bare cached beam search (A), with a no-op
 `on_step` (B), through `Engine.generate` (C), in the pipeline's one worker thread (D), through the pipeline with a store on the NFS home (E)
-and on node-local disk (E-local), and through HTTP (F). It prints numbers only, because the real run decodes MIMIC test images.
+and on node-local disk (E-local), and through HTTP (F). Then A once more (A-end), so that a neighbour that came or went in the middle shows.
+It prints numbers only, because the real run decodes MIMIC test images.
 
 Everything here runs on the laptop over the tiny engine and the tiny gallery (the P5-E fixtures): CPU, offline, synthetic data only (R7), so an
 assertion may print whatever it compares. Tested in layers:
@@ -23,6 +24,7 @@ import platform
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time as real_time
 from pathlib import Path
@@ -158,18 +160,27 @@ def arm_of(arm, ms, total=None, reports=None, tokens=100, error=None):
                             tokens=[tokens] * len(ms), error=error)
 
 
-def ladder(means):
-    """The seven arms with five rows each at the given means, as a dict in ladder order."""
+def ladder(means, a_end=None):
+    """The seven arms with five rows each at the given means, as a dict in ladder order, and A-end at `a_end` when that is given."""
     out = {}
     for arm, mean in zip(timing.ARMS, means):
         has_total = arm in ("E", "E-local", "F")
         out[arm] = arm_of(arm, [mean] * 5, [mean + 400.0] * 5 if has_total else None)
+    if a_end is not None:
+        out["A-end"] = arm_of("A-end", [a_end] * 5)
     return out
 
 
 def test_the_arms_are_the_rulings_seven_in_their_order_and_the_threshold_is_one_and_a_half_times_a():
     assert timing.ARMS == ("A", "B", "C", "D", "E", "E-local", "F") and timing.OVER == 1.5
     assert timing.DEFAULT_ROWS == "0-4" and timing.MODEL == "hybrid_150m_m3_rrg"
+
+
+def test_a_second_a_runs_after_the_last_arm_and_is_not_one_of_the_seven_the_threshold_looks_at():
+    assert timing.A_END == "A-end" and timing.ALL_ARMS == timing.ARMS + ("A-end",)
+    assert timing.ARM_FUNCTIONS["A-end"] is timing.ARM_FUNCTIONS["A"] is timing.arm_a, "the same decode: the same rows, the same options"
+    assert list(timing.ARM_FUNCTIONS) == list(timing.ALL_ARMS)
+    assert timing.TURN_DEADLINE_S == 300.0, "a live turn takes 8 s: a turn that is still going after five minutes is not going to end"
 
 
 def test_an_arm_line_has_its_rows_mean_and_ratio_to_a_and_says_whether_its_reports_were_a_s():
@@ -228,11 +239,63 @@ def test_an_arm_that_failed_is_skipped_by_the_summary_and_without_a_baseline_it_
 
 def test_the_summary_line_has_the_arm_the_sanity_check_the_tokens_and_the_failed_arms():
     results = ladder([3000.0, 3050.0, 3100.0, 3200.0, 7800.0, 7700.0, 8100.0])
-    assert timing.summary_payload(results, True) == {"summary": {"first_over_1_5x": "E", "same_report_all_arms": True, "tokens": [100] * 5,
-                                                                 "arms_failed": []}}
+    assert timing.summary_payload(results, True) == {"summary": {"first_over_1_5x": "E", "a_end_ratio": None, "same_report_all_arms": True,
+                                                                 "tokens": [100] * 5, "arms_failed": [], "load_before": None, "load_after": None}}
     results["F"].error = "OSError"
     summary = timing.summary_payload(results, False)["summary"]
     assert summary["same_report_all_arms"] is False and summary["arms_failed"] == ["F"]
+
+
+def test_a_end_is_a_line_like_a_with_its_ratio_to_the_first_a_and_the_summary_carries_that_ratio():
+    results = ladder([3000.0, 3050.0, 3100.0, 3200.0, 3300.0, 3400.0, 3500.0], a_end=3600.0)
+    base = timing.mean_ms(results["A"])
+    line = timing.arm_payload(results["A-end"], base, True)
+    assert line == {"arm": "A-end", "ms": [3600.0] * 5, "mean": 3600.0, "ratio": 1.2, "same_report": True}
+    assert list(line) == ["arm", "ms", "mean", "ratio", "same_report"], "an arm's line, with no turn total: it is a decode"
+    summary = timing.summary_payload(results, True)["summary"]
+    assert summary["a_end_ratio"] == 1.2 and summary["first_over_1_5x"] == "none"
+    results["A-end"] = arm_of("A-end", [3000.0] * 5)
+    assert timing.summary_payload(results, True)["summary"]["a_end_ratio"] == 1.0, "no drift: the second A is the first"
+    assert timing.arm_payload(results["A-end"], base, True)["ratio"] == 1.0
+
+
+def test_a_slow_a_end_is_drift_and_never_the_arm_the_threshold_names():
+    """first_over_1_5x is computed over A to F only, as before: an A-end that is three times A says so in a_end_ratio and nowhere else."""
+    results = ladder([3000.0, 3050.0, 3100.0, 3200.0, 3300.0, 3400.0, 3500.0], a_end=9000.0)
+    summary = timing.summary_payload(results, True)["summary"]
+    assert summary["a_end_ratio"] == 3.0 and summary["first_over_1_5x"] == "none" and timing.first_over(results) == "none"
+    results = ladder([3000.0, 3050.0, 3100.0, 4600.0, 3300.0, 3400.0, 3500.0], a_end=9000.0)
+    assert timing.first_over(results) == "D", "the ladder's own order, with A-end beyond its end"
+
+
+def test_a_end_has_no_ratio_where_a_or_a_end_has_no_mean():
+    results = ladder([3000.0] * 7, a_end=3000.0)
+    assert timing.a_end_ratio(results) == 1.0
+    results["A-end"].error = "OSError"
+    assert timing.a_end_ratio(results) is None and timing.summary_payload(results, False)["summary"]["arms_failed"] == ["A-end"]
+    results = ladder([3000.0] * 7, a_end=3000.0)
+    results["A"].error = "OSError"
+    assert timing.a_end_ratio(results) is None
+    assert timing.a_end_ratio(ladder([3000.0] * 7)) is None, "A-end never ran"
+    assert timing.a_end_ratio(ladder([0.0] * 7, a_end=5.0)) is None, "no division by a zero mean"
+
+
+def test_the_sanity_check_covers_a_end_and_a_failed_a_end_is_in_the_failed_arms():
+    results = ladder([1.0] * 7, a_end=1.0)
+    same = timing.same_reports(results)
+    assert list(same) == list(timing.ALL_ARMS) and all(same.values())
+    results["A-end"].reports[2] = "a different report"
+    assert timing.same_reports(results)["A-end"] is False
+    assert timing.summary_payload(results, False)["summary"]["arms_failed"] == []
+
+
+def test_the_summary_carries_the_load_before_the_engines_and_after_the_last_arm_to_two_places():
+    results = ladder([3000.0] * 7, a_end=3000.0)
+    summary = timing.summary_payload(results, True, [0.5, 1.25, 2.126], [10.0, 11.5, 12.004])["summary"]
+    assert (summary["load_before"], summary["load_after"]) == ([0.5, 1.25, 2.13], [10.0, 11.5, 12.0])
+    assert list(summary) == ["first_over_1_5x", "a_end_ratio", "same_report_all_arms", "tokens", "arms_failed", "load_before", "load_after"]
+    none = timing.summary_payload(results, True, None, None)["summary"]
+    assert (none["load_before"], none["load_after"]) == (None, None), "no load average, as on a Mac"
 
 
 def test_the_sanity_check_compares_every_arms_report_with_as_row_by_row_in_memory():
@@ -261,11 +324,20 @@ def test_a_result_line_is_json_on_one_line_under_the_300_characters_the_summary_
     assert line.startswith("RESULT {") and "\n" not in line and len(line) < 300, len(line)
     json.loads(line[len("RESULT "):])
     env = timing.result_line(timing.env_payload("gx14.some.long.node.name.example.org", "Intel(R) Xeon(R) Platinum 8480+ @ 2.00GHz", 8, 4,
-                                                [1.0, 2.5, 3.25], 8, 8, "real", list(range(timing.MAX_ROWS))))
+                                                [1.0, 2.5, 3.25], 8, 8, "real", list(range(timing.MAX_ROWS)), "tmpfs", "nfs"))
     assert len(env) < 300, len(env)
+    longest = max(timing.FS_WORDS, key=len)
     widest = timing.result_line(timing.env_payload("n" * 100, "c" * 100, 1024, 1024, [1000.55, 1000.55, 1000.55], 9999, 9999, "real",
-                                                   [timing.MAX_ROW] * timing.MAX_ROWS))
+                                                   [timing.MAX_ROW] * timing.MAX_ROWS, longest, longest))
     assert len(widest) < 300, "the node and the CPU are cut, and the numbers are bounded: even the widest environment line is kept whole"
+    failed = ladder([1.0] * 7, a_end=1.0)
+    for result in failed.values():
+        result.error = "OSError"
+    big = ladder([1.0] * 7, a_end=1234567.89)
+    big["A"].tokens = [99999] * timing.MAX_ROWS
+    for results in (failed, big):
+        summary = timing.result_line(timing.summary_payload(results, False, [1000.55] * 3, [1000.55] * 3))
+        assert len(summary) < 300, "the summary with every arm failed, and with the widest ratio: {}".format(len(summary))
 
 
 def test_a_non_finite_number_is_no_json_and_is_refused_rather_than_printed():
@@ -284,14 +356,14 @@ def test_the_cpu_model_is_the_first_model_name_of_proc_cpuinfo_and_only_plain_ch
     assert timing.cpu_model(str(info)) is None
     assert timing.cpu_model(str(tmp_path / "missing")) is None
     info.write_text("model name\t: " + "x" * 500 + "\n")
-    assert len(timing.cpu_model(str(info))) == timing.CPU_MAX == 60
+    assert len(timing.cpu_model(str(info))) == timing.CPU_MAX == 48, "the longest Intel string of the cluster's nodes is 44"
 
 
 def test_the_node_name_and_the_cpu_string_that_reach_the_environment_line_are_plain_words():
     assert timing.plain("gx14", 64) == "gx14"
     assert timing.plain('a b"c\nd', 64) == "a_b_c_d"
     assert timing.plain("x" * 200, 64) == "x" * 64
-    assert timing.NODE_MAX == 32 and timing.MAX_ROW == 9999
+    assert (timing.NODE_MAX, timing.MAX_ROWS, timing.MAX_ROW) == (16, 6, 9999), "the bounds that keep the environment line, with the two words of the stores, under 300"
 
 
 def test_the_physical_cores_of_the_affinity_are_counted_from_sysfs_and_none_where_it_cannot_be_told(tmp_path):
@@ -327,12 +399,78 @@ def test_the_load_average_is_the_nodes_three_numbers_rounded_and_none_where_ther
     assert timing.load_average() is None
 
 
-def test_the_environment_payload_carries_the_cores_and_the_load_beside_the_affinity():
-    env = timing.env_payload("gx14", "Intel(R) Xeon(R)", 8, 4, [1.0, 2.5, 3.25], 8, 8, "real", [0, 1])["env"]
-    assert list(env) == ["node", "cpu", "affinity", "cores", "load", "threads_main", "threads_worker", "engine", "rows"]
-    assert (env["affinity"], env["cores"], env["load"]) == (8, 4, [1.0, 2.5, 3.25])
+FAKE_MOUNTS = r"""22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw
+23 22 0:20 / /sc/fast rw,nosuid,nodev shared:2 - tmpfs tmpfs rw,size=1024k
+24 22 0:30 / /sc/home rw,relatime shared:3 - nfs4 SECRET-server:/export/SECRET-home rw,vers=4.2,addr=10.0.0.7
+25 22 0:31 / /sc/with\040space rw - xfs /dev/sdb1 rw
+26 22 0:32 / /sc/scratch rw - lustre 10.0.0.1@o2ib:/SECRET-scratch rw
+27 22 0:33 / /sc/data rw - fuse.SECRET-fs SECRET-source rw
+28 22 0:34 / /sc/home/sub rw - ext3 /dev/sdc rw
+29 22 0:35 / /sc/stack rw - xfs /dev/sdd rw
+30 22 0:36 / /sc/stack rw - tmpfs tmpfs rw
+31 22 0:37 / /sc/nfs3 rw - nfs SECRET:/x rw
+32 22 0:38 / /sc/gpfs rw - gpfs gpfs0 rw
+33 22 0:39 / /sc/bee rw - beegfs beegfs_nodev rw
+"""
+
+
+def test_the_filesystem_of_a_directory_is_one_word_of_a_closed_list_from_the_mount_table_and_nothing_of_the_table_is_in_it(tmp_path):
+    """E against E-local is the NFS only if the local store is on a local disk: the job says what each store's directory sits on. A word of a
+    closed list, never a path, a server or an option (R7: the table names the home's server and the export)."""
+    table = tmp_path / "mountinfo"
+    table.write_text(FAKE_MOUNTS)
+
+    def word(path):
+        return timing.fs_word(path, str(table))
+
+    assert timing.FS_WORDS == ("nfs", "tmpfs", "xfs", "ext4", "lustre", "gpfs", "beegfs", "other")
+    assert word("/sc/fast/job") == "tmpfs" and word("/sc/home/user/chat_sessions") == "nfs" and word("/sc/nfs3/x") == "nfs", "nfs4 is nfs"
+    assert word("/sc/with space/x") == "xfs", "a space in a mount point is written \\040 in the table"
+    assert word("/sc/scratch/a") == "lustre" and word("/sc/gpfs") == "gpfs" and word("/sc/bee/x") == "beegfs"
+    assert word("/sc/data/x") == "other", "a type that is not in the list is other, and the table's own word for it is not printed"
+    assert word("/sc/home/sub/deeper") == "other", "the longest mount point that holds the directory wins: ext3 is not in the list"
+    assert word("/sc/homework") == "ext4", "/sc/home is no parent of /sc/homework: the root's type"
+    assert word("/sc/stack/x") == "tmpfs", "a mount over a mount of the same place hides it: the later line wins"
+    assert word("/") == "ext4" and word("/nowhere/else") == "ext4" and word(Path("/sc/home")) == "nfs", "the mount point itself, and a Path"
+    for path in ("/sc/fast", "/sc/home/u", "/sc/data", "/sc/home/sub", "/", "/sc/scratch/x y"):
+        assert word(path) in timing.FS_WORDS and "SECRET" not in word(path)
+    assert timing.fs_word("/sc/home", str(tmp_path / "missing")) is None, "no table (a Mac): none, not a guess"
+    for text in ("", "garbage\n\n22 1 8:2 / / rw -\n - \n"):
+        table.write_text(text)
+        assert word("/sc/home") is None
+    real = timing.fs_word(tmp_path)
+    assert real is None or real in timing.FS_WORDS, "the real table: a word of the list, or none where there is no /proc"
+
+
+def test_the_filesystem_of_a_path_that_cannot_be_resolved_is_none():
+    assert timing.fs_word("a\0b") is None
+
+
+def test_the_environment_names_the_filesystem_of_the_local_store_directory_and_of_the_nfs_one(world, monkeypatch):
+    asked = []
+
+    def fake(path, *args):
+        asked.append(Path(path))
+        return "tmpfs" if Path(path) == world.local else "nfs"
+
+    monkeypatch.setattr(timing, "fs_word", fake)
+    env = timing.environment(world)["env"]
+    assert (env["fs_local"], env["fs_home"]) == ("tmpfs", "nfs")
+    assert asked == [world.local, world.timing], "where E-local's store is made, and the directory E's and F's stores are made under"
+    monkeypatch.setattr(world, "local", None)   # no --local-dir: the system's temporary directory, which is where E-local makes its store
+    asked.clear()
+    timing.environment(world)
+    assert asked[0] == Path(tempfile.gettempdir()) == timing.local_base(world)
+
+
+def test_the_environment_payload_carries_the_cores_and_the_load_beside_the_affinity_and_the_two_filesystems():
+    env = timing.env_payload("gx14", "Intel(R) Xeon(R)", 8, 4, [1.0, 2.5, 3.25], 8, 8, "real", [0, 1], "tmpfs", "nfs")["env"]
+    assert list(env) == ["node", "cpu", "affinity", "cores", "load", "fs_local", "fs_home", "threads_main", "threads_worker", "engine", "rows"]
+    assert (env["affinity"], env["cores"], env["load"], env["fs_local"], env["fs_home"]) == (8, 4, [1.0, 2.5, 3.25], "tmpfs", "nfs")
     none = timing.env_payload("n", None, None, None, None, 1, 1, "tiny", [0])["env"]
-    assert (none["cpu"], none["affinity"], none["cores"], none["load"]) == (None, None, None, None)
+    assert (none["cpu"], none["affinity"], none["cores"], none["load"], none["fs_local"], none["fs_home"]) == (None,) * 6
+    odd = timing.env_payload("n", None, None, None, None, 1, 1, "tiny", [0], "/sc/home/SECRET", "nfs4:SECRET")["env"]
+    assert (odd["fs_local"], odd["fs_home"]) == ("other", "other"), "whatever is given, only a word of the closed list is ever in the line"
 
 
 # ---- the world: the engine as the server builds it, the picker's rows, the published protocol -----------------------------------------
@@ -459,8 +597,9 @@ def test_the_environment_is_the_node_the_cpu_the_affinity_and_torchs_threads_in_
 
     monkeypatch.setattr(torch, "get_num_threads", counting)
     env = timing.environment(world)["env"]
-    assert env["node"] == timing.plain(platform.node(), 64) and env["cpu"] == timing.cpu_model()
+    assert env["node"] == timing.plain(platform.node(), timing.NODE_MAX) and env["cpu"] == timing.cpu_model()
     assert env["engine"] == "tiny" and env["rows"] == [0, 1, 2, 3, 4]
+    assert env["fs_local"] in timing.FS_WORDS + (None,) and env["fs_home"] in timing.FS_WORDS + (None,)
     assert env["threads_main"] == env["threads_worker"] == real()
     assert any(t is threading.main_thread() for t in seen) and any(t is not threading.main_thread() for t in seen)
     assert env["affinity"] == (len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None)
@@ -489,6 +628,18 @@ def test_arm_a_is_the_cached_beam_search_alone_with_no_callback_in_the_main_thre
         assert kwargs["prefix_embeds"] is enc.prefix and tuple(args[0].shape) == (1, 0), "no BOS: the input ids are empty, as in training"
     assert len(result.ms) == len(result.reports) == 5 and result.tokens == [100] * 5 and all(ms > 0 for ms in result.ms)
     assert result.total_ms == []
+
+
+def test_a_end_is_arm_a_again_the_same_rows_and_options_with_no_callback_and_no_warm_up_before_it(world, monkeypatch):
+    searched = spy(world.engine.decoder, "beam_search_cached", [], monkeypatch)
+    generated = spy(world.engine, "generate", [], monkeypatch)
+    result = timing.run_arm("A-end", world)
+    assert result.arm == "A-end" and result.error is None and len(searched) == 5 and generated == [], "five decodes and no warm-up turn before them"
+    for (thread, args, kwargs), enc in zip(searched, world.encoded):
+        assert thread is threading.main_thread() and kwargs["on_step"] is None and kwargs["prefix_embeds"] is enc.prefix
+        assert kwargs["beam_size"] == 3 and kwargs["max_new_tokens"] == 100
+    assert result.tokens == [100] * 5 and result.total_ms == [] and len(result.ms) == 5
+    assert result.reports == timing.run_arm("A", world).reports, "the same decode: the same reports"
 
 
 def test_arm_b_is_arm_a_with_a_callback_that_does_nothing(world, monkeypatch):
@@ -669,6 +820,72 @@ def test_a_turn_that_does_not_end_done_stops_the_arm_with_a_fixed_word_and_its_t
     assert result.error == "stream_model_error" and result.ms == [] and SECRET not in repr(result)
 
 
+class SilentWorker:
+    """A worker that takes a turn and says nothing about it, ever: the turn that never ends."""
+
+    def __init__(self):
+        self.reserved = self.submitted = 0
+
+    def reserve(self):
+        self.reserved += 1
+        return True
+
+    def submit(self, job, emit, done):
+        self.submitted += 1
+
+
+class QuickWorker(SilentWorker):
+    """A worker whose turn is one event and its end."""
+
+    def submit(self, job, emit, done):
+        super().submit(job, emit, done)
+        emit("message_stop", {"status": "done"})
+        done()
+
+
+def drained(worker, *deadline):
+    import asyncio
+    return asyncio.run(timing.drain_turn(worker, None, *deadline))
+
+
+def hang_until_stopped(self, job, emit, stop):
+    """Pipeline.run for a turn that never ends on its own: it waits for the stop that the worker's shutdown sets."""
+    stop.wait(60)
+
+
+def test_a_turn_that_does_not_end_within_the_deadline_fails_with_turn_deadline_and_the_wait_is_the_deadline():
+    worker = SilentWorker()
+    started = real_time.perf_counter()
+    with pytest.raises(timing.TurnFailed) as caught:
+        drained(worker, 0.3)
+    waited = real_time.perf_counter() - started
+    assert caught.value.code == "turn_deadline" and (worker.reserved, worker.submitted) == (1, 1)
+    assert 0.25 <= waited < 10, waited
+
+
+def test_the_deadline_of_a_turn_is_the_modules_300_seconds_unless_it_is_given_a_shorter_one(monkeypatch):
+    monkeypatch.setattr(timing, "TURN_DEADLINE_S", 0.2)
+    started = real_time.perf_counter()
+    with pytest.raises(timing.TurnFailed) as caught:
+        drained(SilentWorker())
+    assert caught.value.code == "turn_deadline" and real_time.perf_counter() - started < 10
+
+
+def test_a_turn_that_ends_in_time_is_drained_as_before_its_frames_and_the_ms_to_the_end_of_its_stream():
+    frames, ms = drained(QuickWorker(), 5.0)
+    assert len(frames) == 1 and frames[0].startswith("event: message_stop\n") and 0 <= ms < 5000
+
+
+def test_a_turn_that_never_ends_fails_arm_e_with_turn_deadline_not_at_the_time_limit_and_its_worker_thread_is_gone(fresh, monkeypatch):
+    monkeypatch.setattr(timing, "TURN_DEADLINE_S", 0.5)
+    monkeypatch.setattr(Pipeline, "run", hang_until_stopped)
+    before = len([t for t in threading.enumerate() if t.name.startswith("turn")])
+    started = real_time.perf_counter()
+    result = timing.run_arm("E", fresh)
+    assert result.error == "turn_deadline" and result.ms == [] and real_time.perf_counter() - started < 30
+    assert len([t for t in threading.enumerate() if t.name.startswith("turn")]) == before
+
+
 def test_the_worker_thread_of_an_arm_is_gone_when_the_arm_ends_whether_it_finished_or_failed(fresh, monkeypatch):
     def turn_threads():
         return [t for t in threading.enumerate() if t.name.startswith("turn")]
@@ -737,6 +954,105 @@ def test_a_turn_the_server_refuses_ends_the_arm_with_its_status_and_stops_the_se
     assert not [t for t in threading.enumerate() if t.name == "timing-server"]
 
 
+class PingingResponse:
+    """The 200 answer of a turn that never ends: a keep-alive comment every little while, for ever."""
+    status_code = 200
+
+    def __init__(self, pause=0.0):
+        self.pause = pause
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def iter_text(self):
+        while True:
+            real_time.sleep(self.pause)
+            yield ": ping\n\n"
+
+    def read(self):
+        pass
+
+
+class FakeClient:
+    def __init__(self, response):
+        self.response, self.asked = response, []
+
+    def stream(self, method, url, data=None):
+        self.asked.append((method, url, data))
+        return self.response
+
+
+def test_a_stream_that_is_still_going_after_the_deadline_is_let_go_with_turn_deadline_by_the_clock_it_is_given():
+    ticks = iter(range(0, 10 ** 6, 100))
+    client = FakeClient(PingingResponse())
+    facts, report, total_ms = timing.http_turn(client, "s1", {"max_new_tokens": 100}, 300.0, lambda: float(next(ticks)))
+    assert facts.status == 200 and facts.error == "turn_deadline" and report is None
+    assert total_ms >= 300 * 1000.0, "the clock moved past the deadline, and the turn's ms are on that clock"
+    assert client.asked[0][:2] == ("POST", "/v1/sessions/s1/messages")
+    assert timing.turn_problem(facts) == "turn_deadline", "an arm that meets it fails with that word"
+
+
+def test_a_pinging_stream_is_let_go_at_the_deadline_in_real_time_after_the_ping_in_hand():
+    started = real_time.perf_counter()
+    facts, report, _ = timing.http_turn(FakeClient(PingingResponse(0.05)), "s1", {}, 0.3)
+    assert facts.error == "turn_deadline" and report is None and 0.25 <= real_time.perf_counter() - started < 10
+
+
+def test_the_deadline_of_an_http_turn_is_the_modules_300_seconds_unless_it_is_given_a_shorter_one(monkeypatch):
+    monkeypatch.setattr(timing, "TURN_DEADLINE_S", 0.2)
+    facts, _, _ = timing.http_turn(FakeClient(PingingResponse(0.05)), "s1", {})
+    assert facts.error == "turn_deadline"
+
+
+def test_a_turn_that_never_ends_fails_arm_f_with_turn_deadline_and_the_server_is_stopped(fresh, monkeypatch):
+    """The server's own keep-alive comment comes every 15 s; here every 0.1 s, so that the stream says something and the deadline is looked at."""
+    monkeypatch.setattr(timing, "TURN_DEADLINE_S", 0.5)
+    monkeypatch.setattr(server, "PING_S", 0.1)
+    monkeypatch.setattr(Pipeline, "run", hang_until_stopped)
+    started = real_time.perf_counter()
+    result = timing.run_arm("F", fresh)
+    assert result.error == "turn_deadline" and result.ms == [] and real_time.perf_counter() - started < 60
+    assert not [t for t in threading.enumerate() if t.name == "timing-server"]
+
+
+def test_a_session_the_server_will_not_make_ends_arm_f_with_the_drills_own_fixed_code_and_stops_the_server(fresh, monkeypatch):
+    import httpx
+    monkeypatch.setattr(httpx.Client, "post", lambda self, *args, **kwargs: httpx.Response(403, request=httpx.Request("POST", "http://127.0.0.1/v1/sessions")))
+    result = timing.run_arm("F", fresh)
+    assert result.error == "session_create_http_403" and result.ms == []
+    assert not [t for t in threading.enumerate() if t.name == "timing-server"]
+
+
+def test_a_connection_that_fails_when_the_session_is_made_is_the_drills_code_with_the_class_and_never_its_text(fresh, monkeypatch):
+    import httpx
+
+    def refuse(self, *args, **kwargs):
+        raise httpx.ConnectError("refused: " + SECRET)
+
+    monkeypatch.setattr(httpx.Client, "post", refuse)
+    result = timing.run_arm("F", fresh)
+    assert result.error == "session_create_ConnectError" and SECRET not in repr(result)
+
+
+def test_a_drill_error_whose_text_is_not_a_code_is_named_by_its_class_alone(fresh, monkeypatch):
+    def broken(client):
+        raise timing.drill.DrillError("an answer with " + SECRET)
+
+    monkeypatch.setattr(timing.drill, "create_session", broken)
+    result = timing.run_arm("F", fresh)
+    assert result.error == "DrillError" and SECRET not in repr(result)
+
+
+def test_a_fixed_code_is_a_word_of_letters_digits_and_underscores_and_anything_else_is_the_fallback():
+    assert timing.fixed_code("session_create_http_403", "DrillError") == "session_create_http_403"
+    assert timing.fixed_code("x" * 60, "F") == "x" * 60
+    for text in ("", "has a space", "a:b", "9starts_with_a_digit", "x" * 61, "é", "line\nbreak", SECRET, SECRET + " text"):
+        assert timing.fixed_code(text, "DrillError") == "DrillError", text
+
+
 def test_a_server_that_never_starts_is_a_named_failure_and_leaves_no_thread_or_open_store(fresh, monkeypatch):
     import uvicorn
     monkeypatch.setattr(uvicorn.Server, "run", lambda self, sockets=None: None)
@@ -797,29 +1113,44 @@ class Ran:
         self.out, self.err = out.getvalue(), err.getvalue()
         self.lines = parsed(self.out) if self.out else []
 
+    @property
+    def env(self):
+        return self.lines[0]["env"]
+
+    @property
+    def arms(self):
+        """The arm lines by name: A to F, then A-end."""
+        return {line["arm"]: line for line in self.lines[1:-1]}
+
+    @property
+    def summary(self):
+        return self.lines[-1]["summary"]
+
 
 @pytest.fixture(scope="module")
 def full(tmp_path_factory, tiny_gallery):
     return Ran(tmp_path_factory.mktemp("timing_full"), tiny_gallery)
 
 
-def test_a_full_run_prints_the_environment_then_each_arm_in_ladder_order_then_the_summary_and_exits_0(full):
+def test_a_full_run_prints_the_environment_then_each_arm_in_ladder_order_then_a_end_then_the_summary_and_exits_0(full):
     assert full.code == 0 and full.err.count("RESULT") == 0
-    assert len(full.lines) == 9 and full.out.endswith("\n") and full.out.count("\n") == 9
-    assert list(full.lines[0]) == ["env"] and list(full.lines[8]) == ["summary"]
-    assert [line["arm"] for line in full.lines[1:8]] == list(timing.ARMS) == ["A", "B", "C", "D", "E", "E-local", "F"]
+    assert len(full.lines) == 10 and full.out.endswith("\n") and full.out.count("\n") == 10
+    assert list(full.lines[0]) == ["env"] and list(full.lines[9]) == ["summary"]
+    assert [line["arm"] for line in full.lines[1:9]] == list(timing.ALL_ARMS) == ["A", "B", "C", "D", "E", "E-local", "F", "A-end"]
     assert all(len(line) < 300 for line in full.out.splitlines()), [len(line) for line in full.out.splitlines()]
 
 
-def test_the_environment_line_is_the_node_the_cpu_the_affinity_the_threads_the_engine_and_the_rows(full):
-    env = full.lines[0]["env"]
-    assert list(env) == ["node", "cpu", "affinity", "cores", "load", "threads_main", "threads_worker", "engine", "rows"]
-    assert env["node"] == timing.plain(platform.node(), 64) and env["engine"] == "tiny" and env["rows"] == [0, 1, 2, 3, 4]
+def test_the_environment_line_is_the_node_the_cpu_the_affinity_the_filesystems_the_threads_the_engine_and_the_rows(full):
+    env = full.env
+    assert list(env) == ["node", "cpu", "affinity", "cores", "load", "fs_local", "fs_home", "threads_main", "threads_worker", "engine", "rows"]
+    assert env["node"] == timing.plain(platform.node(), timing.NODE_MAX) and env["engine"] == "tiny" and env["rows"] == [0, 1, 2, 3, 4]
     assert env["threads_main"] == env["threads_worker"] == torch.get_num_threads() and env["cpu"] == timing.cpu_model()
+    for key in ("fs_local", "fs_home"):
+        assert env[key] is None or env[key] in timing.FS_WORDS, "a word of the closed list, or none where the system has no mount table (a Mac)"
 
 
 def test_every_arm_line_has_five_rows_a_mean_a_ratio_to_a_and_the_same_report_as_a(full):
-    arms = {line["arm"]: line for line in full.lines[1:8]}
+    arms = full.arms
     base = arms["A"]["mean"]
     for name, line in arms.items():
         assert len(line["ms"]) == 5 and all(ms > 0 for ms in line["ms"]) and line["same_report"] is True and "error" not in line, name
@@ -833,16 +1164,43 @@ def test_every_arm_line_has_five_rows_a_mean_a_ratio_to_a_and_the_same_report_as
 
 
 def test_the_summary_names_the_first_arm_over_one_and_a_half_times_a_and_says_the_reports_were_the_same(full):
-    summary = full.lines[8]["summary"]
-    arms = {line["arm"]: line for line in full.lines[1:8]}
+    summary, arms = full.summary, full.arms
     assert summary["same_report_all_arms"] is True and summary["tokens"] == [100] * 5 and summary["arms_failed"] == []
     first = summary["first_over_1_5x"]
-    assert first in set(timing.ARMS[1:]) | {"none"}
+    assert first in set(timing.ARMS[1:]) | {"none"}, "A to F only: A-end is never the arm it names"
     ladder_order = timing.ARMS[1:]
     before = ladder_order if first == "none" else ladder_order[:ladder_order.index(first)]
     assert all(arms[arm]["ratio"] <= 1.51 for arm in before), "no arm before the named one is over (printed ratios are rounded to 2 places)"
     if first != "none":
         assert arms[first]["ratio"] >= 1.49
+
+
+def test_a_end_is_a_decode_of_the_same_five_rows_like_a_with_its_ratio_to_a_and_the_summary_repeats_that_ratio(full):
+    a, end = full.arms["A"], full.arms["A-end"]
+    assert list(end) == ["arm", "ms", "mean", "ratio", "same_report"] and len(end["ms"]) == 5 and end["same_report"] is True
+    assert end["ratio"] == pytest.approx(end["mean"] / a["mean"], abs=0.011) and end["mean"] > 0
+    assert full.summary["a_end_ratio"] == end["ratio"], "one number, in the A-end line and in the summary"
+    assert list(full.summary) == ["first_over_1_5x", "a_end_ratio", "same_report_all_arms", "tokens", "arms_failed", "load_before", "load_after"]
+
+
+def test_the_load_average_is_read_before_the_engines_load_after_them_and_after_the_last_arm(tmp_path, tiny_gallery, monkeypatch):
+    """load_before and load_after are in the summary and `load`, as it was, in the environment line, which is printed once the engines are
+    loaded: the node's three readings across the job, in the order they were taken."""
+    log, readings = [], iter([[1.0, 1.5, 2.0], [3.0, 3.5, 4.0], [5.0, 5.5, 6.0]])
+
+    def load_average():
+        log.append("load")
+        return next(readings)
+
+    real_world, real_arm = timing.load_world, timing.run_arm
+    monkeypatch.setattr(timing, "load_average", load_average)
+    monkeypatch.setattr(timing, "load_world", lambda *a, **k: (log.append("engines"), real_world(*a, **k))[1])
+    monkeypatch.setattr(timing, "run_arm", lambda name, world: (log.append(name), real_arm(name, world))[1])
+    ran = Ran(tmp_path, tiny_gallery, "--rows", "0-1")
+    assert ran.code == 0
+    assert log == ["load", "engines", "load", "A", "B", "C", "D", "E", "E-local", "F", "A-end", "load"], log
+    assert ran.env["load"] == [3.0, 3.5, 4.0], "the existing reading: after the engines are loaded"
+    assert (ran.summary["load_before"], ran.summary["load_after"]) == ([1.0, 1.5, 2.0], [5.0, 5.5, 6.0])
 
 
 def test_the_job_writes_nothing_but_the_stores_of_e_and_f_and_removes_the_node_local_one(full):
@@ -859,10 +1217,11 @@ def test_the_job_writes_nothing_but_the_stores_of_e_and_f_and_removes_the_node_l
 
 
 def test_the_decodes_are_one_warm_up_and_then_the_arms_in_order_with_a_callback_only_where_the_arm_has_one(full):
-    assert len(full.flags) == 1 + 5 + 5 + 5 + (1 + 5) * 4, "one warm-up, A, B, C, and D, E, E-local and F with an uncounted turn each"
+    assert len(full.flags) == 1 + 5 + 5 + 5 + (1 + 5) * 4 + 5, "one warm-up, A, B, C, D, E, E-local and F with an uncounted turn each, and A-end"
     assert full.flags[0] is False, "the warm-up is a whole generate: it has the engine's callback"
     assert full.flags[1:6] == [True] * 5, "A: the bare search, no callback"
     assert full.flags[6:11] == [False] * 5, "B: a callback that does nothing"
+    assert full.flags[-5:] == [True] * 5, "A-end: A again, the bare search, no warm-up turn before it"
 
 
 def test_each_arm_is_printed_as_it_finishes_so_that_a_job_that_is_killed_keeps_what_it_measured(tmp_path, tiny_gallery, monkeypatch):
@@ -878,7 +1237,7 @@ def test_each_arm_is_printed_as_it_finishes_so_that_a_job_that_is_killed_keeps_w
         (tmp_path / name).mkdir()
     code = timing.main(["--home", str(tmp_path / "home"), "--gallery", str(tiny_gallery), "--job", "j1", "--engine", "tiny",
                         "--local-dir", str(tmp_path / "local"), "--rows", "0-1"], out, err)
-    assert code == 0 and seen == [("A", 1), ("B", 2), ("C", 3), ("D", 4), ("E", 5), ("E-local", 6), ("F", 7)], "the environment first, then one line per arm"
+    assert code == 0 and seen == [("A", 1), ("B", 2), ("C", 3), ("D", 4), ("E", 5), ("E-local", 6), ("F", 7), ("A-end", 8)], "the environment first, then one line per arm"
 
 
 def test_a_setup_that_fails_is_one_fatal_line_with_the_step_and_the_class_and_nothing_is_made(tmp_path, tiny_gallery):
@@ -901,11 +1260,10 @@ def test_an_arm_that_fails_is_a_line_with_its_class_the_others_go_on_and_the_job
 
     monkeypatch.setitem(timing.ARM_FUNCTIONS, "C", broken)
     ran = Ran(tmp_path, tiny_gallery, "--rows", "0-1")
-    arms = {line["arm"]: line for line in ran.lines[1:8]}
+    arms = ran.arms
     assert ran.code == 1 and arms["C"] == {"arm": "C", "error": "ValueError", "rows_done": 1, "ms": [1.0]}
-    assert all("error" not in arms[a] for a in timing.ARMS if a != "C"), "the others ran"
-    summary = ran.lines[8]["summary"]
-    assert summary["arms_failed"] == ["C"] and summary["same_report_all_arms"] is False
+    assert all("error" not in arms[a] for a in timing.ALL_ARMS if a != "C"), "the others ran, A-end after them"
+    assert ran.summary["arms_failed"] == ["C"] and ran.summary["same_report_all_arms"] is False
     assert SECRET not in ran.out + ran.err
 
 
@@ -918,10 +1276,26 @@ def test_a_report_that_differs_in_one_arm_fails_the_sanity_check_and_the_exit_st
 
     monkeypatch.setitem(timing.ARM_FUNCTIONS, "D", different)
     ran = Ran(tmp_path, tiny_gallery, "--rows", "0-1")
-    arms = {line["arm"]: line for line in ran.lines[1:8]}
-    assert ran.code == 1 and len(ran.lines) == 9
-    assert [a for a in timing.ARMS if arms[a]["same_report"] is False] == ["D"]
-    assert ran.lines[8]["summary"]["same_report_all_arms"] is False and ran.lines[8]["summary"]["arms_failed"] == []
+    arms = ran.arms
+    assert ran.code == 1 and len(ran.lines) == 10
+    assert [a for a in timing.ALL_ARMS if arms[a]["same_report"] is False] == ["D"]
+    assert ran.summary["same_report_all_arms"] is False and ran.summary["arms_failed"] == []
+
+
+def test_a_turn_that_never_ends_fails_its_arm_with_turn_deadline_and_the_job_goes_on_to_the_arms_after_it(tmp_path, tiny_gallery, monkeypatch):
+    """A pipeline that never ends a turn (E, E-local, F: the decodes of A to D and A-end do not go through it): each of the three fails at
+    the deadline with the fixed code, the job goes on, and the others are measured. The deadline is 0.5 s here, and 300 s in the job."""
+    monkeypatch.setattr(timing, "TURN_DEADLINE_S", 0.5)
+    monkeypatch.setattr(server, "PING_S", 0.1)
+    monkeypatch.setattr(Pipeline, "run", hang_until_stopped)
+    started = real_time.perf_counter()
+    ran = Ran(tmp_path, tiny_gallery, "--rows", "0-1")
+    assert real_time.perf_counter() - started < 120
+    assert ran.code == 1 and len(ran.lines) == 10
+    for arm in ("E", "E-local", "F"):
+        assert ran.arms[arm] == {"arm": arm, "error": "turn_deadline", "rows_done": 0, "ms": []}, arm
+    assert all("error" not in ran.arms[arm] for arm in ("A", "B", "C", "D", "A-end")), "the arms before the failed ones and the one after them ran"
+    assert ran.summary["arms_failed"] == ["E", "E-local", "F"] and ran.summary["same_report_all_arms"] is False
 
 
 # ---- R7: SECRET text in the reports, the ids, the paths and the exceptions never reaches stdout, stderr or a file --------------------
@@ -986,7 +1360,7 @@ def strings_the_job_could_leak(gallery):
 def test_nothing_of_the_reports_ids_or_paths_reaches_stdout_stderr_or_a_file_outside_the_stores(secret_world, capfd):
     root, gallery = secret_world
     code, out, err, fds, before = secret_run(root, gallery, capfd)
-    assert code == 0 and len(parsed(out)) == 9
+    assert code == 0 and len(parsed(out)) == 10
     for leak in strings_the_job_could_leak(gallery):
         for name, stream in (("stdout", out), ("stderr", err), ("the process's fds", fds)):
             assert leak not in stream, (name, leak[:40])
@@ -1000,6 +1374,25 @@ def test_nothing_of_the_reports_ids_or_paths_reaches_stdout_stderr_or_a_file_out
     for name in ("e", "f"):   # the stores do hold the report: the setup put the SECRET where the job's output must not be
         assert any(SECRET in (m["report"] or "") for m, _ in stored_turns(home / "timing" / "j1-x" / name))
     assert list((root / ("local-" + SECRET)).iterdir()) == [] and list((root / "cwd").iterdir()) == []
+
+
+def test_the_two_filesystem_words_are_all_that_reaches_the_output_of_a_mount_table_that_is_full_of_secrets(secret_world, capfd, monkeypatch):
+    """The mount table names the home's server, its export and the run's own directories. What the job prints of it is two words of a closed
+    list, one for each store's directory, and nothing else of the table is in stdout, stderr or any file descriptor."""
+    root, gallery = secret_world
+    home, local = os.path.realpath(str(root / ("home-" + SECRET))), os.path.realpath(str(root / ("local-" + SECRET)))
+    table = root.parent / "mountinfo"
+    table.write_text("1 0 8:1 / / rw - fuse.SECRET-rootfs SECRET-source rw,SECRET-option\n"
+                     "2 1 0:30 / {} rw - nfs4 SECRET-server:/export/SECRET-home rw,addr=SECRET-address\n"
+                     "3 1 0:36 / {} rw - tmpfs SECRET-tmpfs rw,SECRET-size\n".format(home, local))
+    real = timing.fs_word
+    monkeypatch.setattr(timing, "fs_word", lambda path: real(path, str(table)))
+    code, out, err, fds, _ = secret_run(root, gallery, capfd, "--rows", "0")
+    env = parsed(out)[0]["env"]
+    assert code == 0 and (env["fs_local"], env["fs_home"]) == ("tmpfs", "nfs")
+    for leak in (SECRET, "export", "addr=", "rootfs", "fuse", "nfs4", "SECRET-option", home, local):
+        for name, stream in (("stdout", out), ("stderr", err), ("the process's fds", fds)):
+            assert leak not in stream, (name, leak)
 
 
 def test_a_failure_with_the_secret_in_its_text_is_named_by_class_or_by_a_fixed_word_and_its_traceback_is_nowhere(secret_world, capfd, monkeypatch):
@@ -1020,7 +1413,7 @@ def test_a_failure_with_the_secret_in_its_text_is_named_by_class_or_by_a_fixed_w
     monkeypatch.setattr(TinyEngine, "generate", broken)
     root, gallery = secret_world
     code, out, err, fds, _ = secret_run(root, gallery, capfd, "--rows", "0-1")
-    arms = {line["arm"]: line for line in parsed(out)[1:8]}
+    arms = {line["arm"]: line for line in parsed(out)[1:9]}
     assert code == 1
     assert arms["D"] == {"arm": "D", "error": "RuntimeError", "rows_done": 0, "ms": []}
     assert all(arms[a]["error"] == "stream_model_error" for a in ("E", "E-local", "F")), [arms[a] for a in ("E", "E-local", "F")]
@@ -1049,7 +1442,7 @@ def test_the_run_leaves_the_root_loggers_handlers_as_it_found_them(tmp_path, tin
 
 
 def test_the_script_runs_as_a_script_from_any_directory_and_prints_nothing_to_stdout_but_the_result_lines(tmp_path, tiny_gallery):
-    """A process of its own, started the way the wrapper starts it: it puts the repository on its own path, prints the nine RESULT lines and
+    """A process of its own, started the way the wrapper starts it: it puts the repository on its own path, prints the ten RESULT lines and
     nothing else on stdout, and a refused argument is one ERROR line on stderr and exit status 2."""
     import subprocess
     import sys
@@ -1061,8 +1454,8 @@ def test_the_script_runs_as_a_script_from_any_directory_and_prints_nothing_to_st
                           capture_output=True, text=True, timeout=300)
     assert done.returncode == 0, (done.stdout, done.stderr[-2000:])
     lines = parsed(done.stdout)
-    assert len(lines) == 9 and list(lines[0]) == ["env"] and [line["arm"] for line in lines[1:8]] == list(timing.ARMS)
-    assert all(len(line["ms"]) == 2 for line in lines[1:8]) and "RESULT" not in done.stderr
+    assert len(lines) == 10 and list(lines[0]) == ["env"] and [line["arm"] for line in lines[1:9]] == list(timing.ALL_ARMS)
+    assert all(len(line["ms"]) == 2 for line in lines[1:9]) and "RESULT" not in done.stderr
     refused = subprocess.run([sys.executable, str(SCRIPT), "--token", SECRET], cwd=str(tmp_path / "cwd"), env=env, capture_output=True, text=True,
                              timeout=120)
     assert refused.returncode == 2 and refused.stdout == "" and refused.stderr.startswith("ERROR ") and refused.stderr.count("\n") == 1
@@ -1143,15 +1536,22 @@ def box(tmp_path, full):
     return b
 
 
-def test_the_wrapper_prints_the_sync_line_a_banner_and_the_nine_result_lines_and_nothing_else_of_what_the_script_printed(box, full):
+def test_the_wrapper_prints_the_sync_line_a_banner_and_the_ten_result_lines_and_nothing_else_of_what_the_script_printed(box, full):
     done = box.run()
     lines = job_lines(done)
     assert done.returncode == 0, done.stdout
     assert lines[0] == SYNC_LINE and lines[1] == "=== chat decode timing: node=gx14.test.cluster job={} threads=8 gallery=g13d_m3_v1 ===".format(JOB_ID)
-    assert [l for l in lines if l.startswith("RESULT ")] == full.out.splitlines()
+    assert [l for l in lines if l.startswith("RESULT ")] == full.out.splitlines() and len(full.out.splitlines()) == 10
     assert lines[-2:] == ["=== timing lines withheld: 1 ===", "=== END chat decode timing ==="], "the stray line the script printed is counted, not shown"
     assert all(LINE_OK.match(l) for l in lines), [l for l in lines if not LINE_OK.match(l)]
     assert "SECRET" not in done.stdout and "Findings" not in done.stdout and "study_id" not in done.stdout and "/sc/home" not in done.stdout
+
+
+def test_the_banner_before_the_script_runs_says_that_its_result_lines_are_shown_and_its_raw_output_is_kept(box):
+    """It once read as if nothing were printed ("is never printed"), above ten lines of numbers: the raw output is what stays in the files."""
+    notice = [l for l in job_lines(box.run()) if l.startswith("=== decode timing:")]
+    assert len(notice) == 1 and "RESULT lines" in notice[0] and "shown" in notice[0] and "raw output" in notice[0] and "files under CHAT_HOME" in notice[0]
+    assert "never printed" not in notice[0] and "never" not in notice[0]
 
 
 def test_the_result_lines_reach_the_job_log_as_the_script_prints_them_so_that_a_killed_job_keeps_what_it_measured(box, full):
@@ -1167,7 +1567,7 @@ def test_the_result_lines_reach_the_job_log_as_the_script_prints_them_so_that_a_
     text = ""
     try:
         deadline = time.monotonic() + 20
-        while time.monotonic() < deadline and text.count("RESULT ") < 4:   # raw reads, so that a line in a buffer is never waited for
+        while time.monotonic() < deadline and text.count("\nRESULT ") < 4:   # raw reads, so that a line in a buffer is never waited for; a line, not the banner's word
             if select.select([proc.stdout], [], [], 0.5)[0]:
                 chunk = os.read(proc.stdout.fileno(), 65536)
                 if not chunk:
@@ -1188,7 +1588,7 @@ def test_the_whole_job_log_comes_through_chat_remote_summary_unchanged_every_lin
     masks what looks like an id: every line of a normal log must come through whole."""
     from tests.test_chat_remote import _summary_of
     lines = job_lines(box.run())
-    assert len(lines) == 14 and max(len(l) for l in lines) < 300
+    assert len(lines) == 15 and max(len(l) for l in lines) < 300
     assert _summary_of(box.root / "summary", lines) == lines
 
 
@@ -1292,7 +1692,7 @@ def test_a_script_that_exits_1_after_its_lines_has_them_shown_and_the_job_ends_w
     box.say(full.out.splitlines(), exit_code=1)
     done = box.run()
     lines = job_lines(done)
-    assert done.returncode == 1 and len([l for l in lines if l.startswith("RESULT ")]) == 9
+    assert done.returncode == 1 and len([l for l in lines if l.startswith("RESULT ")]) == 10
     errors = [l for l in lines if l.startswith("ERROR ")]
     assert errors == ["ERROR the timing script exited with code 1 (see the logs under CHAT_HOME)"] and "END chat decode timing" not in done.stdout
     assert lines.index(errors[0]) > max(i for i, l in enumerate(lines) if l.startswith("RESULT "))
@@ -1301,15 +1701,44 @@ def test_a_script_that_exits_1_after_its_lines_has_them_shown_and_the_job_ends_w
 def test_a_script_that_exits_0_with_the_wrong_number_of_lines_is_not_a_clean_end(box, full):
     box.say(full.out.splitlines()[:5])
     done = box.run()
-    assert done.returncode != 0 and "ERROR the timing script printed 5 result lines, not 9" in done.stdout
+    assert done.returncode != 0 and "ERROR the timing script printed 5 result lines, not 10" in done.stdout
     assert "END chat decode timing" not in done.stdout
+
+
+# One line of each kind the script prints, as the wrapper's allowlist must take it, and the ways a line of that kind could be wrong or could carry
+# text: each deviation changes one thing in a valid line, so that it is refused for that and for nothing else.
+ARM_LINE = 'RESULT {"arm":"A","ms":[1.0,2.0],"mean":1.5,"ratio":1.0,"same_report":true}'
+TURN_LINE = 'RESULT {"arm":"E","ms":[1.0,2.0],"mean":1.5,"ratio":1.0,"total_ms":[2.0,3.0],"mean_total_ms":2.5,"same_report":true}'
+FAILED_LINE = 'RESULT {"arm":"F","error":"session_create_http_403","rows_done":0,"ms":[]}'
+ENV_LINE = ('RESULT {"env":{"node":"gx14","cpu":"Intel(R) Xeon(R) Gold 6240 CPU @ 2.60GHz","affinity":8,"cores":4,"load":[1.0,2.5,3.25],'
+            '"fs_local":"tmpfs","fs_home":"nfs","threads_main":8,"threads_worker":8,"engine":"real","rows":[0,1,2,3,4]}}')
+SUMMARY_LINE = ('RESULT {"summary":{"first_over_1_5x":"none","a_end_ratio":1.02,"same_report_all_arms":true,"tokens":[100,100,100,100,100],'
+                '"arms_failed":[],"load_before":[1.0,2.5,3.25],"load_after":[2.0,2.5,3.25]}}')
+FATAL_LINE = 'RESULT {"fatal":"GalleryMismatch","step":"gallery"}'
+DEVIATIONS = [
+    (ARM_LINE, '"arm":"A"', '"arm":"Z"'), (ARM_LINE, '[1.0,2.0]', '["x",2.0]'), (ARM_LINE, '"same_report":true', '"same_report":"Findings: x"'),
+    (ARM_LINE, '"same_report":true', '"same_report":true,"report":"x"'), (ARM_LINE, '"ms":[1.0,2.0]', '"ms":[1.0,2.0,3.0,4.0,5.0,6.0,7.0]'),
+    (TURN_LINE, '"mean_total_ms":2.5', '"mean_total_ms":"x"'), (TURN_LINE, '"arm":"E"', '"arm":"A-end"'),
+    (FAILED_LINE, '"error":"session_create_http_403"', '"error":"has a space"'), (FAILED_LINE, '"error":"session_create_http_403"', '"error":"Findings: x"'),
+    (FAILED_LINE, '"arm":"F"', '"arm":"Q"'),
+    (ENV_LINE, '"node":"gx14"', '"node":"a b"'), (ENV_LINE, '"node":"gx14"', '"node":"' + "n" * 17 + '"'),
+    (ENV_LINE, '"cpu":"Intel(R) Xeon(R) Gold 6240 CPU @ 2.60GHz"', '"cpu":"a\\"b"'),
+    (ENV_LINE, '"fs_local":"tmpfs"', '"fs_local":"/sc/home/x"'), (ENV_LINE, '"fs_local":"tmpfs"', '"fs_local":"nfs4"'),
+    (ENV_LINE, '"fs_local":"tmpfs"', '"fs_local":"ext3"'), (ENV_LINE, '"fs_home":"nfs"', '"fs_home":"SECRET"'),
+    (ENV_LINE, '"fs_home":"nfs"', '"fs_home":"nfs","fs_path":"/sc/x"'), (ENV_LINE, '"cores":4', '"cores":"Findings"'),
+    (ENV_LINE, '"load":[1.0,2.5,3.25]', '"load":[1.0,"x",2.0]'), (ENV_LINE, '"load":[1.0,2.5,3.25]', '"load":[1.0,2.0]'),
+    (ENV_LINE, '"rows":[0,1,2,3,4]', '"rows":[0,1,2,3,4,5,6]'), (ENV_LINE, '"rows":[0,1,2,3,4]}}', '"rows":[0,1,2,3,4],"path":"/sc/home/x"}}'),
+    (SUMMARY_LINE, '"none"', '"SECRET"'), (SUMMARY_LINE, '"a_end_ratio":1.02', '"a_end_ratio":"Findings"'),
+    (SUMMARY_LINE, '"arms_failed":[]', '"arms_failed":["Findings"]'), (SUMMARY_LINE, '"load_before":[1.0,2.5,3.25]', '"load_before":[1.0,"x",2.0]'),
+    (SUMMARY_LINE, '"load_after":[2.0,2.5,3.25]', '"load_after":"/sc/home"'),
+    (FATAL_LINE, '"GalleryMismatch"', '"A B"'), (FATAL_LINE, '"gallery"', '"somewhere"'),
+]
 
 
 def test_a_result_line_of_a_shape_the_script_does_not_have_is_withheld_whatever_it_says(box, full):
     lines = full.out.splitlines()
     leaks = ['RESULT {"arm":"A","ms":[1.0],"mean":1.0,"ratio":1.0,"same_report":true,"report":"Findings: SECRET REPORT TEXT"}',
-             'RESULT {"env":{"node":"SECRET node name","cpu":null,"affinity":8,"cores":4,"load":null,"threads_main":8,"threads_worker":8,"engine":"real","rows":[0]}}',
-             'RESULT {"summary":{"first_over_1_5x":"SECRET","same_report_all_arms":true,"tokens":[],"arms_failed":[]}}',
+             ENV_LINE.replace('"node":"gx14"', '"node":"SECRET node name"'), SUMMARY_LINE.replace('"none"', '"SECRET"'),
              'RESULT {"fatal":"Findings: SECRET REPORT TEXT","step":"gallery"}']
     box.say(lines[:1] + leaks + lines[1:])
     done = box.run()
@@ -1335,44 +1764,62 @@ def test_the_wrappers_allowlist_takes_every_line_the_script_prints_in_every_stat
     for line in full.out.splitlines():
         assert matches(shapes, line), line
     base = arm_of("A", [3000.0] * 5)
-    samples = [
-        timing.result_line(timing.arm_payload(arm_of("E", [7000.0, 7100.5], total=[7500.0, 7650.5], error="stream_model_error"), 3000.0, False)),
-        timing.result_line(timing.arm_payload(arm_of("F", [], error="http_422"), 3000.0, False)),
-        timing.result_line(timing.arm_payload(arm_of("D", [4500.0] * 5), None, False)),
-        timing.result_line(timing.arm_payload(arm_of("E-local", [4500.0] * 8, total=[4999.9] * 8), 3000.0, True)),
-        timing.result_line(timing.arm_payload(arm_of("F", [123456.7] * 8, total=[234567.8] * 8), 3000.0, True)),
-        timing.result_line(timing.summary_payload({"A": base, "D": arm_of("D", [9000.0] * 5, error="ValueError")}, False)),
-        timing.result_line(timing.summary_payload({"A": arm_of("A", [], error="ValueError")}, False)),
-        timing.result_line(timing.env_payload("gx14", None, None, None, None, 8, 8, "real", [0, 1, 2, 3, 4])),
-        timing.result_line(timing.env_payload("gx14.long-node.example.org", "Intel(R) Xeon(R) Platinum 8480+ @ 2.00GHz", 8, 4, [0.0, 12.5, 101.25], 8, 8,
-                                              "tiny", [0])),
-        timing.result_line(timing.env_payload("n" * 100, "c" * 100, 1024, 1024, [1000.55, 1000.55, 1000.55], 9999, 9999, "real", [9999] * 8)),
-        timing.result_line({"fatal": "GalleryMismatch", "step": "gallery"}),
-        timing.result_line({"fatal": "OSError", "step": "timing"}),
-        timing.result_line({"fatal": "RuntimeError", "step": "run"}),
-    ]
+    rows = timing.MAX_ROWS
+    longest = max(timing.FS_WORDS, key=len)
+    failed = ladder([1.0] * 7, a_end=1.0)
+    for result in failed.values():
+        result.error = "OSError"
+    big = ladder([1.0] * 7, a_end=1234567.89)
+    big["A"].tokens = [99999] * rows
+    samples = [ARM_LINE, TURN_LINE, FAILED_LINE, ENV_LINE, SUMMARY_LINE, FATAL_LINE,
+               timing.result_line(timing.arm_payload(arm_of("E", [7000.0, 7100.5], total=[7500.0, 7650.5], error="stream_model_error"), 3000.0, False)),
+               timing.result_line(timing.arm_payload(arm_of("F", [], error="http_422"), 3000.0, False)),
+               timing.result_line(timing.arm_payload(arm_of("F", [], error="session_create_ConnectError"), 3000.0, False)),
+               timing.result_line(timing.arm_payload(arm_of("E", [], error="turn_deadline"), 3000.0, False)),
+               timing.result_line(timing.arm_payload(arm_of("D", [4500.0] * 5), None, False)),
+               timing.result_line(timing.arm_payload(arm_of("A-end", [3300.0] * 5), 3000.0, True)),
+               timing.result_line(timing.arm_payload(arm_of("A-end", [3300.0] * 2, error="OSError"), 3000.0, False)),
+               timing.result_line(timing.arm_payload(arm_of("A-end", [999999.9] * rows), 0.1, True)),
+               timing.result_line(timing.arm_payload(arm_of("E-local", [4500.0] * rows, total=[4999.9] * rows), 3000.0, True)),
+               timing.result_line(timing.arm_payload(arm_of("F", [123456.7] * rows, total=[234567.8] * rows), 3000.0, True)),
+               timing.result_line(timing.summary_payload({"A": base, "D": arm_of("D", [9000.0] * 5, error="ValueError")}, False)),
+               timing.result_line(timing.summary_payload({"A": arm_of("A", [], error="ValueError")}, False)),
+               timing.result_line(timing.summary_payload(ladder([3000.0] * 7, a_end=3300.0), True, [0.5, 1.25, 2.13], [10.0, 11.5, 12.0])),
+               timing.result_line(timing.summary_payload(failed, False, [1000.55] * 3, [1000.55] * 3)),
+               timing.result_line(timing.summary_payload(big, False, [1000.55] * 3, [1000.55] * 3)),
+               timing.result_line(timing.env_payload("gx14", None, None, None, None, 8, 8, "real", [0, 1, 2, 3, 4])),
+               timing.result_line(timing.env_payload("gx14.long-node.example.org", "Intel(R) Xeon(R) Platinum 8480+ @ 2.00GHz", 8, 4, [0.0, 12.5, 101.25],
+                                                     8, 8, "tiny", [0], "tmpfs", "nfs")),
+               timing.result_line(timing.env_payload("n" * 100, "c" * 100, 1024, 1024, [1000.55, 1000.55, 1000.55], 9999, 9999, "real",
+                                                     [9999] * rows, longest, longest)),
+               timing.result_line({"fatal": "OSError", "step": "timing"}), timing.result_line({"fatal": "RuntimeError", "step": "run"})]
+    samples += [timing.result_line(timing.env_payload("gx14", None, 8, 4, None, 8, 8, "real", [0], local, home))
+                for local in timing.FS_WORDS for home in (timing.FS_WORDS[0], timing.FS_WORDS[-1], None)]
     for line in samples:
         assert matches(shapes, line), line
 
 
+def test_the_wrappers_allowlist_names_the_same_filesystem_words_as_the_script_and_no_others():
+    shapes = shapes_of_the_wrapper()
+    groups = re.findall(r'"fs_(?:local|home)":\(null\|"\(([a-z0-9|]+)\)"\)', shapes)
+    assert len(groups) == 2 and all(set(g.split("|")) == set(timing.FS_WORDS) for g in groups), groups
+
+
+@pytest.mark.parametrize("template, old, new", DEVIATIONS, ids=["deviation{}".format(i) for i in range(len(DEVIATIONS))])
+def test_the_wrappers_allowlist_takes_a_line_with_one_thing_wrong_in_it_for_none_of_the_shapes(template, old, new):
+    shapes = shapes_of_the_wrapper()
+    assert matches(shapes, template), "the valid line is taken: the deviation below is refused for what it changes"
+    assert old in template
+    assert not matches(shapes, template.replace(old, new)), new
+
+
 @pytest.mark.parametrize("leak", [
-    'RESULT {"arm":"A","ms":[1.0],"mean":1.0,"ratio":1.0,"same_report":true,"report":"x"}',
-    'RESULT {"arm":"Z","ms":[1.0],"mean":1.0,"ratio":1.0,"same_report":true}',
-    'RESULT {"arm":"A","ms":["x"],"mean":1.0,"ratio":1.0,"same_report":true}',
-    'RESULT {"arm":"A","ms":[1.0],"mean":1.0,"ratio":1.0,"same_report":"Findings: x"}',
-    'RESULT {"arm":"A","error":"has a space","rows_done":1,"ms":[]}',
-    'RESULT {"arm":"A","error":"Findings: x","rows_done":1,"ms":[]}',
-    'RESULT {"env":{"node":"a b","cpu":null,"affinity":1,"cores":1,"load":null,"threads_main":1,"threads_worker":1,"engine":"real","rows":[0]}}',
-    'RESULT {"env":{"node":"n","cpu":"a\\"b","affinity":1,"cores":1,"load":null,"threads_main":1,"threads_worker":1,"engine":"real","rows":[0]}}',
-    'RESULT {"env":{"node":"n","cpu":null,"affinity":1,"cores":1,"load":null,"threads_main":1,"threads_worker":1,"engine":"real","rows":[0],"path":"/sc/home/x"}}',
-    'RESULT {"env":{"node":"n","cpu":null,"affinity":1,"cores":"Findings","load":null,"threads_main":1,"threads_worker":1,"engine":"real","rows":[0]}}',
-    'RESULT {"env":{"node":"n","cpu":null,"affinity":1,"cores":1,"load":[1.0,"x",2.0],"threads_main":1,"threads_worker":1,"engine":"real","rows":[0]}}',
-    'RESULT {"env":{"node":"n","cpu":null,"affinity":1,"cores":1,"load":[1.0,2.0],"threads_main":1,"threads_worker":1,"engine":"real","rows":[0]}}',
-    'RESULT {"summary":{"first_over_1_5x":"E","same_report_all_arms":true,"tokens":[],"arms_failed":["Findings"]}}',
-    'RESULT {"fatal":"A B","step":"gallery"}', 'RESULT {"fatal":"X","step":"somewhere"}',
     'RESULT {"gate": {"ok": true}}', 'RESULT {}', 'RESULT ', 'Findings: SECRET', '=== not a result ===', 'ERROR x',
-    'RESULT {"arm":"A","ms":[1.0],"mean":1.0,"ratio":1.0,"same_report":true} trailing',
-    ' RESULT {"arm":"A","ms":[1.0],"mean":1.0,"ratio":1.0,"same_report":true}',
+    ARM_LINE + " trailing", " " + ARM_LINE, ENV_LINE + " trailing", SUMMARY_LINE + " ", "x" + FATAL_LINE,
+    ENV_LINE.replace('"fs_local":"tmpfs","fs_home":"nfs",', ""), SUMMARY_LINE.replace('"a_end_ratio":1.02,', ""),
+    SUMMARY_LINE.replace(',"load_before":[1.0,2.5,3.25],"load_after":[2.0,2.5,3.25]', ""),
 ])
 def test_the_wrappers_allowlist_takes_nothing_else(leak):
     assert not matches(shapes_of_the_wrapper(), leak), leak
+
+

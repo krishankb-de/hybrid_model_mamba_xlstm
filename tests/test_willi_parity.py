@@ -9181,12 +9181,18 @@ def test_the_decode_timing_wrapper_header_documents_the_submit_the_summary_and_t
     assert "bash scripts/chat_remote.sh sync && bash scripts/chat_remote.sh submit scripts/chat_decode_timing_h100.sh [NODE=gx14]" in header
     assert "bash scripts/chat_remote.sh summary logs/chat_decode_timing_<jobid>.log" in header
     for phrase in ("jobs 2590184 and 2638789", "sbatch does not read NODE", "the lever cannot place the job by itself",
-                   "refuses before it loads anything", "NODE=gx14 -- --nodelist=gx14", "never printed", "TIMING_SHAPES", "left in place",
+                   "refuses before it loads anything", "NODE=gx14 -- --nodelist=gx14", "TIMING_SHAPES", "left in place",
                    "R7 (DUA)", "R8: additive only", "no arm counts", "same_report_all_arms", "It has no --requeue",
                    "Reading it:", "how many physical cores it covers", "the node's load average", "F reads a little high"):
         assert phrase in header, phrase
-    for arm in ("A ", "B ", "C ", "D ", "E ", "E-local ", "F "):
+    for arm in ("A ", "B ", "C ", "D ", "E ", "E-local ", "F ", "A-end "):
         assert " " + arm in header, arm
+    # Fix round 1: what the new numbers are, what total_ms is not, and what is printed (the banner once said that nothing was).
+    for phrase in ("a_end_ratio", "turn_deadline", "ten RESULT lines", "the filesystem of the node-local store directory", "never a path",
+                   "leaves out the label stage and the CheXbert half of the score stage", "because the job runs no labeller",
+                   "it is not the live turn's total", "its RESULT lines of known shapes are shown here as it prints them"):
+        assert phrase in header, phrase
+    assert header.count("never printed") == 1 and "its export, is never printed" in header, "only the mount table is never printed: the RESULT lines are"
 
 
 def test_the_decode_timing_wrapper_prepares_like_the_other_chat_wrappers_and_prints_the_sync_line_first():
@@ -9240,7 +9246,10 @@ def test_the_decode_timing_wrapper_validates_every_lever_before_anything_runs_an
     paths = ("${CHAT_HOME}", "${GALLERY}", "${OUT}", "${ERR}", "${LOCAL_DIR}", "${SCRATCH_ROOT}", "${SLURM_SUBMIT_DIR}", "${NODE}", "${NODE_NOW}")
     assert not [m for m in echoed + failed if any(p in m for p in paths)], "a printed message names a path or a lever's value"
     assert 'echo "ERROR the timing script exited with code ${rc} (see the logs under CHAT_HOME)"' in code
-    assert 'fail "the timing script printed ${RESULTS} result lines, not 9"' in code, "the one number a message may carry besides the status is a count the wrapper made itself"
+    assert 'fail "the timing script printed ${RESULTS} result lines, not 10"' in code, "the one number a message may carry besides the status is a count the wrapper made itself"
+    assert '[ "${RESULTS}" -eq 10 ]' in code, "the environment, the seven arms, A-end and the summary"
+    notice = [m for m in echoed if m.startswith("=== decode timing:")]
+    assert len(notice) == 1 and "RESULT lines" in notice[0] and "shown" in notice[0] and "never" not in notice[0], notice
 
 
 def test_the_decode_timing_wrapper_keeps_the_scripts_raw_output_in_files_and_lets_only_known_shapes_through_the_allowlist():
@@ -9352,8 +9361,14 @@ def test_the_decode_timing_script_names_every_exception_by_its_class_or_a_fixed_
                 assert isinstance(parent, ast.Attribute) and parent.attr == "code", ast.unparse(handler)
             elif ast.unparse(handler.type) == "SetupFailed":
                 assert isinstance(parent, ast.Attribute) and parent.attr in ("error", "step"), ast.unparse(handler)
+            elif ast.unparse(handler.type) == "drill.DrillError":   # the drill's own code, kept only through fixed_code: a word, else the class
+                assert isinstance(parent, ast.Call) and ast.unparse(parent.func) == "str", ast.unparse(handler)
+                assert isinstance(parents[parent], ast.Call) and ast.unparse(parents[parent].func) == "fixed_code", ast.unparse(handler)
             else:   # `type(exc)`: the class, never the text
                 assert isinstance(parent, ast.Call) and ast.unparse(parent.func) == "type", ast.unparse(handler) + " uses " + handler.name
+    assert [_timing_inner(h, parents) for h in caught if ast.unparse(h.type) == "drill.DrillError"] == ["run_arm"], "the one place the drill's code is read"
+    fixed = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "fixed_code")
+    assert [ast.unparse(r.value) for r in ast.walk(fixed) if isinstance(r, ast.Return)] == ["text if CODE.fullmatch(text) else fallback"]
     refused = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) in ("Refused", "argparse.ArgumentTypeError")]
     assert refused
     for call in refused:   # every text a refusal can carry is written in this file (a literal, a constant or a format of a constant)
@@ -9375,7 +9390,10 @@ def test_the_decode_timing_script_changes_nothing_on_disk_but_the_stores_of_e_an
                    and _timing_inner(n, parents) in ("arm_e", "arm_f"))
     assert homes == ["world.timing / 'e'", "world.timing / 'f'"], "under <home>/timing/<job>, at e and f"
     assert {_timing_inner(n, parents) for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "read_text"} == {
-        "core_count", "cpu_model"}, "the reads of the system's own files: the CPU's name and the cores' topology"
+        "core_count", "cpu_model", "fs_word"}, "the reads of the system's own files: the CPU's name, the cores' topology and the mount table"
+    fs = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "fs_word")
+    assert sorted(ast.unparse(r.value) for r in ast.walk(fs) if isinstance(r, ast.Return)) == sorted(
+        ["None", "None if kind is None else FS_KINDS.get(kind, 'other')"]), "of the mount table, which names the home's server, only a word of the list leaves"
     assert not [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value == "/tmp"], "the node-local directory is the wrapper's lever"
     roots, first_party = _imports_of(_TIMING)
     assert roots <= set(sys.stdlib_module_names) | {"httpx", "torch", "uvicorn", "app", "scripts"}, sorted(roots)
@@ -9402,7 +9420,10 @@ def test_the_decode_timing_script_reuses_the_servers_loading_the_bridge_and_the_
     used = {(n.value.id, n.attr) for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in modules}
     assert used, "the pin looks at something"
     assert [(who, what) for who, what in sorted(used) if not hasattr(modules[who], what)] == [], "a name of the probe or the drill that is not there"
-    assert {what for who, what in used if who == "probe"} == {"parse_rows", "Facts", "Handles", "read_into", "frames", "turn_options"}
+    assert {what for who, what in used if who == "probe"} == {"parse_rows", "Facts", "Handles", "read_into", "frames", "turn_options", "watched",
+                                                               "Timeout"}, "the probe's own reader and its own deadline: imported, not written again"
+    assert [_timing_inner(n, parents) for n in _timing_calls(tree, "probe.watched")] == ["http_turn"]
+    assert "watched" not in defined and "Timeout" not in defined
 
 
 def test_the_decode_timing_script_runs_the_arms_the_way_the_ruling_says_and_only_there():
@@ -9432,3 +9453,25 @@ def test_the_decode_timing_script_runs_the_arms_the_way_the_ruling_says_and_only
     assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) in module_functions]
     served = {k.arg for k in _timing_calls(tree, "create_app")[0].keywords}
     assert served == {"engine", "models", "home", "gallery", "device", "threads"} and not served & {"token", "mode", "host", "labeler", "labeler_url"}
+
+
+def test_the_decode_timing_script_ends_a_turn_that_never_ends_at_300_s_reads_the_load_three_times_and_runs_a_end_as_a_again():
+    """Fix round 1 (P8-F): the turn deadline is waited for in one place per path (the drain, and the stream's own `watched`), the node's load is read
+    before the engines, with the environment and after the last arm, the two filesystem words are asked in the environment alone, and A-end is A."""
+    tree, parents = _timing_tree()
+    assert [_timing_inner(n, parents) for n in _timing_calls(tree, "asyncio.wait_for")] == ["drain_turn"], "a turn is waited for in one place"
+    constants = [n.value for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "TURN_DEADLINE_S" for t in n.targets)]
+    assert len(constants) == 1 and isinstance(constants[0], ast.Constant) and constants[0].value == 300.0, "five minutes: a live turn takes 8 s"
+    functions = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for name in ("drain_turn", "http_turn"):
+        assert [a.arg for a in functions[name].args.args if a.arg == "deadline_s"] == ["deadline_s"], name
+        assert "TURN_DEADLINE_S if deadline_s is None else deadline_s" in ast.unparse(functions[name]), name + " reads the module's deadline when it is given none"
+    assert sorted(_timing_inner(n, parents) for n in _timing_calls(tree, "load_average")) == ["environment", "run_job", "run_job"], "before, with, after"
+    assert [_timing_inner(n, parents) for n in _timing_calls(tree, "fs_word")] == ["environment", "environment"], "the local directory and the NFS one"
+    registry = next(n.value for n in tree.body if isinstance(n, ast.AnnAssign) and ast.unparse(n.target) == "ARM_FUNCTIONS")
+    assert {ast.unparse(k): ast.unparse(v) for k, v in zip(registry.keys, registry.values)} == {
+        "'A'": "arm_a", "'B'": "arm_b", "'C'": "arm_c", "'D'": "arm_d", "'E'": "arm_e", "'E-local'": "arm_e_local", "'F'": "arm_f", "A_END": "arm_a"}
+    loops = [n for n in ast.walk(functions["run_job"]) if isinstance(n, ast.For)]
+    assert [ast.unparse(n.iter) for n in loops] == ["ALL_ARMS"], "the seven and then A-end, each printed as it finishes"
+    over = functions["first_over"]
+    assert "ARMS[1:]" in ast.unparse(over) and "ALL_ARMS" not in ast.unparse(over), "the threshold looks at A to F only: A-end is drift, not a part of the path"

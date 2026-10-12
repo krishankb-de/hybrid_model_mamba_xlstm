@@ -17,12 +17,18 @@ live path to the one before, so that the first arm that is slower says where the
   E-local  E with the store on node-local disk (--local-dir, ${TMPDIR:-/tmp} in the wrapper), so that E against E-local is the NFS.
   F        E through HTTP: app.server.create_app on the real engine, uvicorn on a free loopback port inside this process, turns sent with httpx
            and the stream read with scripts/chat_realturn_probe.py's own reader (read_into).
+  A-end    A again, after F, on the same rows and options with no warm-up turn before it. The seven arms run in a fixed order, so a neighbour
+           that came or went on the node while they ran would look like a difference between arms: A-end against A shows it. It is not one of
+           the seven the threshold looks at; its ratio to A is on its line and, as `a_end_ratio`, in the summary.
 
 Reading it: A to B is the decoder building its callback's argument at every step (the best beam's ids as a list); B to C the engine's own work
 (the text decode of the best beam at every step, the repair of the finished report); C to D the worker thread; D to E the pipeline's work at
-every step (the session check, the redaction, the SQLite write, the hand-over to the loop); E to E-local the NFS; E to F the HTTP and the
-server's own loop. F's client is a thread of this process, where the live one is on the laptop, so F reads a little high by the client's own
-wake-ups. If every arm, A included, is slow, the code path is not the cause: the environment line says what the node gave this job.
+every step (the session check, the redaction, the SQLite write, the hand-over to the loop); E to E-local the NFS (if the environment line says
+the local directory is on a local disk, and the home on nfs); E to F the HTTP and the server's own loop. F's client is a thread of this process,
+where the live one is on the laptop, so F reads a little high by the client's own wake-ups. E, E-local and F report the turn's total_ms too, but
+the job runs no labeller: the label stage and the CheXbert half of the score stage do not run, so that total is not the live turn's. If every
+arm, A included, is slow, the code path is not the cause: the environment line says what the node gave this job, and A-end and the load readings
+say whether that changed while it ran.
 
 The engine is built as the server builds it (app.server._engines, which is what app/cli.py reaches through create_app) on the CPU, with the
 published protocol (app.pipeline.PUBLISHED_PROTOCOL: beam 3, 100 tokens, no stop on repeat, no compile) and cached decode, the server's default.
@@ -30,19 +36,24 @@ The rows' images come from the gallery's test_meta (Gallery.test_study), which i
 counts, comes before every arm. An arm that runs in a new context, a worker thread, a new store or a new server, starts with one more
 uncounted turn on row 0, so that its rows are steady state, as the live server's are long after its first turn.
 
-Sanity check. Every arm's report for a row must be the same text: they are compared in memory and only `same_report_all_arms` is printed. The
-arms are measured with time.perf_counter. An arm that fails is named by its exception's class and the others go on; the job then exits 1.
+Sanity check. Every arm's report for a row must be the same text, A-end's too: they are compared in memory and only `same_report_all_arms` is
+printed. The arms are measured with time.perf_counter. An arm that fails is named by its exception's class, or by a fixed code (`turn_deadline`
+for a turn of E, E-local or F that has not ended after TURN_DEADLINE_S, so that a hung turn costs five minutes and not the job's hour; the load
+drill's own code, such as `session_create_http_403`, for a session the server would not make), and the others go on; the job then exits 1.
 
 Output. stdout carries only `RESULT {json}` lines, each under the 300 characters `chat_remote.sh summary` keeps: the environment (node, CPU
-model, the size of the CPU affinity and how many physical cores it covers, the node's load average, torch's thread count in the main thread and
-in a worker thread), one line per arm as it finishes (the rows' ms, their mean, the ratio to A's mean, and for E, E-local and F the whole turn's
-ms and its mean), and the summary: the arm whose mean first exceeds 1.5 times A's mean, or `none`, and `same_report_all_arms`. Exit status 0 when every arm ran and every report was the same, 1 otherwise
-(a failed arm, a different report, a setup that could not finish: its RESULT line names the class), 2 for an argument it refuses, which is one
-`ERROR ...` line on stderr before anything is loaded. Everything else the process prints, a library's included, goes to stderr, and an exception
-is named by its class only, in every place.
+model, the size of the CPU affinity and how many physical cores it covers, the node's load average once the engines are loaded, the filesystem
+of the local store's directory and of the NFS store's, each a word of the closed list FS_WORDS, torch's thread count in the main thread and in
+a worker thread), one line per arm as it finishes (the rows' ms, their mean, the ratio to A's mean, and for E, E-local and F the whole turn's
+ms and its mean), and the summary: the arm of A to F whose mean first exceeds 1.5 times A's mean, or `none`, `a_end_ratio`,
+`same_report_all_arms`, and the node's load average before the engines were loaded and after the last arm. Exit status 0 when every arm ran and
+every report was the same, 1 otherwise (a failed arm, a different report, a setup that could not finish: its RESULT line names the class), 2
+for an argument it refuses, which is one `ERROR ...` line on stderr before anything is loaded. Everything else the process prints, a library's
+included, goes to stderr, and an exception is named by its class only, in every place.
 
 R7 (DUA). The job decodes MIMIC test images, and the reports, the study ids and the paths that hold them must not leave the cluster: none is
-printed, logged or written. Reports are held in memory, compared and dropped. The only files written are the stores of E and F under
+printed, logged or written. Reports are held in memory, compared and dropped. The mount table, read for the two filesystem words, names the
+home's server and its export: only the word of the closed list is kept. The only files written are the stores of E and F under
 <home>/timing/<job>, which stay in place (R8), and the node-local store of E-local, a directory this script made and removes. Never port 8000
 (the dev server's) or 8010 (the controller's tunnel): the server of arm F binds port 0, which is an ephemeral port, and check_port refuses
 both all the same, and the client's URL goes through the load drill's own check, which refuses 8000.
@@ -84,14 +95,20 @@ from scripts import chat_realturn_probe as probe  # noqa: E402
 
 MODEL = PUBLISHED_MODEL                          # hybrid_150m_m3_rrg: the model the 2.5 times gap was seen on
 ARMS = ("A", "B", "C", "D", "E", "E-local", "F")   # the ladder: each adds one part of the live path to the one before
+A_END = "A-end"                                  # A again after the ladder: what drifted on the node while it ran; not one of the seven
+ALL_ARMS = ARMS + (A_END,)
 TURN_ARMS = ("E", "E-local", "F")                # the arms that run the whole turn: they also report its total
 OVER = 1.5                                       # an arm is over when its mean is more than this many times A's
+TURN_DEADLINE_S = 300.0                          # a live turn takes 8 s: one that is still going after five minutes fails its arm, not the job's hour
 DEFAULT_ROWS = "0-4"
-MAX_ROWS = 8                                     # five are measured; eight, with the widest numbers below, keep every RESULT line under 300 characters
+MAX_ROWS = 6                                     # five are measured; six, with the widest values below, keep every RESULT line under 300 characters
 MAX_ROW = 9999                                   # the test split has 2,663 studies
 DEFAULT_THREADS = 8
-NODE_CHARS, NODE_MAX = "A-Za-z0-9._-", 32
-CPU_CHARS, CPU_MAX = "A-Za-z0-9 ().@+_-", 60
+NODE_CHARS, NODE_MAX = "A-Za-z0-9._-", 16        # gx14, ga03, gx17v1: the cluster's nodes
+CPU_CHARS, CPU_MAX = "A-Za-z0-9 ().@+_-", 48     # the longest Intel string of those nodes is 44 characters
+FS_WORDS = ("nfs", "tmpfs", "xfs", "ext4", "lustre", "gpfs", "beegfs", "other")   # the closed list: all that is printed of a mount table
+FS_KINDS = {"nfs": "nfs", "nfs4": "nfs", "tmpfs": "tmpfs", "xfs": "xfs", "ext4": "ext4", "lustre": "lustre", "gpfs": "gpfs", "beegfs": "beegfs"}
+CODE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,59}")   # an arm's error as the wrapper's allowlist takes it: a class name or a fixed code
 JOB_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")      # the job id goes into a directory name: only a plain one is used
 ROWS_REFUSAL = "must be test rows such as 0-4 or 1,3,5: whole numbers from 0 to {}, none twice, at most {} of them".format(MAX_ROW, MAX_ROWS)
 
@@ -146,9 +163,9 @@ def parse_rows(text: str) -> List[int]:
 
 def build_parser() -> argparse.ArgumentParser:
     p = _Parser(prog="chat_decode_timing.py", allow_abbrev=False, add_help=False,
-                description="Decode the same test rows seven ways (A to F, each adding one part of the live path to the one before) and print "
-                            "numbers only: RESULT lines for the environment, each arm and the summary. Exit 0 when every arm ran and every "
-                            "report was the same, 1 when not, 2 for an argument it refuses.")
+                description="Decode the same test rows seven ways (A to F, each adding one part of the live path to the one before), then A "
+                            "again (A-end), and print numbers only: RESULT lines for the environment, each arm and the summary. Exit 0 when "
+                            "every arm ran and every report was the same, 1 when not, 2 for an argument it refuses.")
     p.add_argument("--home", metavar="DIR", help="CHAT_HOME: the stores of E and F are made under its timing/<job> (required)")
     p.add_argument("--gallery", metavar="DIR", help="a gallery build directory: the test rows come from it, as the picker's do (required)")
     p.add_argument("--job", type=job_id, default="local", metavar="ID", help="names <home>/timing/<job>, which must not exist (default local)")
@@ -270,21 +287,51 @@ def same_reports(results: Dict[str, ArmResult]) -> Dict[str, bool]:
     ok = bool(reference) and None not in reference
     return {arm: bool(ok and results[arm].error is None and len(results[arm].reports) == len(reference)
                       and all(mine is not None and mine == theirs for mine, theirs in zip(results[arm].reports, reference)))
-            for arm in ARMS if arm in results}
+            for arm in ALL_ARMS if arm in results}
+
+
+def _load(values: Optional[Sequence[float]]) -> Optional[List[float]]:
+    return None if values is None else [round(v, 2) for v in values]
+
+
+def _fs_word(word: Optional[str]) -> Optional[str]:
+    """A filesystem word as it is printed: one of FS_WORDS, or None. Whatever else it was given, it is `other`: no text of a mount table or a
+    path can be in the environment line."""
+    return None if word is None else word if word in FS_WORDS else "other"
 
 
 def env_payload(node: str, cpu: Optional[str], affinity: Optional[int], cores: Optional[int], load: Optional[Sequence[float]], threads_main: int,
-                threads_worker: int, engine: str, rows: Sequence[int]) -> Dict[str, Any]:
+                threads_worker: int, engine: str, rows: Sequence[int], fs_local: Optional[str] = None,
+                fs_home: Optional[str] = None) -> Dict[str, Any]:
     return {"env": {"node": plain(node, NODE_MAX), "cpu": None if cpu is None else plain(cpu, CPU_MAX, CPU_CHARS), "affinity": affinity,
-                    "cores": cores, "load": None if load is None else [round(v, 2) for v in load], "threads_main": threads_main,
-                    "threads_worker": threads_worker, "engine": engine, "rows": list(rows)}}
+                    "cores": cores, "load": _load(load), "fs_local": _fs_word(fs_local), "fs_home": _fs_word(fs_home),
+                    "threads_main": threads_main, "threads_worker": threads_worker, "engine": engine, "rows": list(rows)}}
 
 
-def summary_payload(results: Dict[str, ArmResult], same_all: bool) -> Dict[str, Any]:
+def a_end_ratio(results: Dict[str, ArmResult]) -> Optional[float]:
+    """A-end's mean against the first A's, to two places: how far the node drifted while the ladder ran. None where either has no mean (it
+    failed, or never ran)."""
+    first, last = results.get("A"), results.get(A_END)
+    if first is None or last is None or first.error is not None or last.error is not None:
+        return None
+    return _ratio(raw_mean(last.ms), raw_mean(first.ms))
+
+
+def summary_payload(results: Dict[str, ArmResult], same_all: bool, load_before: Optional[Sequence[float]] = None,
+                    load_after: Optional[Sequence[float]] = None) -> Dict[str, Any]:
+    """The last line: the arm of A to F that is first over 1.5 times A, A-end's ratio to A, the sanity check, A's token counts, the arms that
+    failed, and the node's load average before the engines were loaded and after the last arm."""
     base = results.get("A")
-    return {"summary": {"first_over_1_5x": first_over(results), "same_report_all_arms": same_all,
+    return {"summary": {"first_over_1_5x": first_over(results), "a_end_ratio": a_end_ratio(results), "same_report_all_arms": same_all,
                         "tokens": [] if base is None else list(base.tokens),
-                        "arms_failed": [arm for arm in ARMS if arm in results and results[arm].error is not None]}}
+                        "arms_failed": [arm for arm in ALL_ARMS if arm in results and results[arm].error is not None],
+                        "load_before": _load(load_before), "load_after": _load(load_after)}}
+
+
+def fixed_code(text: str, fallback: str) -> str:
+    """`text`, when it is a word of letters, digits and underscores (a class name, or a code such as the drill's session_create_http_403, which
+    holds a status or a class and never a part of an answer), else `fallback`: what an arm's error line may carry is a word and no free text."""
+    return text if CODE.fullmatch(text) else fallback
 
 
 def result_line(payload: Dict[str, Any]) -> str:
@@ -327,6 +374,28 @@ def load_average() -> Optional[List[float]]:
         return [round(v, 2) for v in getter()]
     except OSError:
         return None
+
+
+def fs_word(path: Any, table: str = "/proc/self/mountinfo") -> Optional[str]:
+    """What the directory `path` sits on, as one word of FS_WORDS, from the kernel's mount table: the type of the longest mount point that holds
+    it (a mount over another of the same place hides it: the later line), nfs4 as nfs, a type that is not in the list as `other`. E against
+    E-local is the NFS only if E-local's store is on a local disk, and the line says whether it is. None where it cannot be told (no table: a
+    Mac). The table names the home's server and its export, so nothing of it but the word is kept (R7)."""
+    try:
+        where = os.path.realpath(str(path))
+        text = Path(table).read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+    best, kind = -1, None
+    for line in text.splitlines():
+        head, _, tail = line.partition(" - ")
+        fields, rest = head.split(" "), tail.split(" ")
+        if len(fields) < 5 or not rest[0]:
+            continue
+        mount = os.path.normpath(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[4]))   # a space is written \040
+        if (where == mount or where.startswith(mount.rstrip("/") + "/")) and len(mount) >= best:
+            best, kind = len(mount), rest[0]
+    return None if kind is None else FS_KINDS.get(kind, "other")
 
 
 def node_name() -> str:
@@ -390,13 +459,19 @@ def load_world(args: argparse.Namespace, paths: Dict[str, Optional[Path]]) -> Wo
                  threads=args.threads)
 
 
+def local_base(world: World) -> Path:
+    """The directory E-local makes its store in: the one it was given, else the system's temporary directory."""
+    return world.local if world.local is not None else Path(tempfile.gettempdir())
+
+
 def environment(world: World) -> Dict[str, Any]:
-    """The environment line: the node, the CPU, the size of the CPU affinity and how many physical cores it covers, the node's load average,
-    and torch's thread count in the main thread and in a worker thread of the kind the pipeline decodes in."""
+    """The environment line: the node, the CPU, the size of the CPU affinity and how many physical cores it covers, the node's load average
+    (read once the engines are loaded), the filesystem of E-local's directory and of the one E's and F's stores are made under (one word of
+    FS_WORDS each), and torch's thread count in the main thread and in a worker thread of the kind the pipeline decodes in."""
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="turn") as pool:
         threads_worker = pool.submit(torch.get_num_threads).result()
     return env_payload(node_name(), cpu_model(), affinity_size(), core_count(), load_average(), torch.get_num_threads(), threads_worker, world.kind,
-                       world.rows)
+                       world.rows, fs_word(local_base(world)), fs_word(world.timing))
 
 
 # ---- arms A to D: the decode alone, and the decode through the engine, in the main thread and in a worker -----------------------
@@ -554,17 +629,26 @@ def turn_job(world: World, store: Store, session_id: str, row: int) -> TurnJob:
     return TurnJob(session_id, user_message_id, message_id, "", None, None, opts, mode="private", previous_sha256=sha256)
 
 
-async def drain_turn(worker: Worker, job: TurnJob) -> Tuple[List[str], float]:
+async def drain_turn(worker: Worker, job: TurnJob, deadline_s: Optional[float] = None) -> Tuple[List[str], float]:
     """Queue a turn on the worker and drain its frames the way the server's SSE bridge does, with its own functions: the worker's thread hands
     each event to this loop as a frame (sse, _push: loop.call_soon_threadsafe) and the loop reads them off a queue (_frames).
-    -> (the frames, the ms from the submission to the end of the stream)."""
+    -> (the frames, the ms from the submission to the end of the stream). A turn that has not ended after `deadline_s` (TURN_DEADLINE_S) is
+    TurnFailed("turn_deadline"): the arm ends there, and the shutdown of its worker stops the turn at its next step."""
+    limit = TURN_DEADLINE_S if deadline_s is None else deadline_s
     loop = asyncio.get_running_loop()
     queue = asyncio.Queue()
     if not worker.reserve():
         raise TurnFailed("queue_full")
     started = time.perf_counter()
     worker.submit(job, lambda event, data: _push(loop, queue, sse(event, data)), lambda: _push(loop, queue, None))
-    frames = [frame async for frame in _frames(queue)]
+
+    async def drained() -> List[str]:
+        return [frame async for frame in _frames(queue)]
+
+    try:
+        frames = await asyncio.wait_for(drained(), timeout=limit)
+    except asyncio.TimeoutError:
+        raise TurnFailed("turn_deadline") from None
     return frames, (time.perf_counter() - started) * 1000.0
 
 
@@ -602,7 +686,7 @@ def arm_e(world: World, result: ArmResult) -> None:
 def arm_e_local(world: World, result: ArmResult) -> None:
     """E-local: E with the store on node-local disk. The directory is made here (mkdtemp: mode 0700, and the reports of five studies go into
     it) and removed when the arm ends, whatever the arm came to: it is this job's own."""
-    base = world.local if world.local is not None else Path(tempfile.gettempdir())
+    base = local_base(world)
     home = Path(tempfile.mkdtemp(prefix="chat_decode_timing_", dir=str(base)))
     try:
         _pipeline_arm(world, result, home)
@@ -631,10 +715,15 @@ def check_port(port: int) -> int:
     return port
 
 
-def http_turn(client: httpx.Client, session_id: str, options: Dict[str, Any]) -> Tuple[probe.Facts, Optional[str], float]:
+def http_turn(client: httpx.Client, session_id: str, options: Dict[str, Any], deadline_s: Optional[float] = None,
+              clock: Callable[[], float] = time.perf_counter) -> Tuple[probe.Facts, Optional[str], float]:
     """One turn over HTTP, sent as the page sends it (a form of the note and the options; the test row is one of the options, as the picker
     sets it) and read as it arrives by the probe's read_into. -> (the facts, the report, the ms from the request to the end of the stream).
-    The report is kept in memory for the sanity check only. A failure is the facts' `error`, the class of the exception."""
+    The report is kept in memory for the sanity check only. A failure is the facts' `error`, the class of the exception. A stream that is still
+    going `deadline_s` (TURN_DEADLINE_S) after the request is let go, by the probe's own `watched`, after the chunk in hand: the server pings
+    every 15 s, so that is within 15 s of the deadline, and the facts' error is `turn_deadline`. A stream that says nothing at all ends with
+    the client's own read timeout, 120 s, as a ReadTimeout."""
+    limit = TURN_DEADLINE_S if deadline_s is None else deadline_s
     facts, handles = probe.Facts(), probe.Handles()
     kept: List[str] = []
 
@@ -643,18 +732,20 @@ def http_turn(client: httpx.Client, session_id: str, options: Dict[str, Any]) ->
             kept.append(chunk)
             yield chunk
 
-    started = time.perf_counter()
+    started = clock()
     try:
         with client.stream("POST", "/v1/sessions/{}/messages".format(session_id),
                            data={"text": "", "options": json.dumps(options)}) as response:
             facts.status = response.status_code
             if response.status_code == 200:
-                probe.read_into(facts, handles, teed(response.iter_text()), started)
+                probe.read_into(facts, handles, teed(probe.watched(response.iter_text(), started + limit, clock)), started, clock)
             else:
                 response.read()
+    except probe.Timeout:
+        facts.error = "turn_deadline"
     except Exception as exc:   # the class, never the text: an httpx error can name a url
         facts.error = type(exc).__name__
-    total_ms = (time.perf_counter() - started) * 1000.0
+    total_ms = (clock() - started) * 1000.0
     return facts, final_report(kept), total_ms
 
 
@@ -695,17 +786,20 @@ def arm_f(world: World, result: ArmResult) -> None:
 
 
 ARM_FUNCTIONS: Dict[str, Callable[[World, ArmResult], None]] = {"A": arm_a, "B": arm_b, "C": arm_c, "D": arm_d, "E": arm_e,
-                                                                "E-local": arm_e_local, "F": arm_f}
+                                                                "E-local": arm_e_local, "F": arm_f, A_END: arm_a}   # A-end is A again
 
 
 def run_arm(name: str, world: World) -> ArmResult:
-    """One arm, over the rows. An exception ends it and is named by its class (or, for a turn that did not end well, by its fixed code): its
-    text could hold a report or a path. What the arm had finished before it is kept."""
+    """One arm, over the rows. An exception ends it and is named by its class (or, for a turn that did not end well, by its fixed code, and for
+    a session the server would not make by the load drill's own code): its text could hold a report or a path. What the arm had finished
+    before it is kept."""
     result = ArmResult(name)
     try:
         ARM_FUNCTIONS[name](world, result)
     except TurnFailed as exc:
         result.error = exc.code
+    except drill.DrillError as exc:   # its text is a code of its own (session_create_http_403): kept when it is a word, never free text
+        result.error = fixed_code(str(exc), "DrillError")
     except Exception as exc:
         result.error = type(exc).__name__
     return result
@@ -742,10 +836,12 @@ def main(argv: Optional[Sequence[str]] = None, stdout: Optional[TextIO] = None, 
 
 
 def run_job(args: argparse.Namespace, paths: Dict[str, Optional[Path]], stdout: TextIO) -> int:
-    """The job: set up, the environment, the warm-up, the seven arms (each printed as it finishes), the summary. -> the exit status."""
+    """The job: the load average, set up (the engines are loaded), the environment, the warm-up, the seven arms and A-end (each printed as it
+    finishes), the load average again, the summary. -> the exit status."""
     def say(payload: Dict[str, Any]) -> None:
         drill._write(stdout, result_line(payload))
 
+    load_before = load_average()   # before the engines load: what else was on the node when this job began
     try:
         world = load_world(args, paths)
     except SetupFailed as exc:
@@ -763,13 +859,14 @@ def run_job(args: argparse.Namespace, paths: Dict[str, Optional[Path]], stdout: 
         say({"fatal": type(exc).__name__, "step": "warmup"})
         return 1
     results: Dict[str, ArmResult] = {}
-    for arm in ARMS:
+    for arm in ALL_ARMS:   # the seven, then A-end: its ratio is to the first A's mean
         results[arm] = run_arm(arm, world)
         base = results["A"]
         say(arm_payload(results[arm], None if base.error is not None else raw_mean(base.ms), same_reports(results).get(arm, False)))
+    load_after = load_average()   # after the last decode: with the first reading and the one in the environment line, what the node did meanwhile
     same = same_reports(results)
     same_all = bool(same) and all(same.values())
-    say(summary_payload(results, same_all))
+    say(summary_payload(results, same_all, load_before, load_after))
     return 0 if same_all and all(r.error is None for r in results.values()) else 1
 
 

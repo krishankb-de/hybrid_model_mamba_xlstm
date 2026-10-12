@@ -16,24 +16,33 @@
 #            the way the SSE bridge drains them
 #   E-local  E with the store on node-local disk (TMPDIR, else /tmp): E against E-local is the NFS
 #   F        E through HTTP: the real create_app, uvicorn on a free loopback port inside this job, httpx and the probe's reader
+#   A-end    A again after F, on the same rows and options with no warm-up before it. The seven run in a fixed order, so a neighbour that came
+#            or went on the node while they ran would look like a difference between arms: A-end against A shows it. It is not one of the
+#            seven the threshold looks at; its ratio to A is on its line and, as a_end_ratio, in the summary.
 # Reading it: A to B is the decoder building its callback's argument at every step; B to C the engine's own work (the text decode of the best
 # beam at every step, the repair of the finished report); C to D the worker thread; D to E the pipeline's work at every step (the session check,
-# the redaction, the SQLite write, the hand-over to the loop); E to E-local the NFS; E to F the HTTP and the server's own loop. F's client is a
-# thread of this job, where the live one is on the laptop, so F reads a little high by the client's own wake-ups.
+# the redaction, the SQLite write, the hand-over to the loop); E to E-local the NFS (when the environment line says the local directory is on a
+# local disk and the home is on nfs); E to F the HTTP and the server's own loop. F's client is a thread of this job, where the live one is on the
+# laptop, so F reads a little high by the client's own wake-ups. The total_ms that E, E-local and F report leaves out the label stage and the
+# CheXbert half of the score stage, because the job runs no labeller: it is not the live turn's total, and only its generate stage (ms) is
+# comparable with the live turn's. A turn that is still going after 300 s fails its arm with the code turn_deadline and the job goes on to the next
+# arm, so that one hung turn costs five minutes and not the hour.
 # It builds the engine as the server builds it (the published model, CPU, the job's CPUs as threads), under the published protocol and with the
 # cached decode, and runs one warm-up turn that no arm counts. Every arm's report must be the same text: that is compared in memory, and only
 # `same_report_all_arms` is printed.
 #
-# Output. The job log carries the sync line, a banner, and nine RESULT lines of the script (each under the 300 characters `summary` keeps): the
-# environment (node, CPU model, the size of the CPU affinity and how many physical cores it covers, the node's load average, torch's thread count
-# in the main thread and in a worker), one line per arm (the rows' ms, their mean, the ratio to A's mean, and for E, E-local and F the whole
-# turn's ms and its mean) and the summary (the arm whose mean first exceeds 1.5 times A's, or none, and same_report_all_arms). The cores and the
-# load are there because 8 CPUs can be 8 cores or 4 cores of 2 hardware threads, and because a node's other jobs share its caches and its memory
-# bandwidth: neither shows in a thread count, and either can make the same decode slower on one day than on another. A normal log:
+# Output. The job log carries the sync line, two banners, and ten RESULT lines of the script (each under the 300 characters `summary` keeps): the
+# environment (node, CPU model, the size of the CPU affinity and how many physical cores it covers, the node's load average once the engines
+# are loaded, the filesystem of the node-local store directory and of the NFS one as a word each (nfs, tmpfs, xfs, ext4 and so on, never a path),
+# torch's thread count in the main thread and in a worker), one line per arm as it finishes (the rows' ms, their mean, the ratio to A's mean,
+# and for E, E-local and F the whole turn's ms and its mean), A-end, and the summary (the arm of A to F whose mean first exceeds 1.5 times A's,
+# or none; a_end_ratio; same_report_all_arms; and the node's load average before the engines were loaded and after the last arm). The cores and
+# the loads are there because 8 CPUs can be 8 cores or 4 cores of 2 hardware threads, and because a node's other jobs share its caches and its
+# memory bandwidth: neither shows in a thread count, and either can make the same decode slower on one day than on another. A normal log:
 #   === sync <40-hex commit> <clean|dirty> ===
 #   === chat decode timing: node=<node> job=<id> threads=<n> gallery=<build id> ===
-#   === decode timing: the script's own output goes to files under CHAT_HOME and is never printed ===
-#   RESULT {"env":{...}}  RESULT {"arm":"A",...}  ...  RESULT {"arm":"F",...}  RESULT {"summary":{...}}
+#   === decode timing: the script's raw output stays in files under CHAT_HOME; its RESULT lines of known shapes are shown here as it prints them ===
+#   RESULT {"env":{...}}  RESULT {"arm":"A",...}  ...  RESULT {"arm":"F",...}  RESULT {"arm":"A-end",...}  RESULT {"summary":{...}}
 #   === timing lines withheld: 0 ===
 #   === END chat decode timing ===
 # The job exits 0 when every arm ran and every report was the same, and with the script's own status otherwise (1: an arm failed, a report
@@ -42,7 +51,9 @@
 # R7 (DUA). The job decodes MIMIC test images, so what it prints is numbers, booleans, fixed words, test-row indices and the environment line,
 # and nothing else: the script's stdout and stderr go to files under ${CHAT_HOME}/logs (decode_timing_<jobid>.out and .err), and of stdout only a
 # line of one of the shapes of TIMING_SHAPES below (an allowlist: a report, an id or a path on a RESULT line is no known shape) reaches this log;
-# `=== timing lines withheld: N ===` counts the others. Nothing names a path, a port or an exception text. Read it with the `summary` line above.
+# `=== timing lines withheld: N ===` counts the others. Nothing names a path, a port or an exception text. The two filesystem words are of a
+# closed list, and the mount table they come from, which names the home's server and its export, is never printed. Read the log with the
+# `summary` line above.
 #
 # Files (R8: additive only). The stores of E and F are made under ${CHAT_HOME}/timing/<jobid>/ (e and f) and left in place: they hold the six
 # turns each of this job and are DUA-covered like the rest of CHAT_HOME. E-local's store is a directory of TMPDIR that the script makes and
@@ -97,14 +108,14 @@ JOB="${SLURM_JOB_ID:-local}"
 
 # The lines of the script's stdout that may reach this log, as one anchored pattern per line (grep -E reads a newline as "or"). The keys are
 # fixed and so are the arm and step words; a value is a number with a decimal point, a count, a boolean, a word of letters, digits and
-# underscores, or, of the environment line, a node name and a CPU model of plain characters. A report, an id or a path on a RESULT line
-# matches none of them. tests/test_chat_decode_timing.py runs these very patterns, through grep, over everything the script prints and over
-# lines that carry text. No line may be empty: an empty pattern matches every line.
-TIMING_SHAPES='^RESULT \{"env":\{"node":"[A-Za-z0-9._-]{1,32}","cpu":(null|"[A-Za-z0-9 ().@+_-]{1,60}"),"affinity":(null|[0-9]{1,4}),"cores":(null|[0-9]{1,4}),"load":(null|\[[0-9]{1,4}\.[0-9]{1,2},[0-9]{1,4}\.[0-9]{1,2},[0-9]{1,4}\.[0-9]{1,2}\]),"threads_main":[0-9]{1,4},"threads_worker":[0-9]{1,4},"engine":"(real|tiny)","rows":\[[0-9]{1,4}(,[0-9]{1,4}){0,7}\]\}\}$
-^RESULT \{"arm":"(A|B|C|D|E|E-local|F)","ms":\[[0-9]{1,7}\.[0-9]{1,2}(,[0-9]{1,7}\.[0-9]{1,2}){0,7}\],"mean":[0-9]{1,7}\.[0-9]{1,2},"ratio":([0-9]{1,7}\.[0-9]{1,2}|null),"same_report":(true|false)\}$
-^RESULT \{"arm":"(E|E-local|F)","ms":\[[0-9]{1,7}\.[0-9]{1,2}(,[0-9]{1,7}\.[0-9]{1,2}){0,7}\],"mean":[0-9]{1,7}\.[0-9]{1,2},"ratio":([0-9]{1,7}\.[0-9]{1,2}|null),"total_ms":\[[0-9]{1,7}\.[0-9]{1,2}(,[0-9]{1,7}\.[0-9]{1,2}){0,7}\],"mean_total_ms":[0-9]{1,7}\.[0-9]{1,2},"same_report":(true|false)\}$
-^RESULT \{"arm":"(A|B|C|D|E|E-local|F)","error":"[A-Za-z_][A-Za-z0-9_]{0,59}","rows_done":[0-9]{1,2},"ms":\[([0-9]{1,7}\.[0-9]{1,2}(,[0-9]{1,7}\.[0-9]{1,2}){0,7})?\]\}$
-^RESULT \{"summary":\{"first_over_1_5x":"(A|B|C|D|E|E-local|F|none|unknown)","same_report_all_arms":(true|false),"tokens":\[([0-9]{1,5}(,[0-9]{1,5}){0,7})?\],"arms_failed":\[("(A|B|C|D|E|E-local|F)"(,"(A|B|C|D|E|E-local|F)"){0,6})?\]\}\}$
+# underscores, or, of the environment line, a node name and a CPU model of plain characters and two filesystem words of a closed list. A
+# report, an id or a path on a RESULT line matches none of them. tests/test_chat_decode_timing.py runs these very patterns, through grep, over
+# everything the script prints and over lines that carry text. No line may be empty: an empty pattern matches every line.
+TIMING_SHAPES='^RESULT \{"env":\{"node":"[A-Za-z0-9._-]{1,16}","cpu":(null|"[A-Za-z0-9 ().@+_-]{1,48}"),"affinity":(null|[0-9]{1,4}),"cores":(null|[0-9]{1,4}),"load":(null|\[[0-9]{1,4}\.[0-9]{1,2},[0-9]{1,4}\.[0-9]{1,2},[0-9]{1,4}\.[0-9]{1,2}\]),"fs_local":(null|"(nfs|tmpfs|xfs|ext4|lustre|gpfs|beegfs|other)"),"fs_home":(null|"(nfs|tmpfs|xfs|ext4|lustre|gpfs|beegfs|other)"),"threads_main":[0-9]{1,4},"threads_worker":[0-9]{1,4},"engine":"(real|tiny)","rows":\[[0-9]{1,4}(,[0-9]{1,4}){0,5}\]\}\}$
+^RESULT \{"arm":"(A|B|C|D|E|E-local|F|A-end)","ms":\[[0-9]{1,7}\.[0-9]{1,2}(,[0-9]{1,7}\.[0-9]{1,2}){0,5}\],"mean":[0-9]{1,7}\.[0-9]{1,2},"ratio":([0-9]{1,7}\.[0-9]{1,2}|null),"same_report":(true|false)\}$
+^RESULT \{"arm":"(E|E-local|F)","ms":\[[0-9]{1,7}\.[0-9]{1,2}(,[0-9]{1,7}\.[0-9]{1,2}){0,5}\],"mean":[0-9]{1,7}\.[0-9]{1,2},"ratio":([0-9]{1,7}\.[0-9]{1,2}|null),"total_ms":\[[0-9]{1,7}\.[0-9]{1,2}(,[0-9]{1,7}\.[0-9]{1,2}){0,5}\],"mean_total_ms":[0-9]{1,7}\.[0-9]{1,2},"same_report":(true|false)\}$
+^RESULT \{"arm":"(A|B|C|D|E|E-local|F|A-end)","error":"[A-Za-z_][A-Za-z0-9_]{0,59}","rows_done":[0-9]{1,2},"ms":\[([0-9]{1,7}\.[0-9]{1,2}(,[0-9]{1,7}\.[0-9]{1,2}){0,5})?\]\}$
+^RESULT \{"summary":\{"first_over_1_5x":"(A|B|C|D|E|E-local|F|none|unknown)","a_end_ratio":(null|[0-9]{1,7}\.[0-9]{1,2}),"same_report_all_arms":(true|false),"tokens":\[([0-9]{1,5}(,[0-9]{1,5}){0,5})?\],"arms_failed":\[("(A|B|C|D|E|E-local|F|A-end)"(,"(A|B|C|D|E|E-local|F|A-end)"){0,7})?\],"load_before":(null|\[[0-9]{1,4}\.[0-9]{1,2},[0-9]{1,4}\.[0-9]{1,2},[0-9]{1,4}\.[0-9]{1,2}\]),"load_after":(null|\[[0-9]{1,4}\.[0-9]{1,2},[0-9]{1,4}\.[0-9]{1,2},[0-9]{1,4}\.[0-9]{1,2}\])\}\}$
 ^RESULT \{"fatal":"[A-Za-z_][A-Za-z0-9_]{0,59}","step":"(engine|gallery|rows|timing|warmup|run)"\}$'
 
 # --- the levers and the tree, before anything is loaded or made. A refusal says what is wrong and never the value it was given. ---------
@@ -136,7 +147,7 @@ mkdir -p "${CHAT_HOME}/logs"
 OUT="${CHAT_HOME}/logs/decode_timing_${JOB}.out"
 ERR="${CHAT_HOME}/logs/decode_timing_${JOB}.err"
 
-echo "=== decode timing: the script's own output goes to files under CHAT_HOME and is never printed ==="
+echo "=== decode timing: the script's raw output stays in files under CHAT_HOME; its RESULT lines of known shapes are shown here as it prints them ==="
 # The script prints each arm's line as the arm finishes, and its stdout goes through tee into its file and through grep into this log, line by
 # line: what an arm measured is here at once, and stays here when the job is killed at its time limit. Only a line of a known shape passes grep;
 # the others are in the file and are counted below, not shown. The script's stderr goes to its own file. The status of each stage of the
@@ -158,6 +169,6 @@ if [ "${rc}" -ne 0 ]; then
   echo "ERROR the timing script exited with code ${rc} (see the logs under CHAT_HOME)"
   exit "${rc}"
 fi
-# Exit 0 without all nine lines is a failure like any other: something was not measured.
-[ "${RESULTS}" -eq 9 ] || fail "the timing script printed ${RESULTS} result lines, not 9"
+# Exit 0 without all ten lines (the environment, the seven arms, A-end and the summary) is a failure like any other: something was not measured.
+[ "${RESULTS}" -eq 10 ] || fail "the timing script printed ${RESULTS} result lines, not 10"
 echo "=== END chat decode timing ==="
