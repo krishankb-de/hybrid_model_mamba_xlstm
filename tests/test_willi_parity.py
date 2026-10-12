@@ -9125,3 +9125,310 @@ def test_the_realturn_probe_keeps_nothing_of_a_frame_but_numbers_booleans_and_fi
         for use in (n for stmt in handler.body for n in ast.walk(stmt) if isinstance(n, ast.Name) and n.id == handler.name):
             parent = parents[use]   # `type(exc)`: the class, never the text
             assert isinstance(parent, ast.Call) and ast.unparse(parent.func) == "type", ast.unparse(handler) + " uses " + handler.name
+
+
+# ── CHAT_UI_PLAN.md P8-F (part 1): the decode timing job ──────────────────────
+# Static pins on scripts/chat_decode_timing.py and its wrapper scripts/chat_decode_timing_h100.sh. Their behaviour (the seven arms, the lines, the
+# exit statuses, the refusals, the R7 sentinel, the wrapper rehearsed in a temp tree, the allowlist run through grep) is exercised for real in
+# tests/test_chat_decode_timing.py. These pins hold what a later edit could break without a test noticing: what the wrapper asks SLURM for, what
+# can reach the two output streams of a script that decodes MIMIC test images (R7), what is reused from the app and from the probe and not copied.
+
+_TIMING = REPO_ROOT / "scripts" / "chat_decode_timing.py"
+_TIMING_SH = REPO_ROOT / "scripts" / "chat_decode_timing_h100.sh"
+
+
+def _timing_tree():
+    """-> (the script's syntax tree, a map from each node to its parent)."""
+    tree = ast.parse(_TIMING.read_text(encoding="utf-8"))
+    return tree, {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+
+def _timing_calls(tree, dotted):
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == dotted]
+
+
+def _timing_inner(node, parents):
+    """The name of the innermost function a node is in (a helper defined inside a function counts as itself), or None at module level."""
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return node.name
+    return None
+
+
+def _timing_code():
+    return _gallery_wrapper_code(_TIMING_SH.read_text())
+
+
+def test_the_decode_timing_wrapper_asks_slurm_for_the_serve_wrappers_resources_apart_from_its_time_its_name_and_the_requeue():
+    """The ruling: the serve wrapper's partition, account, qos, exclude list, 8 CPUs and 32 GB, with one hour and the job name chat_decode_timing.
+    The serving job is long and preemptible, so it requeues and appends to its log; this one is a measurement of an hour at most, and a requeued run
+    would meet the stores of its first, which a timing directory never allows."""
+    serve, serve_flags = _sbatch_options(_serve_text("serve_chat_h100.sh"))
+    mine, mine_flags = _sbatch_options(_TIMING_SH.read_text())
+    apart = ("--time", "--job-name", "--open-mode")
+    assert {k: v for k, v in mine.items() if k not in apart} == {k: v for k, v in serve.items() if k not in apart}, mine
+    assert mine["--time"] == "01:00:00" and mine["--job-name"] == "chat_decode_timing" and "--open-mode" not in mine
+    assert serve_flags == ["--requeue"] and mine_flags == []
+    assert mine["--partition"] == "pot-hpi-aisc-batch" and mine["--account"] == "aisc" and mine["--qos"] == "aisc"
+    assert mine["--cpus-per-task"] == "8" and mine["--mem"] == "32G" and mine["--exclude"] == "ga03,gx17v1,gx13v1"
+    assert mine["--output"] == mine["--error"] == "logs/%x_%j.log"
+    assert "--gres" not in _TIMING_SH.read_text() and "--gpus" not in mine, "a CPU job"
+
+
+def test_the_decode_timing_wrapper_header_documents_the_submit_the_summary_and_the_node_lever_as_it_is():
+    header = " ".join(" ".join(l.lstrip("#") for l in _TIMING_SH.read_text().splitlines() if l.startswith("#") and not l.startswith("#SBATCH")).split())
+    assert "bash scripts/chat_remote.sh sync && bash scripts/chat_remote.sh submit scripts/chat_decode_timing_h100.sh [NODE=gx14]" in header
+    assert "bash scripts/chat_remote.sh summary logs/chat_decode_timing_<jobid>.log" in header
+    for phrase in ("jobs 2590184 and 2638789", "sbatch does not read NODE", "the lever cannot place the job by itself",
+                   "refuses before it loads anything", "NODE=gx14 -- --nodelist=gx14", "never printed", "TIMING_SHAPES", "left in place",
+                   "R7 (DUA)", "R8: additive only", "no arm counts", "same_report_all_arms", "It has no --requeue",
+                   "Reading it:", "how many physical cores it covers", "the node's load average", "F reads a little high"):
+        assert phrase in header, phrase
+    for arm in ("A ", "B ", "C ", "D ", "E ", "E-local ", "F "):
+        assert " " + arm in header, arm
+
+
+def test_the_decode_timing_wrapper_prepares_like_the_other_chat_wrappers_and_prints_the_sync_line_first():
+    text, code = _TIMING_SH.read_text(), "\n".join(_timing_code())
+    for needle in ('cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"', "set -euo pipefail",
+                   'SCRATCH_ROOT="${SCRATCH_ROOT:-/sc/scratch/$USER/hybrid_xmamba_h100}"', 'VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"',
+                   'CHAT_HOME="${CHAT_HOME:-$HOME/chat_sessions}"', 'GALLERY="${GALLERY:-${CHAT_HOME}/gallery/g13d_m3_v1}"',
+                   'export HF_HOME="${SCRATCH_ROOT}/.hf" HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1',
+                   'export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}" MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"',
+                   "export PYTHONPATH=.chat_deps", 'source "${VENV_ACTIVATE}"', "mkdir -p logs"):
+        assert needle in code, needle
+    assert code.index("export PYTHONPATH=.chat_deps") < code.index('source "${VENV_ACTIVATE}"') < code.index("python scripts/chat_decode_timing.py")
+    train = _eos_wrapper_text()
+    start = train.index('SYNC="unknown"')
+    snippet = train[start:train.index('echo "=== sync ${SYNC} ==="', start) + len('echo "=== sync ${SYNC} ==="')]
+    assert snippet in text, "the P9-G3 provenance snippet, copied exactly"
+    sync = code.index('echo "=== sync ${SYNC} ==="')
+    assert code.index('echo "') == sync, "something is printed before the sync line"
+    assert code.index("python") > sync and code.index("source ") > sync and ".sync_stamp" in code[:sync]
+    assert code.index("umask 077") < code.index('mkdir -p "${CHAT_HOME}/logs"'), "what the job makes of its own is owner-only: the stores hold report text"
+
+
+def test_the_decode_timing_wrapper_validates_every_lever_before_anything_runs_and_no_refusal_echoes_a_value():
+    """The levers are NODE, GALLERY, CHAT_HOME, the node-local directory and the CPU count. A refusal says what is wrong and never the value it
+    was given: the environment of the submitting shell can hold anything. The banner shows validated values only, and the node and the build
+    name only (never a path)."""
+    code_lines = _timing_code()
+    code = "\n".join(code_lines)
+    guards = ('[ -z "${NODE}" ] || [[ "${NODE}" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || fail "NODE must be one node name: lower-case letters, digits and dashes"',
+              '[[ "${THREADS}" =~ ^[1-9][0-9]{0,2}$ ]] || fail "SLURM_CPUS_PER_TASK must be a whole number from 1 to 999 without a leading zero"',
+              '[[ "$(basename "${GALLERY}")" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "GALLERY must end in one plain build name: letters, digits, dot, dash and underscore"',
+              '[ -d "${CHAT_HOME}" ] || fail "CHAT_HOME does not exist: run chat_cluster_setup_h100.sh first"',
+              '[ -d "${LOCAL_DIR}" ] || fail "the node-local directory (TMPDIR, else /tmp) does not exist"',
+              '[ -f "${GALLERY}/manifest.json" ] || fail "the gallery has no manifest.json: build it first (P5-B)"',
+              '|| fail "the gallery\'s manifest.json is unreadable or its R@k gate is not equal: it cannot be used"',
+              '[ -f "${VENV_ACTIVATE}" ] || fail "the venv\'s activate script is missing: run chat_cluster_setup_h100.sh first"',
+              '[ -f .chat_deps/.setup_ok ] || fail "the web overlay is not set up: run chat_cluster_setup_h100.sh first"',
+              '[ -f scripts/chat_decode_timing.py ] || fail "chat_decode_timing.py is missing from this tree: run chat_remote.sh sync first"',
+              '[ -z "${NODE}" ] || [ "${NODE_NOW}" = "${NODE}" ] || fail "the job is not on the requested node: place it with -- --nodelist=<node> after the wrapper\'s name"')
+    banner = code.index('echo "=== chat decode timing: node=$(hostname) job=${JOB} threads=${THREADS} gallery=$(basename "${GALLERY}") ==="')
+    for guard in guards:
+        assert guard in code, guard
+        assert code.index(guard) < banner < code.index("python scripts/chat_decode_timing.py"), guard
+    failed = re.findall(r'\bfail "([^"]*)"', code)
+    after_the_run = [m for m in failed if "${RESULTS}" in m or "could not be kept" in m]
+    levers = [m for m in failed if m not in after_the_run]
+    assert len(failed) == 13 and len(levers) == 11 and len(after_the_run) == 2, failed
+    echoed = re.findall(r'echo "([^"]*)"', code)
+    assert not [m for m in levers if "${" in m or "$(" in m], "a refusal quotes no variable"
+    assert all(re.match(r"(=== |ERROR )", m) for m in echoed), echoed
+    paths = ("${CHAT_HOME}", "${GALLERY}", "${OUT}", "${ERR}", "${LOCAL_DIR}", "${SCRATCH_ROOT}", "${SLURM_SUBMIT_DIR}", "${NODE}", "${NODE_NOW}")
+    assert not [m for m in echoed + failed if any(p in m for p in paths)], "a printed message names a path or a lever's value"
+    assert 'echo "ERROR the timing script exited with code ${rc} (see the logs under CHAT_HOME)"' in code
+    assert 'fail "the timing script printed ${RESULTS} result lines, not 9"' in code, "the one number a message may carry besides the status is a count the wrapper made itself"
+
+
+def test_the_decode_timing_wrapper_keeps_the_scripts_raw_output_in_files_and_lets_only_known_shapes_through_the_allowlist():
+    code_lines = _timing_code()
+    code = "\n".join(code_lines)
+    assert 'OUT="${CHAT_HOME}/logs/decode_timing_${JOB}.out"' in code and 'ERR="${CHAT_HOME}/logs/decode_timing_${JOB}.err"' in code
+    runs = [l for l in code_lines if "python scripts/" in l]
+    assert len(runs) == 1 and runs[0].startswith("python scripts/chat_decode_timing.py ") and runs[0].endswith(
+        '2> "${ERR}" | tee "${OUT}" | grep --line-buffered -aE "${TIMING_SHAPES}"'), runs
+    for line in code_lines:
+        if "${OUT}" in line:
+            assert line.startswith(("OUT=", "python scripts/")) or re.match(r'(WITHHELD=|RESULTS=)', line), line
+        if "${ERR}" in line:
+            assert line.startswith(("ERR=", "python scripts/")), line
+    assert 'WITHHELD="$(grep -avcE "${TIMING_SHAPES}" "${OUT}" || true)"' in code and 'RESULTS="$(grep -acE "${TIMING_SHAPES}" "${OUT}" || true)"' in code
+    # The status of each stage of the pipeline is read straight after it, with set -e off for the pipeline alone, so that an arm's line is shown
+    # as the script prints it and the script's own exit status is the job's.
+    run = code.index(runs[0])
+    assert code.rindex("set +e", 0, run) < run < code.index('STATUSES=("${PIPESTATUS[@]}")') < code.index("set -e", run)
+    assert code.index('STATUSES=("${PIPESTATUS[@]}")') == code.index("\n", run) + 1, "nothing between the pipeline and the read of its statuses"
+    assert 'rc="${STATUSES[0]:-1}"' in code and '[ "${STATUSES[1]:-1}" -eq 0 ] || fail "the timing output could not be kept"' in code
+    assert "head -n" not in code, "a head would close the pipe on the script"
+    assert not re.search(r"\b(cat|tail|less|more|sed|awk|cut)\b[^\n]*\$\{(OUT|ERR)\}", code), "the raw files are never shown"
+    assert [l for l in code_lines if re.search(r"\btee\b", l)] == [runs[0]], "tee writes the one file, in the one pipeline, and shows nothing"
+    assert "set -x" not in code and "xtrace" not in code and not re.search(r"(^|[\s;&|(])(printenv|env|date|nvidia-smi)\s*$", code, re.M)
+    shapes = re.search(r"^TIMING_SHAPES='(.*?)'$", _TIMING_SH.read_text(), re.S | re.M)
+    assert shapes and all(line.startswith("^RESULT ") and line.endswith("$") for line in shapes.group(1).splitlines()), "anchored, one shape per line"
+    assert len(shapes.group(1).splitlines()) == 6 and "'" not in shapes.group(1)
+
+
+def test_the_decode_timing_wrapper_installs_deletes_and_replaces_nothing_and_starts_no_other_job():
+    code = "\n".join(_timing_code())
+    assert not re.search(r"\b(pip|uv|conda)\b", code), "an installer string"
+    assert not re.search(r"(^|[\s;&|(])(rm|mv|ln|cp|chmod|scancel|sbatch|srun|ssh|git|nohup)(\s|$)", code, re.M), "additive only (R8), and one job"
+    assert code.count("mkdir -p") == 2 and 'mkdir -p "${CHAT_HOME}/logs"' in code, "its own log directory and the repository's logs, nothing else"
+    assert 'trap' not in code and '&' not in re.sub(r"2>|&&|\|\|", "", code.replace('"${TIMING_SHAPES}"', "")), "no background process: the one command is waited for"
+
+
+def test_the_decode_timing_wrapper_passes_the_bash_syntax_check():
+    import shutil
+    import subprocess
+    shells = [s for s in ("/bin/bash", shutil.which("bash")) if s and os.path.exists(s)]
+    assert shells
+    for shell in set(shells):
+        done = subprocess.run([shell, "-n", str(_TIMING_SH)], capture_output=True, text=True)
+        assert done.returncode == 0, (shell, done.stderr)
+
+
+def test_every_flag_the_decode_timing_wrapper_gives_the_script_is_one_of_its_own():
+    from scripts import chat_decode_timing
+    known = set(chat_decode_timing.build_parser()._option_string_actions)
+    run = next(l for l in _timing_code() if "python scripts/chat_decode_timing.py" in l).split(" 2> ")[0]   # the command, not the pipeline after it
+    given = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]*)", run))
+    assert {"--engine", "--home", "--gallery", "--job", "--threads", "--local-dir"} == given and given <= known, (given, known)
+    assert "--engine real" in run, "the job is the published model on the CPU, never the tiny engine"
+
+
+def test_the_decode_timing_script_prints_through_one_writer_and_never_prints_a_frame_or_a_report():
+    """R7: the job decodes MIMIC test images. No print, no logging call, no traceback, no file opened or written, no stream but the two that main
+    is given: every write is the drill's one `_write`, with four callers, the help text, a refusal (`ERROR ` and the fixed text of a Refused), and
+    result_line of a payload of numbers, booleans and fixed words (a fatal line, or whatever `say` is given: a fatal dictionary, the environment,
+    an arm or the summary). The reports are held in memory: they are read in the functions that store them and in the one that compares them."""
+    tree, parents = _timing_tree()
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id in ("print", "open", "breakpoint", "exec", "eval", "input", "compile", "__import__")]
+    writers = {"write", "writelines", "write_text", "write_bytes", "dump", "flush", "truncate", "unlink", "rename", "replace", "touch"}
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in writers], "its own writes are the drill's, through one call"
+    sinks = _timing_calls(tree, "drill._write")
+    assert sorted((_timing_inner(s, parents), ast.unparse(s.args[0]), ast.unparse(s.args[1])) for s in sinks) == sorted(
+        (where, stream, _normalized(shape)) for where, stream, shape in (
+            ("main", "stdout", 'parser.format_help().rstrip("\\n")'), ("main", "stderr", '"ERROR " + str(exc)'),
+            ("main", "stdout", 'result_line({"fatal": type(exc).__name__, "step": "run"})'), ("say", "stdout", "result_line(payload)")))
+    refusal = next(s for s in sinks if ast.unparse(s.args[1]) == _normalized('"ERROR " + str(exc)'))
+    handler = parents[refusal]
+    while not isinstance(handler, ast.ExceptHandler):
+        handler = parents[handler]
+    assert ast.unparse(handler.type) == "Refused" and handler.name == "exc", "the text of a refusal is that of a Refused: a fixed sentence"
+    functions = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    assert [ast.unparse(r.value) for r in ast.walk(functions["result_line"]) if isinstance(r, ast.Return)] == [
+        _normalized('"RESULT " + json.dumps(payload, separators=(",", ":"), allow_nan=False)')]
+    assert sorted(_timing_inner(n, parents) for n in _timing_calls(tree, "json.dumps")) == ["http_turn", "result_line"]
+    assert [ast.unparse(n.args[0]) for n in _timing_calls(tree, "json.dumps") if _timing_inner(n, parents) == "http_turn"] == ["options"]
+    for call in _timing_calls(tree, "say"):
+        arg = call.args[0]
+        shape = ({k.value for k in arg.keys} if isinstance(arg, ast.Dict) else ast.unparse(arg).split("(")[0])
+        assert shape in ({"fatal", "step"}, "environment", "arm_payload", "summary_payload"), ast.unparse(arg)
+    assert sorted(_timing_inner(n, parents) for n in _timing_calls(tree, "result_line")) == ["main", "say"]
+    reads = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "reports" and isinstance(n.ctx, ast.Load)]
+    assert {_timing_inner(n, parents) for n in reads} == {"_decode_arm", "_note_generated", "count_turn", "same_reports"}, "where a report is touched"
+    for name in ("arm_payload", "summary_payload", "env_payload", "result_line", "run_job", "main", "say", "first_over", "mean_ms"):
+        assert "reports" not in {n.attr for n in ast.walk(functions[name]) if isinstance(n, ast.Attribute)}, name
+    streams = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "sys"]
+    assert {n.attr for n in streams} == {"path", "stdout", "stderr", "exit"}
+    assert {_timing_inner(n, parents) for n in streams if n.attr in ("stdout", "stderr")} == {"main"}, "the process's own streams are main's defaults"
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in ("environ", "environb", "getenv", "argv")]
+
+
+def test_the_decode_timing_script_names_every_exception_by_its_class_or_a_fixed_code_and_never_by_its_text():
+    tree, parents = _timing_tree()
+    caught = [n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler) and n.name]
+    assert len(caught) >= 10, "the pin looks at something"
+    for handler in caught:
+        uses = [n for stmt in handler.body for n in ast.walk(stmt) if isinstance(n, ast.Name) and n.id == handler.name]
+        for use in uses:
+            parent = parents[use]
+            if ast.unparse(handler.type) == "Refused":
+                assert isinstance(parent, ast.Call) and ast.unparse(parent.func) == "str", ast.unparse(handler)   # fixed sentences, written here
+            elif ast.unparse(handler.type) == "TurnFailed":
+                assert isinstance(parent, ast.Attribute) and parent.attr == "code", ast.unparse(handler)
+            elif ast.unparse(handler.type) == "SetupFailed":
+                assert isinstance(parent, ast.Attribute) and parent.attr in ("error", "step"), ast.unparse(handler)
+            else:   # `type(exc)`: the class, never the text
+                assert isinstance(parent, ast.Call) and ast.unparse(parent.func) == "type", ast.unparse(handler) + " uses " + handler.name
+    refused = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) in ("Refused", "argparse.ArgumentTypeError")]
+    assert refused
+    for call in refused:   # every text a refusal can carry is written in this file (a literal, a constant or a format of a constant)
+        text = call.args[0]
+        assert isinstance(text, (ast.Constant, ast.Name)) or ast.unparse(text).endswith(".format(MAX_ROWS)") or ast.unparse(text) == _normalized(
+            'm = re.sub(r"\'.*$", "", message).rstrip(" :")'.split(" = ", 1)[1]), ast.unparse(call)   # argparse's own, with what it quoted cut off
+
+
+def test_the_decode_timing_script_changes_nothing_on_disk_but_the_stores_of_e_and_f_and_the_node_local_one_it_removes():
+    tree, parents = _timing_tree()
+    assert [_timing_inner(n, parents) for n in _timing_calls(tree, "tempfile.mkdtemp")] == ["arm_e_local"]
+    assert [_timing_inner(n, parents) for n in _timing_calls(tree, "shutil.rmtree")] == ["arm_e_local"], "the only thing it removes is its own"
+    removing = _timing_calls(tree, "shutil.rmtree")[0]
+    assert ast.unparse(removing) == "shutil.rmtree(str(home), ignore_errors=True)" and ast.unparse(_timing_calls(tree, "tempfile.mkdtemp")[0].keywords[1].value) == "str(base)"
+    makers = sorted((_timing_inner(n, parents), ast.unparse(n.func.value)) for n in ast.walk(tree)
+                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "mkdir")
+    assert makers == [("arm_e", "home"), ("arm_f", "home"), ("run_job", "paths['timing']")], makers
+    homes = sorted(ast.unparse(n.value) for n in ast.walk(tree) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "home" for t in n.targets)
+                   and _timing_inner(n, parents) in ("arm_e", "arm_f"))
+    assert homes == ["world.timing / 'e'", "world.timing / 'f'"], "under <home>/timing/<job>, at e and f"
+    assert {_timing_inner(n, parents) for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "read_text"} == {
+        "core_count", "cpu_model"}, "the reads of the system's own files: the CPU's name and the cores' topology"
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value == "/tmp"], "the node-local directory is the wrapper's lever"
+    roots, first_party = _imports_of(_TIMING)
+    assert roots <= set(sys.stdlib_module_names) | {"httpx", "torch", "uvicorn", "app", "scripts"}, sorted(roots)
+    assert not roots & {"traceback", "pickle", "subprocess", "socket", "requests", "urllib"}, "no traceback, no other client, no process"
+
+
+def test_the_decode_timing_script_reuses_the_servers_loading_the_bridge_and_the_probes_reader_and_copies_none_of_them():
+    tree, parents = _timing_tree()
+    defined = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    for name in ("_engines", "_frames", "_push", "sse", "create_app", "build_engine", "load_report_generation_module", "read_into", "frames",
+                 "parse_rows_probe", "beam_search_cached", "write_hyps_refs", "turn_options", "Facts", "Handles", "Pipeline", "Worker", "Store", "Gallery"):
+        assert name not in defined, name + " is the app's or the probe's: imported, not written again"
+    imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "app.server" for a in n.names}
+    assert imported == {"_chat_home", "_engines", "_frames", "_push", "create_app", "sse"}, imported
+    assert [_timing_inner(n, parents) for n in _timing_calls(tree, "_engines")] == ["load_world"]
+    assert [_timing_inner(n, parents) for n in _timing_calls(tree, "create_app")] == ["arm_f"]
+    assert [_timing_inner(n, parents) for n in _timing_calls(tree, "Gallery.open")] == ["load_world"]
+    assert "expect_tower_sha256=engine.tower_sha256()" in ast.unparse(_timing_calls(tree, "Gallery.open")[0])
+    assert [_timing_inner(n, parents) for n in _timing_calls(tree, "probe.read_into")] == ["read_turn", "http_turn"]
+    assert sorted(_timing_inner(n, parents) for n in _timing_calls(tree, "probe.frames")) == ["final_report"]
+    assert [_timing_inner(n, parents) for n in _timing_calls(tree, "probe.turn_options")] == ["_http_turns"]
+    from scripts import chat_load_drill, chat_realturn_probe
+    modules = {"probe": chat_realturn_probe, "drill": chat_load_drill}
+    used = {(n.value.id, n.attr) for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in modules}
+    assert used, "the pin looks at something"
+    assert [(who, what) for who, what in sorted(used) if not hasattr(modules[who], what)] == [], "a name of the probe or the drill that is not there"
+    assert {what for who, what in used if who == "probe"} == {"parse_rows", "Facts", "Handles", "read_into", "frames", "turn_options"}
+
+
+def test_the_decode_timing_script_runs_the_arms_the_way_the_ruling_says_and_only_there():
+    tree, parents = _timing_tree()
+    beam = _timing_calls(tree, "world.engine.decoder.beam_search_cached")
+    assert [_timing_inner(n, parents) for n in beam] == ["decode_ids"] and [k.arg for k in beam[0].keywords] == [
+        "prefix_embeds", "beam_size", "max_new_tokens", "on_step"], "the decoder's own search, with the engine's arguments and the callback of the arm"
+    generates = _timing_calls(tree, "world.engine.generate")
+    assert [_timing_inner(n, parents) for n in generates] == ["time_generate"]
+    assert [ast.unparse(a) for a in generates[0].args] == ["enc", "world.opts", "_no_snapshot", "threading.Event()"]
+    pools = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == "ThreadPoolExecutor"]
+    assert sorted(_timing_inner(n, parents) for n in pools) == ["arm_d", "environment"] and all(
+        {k.arg: ast.unparse(k.value) for k in n.keywords} == {"max_workers": "1", "thread_name_prefix": "'turn'"} for n in pools), "the pipeline's own kind"
+    assert [_timing_inner(n, parents) for n in _timing_calls(tree, "asyncio.run")] == ["_pipeline_arm"]
+    assert [_timing_inner(n, parents) for n in _timing_calls(tree, "Worker")] == ["_pipeline_arm"]
+    assert [_timing_inner(n, parents) for n in _timing_calls(tree, "Pipeline")] == ["_pipeline_arm"]
+    assert "labeler" not in ast.unparse(_timing_calls(tree, "Pipeline")[0]), "no labeller: the stages after generate that need one are skipped"
+    ports = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value in (8000, 8010)]
+    assert sorted(ports) == [8000, 8010], "the two ports appear once each, in the tuple that refuses them"
+    config = _timing_calls(tree, "uvicorn.Config")
+    assert len(config) == 1 and {k.arg: ast.unparse(k.value) for k in config[0].keywords} == {
+        "host": "'127.0.0.1'", "port": "0", "log_config": "None", "log_level": "'warning'", "access_log": "False"}
+    client = _timing_calls(tree, "httpx.Client")
+    assert len(client) == 1 and {k.arg: ast.unparse(k.value) for k in client[0].keywords}.keys() >= {"trust_env", "follow_redirects"}
+    assert {k.arg: ast.unparse(k.value) for k in client[0].keywords}["trust_env"] == "False"
+    module_functions = {"httpx." + name for name in ("get", "post", "put", "patch", "delete", "head", "options", "request", "stream")}
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) in module_functions]
+    served = {k.arg for k in _timing_calls(tree, "create_app")[0].keywords}
+    assert served == {"engine", "models", "home", "gallery", "device", "threads"} and not served & {"token", "mode", "host", "labeler", "labeler_url"}
