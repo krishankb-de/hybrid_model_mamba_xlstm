@@ -576,10 +576,12 @@ def pytest_runtest_makereport(item, call):
 @pytest.fixture
 def ui(request, browser, tmp_path):
     """A fresh tiny server and a fresh page, both gone when the test ends, however it ends. Parametrized indirectly, its
-    param is TinyServer's keyword arguments ({"tiny_gallery": True})."""
+    param is TinyServer's keyword arguments ({"tiny_gallery": True}); a "server" key names a TinyServer subclass to start instead
+    (P8-D: the chaos tests' server behind a tunnel, and the one that takes its token from a file)."""
     home = tmp_path / "chat_home"
     home.mkdir()
-    server = TinyServer(str(home), **getattr(request, "param", {}))
+    params = dict(getattr(request, "param", {}))
+    server = params.pop("server", TinyServer)(str(home), **params)
     harness = None
     try:
         harness = UI(browser, server, os.environ.get(EVIDENCE_ENV) or None)

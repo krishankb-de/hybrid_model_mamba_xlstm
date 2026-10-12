@@ -9475,3 +9475,58 @@ def test_the_decode_timing_script_ends_a_turn_that_never_ends_at_300_s_reads_the
     assert [ast.unparse(n.iter) for n in loops] == ["ALL_ARMS"], "the seven and then A-end, each printed as it finishes"
     over = functions["first_over"]
     assert "ARMS[1:]" in ast.unparse(over) and "ALL_ARMS" not in ast.unparse(over), "the threshold looks at A to F only: A-end is drift, not a part of the path"
+
+
+# ── CHAT_UI_PLAN.md P8-D: the chaos checklist ─────────────────────────────────
+# Seven items, run as tests: tests/test_app_chaos.py (the API side: real processes, the labeller, the gallery, the store; part of validate.sh)
+# and tests/e2e/test_chaos_e2e.py (the page side, in a real Chrome; run with -m e2e). Each test is named test_chaos_<item>_... and says its item
+# and what is expected in its docstring. These pins hold what a later edit could lose without a test noticing: an item with no test, a test that
+# does not say what it expects, a page test that would run in validate.sh, or a port that belongs to someone else.
+
+_CHAOS_TESTS = {"api": "tests/test_app_chaos.py", "page": "tests/e2e/test_chaos_e2e.py"}
+
+
+def _chaos_tree(name):
+    return ast.parse((REPO_ROOT / _CHAOS_TESTS[name]).read_text(encoding="utf-8"))
+
+
+def _chaos_test_functions(tree):
+    return [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name.startswith("test_chaos_")]
+
+
+def test_every_item_of_the_chaos_checklist_has_a_test_and_each_test_says_its_item_and_what_is_expected():
+    """P8-D. Items 1 to 7 each have at least one test across the two files, and every test has a docstring that begins "Chaos item <n>" for the
+    item its name carries and holds an "Expected" sentence. The page side covers items 1 to 4 (the ones with a page to look at), the API side
+    1 and 3 to 7: 2 (the tunnel) is the page's alone, because the page is what polls."""
+    covered = {}
+    for side in _CHAOS_TESTS:
+        for function in _chaos_test_functions(_chaos_tree(side)):
+            item = int(re.match(r"test_chaos_(\d+)_", function.name).group(1))
+            doc = ast.get_docstring(function) or ""
+            assert doc.startswith("Chaos item {}".format(item)) and "Expected" in doc, "{}: {}".format(side, function.name)
+            covered.setdefault(item, set()).add(side)
+    assert sorted(covered) == [1, 2, 3, 4, 5, 6, 7], sorted(covered)
+    assert {item for item, sides in covered.items() if "page" in sides} == {1, 2, 3, 4}
+    assert {item for item, sides in covered.items() if "api" in sides} == {1, 3, 4, 5, 6, 7}
+
+
+def test_the_chaos_page_tests_run_in_a_real_chrome_and_stay_out_of_validate_sh_and_the_api_tests_need_no_browser():
+    """P8-D. The page file is marked e2e and slow, as every file of tests/e2e is (validate.sh runs `-m "not cuda and not slow"`), and skips without
+    Playwright; the API file imports neither Playwright nor anything of tests/e2e, so it is part of validate.sh and runs on a laptop with no Chrome."""
+    page, api = _chaos_tree("page"), _chaos_tree("api")
+    marks = [n for n in page.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in n.targets)]
+    assert len(marks) == 1 and {"pytest.mark.e2e", "pytest.mark.slow"} <= {ast.unparse(m) for m in ast.walk(marks[0].value) if isinstance(m, ast.Attribute)}
+    assert any(isinstance(n, ast.Expr) and ast.unparse(n.value).startswith("pytest.importorskip('playwright.sync_api'") for n in page.body)
+    modules = {n.module or "" for n in ast.walk(api) if isinstance(n, ast.ImportFrom)} | {a.name for n in ast.walk(api) if isinstance(n, ast.Import) for a in n.names}
+    assert not [m for m in modules if m.split(".")[0] == "playwright" or m.startswith("tests.e2e")], sorted(modules)
+
+
+def test_the_chaos_tests_never_name_the_dev_servers_ports():
+    """P8-D. 8000 and 8010 are the ports of the user's own servers and tunnels (app/README.md): every chaos test starts its server on a free port
+    of its own, and no test file here says either number as a number or as the end of an address."""
+    for side in _CHAOS_TESTS:
+        for node in ast.walk(_chaos_tree(side)):
+            if isinstance(node, ast.Constant) and isinstance(node.value, int):
+                assert node.value not in (8000, 8010), side
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                assert not re.search(r":(8000|8010)\b", node.value), (side, node.value)
