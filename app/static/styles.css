@@ -622,7 +622,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
      between them (P6 fix 2), so that Stop and Send stay in sight at 801 x 568 with the drawer open (layout check k, busy). */
   #composer > button { padding-block: 7px; padding-inline: 8px; }
 }
-/* A busy composer on a phone (P9-G5b): Stop is shown, and Settings, Send and Stop share one row. Between 261 and 319 px (a 320 px phone: 271 to 286 px,
+/* A busy composer on a phone (P9-G5b): Stop is shown, and Settings, Send and Stop share one row. Between 261 and 319 px (a 320 px phone: 251 to 266 px,
    by whether the composer scrolls) the three do not fit at their usual padding, so Stop, whose label is the longest ("Cancel upload"), wrapped onto
    a row of its own, the composer's last, and at 320 x 568 it showed 9 px above the composer's fold (the re-review of P6 fix 2). With 6 px of padding
    each side they fit with room to spare. Below 261 px (801 px with the drawer open) the rule above takes over, and Stop keeps the row it has always had.
