@@ -4010,13 +4010,27 @@ def test_six_concurrent_turns_four_accepted_two_refused(tmp_path):
 
 Each item with its expected behaviour, run and recorded: kill → turn `error/server_restart` after restart; tunnel drop → polling completes the card; oversize → 413 and the preview stays; wrong token → 401 and the drawer asks for the token; labeller down → `label` skipped, turn `done`; gallery missing → `retrieve` skipped, turn `done`; `OSError` on upload write → `error` event with a readable message, no partial files. Commit `"P8-D: chaos checklist"`.
 
-- [ ] **P8-E** `app/README.md` runbook (start, tunnel, public demo, stop, retention, what is stored, the DUA rules); allow-listed in `.gitignore`.
+- [x] **P8-E** `app/README.md` runbook (start, tunnel, public demo, stop, retention, what is stored, the DUA rules); allow-listed in `.gitignore`.
 
 Commit `"P8-E: runbook"`.
 
 - [ ] **P8-F** Non-functional targets measured: first byte ≤ 300 ms, full turn (P1-D target), 375 px, no external requests from the page, no `EventSource` in `static/`.
 
 Record the numbers from P7-D and a laptop tiny run; the static checks already exist as tests (P4-A). Commit `"P8-F: targets measured"`.
+
+*Part 1, the timing job (merged bd67b4f + 967b536; reviewed, fix round 1 clean).* `scripts/chat_decode_timing_h100.sh` splits the live turn into arms on the serve node:
+- A: the bare engine;
+- B: with `on_step`;
+- C: the generate stage;
+- D: on the worker thread;
+- E and E-local: through the store and emit path, on NFS and on node-local disk;
+- F: over HTTP;
+- A-end: A again at the end, to catch drift.
+
+The aim is to find where the live per-step cost (77-88 ms against P1-C's ~30 ms) comes from.
+
+- **Prediction (R4, recorded 2026-10-12 before submission):** A ≈ 3.0 s per report (P1-C's ~30 ms per step, 100 tokens, beam 3); B and C within 10% of A. The mean first exceeds 1.5× A at D (the worker thread) 45%; at E or E-local (the store/emit path) 25%; at F (HTTP + event loop) 10%; at no arm 20% (then the probe's 77-88 ms per step was node load at that time). A-end within 10% of A (no drift over the run) 80%. fs_home a network filesystem (nfs, gpfs, lustre or beegfs) 90%; fs_local node-local (tmpfs, xfs or ext4) 85%.
+
 
 ### P9 — Demo and close
 

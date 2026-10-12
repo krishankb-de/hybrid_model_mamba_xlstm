@@ -137,7 +137,8 @@
     "P5-C": "0 mismatches vs published y_true and refs.txt on 2,663 test rows (85%); f1chexbert stays on CPU (55%) -> 8 CPU shards of ~1 h (0.16 s/report x ~150-190k groups), else 15-45 min on one H100",
     "P5-F": "50/50 self-retrieval at rank 1; live CPU own-rank == build rank on >=48/50; labeller == published labels 100/100",
     "P9-G3": "preflight code eos_flag true + module_in_cwd true; recipe ok with changed = the 6 root-derived keys (checkpoint_dir, experiment_name, log_dir, output_dir, trainer.default_root_dir, wandb.name), added = [dataset.report_eos_target], removed = [] (80%); wall 1.1-1.8 h for 12,000 steps on 4 H100 (published ~1.3 h); final val/lm_loss within 0.03 of the published run's last value, slightly higher more likely (one more target per report); DONE written with steps 12000",
-    "P7-A": "all 3 probes pass in ~1 min (85%); fastapi >= 0.115 (overlay), transformers 4.x < 5 (.venv_chexbert); chexbert label order true with f1chexbert 0.0.2 (92%)"
+    "P7-A": "all 3 probes pass in ~1 min (85%); fastapi >= 0.115 (overlay), transformers 4.x < 5 (.venv_chexbert); chexbert label order true with f1chexbert 0.0.2 (92%)",
+    "P8-F-timing": "A ≈ 3.0 s per report (P1-C's ~30 ms per step, 100 tokens, beam 3); B and C within 10% of A. The mean first exceeds 1.5× A at D (the worker thread) 45%; at E or E-local (the store/emit path) 25%; at F (HTTP + event loop) 10%; at no arm 20% (then the probe's 77-88 ms per step was node load at that time). A-end within 10% of A (no drift over the run) 80%. fs_home a network filesystem (nfs, gpfs, lustre or beegfs) 90%; fs_local node-local (tmpfs, xfs or ext4) 85%."
   },
   "decisions": {
     "branch": "chat_ui, cut from h100_efficiency @ 5c45527 (has cached decode, E6/E7 decode verification, ISBI neighbour code, partition rename)",
@@ -593,7 +594,7 @@
           "desc": "Chaos checklist: API killed mid-turn, tunnel dropped mid-stream, oversize upload, wrong token, labeller down, gallery missing, disk quota error on upload."
         },
         "P8-E": {
-          "done": false,
+          "done": true,
           "desc": "app/README.md runbook (start, tunnel, public demo, stop, retention, what is stored, the DUA rules); allow-listed in .gitignore."
         },
         "P8-F": {
@@ -612,7 +613,11 @@
         "p8c_cluster_accepted": "4",
         "p8c_cluster_refused": "2",
         "p8c_cluster_wall_s": "20.38",
-        "p8c_cluster_ok": "true"
+        "p8c_cluster_ok": "true",
+        "p8e_commits": "40a7239,038a59d,a07b695",
+        "p8e_openapi_tests": "33 passed (the walkthrough runs the README's own curl calls; 9 drift cases caught)",
+        "p8e_hook_tests": "163 passed",
+        "p8e_validate": "All gates passed on 967b536: 4713 passed, 1 skipped, 21 xfailed; node 473/473"
       },
       "verdict": null
     },
@@ -779,9 +784,10 @@
     "P8-C: load drill — laptop (tiny, cap 4): 4 accepted, 2 x overloaded_error, seq contiguous, wall 6.78 s; cluster (serve job 2638789 via tunnel localhost:8010, default model hybrid_150m_m3_rrg_eos, CPU): RESULT requested 6, accepted 4, refused_429 2 (overloaded_error), done 4, seq_contiguous true, session_deleted true, wall_s 20.38, ok true. Drill found and fixed the save_upload race (merged 3612a3d, daaffcb; review approved).",
     "2026-10-12: 2026-10-12: P7-D probe (scripts/chat_realturn_probe.py, merged 375c521) vs serve 2638789: gate ok — published_equal 5/5, eos_stops 6/6 (rows 0-4 + upload), features_ok; first byte <= 89 ms, published turn 7.7-8.4 s (generate 2.5x the P1-C 3.05 s on the same node; cause under investigation in P8-F; store commits ruled out). P7-D tick waits on the user's visual check of the five features on real data. P9-G6 LP1.5 (2638779-81): no effect (44.6 words, metrics within 0.002 of alpha=1.0), gate fail; alpha cannot act under top-hypothesis stopping (plan P9-G6 note).",
     "EOS model in the UI: G5a (registry, card, EOS guard) + G5b (EOS copy: 'ended the report' chip, per-model stop hint, drawer note; tiny-engine notice + badge; per-model drift note, CPU-only EOS sentence; busy composer fix) merged; cluster check by the R7-safe probe: every EOS turn stopped by eos with 4 similar X-rays and 3 matching reports",
-    "2026-10-12: stopped by the user with P8-F fix 1, P6-F and P8-D in flight (uncommitted work kept in their worktrees and backed up in the SDD workspace wip/); P8-E committed and reviewed (tick after a clean validate); probe run 2 on 610fe8f: gate ok, EOS default turn mean 5.9 s."
+    "2026-10-12: stopped by the user with P8-F fix 1, P6-F and P8-D in flight (uncommitted work kept in their worktrees and backed up in the SDD workspace wip/); P8-E committed and reviewed (tick after a clean validate); probe run 2 on 610fe8f: gate ok, EOS default turn mean 5.9 s.",
+    "P8-E runbook: app/README.md (40a7239) + review fixes 038a59d, a07b695; review + two scoped re-reviews, all findings addressed; validate clean on 967b536"
   ],
-  "last_updated": "2026-10-12T12:39:28+02:00",
+  "last_updated": "2026-10-12T15:36:30+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
