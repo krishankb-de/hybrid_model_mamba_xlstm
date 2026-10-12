@@ -10,8 +10,13 @@ included) and nothing outlives a failure path. It is stopped politely first, and
 DevTools (it has CLOSE_WAIT_S in all, by the clock, to answer and go), then sent SIGTERM, and only a process that is still there
 after the wait gets SIGKILL. A Chrome that is killed leaves its singleton directory (com.google.Chrome.*, a SingletonSocket and
 a SingletonCookie) in $TMPDIR, one more on every run; one that leaves on request removes it. Browser.close() and App.stop() are
-safe to call at any time, on an object whose constructor failed half-way too. Standard library only: the websocket client is the
-little of RFC 6455 a DevTools session needs.
+safe to call at any time, on an object whose constructor failed half-way too, and Browser.close() stops Chrome and removes its
+profile even when an interrupt (the SIGTERM handler's SystemExit, Ctrl-C) cuts it short.
+
+What a process leaves in its session when it goes (the helpers of a Chrome that went on request, or died) is swept too: with SIGKILL,
+once, after every way out, and while the leader is not yet reaped. The wait for an exit is made without reaping (exited, wait_exit: waitid
+with WNOWAIT), because a reaped leader's pid is free to be anyone's and the session it names with it, so nothing is signalled after
+the reap, whatever the order of the calls. Standard library only: the websocket client is the little of RFC 6455 a DevTools session needs.
 """
 import base64
 import hashlib
@@ -87,8 +92,9 @@ class WebSocket:
             raise
 
     def _arm(self) -> None:
-        """Before a wait for the peer's data: with a deadline, cut the wait off at it. A socket timeout alone is per read, so a peer that
-        keeps sending (events, pings) and never answers would never time out."""
+        """Before a wait for the peer's data, or a write to it: with a deadline, cut the wait off at it. A socket timeout alone is per
+        operation, so a peer that keeps sending (events, pings) and never answers would never time out, and one that reads nothing would
+        hold a write for as long as the socket's own timeout."""
         if self.deadline is not None:
             remaining = self.deadline - time.monotonic()
             if remaining <= 0:
@@ -118,6 +124,7 @@ class WebSocket:
         self.sock.sendall(bytes(head) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
 
     def send(self, text: str) -> None:
+        self._arm()
         self._send_frame(0x1, text.encode("utf-8"))
 
     def recv(self) -> str:
@@ -170,28 +177,63 @@ def kill_group(proc: Optional["subprocess.Popen"]) -> None:
         pass
 
 
+def exited(proc: "subprocess.Popen") -> bool:
+    """Whether the process has exited, without reaping it. proc.poll() answers the same but waits for the process as it does, and a process
+    that has been waited for is gone from the kernel's tables: its pid is free to be anyone's, and so is the id of the process group and
+    the session that pid names. Until then the pid is still this one's, so what is left in its group can be signalled safely (kill_group
+    does). Where the platform has no waitid, the process is reaped to find out (poll), and nothing is swept after it."""
+    if proc.returncode is not None:
+        return True
+    if not hasattr(os, "waitid"):
+        return proc.poll() is not None
+    try:
+        return os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:   # waited for behind Popen's back: poll() learns it and settles returncode, so nothing is signalled after it
+        return proc.poll() is not None
+
+
+def wait_exit(proc: "subprocess.Popen", timeout: float) -> bool:
+    """Wait up to `timeout` seconds for the process to exit, without reaping it (see exited); -> whether it has."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    while not exited(proc):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
 def stop_group(proc: Optional["subprocess.Popen"], term_wait: Optional[float] = None) -> None:
     """Stop a process started with start_new_session=True, and its session, politely first: SIGTERM to the group, a wait of up to
-    term_wait seconds (TERM_WAIT_S) for the process to go and clean up after itself, then SIGKILL for what is still there. Safe on
-    None and on a process that is gone (nothing is signalled once the process was reaped)."""
+    term_wait seconds (TERM_WAIT_S) for the process to go and clean up after itself, then SIGKILL for what is still there. That last step
+    is made after every way out, also of a process that went by itself or on request: it is the sweep of what the process left in its
+    session, made while the leader is not yet reaped (the wait above does not reap it), and it is made even when an interrupt cuts the
+    wait short. Safe on None and on a process that is gone (nothing is signalled once the process was reaped)."""
     if proc is None:
         return
-    if proc.poll() is None:   # poll() reaps a process that has already exited
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except OSError:
-            pass
-        try:
-            proc.wait(timeout=TERM_WAIT_S if term_wait is None else term_wait)
-        except subprocess.TimeoutExpired:
-            pass
-    kill_group(proc)
+    try:
+        if not exited(proc):
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            wait_exit(proc, TERM_WAIT_S if term_wait is None else term_wait)
+    finally:
+        kill_group(proc)
 
 
 def exit_on_sigterm() -> None:
     """Make SIGTERM raise SystemExit, so that a check's `finally` runs and stops Chrome and the app: left at its default, a SIGTERM
-    ends the process at once and orphans both (each runs in a session of its own, which the terminal's signals do not reach)."""
+    ends the process at once and orphans both (each runs in a session of its own, which the terminal's signals do not reach).
+
+    The handler is one-shot. The clean-up that the SystemExit starts takes several seconds (the DevTools close, the TERM and its wait,
+    the KILL), and a second SIGTERM in that time, from a harness that is impatient, used to raise a second SystemExit in the middle of it,
+    which is where the processes were left running. After the first, SIGTERM is taken by a handler that does nothing. It is a handler and
+    not SIG_IGN, because an ignored signal is inherited by what the process starts afterwards, which would then ignore its TERM too."""
+    def absorb(signum: int, frame: Any) -> None:
+        pass
+
     def handler(signum: int, frame: Any) -> None:
+        signal.signal(signal.SIGTERM, absorb)
         raise SystemExit(128 + signum)
 
     signal.signal(signal.SIGTERM, handler)
@@ -371,24 +413,29 @@ class Browser:
     def close(self) -> None:
         """Close Chrome as a user would, so that it removes what it made outside its profile: the DevTools Browser.close first (Chrome has
         CLOSE_WAIT_S in all, by the clock, to answer it and to go), then SIGTERM to its group (TERM_WAIT_S), and SIGKILL only for what is
-        still there. Then the profile directory is removed. Safe on a half-built Browser and when called twice."""
+        still there, and for what Chrome left in its session when it went (stop_group). Then the profile directory is removed. Safe on a
+        half-built Browser and when called twice. An interrupt that is not an Exception (the SIGTERM handler's SystemExit, Ctrl-C) cuts
+        the DevTools step short and goes on as it was raised, but the stopping and the removal still happen (P4-E follow-up)."""
         proc = self.proc
-        if self.ws is not None:
-            if proc is not None and proc.poll() is None:
-                deadline = time.monotonic() + CLOSE_WAIT_S
-                self.ws.deadline = deadline   # however much DevTools sends meanwhile, the wait for its answer ends here
+        try:
+            if self.ws is not None:
                 try:
-                    self.call("Browser.close")
-                except Exception:   # it may drop the connection, or never answer (TimeoutError); either way the signals follow
-                    pass
-                try:
-                    proc.wait(timeout=max(0.0, deadline - time.monotonic()))
-                except subprocess.TimeoutExpired:
-                    pass
-            self.ws.close()
-            self.ws = None
-        stop_group(proc)
-        shutil.rmtree(self.profile, ignore_errors=True)
+                    if proc is not None and not exited(proc):
+                        deadline = time.monotonic() + CLOSE_WAIT_S
+                        self.ws.deadline = deadline   # however much DevTools sends meanwhile, the wait for its answer ends here
+                        try:
+                            self.call("Browser.close")
+                        except Exception:   # it may drop the connection, or never answer (TimeoutError); either way the signals follow
+                            pass
+                        wait_exit(proc, deadline - time.monotonic())
+                finally:
+                    self.ws.close()
+                    self.ws = None
+        finally:
+            try:
+                stop_group(proc)
+            finally:
+                shutil.rmtree(self.profile, ignore_errors=True)
 
 
 def free_port() -> int:

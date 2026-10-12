@@ -1654,11 +1654,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
     finally:
         signal.alarm(0)
-        if browser is not None:
-            browser.close()
-        if app is not None:
-            app.stop()
-        shutil.rmtree(work, ignore_errors=True)
+        try:   # each step in the finally of the one before it: an interrupt in one (Ctrl-C, a SIGTERM's SystemExit) must not leave the next running
+            if browser is not None:
+                browser.close()
+        finally:
+            try:
+                if app is not None:
+                    app.stop()
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
     failures = [r["name"] for r in results if r["status"] != "PASS"]
     result = {"checks": len(results), "failures": failures}
     if out_dir is not None and ctx is not None:

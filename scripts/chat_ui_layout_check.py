@@ -981,10 +981,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("ERROR {}".format(exc))
         return 2
     finally:
-        if browser is not None:
-            browser.close()
-        if app is not None:
-            app.stop()
+        try:   # the app is stopped even when an interrupt (Ctrl-C, a SIGTERM's SystemExit) cuts the closing of the browser short
+            if browser is not None:
+                browser.close()
+        finally:
+            if app is not None:
+                app.stop()
     for failure in failures:
         print("FAIL " + failure)
     print("RESULT " + json.dumps({"cases": cases, "failures": failures}))

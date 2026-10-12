@@ -3,8 +3,12 @@
 that returns canned measurements.
 
 The harness bugs these pin were found by the P4-A re-review: a Chrome orphaned when the DevTools connection failed after it
-started, `display: none` mutants of #stop and #drawer that passed, and a report floor that could be deleted unseen.
+started, `display: none` mutants of #stop and #drawer that passed, and a report floor that could be deleted unseen. The P4-E
+follow-up (the final review's carried items) adds: a close() that an interrupt cuts short still stops Chrome, the websocket's send
+keeps the deadline, the SIGTERM handler is one-shot, what a Chrome leaves in its session when it goes is swept, and the fakes'
+clean-up fixture is proven to call its clean-up.
 """
+import importlib
 import json
 import os
 import signal
@@ -268,24 +272,32 @@ def _bare_browser(proc: Any, profile: Path, ws: Any = None) -> Browser:
     return browser
 
 
+@pytest.mark.parametrize("stall", [0.0, 1.5], ids=["prompt", "late"])   # seconds the test is held up after it sees the shim, as on a loaded machine
 @pytest.mark.parametrize("body, handles_term", [(POLITE, True), (STUBBORN, False)], ids=["polite", "stubborn"])
-def test_a_fake_has_its_trap_in_place_before_it_makes_its_marker(tmp_path, body, handles_term):
+def test_a_fake_has_its_trap_in_place_before_it_makes_its_marker(tmp_path, body, handles_term, stall):
     """A test waits for the marker before it sends TERM, so the trap has to be installed first. mkdir is slowed here by a shim on PATH
     and the TERM comes while it runs: a fake with its trap in place meets it (polite: handles it and exits 0 once mkdir is done;
-    stubborn: ignores it and goes on); one without a trap dies of it at once (-15)."""
+    stubborn: ignores it and goes on); one without a trap dies of it at once (-15). The window is held open by the test and not by the
+    clock (P4-E follow-up): the shim runs mkdir once the test has sent the TERM, however long that takes it (the "late" cases hold the test
+    up for longer than the shim's old fixed second; the shim gives up after 10 s, so a failed test leaves nothing looping)."""
     shim = tmp_path / "bin"
     shim.mkdir()
-    entered = tmp_path / "entered"
-    (shim / "mkdir").write_text('#!/bin/sh\n: > "{}"\nsleep 1\nexec /bin/mkdir "$@"\n'.format(entered))
+    entered, released = tmp_path / "entered", tmp_path / "released"
+    (shim / "mkdir").write_text('#!/bin/sh\n: > "{}"\ni=0\nwhile [ ! -e "{}" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done\n'
+                                'exec /bin/mkdir "$@"\n'.format(entered, released))
     (shim / "mkdir").chmod(0o755)
     proc, marker = _start(tmp_path, body, env=dict(os.environ, PATH=str(shim) + os.pathsep + os.environ["PATH"]), ready=None)
-    assert _until(entered.exists), "the fake never reached mkdir"
-    assert not marker.exists()   # the marker does not exist yet: that is the window
-    proc.send_signal(signal.SIGTERM)
+    try:
+        assert _until(entered.exists, 15), "the fake never reached mkdir"
+        time.sleep(stall)
+        assert not marker.exists()   # the marker does not exist yet: that is the window
+        proc.send_signal(signal.SIGTERM)
+    finally:
+        released.touch()   # mkdir may go on, whatever became of the test
     if handles_term:
-        assert proc.wait(timeout=5) == 0, "the TERM found no trap"
+        assert proc.wait(timeout=15) == 0, "the TERM found no trap"
     else:
-        assert _until(marker.exists), "the TERM was fatal to a fake that ignores it: its trap came too late"
+        assert _until(marker.exists, 15), "the TERM was fatal to a fake that ignores it: its trap came too late"
         assert proc.poll() is None
 
 
@@ -315,6 +327,20 @@ def test_a_fake_that_never_comes_up_is_cleaned_up_too(tmp_path):
 
 def test_the_clean_up_is_wired_in_for_every_test_of_this_file(request):
     assert "_no_fake_outlives_its_test" in request.fixturenames
+
+
+def test_the_autouse_fixture_calls_kill_the_fakes_when_its_test_ends(monkeypatch):
+    """P4-E follow-up. The test above sees the fixture named for every test; this one runs it, so that a fixture that is named and
+    does nothing (a deleted call) is caught: nothing is killed while the test runs, and the end of the test kills."""
+    fixture = getattr(_no_fake_outlives_its_test, "__wrapped__", _no_fake_outlives_its_test)   # pytest wraps a fixture's function
+    called = []
+    monkeypatch.setitem(globals(), "_kill_the_fakes", lambda: called.append("killed"))
+    steps = fixture()
+    next(steps)
+    assert called == [], "the fixture killed the fakes before the test had run"
+    with pytest.raises(StopIteration):
+        next(steps)
+    assert called == ["killed"]
 
 
 def test_stop_group_asks_politely_first(tmp_path):
@@ -400,6 +426,90 @@ def test_closing_a_browser_that_drops_the_connection_instead_of_answering_still_
     assert proc.returncode == 0 and not (tmp_path / "profile").exists()
 
 
+@pytest.mark.parametrize("where, interrupt", [("send", SystemExit(128 + signal.SIGTERM)), ("recv", KeyboardInterrupt())],
+                         ids=["sigterm-in-the-request", "ctrl-c-in-the-wait-for-the-answer"])
+def test_a_close_that_is_interrupted_in_its_devtools_step_still_stops_chrome_and_removes_the_profile(tmp_path, where, interrupt):
+    """P4-E follow-up. The SIGTERM handler raises SystemExit wherever the main thread is, and Ctrl-C raises KeyboardInterrupt: neither is an
+    Exception, so the DevTools step's `except Exception` lets it through, and the signals and the profile's removal that come after the step
+    were skipped: Chrome was left running, its profile left behind. They are in a finally now; the interrupt still goes on."""
+    class Interrupted(ScriptedSocket):
+        def send(self, text: str) -> None:
+            if where == "send":
+                raise interrupt
+            super().send(text)
+
+        def recv(self) -> str:
+            raise interrupt
+
+    proc, marker = _start(tmp_path, POLITE, "chrome")
+    ws = Interrupted([[lambda i: {"id": i, "result": {}}]])
+    with pytest.raises(type(interrupt)):
+        _bare_browser(proc, tmp_path / "profile", ws).close()
+    assert proc.returncode == 0 and not marker.exists(), "Chrome was left running ({})".format(proc.returncode)
+    assert not (tmp_path / "profile").exists(), "its profile directory was left behind"
+    assert getattr(ws, "closed", False), "the DevTools connection was left open"
+
+
+# A "Chrome" that leaves a helper in its session, as the real one has renderers and a GPU process, and goes by itself after `lifetime`
+# seconds, as it does on a DevTools Browser.close. The helper's pid is written beside the marker, which exists once it is running.
+def _leader(helper: str, lifetime: float = 0.3) -> str:
+    return '#!/bin/sh\nmarker="$1"\nmkdir -p "$marker"\n{helper} &\necho $! > "$marker/helper"\nsleep {lifetime}\nexit 0\n'.format(helper=helper, lifetime=lifetime)
+
+
+HELPERS = ["sleep 30", "(trap '' TERM; exec sleep 30)"]   # a helper that dies of TERM, and one that ignores it
+
+
+def _helper_pid(marker: Path) -> int:
+    assert _until(lambda: (marker / "helper").exists() and (marker / "helper").read_text().strip()), "the fake's helper did not start"
+    pid = int((marker / "helper").read_text())
+    assert _alive(pid)
+    return pid
+
+
+@pytest.mark.parametrize("helper", HELPERS, ids=["terminable", "ignores-term"])
+def test_a_chrome_that_leaves_on_request_has_what_it_left_in_its_session_swept(tmp_path, helper):
+    """P4-E follow-up. A Chrome that goes on Browser.close was never signalled, and what it left in its session (the helpers that outlive
+    their browser) was never looked for: close() saw the browser gone and did nothing more. The session is swept (SIGKILL) once the
+    leader has gone, while the leader is not yet reaped, so that its pid, which names the session, is still nobody else's."""
+    proc, marker = _start(tmp_path, _leader(helper), "chrome")
+    straggler = _helper_pid(marker)
+    ws = ScriptedSocket([[lambda i: {"id": i, "result": {}}]])
+    _bare_browser(proc, tmp_path / "profile", ws).close()
+    assert [m["method"] for m in ws.sent] == ["Browser.close"]
+    assert proc.returncode == 0, "the Chrome that went by itself was signalled before it went ({})".format(proc.returncode)
+    assert _until(lambda: not _alive(straggler)), "a helper of the Chrome that left is still running"
+
+
+def test_a_chrome_that_died_on_its_own_before_close_has_its_session_swept_too(tmp_path):
+    """The same sweep when no DevTools connection is left to ask: the leader has gone (not reaped: nobody has waited for it), its helper
+    has not."""
+    if not hasattr(os, "waitid"):
+        pytest.skip("os.waitid is what tells a leader that has gone from one that has gone and been reaped")
+    proc, marker = _start(tmp_path, _leader("sleep 30", lifetime=0.1), "chrome")
+    straggler = _helper_pid(marker)
+    assert _until(lambda: os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None), "the leader did not go"
+    assert proc.returncode is None   # gone, and not reaped: the state of a Chrome that crashed while the check ran
+    _bare_browser(proc, tmp_path / "profile").close()
+    assert proc.returncode == 0
+    assert _until(lambda: not _alive(straggler)), "a helper of the Chrome that had gone is still running"
+
+
+def test_a_sweep_never_signals_a_session_whose_leader_was_reaped(tmp_path, monkeypatch):
+    """The rule the sweep keeps (it is made before the reap, never after): a Chrome that was reaped, by whoever, is not signalled again."""
+    sent = _record_killpg(monkeypatch)
+    proc, marker = _start(tmp_path, _leader("sleep 30", lifetime=0.1), "chrome")
+    helper = _helper_pid(marker)
+    try:
+        proc.wait(timeout=10)   # reaped: its pid may be anyone's now
+        _bare_browser(proc, tmp_path / "profile").close()
+        assert sent == [], "a signal went to the session of a leader that was already reaped: {}".format(sent)
+    finally:
+        try:
+            os.kill(helper, signal.SIGKILL)   # nothing else will: with its leader reaped, the clean-up of the fakes does not look for it
+        except ProcessLookupError:
+            pass
+
+
 def _server_frame(text: str, opcode: int = 0x1) -> bytes:
     """One unmasked websocket frame, as DevTools sends it: FIN set, a payload under 64 KiB."""
     payload = text.encode("utf-8")
@@ -448,6 +558,45 @@ def test_the_devtools_step_of_close_ends_at_its_deadline_however_much_the_peer_s
     assert proc.returncode == 0 and not marker.exists()
 
 
+def _socketpair_websocket(deadline: Optional[float]):
+    """A real WebSocket on one end of a socketpair (no handshake, no Chrome), with its deadline set; -> (it, the peer's end)."""
+    mine, theirs = socket.socketpair()
+    ws = chat_ui_cdp.WebSocket.__new__(chat_ui_cdp.WebSocket)
+    ws.sock, ws.buffer, ws.deadline = mine, b"", deadline
+    return ws, theirs
+
+
+def test_a_send_after_the_deadline_sends_nothing_and_raises():
+    """P4-E follow-up. The deadline of a receive was kept by _arm(); the send side had none, so a close() whose Browser.close request met
+    a deadline that had passed still wrote it."""
+    ws, theirs = _socketpair_websocket(time.monotonic() - 1.0)
+    try:
+        with pytest.raises((TimeoutError, socket.timeout)):
+            ws.send("never sent")
+        theirs.settimeout(0.3)
+        with pytest.raises((TimeoutError, socket.timeout)):
+            theirs.recv(1)   # not one byte reached the peer
+    finally:
+        ws.close()
+        theirs.close()
+
+
+def test_a_send_to_a_peer_that_never_reads_ends_at_the_deadline_and_not_at_the_sockets_own_timeout():
+    """The request is larger than the socket's buffers and the peer reads none of it: sendall blocks. A socket timeout is per operation (here
+    5 s, as a connection's own is 30 s), so only the deadline, applied before the write, can end it when close() says it must."""
+    ws, theirs = _socketpair_websocket(time.monotonic() + 0.3)
+    ws.sock.settimeout(5.0)
+    started = time.monotonic()
+    try:
+        with pytest.raises((TimeoutError, socket.timeout)):
+            ws.send("x" * (8 * 1024 * 1024))
+        took = time.monotonic() - started
+    finally:
+        ws.close()
+        theirs.close()
+    assert took < 2.0, "the send held on for {:.1f} s: it kept the socket's timeout, not the deadline".format(took)
+
+
 def test_closing_a_browser_whose_chrome_has_gone_sends_nothing(tmp_path):
     proc = subprocess.Popen(["/bin/sh", "-c", "exit 0"], start_new_session=True)
     proc.wait()
@@ -490,6 +639,27 @@ def test_exit_on_sigterm_turns_the_signal_into_a_system_exit_so_that_finally_run
         signal.signal(signal.SIGTERM, before)
 
 
+def test_the_sigterm_handler_is_one_shot_so_a_second_term_cannot_cut_the_clean_up_short():
+    """P4-E follow-up. The first SIGTERM raises SystemExit and the finally clauses stop Chrome and the app, which takes several seconds (a
+    DevTools close, a TERM and its wait, a KILL). A handler that raised on every SIGTERM turned a second one, from a harness that is
+    impatient, into a second SystemExit in the middle of that clean-up, which is where the processes are left running. After the first, the
+    handler is replaced by one that takes the signal and does nothing (not SIG_IGN, which a process started afterwards would inherit)."""
+    before = signal.getsignal(signal.SIGTERM)
+    try:
+        chat_ui_cdp.exit_on_sigterm()
+        first = signal.getsignal(signal.SIGTERM)
+        with pytest.raises(SystemExit) as raised:
+            first(signal.SIGTERM, None)
+        assert raised.value.code == 128 + signal.SIGTERM
+        later = signal.getsignal(signal.SIGTERM)
+        assert later is not first and callable(later), "the handler is still the one that raises"
+        assert later(signal.SIGTERM, None) is None   # a second, a third: nothing is raised
+        assert later(signal.SIGTERM, None) is None
+        assert signal.getsignal(signal.SIGTERM) is later
+    finally:
+        signal.signal(signal.SIGTERM, before)
+
+
 def test_both_checks_install_it_before_they_start_anything(monkeypatch):
     from scripts import chat_ui_browser_check as browser_check
     for module in (layout, browser_check):
@@ -504,6 +674,64 @@ def test_both_checks_install_it_before_they_start_anything(monkeypatch):
         finally:
             signal.signal(signal.SIGTERM, before)
             signal.alarm(0)
+
+
+@pytest.mark.parametrize("module_name", ["chat_ui_layout_check", "chat_ui_browser_check"])
+@pytest.mark.parametrize("interrupted", ["browser", "app"])
+def test_a_check_goes_on_stopping_what_it_started_when_a_step_of_its_clean_up_is_interrupted(monkeypatch, tmp_path, module_name, interrupted):
+    """P4-E follow-up. Browser.close() now finishes its own clean-up when an interrupt (Ctrl-C, the SIGTERM handler's SystemExit) cuts it
+    short, and then lets the interrupt through. A main() whose finally closed the browser, stopped the app and removed its work directory,
+    one statement after the other, never got past the first of them: the app was left running. Each step is in the finally of the one
+    before it, so the steps after an interrupted one still run, and the interrupt goes on out of main()."""
+    module = importlib.import_module("scripts." + module_name)
+    calls = []   # type: List[str]
+    work = tmp_path / "work"
+
+    class FakeApp:
+        url = "http://127.0.0.1:1/"
+        static_dir = None
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            calls.append("app started")
+
+        def stop(self) -> None:
+            calls.append("app stopped")
+            if interrupted == "app":
+                raise KeyboardInterrupt
+
+    class FakeBrowser:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            calls.append("browser started")
+
+        def close(self) -> None:
+            calls.append("browser closed")
+            if interrupted == "browser":
+                raise KeyboardInterrupt
+
+    def make_work(prefix: str = "") -> str:
+        work.mkdir()
+        return str(work)
+
+    monkeypatch.setattr(module, "find_chrome", lambda: "chrome")
+    monkeypatch.setattr(module, "App", FakeApp)
+    monkeypatch.setattr(module, "Browser", FakeBrowser)
+    if module_name == "chat_ui_browser_check":
+        monkeypatch.setattr(module, "warm_up", lambda base: 0.0)
+        monkeypatch.setattr(module, "run_all", lambda *args, **kwargs: ([], None))
+        monkeypatch.setattr(module, "environment", lambda *args, **kwargs: {})
+        monkeypatch.setattr(module.tempfile, "mkdtemp", make_work)
+    else:
+        monkeypatch.setattr(module, "run_checks", lambda browser, url: (0, []))
+    before = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGALRM)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            module.main(["--no-evidence"] if module_name == "chat_ui_browser_check" else [])
+    finally:
+        signal.signal(signal.SIGTERM, before[0])
+        signal.signal(signal.SIGALRM, before[1])
+        signal.alarm(0)
+    assert calls == ["app started", "browser started", "browser closed", "app stopped"], calls
+    assert not work.exists(), "the work directory was left behind"
 
 
 # ---- the geometry check, on measurements ----------------------------------------------------------------------------------------------
