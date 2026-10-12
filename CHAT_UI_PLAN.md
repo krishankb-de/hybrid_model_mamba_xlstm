@@ -4277,7 +4277,7 @@ What it means for the plan:
     - Per label (informational, never gating), worse: Pneumonia 0.090 vs 0.205, Fracture 0.000 vs 0.061, Edema 0.356 vs 0.416, Pleural Effusion 0.597 vs 0.631. Shorter reports name fewer findings.
   - **Wall time:** faster than predicted (decode 0.52 h, CheXbert 15 min, compare 12 min).
   - **What it means.** The EOS model stops where a report ends and no longer repeats itself, but it says less, which costs about 2 points of every CheXbert F1. Per P9-G5 it is offered as a selectable model. Making it the default is the user's decision, and the failed gate argues against a silent switch.
-- [ ] **P9-G5** (laptop, then cluster) The EOS model in the UI.
+- [x] **P9-G5** (laptop, then cluster) The EOS model in the UI.
   - The model appears in `MODEL_CHECKPOINTS` as a selectable model. Its card names the EOS training and links the G4 numbers.
   - The published checkpoints and numbers are unchanged.
   - Making it the *default* model is the user's decision, once they have seen the G4 numbers.
@@ -4297,6 +4297,9 @@ What it means for the plan:
   - **Cluster.** One G4-style chain (decode → CheXbert → compare against the published run, the same gate) per α ∈ {1.5, 2.0}.
   - **Prediction (R4), recorded before submission:** α = 2.0 lengthens the reports to 48–60 words. CheXbert-14 micro rises from 0.4464 towards the published 0.4661 but stays significantly below it on at least one CheXbert metric, so the gate still fails (60%). ROUGE-L stays at or above the published 0.1920. α = 1.5 lands between α = 1.0 and α = 2.0 on every one of these.
   - **Decision rule.** The smallest α whose gate passes becomes the EOS model's serving default, as a per-model decode setting. If none passes, keep α = 1.0 and report the length-versus-F1 trade-off to the user.
+  - **Result, α = 1.5 (2026-10-12): no effect.** Jobs 2638779 (decode, 32 min, gx08), 2638780 (CheXbert, 15 min) and 2638781 (compare, 13 min), sync 4a71f55 clean. 2,662 of 2,663 reports end at EOS. 44.6 words (69.0 tokens) against α = 1.0's 44.2 (68.3). Every metric is within 0.002 of α = 1.0: ROUGE-L 0.1949, BLEU-1 0.1941, BLEU-4 0.0468, CheXbert-14 micro 0.4471, 14-macro 0.2619, 5-micro 0.5132, 5-macro 0.4129. Gate: fail, with the same six metrics worse than the published run.
+  - **Why (read from the code, 2026-10-12).** `beam_search_decode_eos` (`scripts/evaluate_report_generation.py`) stops as soon as the best finished hypothesis scores at least as well as the best live beam, which is top-hypothesis stopping. When an EOS is set aside, it and every live beam have the same length, so length^α divides both sides alike. The stop decision is therefore independent of α, and so is the ranking within a step. α acts only when a hypothesis that finished earlier meets a longer live beam with a near-equal score. The prediction above assumed that α re-ranks finished hypotheses against longer ones. Under this search it cannot.
+  - **Revised prediction for α = 2.0 (recorded 2026-10-12, before its result):** 44.5–46.0 words; at least 2,660 reports end at EOS; the gate fails on the same CheXbert metrics; ROUGE-L between 0.194 and 0.196. If that holds, the 48–60 words above is falsified and the decision rule keeps α = 1.0. A lever that can lengthen reports under this search has to act at the EOS step itself: a penalty on the EOS log-probability, or a minimum number of new tokens that generalises the existing step-0 EOS drop.
 
 ---
 

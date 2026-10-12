@@ -6,7 +6,7 @@
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
   "current_phase": "P5",
   "status": "P0-P3 complete; P4 7/8 (P4-H Playwright e2e added 2026-10-09). P9-G1/G2 done; P9-G3 job 2632173 submitted (EOS training). Parallel worktrees off a8e7efe: P9-G4 laptop part, P5-A, P5-B, P4-H.",
-  "next_action": "STOPPED by the user 2026-10-10 (no new subagents/tasks; commit + push). Resume here: (1) Scoped re-reviews still pending (fix rounds done, not re-reviewed): P6-B/C/D fix 1 = 37f7a53 (package .superpowers/sdd/CHAT_UI_PLAN/review-1dc963c..37f7a53.diff; findings in task-P6-BCD-fix1.md) and P7-B fix 1 (chat_ui fcbf101 = worktree d4bc136; diff cdebd60..fcbf101; findings in task-P7-B-fix1.md). Tick P6-B/C/D after a clean re-review. (2) P7-C review APPROVED with one open plan-mandated Important: tunnel.sh never notices a dead target while a forward is up (server restarts on a new --port 0 port) -> add a periodic endpoint re-read (~60 s) that kills the forward on change/absence + a fake-ssh test; minors in carried_items['P7-C']. (3) Cluster: 2632173 (P9-G3 EOS training) and 2632531 (P5-B gallery g13d_m3_v1) PENDING (Priority). When G3 prints DONE+RESULT: R4 check, tick P9-G3, submit the G4 chain (DEC -- --time=04:00:00 -> CHX -> CMP; lines in the scripts/eval_report_eos_compare_h100.sh header). When 2632531 ends: check towers_identical, gate_rk_equal, withheld 0; tick P5-B; submit P5-C CPU array (bash scripts/chat_remote.sh submit scripts/label_gallery_reports_cpu_h100.sh BUILD_ID=g13d_m3_v1 -- --array=0-7; then MERGE=1 -- --dependency=afterok:<A>); then P5-F gates (bash scripts/chat_remote.sh sync && bash scripts/chat_remote.sh submit scripts/chat_retrieval_gates_h100.sh; R4: 50/50, own-rank >=48/50, labeller 100/100); then the P7-B serve job for P7-D (bash scripts/chat_remote.sh submit scripts/serve_chat_h100.sh; laptop: bash app/tunnel/tunnel.sh with LOCAL_PORT != 8000 while the dev server runs). (4) Next laptop work after the re-reviews: P6-A + P6-E (main checkout; app/static), P8-A + P8-B (server.py), P7-F, P8-E, carried_items, final review. Dev server: create_app(home='/tmp/cxrchat_dev', tiny_step_delay_s=0.05, tiny_gallery=True) on port 8000, restarted by the controller after merges.",
+  "next_action": "2026-10-12, chat_ui 8b9b856 (P7-D probe + follow-up, P9-G5b, P8 follow-up merged; P9-G5 ticked). Next: (1) sync + restart the serve job on the merged code (MODELS=m3eos,m3; DRIFT_NOTE = the published-model sentence) and re-run scripts/chat_realturn_probe.py http://localhost:8010 (EOS timings); (2) P8-E: commit app/README.md (drafted, ignored by *.md) with the '!app/README.md' allow-list line staged alone (the user's .gitignore edits stay unstaged) and a README walkthrough test; review; (3) P8-F part 1 timing job (implementer in flight) -> review -> merge -> submit; (4) P9-G6 LP2.0 chain 2638782-84 (pending; revised prediction in the plan) -> decision rule; (5) P6-F (five features on tiny, screenshots), P7-E requeue drill (disrupts the live server: tell the user first), P8-D chaos checklist, P9-C demo picks, P9-E close, final review. The SDD ledger .superpowers/sdd/CHAT_UI_PLAN/progress.md has the detail. New worktree agents: empty-status check, then git reset --keep <tip> alone (user, 2026-10-12).",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -661,7 +661,7 @@
           "desc": "(cluster) The evaluation job, on the official test split (n = 2,663)."
         },
         "P9-G5": {
-          "done": false,
+          "done": true,
           "desc": "(laptop, then cluster) The EOS model in the UI."
         },
         "P9-G6": {
@@ -703,7 +703,11 @@
         "g4_chexbert_5_macro": "0.4127",
         "g4_gate": "fail",
         "g4_mean_words": "44.17",
-        "g4_sync": "a0afdb2"
+        "g4_sync": "a0afdb2",
+        "commits": "5574917,24a1224,2af9f6e,1e1cb71,fd5b226,0806ad1",
+        "probe": "run1_2026-10-12_gate_ok_eos_stops_6of6",
+        "gates_0806ad1": "validate 4458 passed, e2e 29/29, layout 366/0, browser 10/0",
+        "serve_job": "2638789"
       },
       "verdict": null
     }
@@ -772,9 +776,11 @@
     "P7-C complete: tunnel.sh (forward loop, endpoint re-check every RECHECK_S=60, ::1 bind test, quoted known_hosts) + public_demo.sh (public-mode gate + watchdog every DEMO_RECHECK_S=10); review approved, fix round 1 re-review clean (1 minor parked); merged 86af48d + 98c596c; tunnel tests 196.",
     "2026-10-11: 2026-10-11: user approved the cluster retention sweep and chose the stop-trained model; root cause of the unreadable local report = the dev server's tiny random-init engine (by design). Serve job 2637561 submitted (sync 5c38b2a, MODELS=m3, DRIFT_NOTE 20/20); P9-G5a (EOS model in the registry) + P9-G6 (length-penalty lever) dispatched; P9-G6 added to the plan with its R4 prediction.",
     "P6-A (one intake path in composer.js: click/drag/paste, preview with pixel size, DICOM/type/20 MB refusals, Uploading…/Cancel upload with server-side disconnect checks) and P6-E (viewer.js: full-screen single/side-by-side, zoom/pan/brightness/contrast, keyboard, focus trap, Escape topmost): review → fix rounds 1-2 clean; merged 1c013b1, b5fb4b6, 590a926, cb38f78 (save_upload combined with P8-C's lock). Gates on cb38f78: validate All gates passed (pytest 4214 passed, 1 skipped, 27 deselected, 21 xfailed), e2e 22/22, layout 356/0, browser 10/0.",
-    "P8-C: load drill — laptop (tiny, cap 4): 4 accepted, 2 x overloaded_error, seq contiguous, wall 6.78 s; cluster (serve job 2638789 via tunnel localhost:8010, default model hybrid_150m_m3_rrg_eos, CPU): RESULT requested 6, accepted 4, refused_429 2 (overloaded_error), done 4, seq_contiguous true, session_deleted true, wall_s 20.38, ok true. Drill found and fixed the save_upload race (merged 3612a3d, daaffcb; review approved)."
+    "P8-C: load drill — laptop (tiny, cap 4): 4 accepted, 2 x overloaded_error, seq contiguous, wall 6.78 s; cluster (serve job 2638789 via tunnel localhost:8010, default model hybrid_150m_m3_rrg_eos, CPU): RESULT requested 6, accepted 4, refused_429 2 (overloaded_error), done 4, seq_contiguous true, session_deleted true, wall_s 20.38, ok true. Drill found and fixed the save_upload race (merged 3612a3d, daaffcb; review approved).",
+    "2026-10-12: 2026-10-12: P7-D probe (scripts/chat_realturn_probe.py, merged 375c521) vs serve 2638789: gate ok — published_equal 5/5, eos_stops 6/6 (rows 0-4 + upload), features_ok; first byte <= 89 ms, published turn 7.7-8.4 s (generate 2.5x the P1-C 3.05 s on the same node; cause under investigation in P8-F; store commits ruled out). P7-D tick waits on the user's visual check of the five features on real data. P9-G6 LP1.5 (2638779-81): no effect (44.6 words, metrics within 0.002 of alpha=1.0), gate fail; alpha cannot act under top-hypothesis stopping (plan P9-G6 note).",
+    "EOS model in the UI: G5a (registry, card, EOS guard) + G5b (EOS copy: 'ended the report' chip, per-model stop hint, drawer note; tiny-engine notice + badge; per-model drift note, CPU-only EOS sentence; busy composer fix) merged; cluster check by the R7-safe probe: every EOS turn stopped by eos with 4 similar X-rays and 3 matching reports"
   ],
-  "last_updated": "2026-10-11T22:41:54+02:00",
+  "last_updated": "2026-10-12T11:30:36+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -801,8 +807,7 @@
     "P6-F": [
       "as its own first commit 'P4-E follow-up': try/finally in Browser.close; _arm() at the top of WebSocket.send; widen the trap-order test margin; one-shot SIGTERM handler; straggler sweep of the Chrome session after a graceful exit; test that the autouse fixture calls _kill_the_fakes()",
       "browser check reload step races under load (mid-turn 150-token turn can finish before the reload): harden",
-      "browser check a11y item assumes the no-gallery app's three stage buttons -> fails on a --url run against a tiny_gallery server (pre-existing)",
-      "busy composer at 320x568 hides most of Stop ('Cancel upload', 9 px visible, scrollable): add a busy case at 320x568 to layout check k and fix (Stop shares Send's row, or scroll the composer to the bottom while busy)"
+      "browser check a11y item assumes the no-gallery app's three stage buttons -> fails on a --url run against a tiny_gallery server (pre-existing)"
     ],
     "P7-B": [
       "pass RealEngine cache_dir so the 2.4 GB checkpoint is not re-hashed at every start",
@@ -814,7 +819,7 @@
       "track: transient InterruptedError at interpreter start in tests/test_report_eos_job.py under load (seen once in a P7-B gate run)"
     ],
     "P7-D": [
-      "the live-equals-golden check runs with stop_on_repeat off; a second pass measures the stop on real decoders (see the plan's P7-D note)"
+      "the visual half (the five image features on real data, screenshots) is the user's: R7 keeps report text out of every agent's context; the numeric gate passed (probe run 1, 2026-10-12)"
     ],
     "P8-A": [
       "timeouts on cancel/poll/request fetches (a half-open tunnel can hang Stop at 'Stopping...'); document 413 on all routes",
@@ -847,13 +852,16 @@
       "P6 re-review minor: api.js:184 keeps every refusal for the view incl. 502/503/504 -> a transient gateway error leaves a placeholder until chat switch/reload; consider treating 502-504 as transport failures (not cached)",
       "tests/test_build_retrieval_gallery.py:64 holds raw U+00A0 and U+2028 (write as \\u escapes; outside the P6 source scan's glob)",
       "P9-G5a/G6 re-review minors: tests/test_app_retrieval_stages.py:459 'score =_ends' (missing space); a non-EOS EOS entry refusal leaves an empty chat.db + uploads/ (guard runs after the Store opens); serve headers say the DONE marker is 'beside' the checkpoint (one directory up)",
-      "P6 re-review minor: two tabs, same chat, same bytes — a late 499's discard_upload can remove the copy another turn's save found complete; harden: under _upload_lock skip the discard when a stored message of that session references the sha (or count holders per (session, sha))"
+      "P6 re-review minor: two tabs, same chat, same bytes — a late 499's discard_upload can remove the copy another turn's save found complete; harden: under _upload_lock skip the discard when a stored message of that session references the sha (or count holders per (session, sha))",
+      "optional final engine snapshot: the last stream frame is not the report after a soft stop that returns a finished report while the answer was live, or after a late win (message_stop.display_report settles the card)",
+      "layout check: 'same row only where the composer does not scroll' + keep-scroll means busy cases no longer guarantee 'busy needs no scroll' at 801-834 drawer-open (squeeze still pinned by idle cases, test_app_static CSS text, e2e)",
+      "layout check busy-save needs the 4 s 'Settings saved' row alive at measure time (flake risk on a stalled machine)",
+      "no layout case for the gallery page (Test-study button) busy flow at 320x568 (it scrolls; Stop stays in sight); a notice shown while busy is not re-scrolled (Chrome scroll anchoring keeps Stop in sight; other engines unverified)",
+      "probe: restated vocabularies partly tied to the app by literal/regex (ERROR_KINDS, SKIP_REASONS, STOPPED); private-name coupling to the drill (_write, _Parser, _whole, _seconds, _json_or_none) and a duplicated SSE splitter/SESSION_ID; tests import private helpers from two test modules",
+      "probe pins: the timing write scan sees only plain Assign (tuple-unpack or setattr side-writes pass); `Streaming` is a third near-identical fake beside Answer/Refusal",
+      "browser check 'reload' step flakes ~25% (pre-existing on 4a71f55; also P6-F)"
     ],
-    "P9-G5": [
-      "UI copy for eos_trained models: render.js \"full budget\" chip and app.js:1360 stop-switch hint (\"always decodes the whole token budget\") are wrong for an EOS model",
-      "golden driver card line prints eos_trained",
-      "optional final engine snapshot: the last stream frame is not the report after a soft stop that returns a finished report while the answer was live, or after a late win (message_stop.display_report settles the card)"
-    ],
+    "P9-G5": [],
     "P5-D": [
       "Gallery.open refuses a manifest without gate_rk.equal == true (P5-B review minor 4)",
       "read gallery sizes from manifest[\"counts\"] (tiny gallery is 200/40/240)"
@@ -865,14 +873,7 @@
     "P7-C": [
       "parked: the endpoint re-read has only ConnectTimeout; a read that connects then stalls blinds the watch loop -> add -o ServerAliveInterval=5 -o ServerAliveCountMax=2 to the read (pinned argv changes)"
     ],
-    "P8-followup": [
-      "text-only non-command public turns (no model run) spend rate-limit tokens -> refund turns that ran no model; app.js errorMessage shows every 429 as 'server is busy' -> show error.type rate_limited's message + Retry-After",
-      "app.js request() (create chat, list, delete, export) has no fetch timeout (P8-A covered api.js only)",
-      "422 API description: 'never repeats a value that was sent' (key names are echoed, values never)",
-      "413 example text on every route is the image message 'Image is larger than 20 MB.' -> a request-size message for _Guard/_capped; chunked bodies are refused after ~21 MB is read",
-      "P8-C review minor: scripts/chat_load_drill.py check_url catches only httpx.InvalidURL -> UnicodeEncodeError / idna.IDNAError (e.g. a non-UTF-8 byte in the path, http://xn--) end as a traceback, exit 1; catch (httpx.InvalidURL, UnicodeError) + two refusal-table rows",
-      "P8-C review minor (optional): pin that the token appears in exactly one expression (where it goes, not only where it comes from); public-mode six-turn 'given 2 back' path only tested with --turns 2"
-    ],
+    "P8-followup": [],
     "P8-E": [
       "R8 heads-up: the first P8-B start on the cluster CHAT_HOME runs the retention sweep (public sessions > 7 d, private > 45 d, soft-deleted sessions, orphan upload dirs) -> the user is told before the first cluster start; the runbook says so",
       "runbook: RECHECK_S=60 / DEMO_RECHECK_S=10; requeue followed within ~RECHECK_S; MAX_ATTEMPTS counts attempts only; macOS wildcard listener reads free; safe to background; demo closes itself (exit 1) when the server stops saying public; after a demo check pgrep cloudflared (a SIGKILLed public_demo.sh leaves it running)",
@@ -881,7 +882,12 @@
     ],
     "P9-D": [
       "verify how fast the public link closes after the watchdog's SIGTERM (cloudflared grace period)",
-      "/healthz must answer within 5 s under CPU-bound generation, or the demo watchdog closes the link"
+      "/healthz must answer within 5 s under CPU-bound generation, or the demo watchdog closes the link",
+      "free notes are unlimited per client but each holds a queue slot briefly and writes rows: add a separate generous note cap before a public demo (P9-G5b/P8f review)"
+    ],
+    "P8-F": [
+      "live generate stage 7.4-8.1 s per 100 tokens vs P1-C 3.05 s per report on the same node (gx14, 8 CPUs); store commits ruled out (WAL exclusive, 0.007 ms); timing job (P8-F part 1, arms A-F) to locate it",
+      "the EOS (default) model's turn time: probe pass 3 records it from the P7-D follow-up on (eos_turn_ms_max)"
     ]
   }
 }
