@@ -919,6 +919,9 @@ def check_stop(ctx: Context) -> Tuple[str, Dict[str, Any]]:
 def check_keyboard(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     b = ctx.browser
     ctx.open("#/new")
+    # Tab leaves the page for the browser's own controls after the last control only when the browser's window is the active one; when it is not,
+    # which depends on the machine and not on the page, Tab wraps to the first control. The walk below asserts the first.
+    b.call("Page.bringToFront")
     b.set_files("#file", [ctx.images["a"]])   # the file dialog is the one thing a script cannot press a key in
     b.wait_for("!document.querySelector('#preview').hidden", what="the attached image")
     stops = []  # type: List[str]

@@ -171,6 +171,30 @@ def test_the_reload_step_holds_the_turn_before_it_sends_it_and_always_releases_i
     assert hold.lineno < in_finally[0].lineno, "the hold is not made before the try that releases it"
 
 
+# ---- the keyboard item walks the tab order of a page that is the browser's active one ----------------------------------------------------
+
+def test_the_keyboard_item_brings_the_page_to_the_front_before_it_presses_a_tab():
+    """The item asserts that after the last control Tab leaves the page for the browser's own controls (the page's active element is then the
+    body). Chrome does that only when its window is the active one. When it is not, Tab wraps to the first control instead and the item says
+    'after the last control Tab stays in the page: #new-session'. The item passed on this machine in earlier runs and then failed every run,
+    with the same page and the same Chrome flags, so the state of the window is the machine's and not the page's; why it changed is not known.
+    Measured on a page of three buttons: without Page.bringToFront the focus after eight Tabs is a b c a b c body a, with it a b c body a b c a.
+    The item brings the page to the front before its first Tab, so that it measures the page and not the window."""
+    import ast
+    import inspect
+    import textwrap
+    tree = ast.parse(textwrap.dedent(inspect.getsource(check.check_keyboard)))
+
+    def calls(name: str, first_arg: str) -> List[Any]:
+        return [c for c in ast.walk(tree) if isinstance(c, ast.Call) and ast.unparse(c.func) == name and c.args and ast.unparse(c.args[0]) == first_arg]
+
+    fronts = calls("b.call", "'Page.bringToFront'")
+    tabs = calls("b.key", "'Tab'")
+    assert tabs, "the pin looks at the Tab presses of the item"
+    assert len(fronts) == 1, "the item does not bring the page to the front exactly once: {}".format(len(fronts))
+    assert fronts[0].lineno < min(t.lineno for t in tabs), "the first Tab is pressed before the page is brought to the front"
+
+
 # ---- the accessibility-tree reader ----------------------------------------------------------------------------------------------------
 
 class FakeTree:
