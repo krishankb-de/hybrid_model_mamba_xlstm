@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,33 +54,60 @@ def no_real_ssh(monkeypatch):
     monkeypatch.setattr(requeue, "subprocess", SimpleNamespace(**dict(vars(subprocess), run=forbidden)))
 
 
+FORBIDDEN_PORTS = frozenset({8000, 8010})   # the user's dev server, and the tunnel to the live cluster server: nothing in this process connects to either
+
+
+def is_forbidden(address):
+    """Whether a socket address, as connect takes it ((host, port), or an IPv6 four-tuple), names a port of the user's own servers. FORBIDDEN_PORTS is
+    read when it is called, so that its own test can add a port that it owns."""
+    return isinstance(address, tuple) and len(address) >= 2 and address[1] in FORBIDDEN_PORTS
+
+
 @pytest.fixture(autouse=True)
 def never_the_ports_of_the_users_own_servers(monkeypatch):
-    """8000 is the user's dev server and 8010 the tunnel to the live cluster server: no test may connect to either, whatever it says in a URL. The
-    socket's own connect is guarded for the whole module, so that a test that was wrong about its fake or its server would fail instead."""
+    """No test may connect to a port of FORBIDDEN_PORTS, whatever it says in a URL. The socket's own connect is guarded for the whole module, so that a
+    test that was wrong about its fake or its server would fail instead. The guard stays in this process: a child process is not reached by it, so no
+    child is ever handed either port (pinned in tests/test_willi_parity.py)."""
     real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
 
-    def guard(address):
-        if isinstance(address, tuple) and len(address) >= 2 and address[1] in (8000, 8010):
-            raise AssertionError("a test tried to connect to a port of the user's own servers")
-
     def connect(self, address):
-        guard(address)
+        if is_forbidden(address):
+            raise AssertionError("a test tried to connect to a port of the user's own servers")
         return real_connect(self, address)
 
     def connect_ex(self, address):
-        guard(address)
+        if is_forbidden(address):
+            raise AssertionError("a test tried to connect to a port of the user's own servers")
         return real_connect_ex(self, address)
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
 
 
-def test_the_guard_that_keeps_every_test_off_the_users_ports_stops_a_connection_before_it_is_made():
-    for port in (8000, 8010):
+def test_the_guard_names_the_users_ports_and_decides_on_the_address_alone_so_that_checking_it_connects_to_neither():
+    assert FORBIDDEN_PORTS == {8000, 8010}
+    for address in (("127.0.0.1", 8000), ("localhost", 8010), ("::1", 8000, 0, 0), ("fe80::1", 8010, 0, 2)):
+        assert is_forbidden(address), address
+    for address in (("127.0.0.1", 8001), ("127.0.0.1", 18000), ("127.0.0.1", 80), "/tmp/a-unix-socket", None, ("127.0.0.1",)):
+        assert not is_forbidden(address), address
+
+
+def test_the_guard_stops_a_connection_before_it_is_made_shown_on_a_port_the_test_owns_and_never_on_the_users(monkeypatch):
+    """The guard is shown on a listening socket of this test's own: its port is added to FORBIDDEN_PORTS, and connecting to it must raise before anything
+    is connected, by either of the two methods the guard wraps. Nothing here connects to 8000 or 8010, whether or not the guard works: if it were broken,
+    the connection would be made to this test's own socket, which would fail the test on its own port (and the check of the socket's queue)."""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        owned = listener.getsockname()[1]
+        assert owned not in FORBIDDEN_PORTS
+        monkeypatch.setattr(sys.modules[__name__], "FORBIDDEN_PORTS", FORBIDDEN_PORTS | {owned})
         with pytest.raises(AssertionError, match="the user's own servers"):
-            socket.create_connection(("127.0.0.1", port), timeout=1)
+            socket.create_connection(("127.0.0.1", owned), timeout=1)
         with socket.socket() as sock, pytest.raises(AssertionError, match="the user's own servers"):
-            sock.connect_ex(("127.0.0.1", port))
+            sock.connect_ex(("127.0.0.1", owned))
+        listener.settimeout(0.2)
+        with pytest.raises(TimeoutError):   # no connection reached it: nothing is waiting to be accepted
+            listener.accept()
 
 
 @pytest.fixture
@@ -898,7 +926,7 @@ class FakeChat:
         self.httpd = ThreadingHTTPServer(("127.0.0.1", self.port or 0), self._handler())
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
-        assert self.port not in (8000, 8010), "a test server never takes the ports of the user's own servers"
+        assert self.port not in FORBIDDEN_PORTS, "a test server never takes the ports of the user's own servers"
         threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
 
     def stop(self, cut=True):
@@ -1188,7 +1216,8 @@ def test_a_token_file_wins_over_chat_token_and_a_server_that_wants_a_token_the_d
     chat.token = TOKEN
     monkeypatch.setenv("CHAT_TOKEN", "the-wrong-token")
     path = write_token_file(tmp_path, TOKEN + "\n")
-    assert flow(chat, FakeCluster(chat), "--token-file", str(path))[0] == 0
+    code, out, err = flow(chat, FakeCluster(chat), "--token-file", str(path))
+    assert code == 0 and "SECRET" not in out + err
     chat2 = FakeChat(token=TOKEN)
     try:
         for token in (None, "the-wrong-token"):
@@ -1201,6 +1230,7 @@ def test_a_token_file_wins_over_chat_token_and_a_server_that_wants_a_token_the_d
             result = the_result(out)
             assert code == 1 and err == "" and result["error"] == "session_create_http_401" and result["ok"] is False
             assert result["session_deleted"] is None and ("requeue", JOB) not in cluster.calls and "the-wrong-token" not in out
+            assert "SECRET" not in out + err, "nothing of the 401's error body"
     finally:
         chat2.close()
 
@@ -1349,6 +1379,7 @@ def test_a_stored_turn_that_cannot_be_read_after_the_server_is_back_is_a_fixed_c
     result = the_result(out)
     assert code == 1 and result["error"] == "stored_turn_http_500" and result["back_s"] is not None and result["turn_status"] is None
     assert result["ok"] is False and result["session_deleted"] is True
+    assert err == "" and "SECRET" not in out + err, "nothing of the 500's error body"
 
 
 def test_a_session_that_cannot_be_deleted_is_reported_and_is_no_part_of_ok(chat):
@@ -1358,6 +1389,7 @@ def test_a_session_that_cannot_be_deleted_is_reported_and_is_no_part_of_ok(chat)
     code, out, err = flow(chat, FakeCluster(chat))
     result = the_result(out)
     assert code == 0 and err == "" and result["session_deleted"] is False and result["ok"] is True
+    assert "SECRET" not in out + err, "nothing of the 404's error body"
 
 
 def test_an_interrupt_while_the_requeue_is_sent_still_prints_the_line_deletes_the_session_and_exits_1(chat):
@@ -1481,7 +1513,7 @@ class ProcessCluster:
 def servers(tmp_path):
     """Two lives of one tiny server: the first started, the second not yet (the cluster starts it). Whatever still runs at the end is stopped."""
     port = free_port()
-    assert port not in (8000, 8010), "a test server never takes the ports of the user's own servers"
+    assert port not in FORBIDDEN_PORTS, "a test server never takes the ports of the user's own servers"
     home = tmp_path / "chat_home"
     first, second = TinyServerProcess(home, port, tmp_path / "first.log"), TinyServerProcess(home, port, tmp_path / "second.log")
     first.start()
@@ -1542,11 +1574,16 @@ exit 0
 """
 
 
-def test_the_script_runs_as_a_script_from_any_directory_through_its_own_ssh_commands_and_prints_nothing_but_the_result_line(tmp_path):
-    """`venv/bin/python scripts/chat_requeue_drill.py URL --job N`, in a process of its own, from a directory that is not the repository: the real
-    SshCluster, whose ssh is a stub found first on a PATH that holds nothing else (so no real ssh can run), against the fake server, which goes down
-    when the stub has been called with `scontrol requeue`. What the process printed on both streams is read for the SECRETs the fake sent, and what
-    the stub was asked is the two commands, in order: the node, the requeue, the node."""
+SCRIPT = REPO_ROOT / "scripts" / "chat_requeue_drill.py"
+
+
+@contextmanager
+def script_world(tmp_path, how):
+    """Everything a child process of the script needs, and a way to run it. A PATH that holds a stub `ssh` and nothing else (so that no real ssh can run, and
+    the real SshCluster finds the stub), a log of the stub's calls, an empty directory to run in, the fake server, and a watcher that takes that server
+    down the way a requeue does (`how`: graceful, hard or silent, see FakeChat.requeued) once the stub has been called with `scontrol requeue`.
+    world.run(*args) runs the script with those arguments in a process of its own, from that directory, and returns the finished process. The URLs a test
+    gives it are the fake's, or a refusal that needs no server at all: a child process is not reached by the socket guard of this module."""
     stubs = tmp_path / "bin"
     stubs.mkdir()
     (stubs / "ssh").write_text(STUB_SSH)
@@ -1556,34 +1593,68 @@ def test_the_script_runs_as_a_script_from_any_directory_through_its_own_ssh_comm
     work = tmp_path / "cwd"
     work.mkdir()
     env = {"PATH": str(stubs), "STUB_LOG": str(log), "HOME": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"}
-    script = REPO_ROOT / "scripts" / "chat_requeue_drill.py"
-    chat = FakeChat()
-    watching = threading.Event()
+    chat, watching = FakeChat(), threading.Event()
 
     def watch():   # the cluster's side of it: a requeue that reached the scheduler takes the server down, and it comes back
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + 120
         while time.monotonic() < deadline and not watching.is_set():
             if "scontrol" in log.read_text():
-                chat.requeued("graceful", 0.4)
+                chat.requeued(how, 0.4)
                 return
             time.sleep(0.02)
+
+    def run(*args, timeout=180):
+        return subprocess.run([sys.executable, str(SCRIPT)] + list(args), cwd=str(work), env=env, capture_output=True, text=True, timeout=timeout)
+
     watcher = threading.Thread(target=watch, daemon=True)
     watcher.start()
     try:
-        done = subprocess.run([sys.executable, str(script), chat.base, "--job", JOB, "--wait", "60"], cwd=str(work), env=env, capture_output=True,
-                              text=True, timeout=180)
-        refused = subprocess.run([sys.executable, str(script), "http://localhost:8000", "--job", JOB], cwd=str(work), env=env, capture_output=True,
-                                 text=True, timeout=60)
+        yield SimpleNamespace(chat=chat, log=log, work=work, run=run)
     finally:
         watching.set()
         watcher.join(5)
         chat.close()
+
+
+def test_the_script_runs_as_a_script_from_any_directory_through_its_own_ssh_commands_and_prints_nothing_but_the_result_line(tmp_path):
+    """`venv/bin/python scripts/chat_requeue_drill.py URL --job N`, in a process of its own, from a directory that is not the repository: the real
+    SshCluster, whose ssh is a stub found first on a PATH that holds nothing else (so no real ssh can run), against the fake server, which goes down
+    when the stub has been called with `scontrol requeue`. What the process printed on both streams is read for the SECRETs the fake sent, and what
+    the stub was asked is the two commands, in order: the node, the requeue, the node. Two more runs are refused as a script is: one for a job that is
+    no number, one for a URL on a scheme the script does not speak. Neither needs a server, so neither can reach one; the dev server's port, which the
+    script refuses too, is tried where the guard of this module is in force (test_the_script_refuses_port_8000_...), never in a process the guard does
+    not reach."""
+    with script_world(tmp_path, "graceful") as world:
+        done = world.run(world.chat.base, "--job", JOB, "--wait", "60")
+        sent, calls = len(world.chat.requests), world.log.read_text()
+        refused = [world.run(world.chat.base, "--job", "abc", timeout=60), world.run("ftp://127.0.0.1:2121", "--job", JOB, timeout=60)]
+        sent_after, calls_after = len(world.chat.requests), world.log.read_text()
     assert done.returncode == 0 and done.stderr == "", (done.stdout, done.stderr)
     result = the_result(done.stdout)
     assert result["ok"] is True and (result["node_before"], result["node_after"]) == ("gx14", "gx14") and result["turn_error"] == "server_restart"
-    assert "SECRET" not in done.stdout + done.stderr and list(work.iterdir()) == []
-    assert log.read_text().splitlines() == [
+    assert "SECRET" not in done.stdout + done.stderr and list(world.work.iterdir()) == []
+    assert calls.splitlines() == [
         "-o BatchMode=yes hpi-hpc squeue -j {} -h -o %N".format(JOB), "-o BatchMode=yes hpi-hpc scontrol requeue {}".format(JOB),
         "-o BatchMode=yes hpi-hpc squeue -j {} -h -o %N".format(JOB)], "the stub saw the two commands the drill may build, and nothing else"
-    assert refused.returncode == 2 and refused.stdout == "" and refused.stderr.startswith("ERROR ") and "8000" in refused.stderr
-    assert refused.stderr.count("\n") == 1 and log.read_text().count("\n") == 3, "the refusal ran no command"
+    for process, sentence, given in zip(refused, (requeue.JOB_REFUSAL, drill.URL_REFUSAL), ("abc", "ftp")):
+        assert process.returncode == 2 and process.stdout == "" and process.stderr.startswith("ERROR ") and sentence in process.stderr, process.stderr
+        assert process.stderr.count("\n") == 1 and given not in process.stderr, "one fixed line, which does not say what it was given"
+    assert (sent_after, calls_after) == (sent, calls), "a refusal sends no request and runs no command"
+
+
+@pytest.mark.parametrize("how, stream_end", [("hard", "reset"), ("silent", "timeout")])
+def test_the_real_stderr_of_the_script_is_empty_when_its_stream_is_cut_or_goes_silent_and_its_reader_thread_is_left_behind(tmp_path, how, stream_end):
+    """P7-E fix 1. The one other run of the script in a process of its own, where its real stderr and stdout are read and not a StringIO's, on the two
+    endings that leave a reader behind: `hard` (SIGKILL: the connection is cut in the middle of a chunked body, so the reader's read fails and it is
+    ended as a reset) and `silent` (a tunnel whose far end is gone: the connection stays open and says nothing, the drill gives the reader FINISH_S
+    seconds and calls it a timeout, and the process then ends with that daemon thread still blocked in its read, while the client is closed under it).
+    Neither may print anything: stderr is empty, stdout is exactly one RESULT line, and the line is the one a drill that held prints."""
+    with script_world(tmp_path, how) as world:
+        done = world.run(world.chat.base, "--job", JOB, "--wait", "60")
+    assert done.returncode == 0 and done.stderr == "", (done.returncode, done.stdout, done.stderr)
+    assert done.stdout.count("\n") == 1 and done.stdout.startswith("RESULT {") and done.stdout.endswith("}\n"), done.stdout
+    result = the_result(done.stdout)
+    assert result["ok"] is True and (result["turn_status"], result["turn_error"]) == ("error", "server_restart")
+    assert result["stream_end"] in (stream_end, "reset"), "an abandoned reader may see the client's close before the line is built, and call it a reset"
+    assert result["error_event"] is False and "SECRET" not in done.stdout + done.stderr and list(world.work.iterdir()) == []
+    assert world.log.read_text().count("scontrol requeue") == 1

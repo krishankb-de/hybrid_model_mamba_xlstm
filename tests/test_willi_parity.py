@@ -9245,8 +9245,9 @@ def test_the_requeue_drill_names_ssh_and_starts_a_process_in_one_class_and_build
     """P7-E. The cluster is injected. The one class that touches it, SshCluster, is the only place in the script where ssh, the scheduler's commands or
     `subprocess` appear (a docstring aside); it runs one `subprocess.run` with an argument list, no shell, nothing on stdin and a time limit; and the
     argument lists it builds are exactly the two the plan allows: `squeue -j JOB -h -o %N` and `scontrol requeue JOB` behind `ssh -o BatchMode=yes
-    hpi-hpc`. The drill's own code asks the cluster for the node in one function and requeues once, after the third delta, and the real cluster is made in main,
-    as the default of the argument."""
+    hpi-hpc`. That is pinned at the one door a command goes through, `_run` (P7-E fix 1: the list literals alone left a third command built as a tuple
+    unseen): node and requeue are its only callers, each hands it one of the two literal lists, and no other method exists. The drill's own code asks the
+    cluster for the node in one function and requeues once, after the third delta, and the real cluster is made in main, as the default of the argument."""
     tree, parents = _requeue_tree()
     docstrings = _requeue_docstrings(tree)
     cluster = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "SshCluster")
@@ -9264,10 +9265,25 @@ def test_the_requeue_drill_names_ssh_and_starts_a_process_in_one_class_and_build
     assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "subprocess"} == {
         "run", "DEVNULL", "TimeoutExpired"}, "no Popen, no check_output, no other way to start a process"
     lists = [n for n in ast.walk(tree) if isinstance(n, ast.List) and n.elts and isinstance(n.elts[0], ast.Constant) and n.elts[0].value == "ssh"]
-    assert sorted(ast.unparse(n) for n in lists) == sorted(_normalized(shape) for shape in (
-        '["ssh", "-o", "BatchMode=yes", CLUSTER_HOST, "squeue", "-j", job, "-h", "-o", "%N"]',
-        '["ssh", "-o", "BatchMode=yes", CLUSTER_HOST, "scontrol", "requeue", job]')), "the two commands, and no third"
+    shapes = {"node": '["ssh", "-o", "BatchMode=yes", CLUSTER_HOST, "squeue", "-j", job, "-h", "-o", "%N"]',
+              "requeue": '["ssh", "-o", "BatchMode=yes", CLUSTER_HOST, "scontrol", "requeue", job]'}
+    assert sorted(ast.unparse(n) for n in lists) == sorted(_normalized(shape) for shape in shapes.values()), "the two commands, and no third"
     assert sorted(_probe_outer(n, parents) for n in lists) == ["node", "requeue"]
+    # A command is whatever reaches `_run`, so what reaches it is pinned, and not only the list literals that begin with "ssh": a third command built as a
+    # tuple, through list(...) or from a variable has no such literal. `_run` is called twice, once by node and once by requeue, each time with one list
+    # literal and nothing else; its name is used nowhere else in the class (no getattr, no alias) and the class has no method but those two and their two
+    # helpers. (The turn reader has a `_run` of its own, its thread's body, which is the one other use of the name, in its __init__.)
+    callers = [n for n in ast.walk(cluster) if isinstance(n, ast.Call) and getattr(n.func, "attr", getattr(n.func, "id", None)) == "_run"]
+    assert sorted(_probe_outer(n, parents) for n in callers) == ["node", "requeue"], "_run: called by node and requeue, once each"
+    assert all(len(n.args) == 1 and not n.keywords and isinstance(n.args[0], ast.List) for n in callers), "each hands it one list literal"
+    assert {_probe_outer(n, parents): ast.unparse(n.args[0]) for n in callers} == {name: _normalized(shape) for name, shape in shapes.items()}, \
+        "node its squeue and requeue its scontrol, and no other command"
+    named = [n for n in ast.walk(cluster) if (isinstance(n, ast.Attribute) and n.attr == "_run") or (isinstance(n, ast.Name) and n.id == "_run")
+             or (isinstance(n, ast.Constant) and n.value == "_run" and n not in docstrings)]
+    assert len(named) == len(callers) == 2, "the name `_run` is used as the callee of those two calls and nowhere else in the class"
+    assert sorted(n.name for n in cluster.body if isinstance(n, ast.FunctionDef)) == ["_checked", "_run", "node", "requeue"], "no method that could build a third"
+    elsewhere = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "_run" and n not in inside]
+    assert [(_probe_outer(n, parents), ast.unparse(n)) for n in elsewhere] == [("__init__", "self._run")], "outside the class: the reader's own thread body only"
     raised = [n for n in ast.walk(cluster) if isinstance(n, ast.Call) and ast.unparse(n.func) == "ClusterError"]
     assert sorted(ast.unparse(n.args[0]) for n in raised) == sorted(repr(w) for w in ("bad_job", "timeout", "not_run", "failed")), "fixed words only"
     made = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == "SshCluster"]
@@ -9299,6 +9315,34 @@ def test_the_requeue_drill_never_says_either_of_the_ports_of_the_users_own_serve
     assert plain["POLL_S"] == "5.0" and plain["DEFAULT_WAIT_S"] == "1800.0" and plain["DELTA"] == "'content_block_delta'"
     options = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "turn_options")
     assert [ast.unparse(r.value) for r in ast.walk(options) if isinstance(r, ast.Return)] == ["probe.turn_options(model=MODEL, max_new_tokens=MAX_NEW_TOKENS)"]
+
+
+_REQUEUE_TESTS = REPO_ROOT / "tests" / "test_chat_requeue_drill.py"
+
+
+def test_the_requeue_drill_tests_name_the_users_ports_only_where_nothing_can_connect():
+    """P7-E fix 1. 8000 is the user's dev server and 8010 the tunnel to the live cluster server. The module's autouse socket guard keeps every test of
+    tests/test_chat_requeue_drill.py off both, but it works in the test process: a child process is not reached by it, and a child that was handed
+    http://localhost:8000 would have posted a turn to the dev server had the script's URL check ever regressed. So the numbers are written in the guard's
+    own constant and in the tests that run in this process with a client that cannot connect (the refusal matrix under `offline`, the check_url matrix,
+    the `Down` client, the guard's address test), and nowhere else: not in a test that starts a process, not in a fixture, not in a fake (a docstring
+    aside). Each of those places must still name them, so that the list cannot drift."""
+    tree = ast.parse(_REQUEUE_TESTS.read_text(encoding="utf-8"))
+    docstrings = _requeue_docstrings(tree)
+    where = {}
+    for top in tree.body:
+        name = top.name if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else type(top).__name__
+        if isinstance(top, ast.Assign):
+            name = ast.unparse(top.targets[0])
+        for node in ast.walk(top):
+            if not isinstance(node, ast.Constant) or node in docstrings:
+                continue
+            if (type(node.value) is int and node.value in (8000, 8010)) or (isinstance(node.value, str) and re.search(r"(?<![0-9])(8000|8010)(?![0-9])", node.value)):
+                where.setdefault(name, []).append(node.value)
+    assert sorted(where) == sorted([
+        "FORBIDDEN_PORTS", "test_the_guard_names_the_users_ports_and_decides_on_the_address_alone_so_that_checking_it_connects_to_neither",
+        "test_the_script_refuses_port_8000_in_one_line_with_exit_2_and_connects_to_nothing", "test_only_port_8000_itself_is_refused_for_being_the_dev_server",
+        "test_a_loopback_address_is_not_refused_and_a_server_that_is_down_ends_in_one_result_line_with_a_fixed_code"]), sorted(where)
 
 
 def test_the_requeue_drill_prints_and_writes_nothing_but_result_lines_help_and_its_fixed_refusals():
