@@ -92,6 +92,7 @@ multirun/
 !EFFICIENCY_PLAN.md
 !CHAT_UI_PLAN.md
 !docs/chat_ui/CHAT_UI_SPEC.md
+!app/README.md
 !CLAUDE.md
 !analysis/baseline_probe_report.md
 !analysis/h100_scaling_results.md

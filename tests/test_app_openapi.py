@@ -1,6 +1,7 @@
 """CHAT_UI_PLAN.md P3-E: the chat server's OpenAPI reference (/docs), on the tiny engine."""
 import json
 import re
+from pathlib import Path
 from typing import Annotated
 
 import pytest
@@ -92,6 +93,35 @@ def test_curl_walkthrough_options_validate():
     Options(**{"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "cached_decode": True, "compile": False,
                "k_images": 4, "k_reports": 3, "label": True, "reference": None, "display_repair": False,
                "stop_on_repeat": False})
+
+
+REPO = Path(__file__).resolve().parent.parent
+README = REPO / "app" / "README.md"   # the runbook (P8-E); its section 9 is the curl walkthrough
+
+
+def _readme_walkthrough_options():
+    """The options the README's walkthrough sends: the JSON of its one `-F 'options=...'` argument."""
+    found = re.findall(r"-F 'options=(\{.*?\})'", README.read_text(encoding="utf-8"))
+    assert len(found) == 1, found
+    return json.loads(found[0])
+
+
+def test_the_readme_walkthrough_sends_the_published_protocol_and_runs(client):
+    options = _readme_walkthrough_options()
+    assert options == WALKTHROUGH_OPTIONS   # the dict test_curl_walkthrough_options_validate pins
+    sid = client.post("/v1/sessions", json={}).json()["id"]   # then the walkthrough's steps, in its order, on the tiny engine
+    r = client.post(MESSAGES.format(session_id=sid), files={"image": ("xray.png", png_bytes(), "image/png")},
+                    data={"options": json.dumps(options)})
+    assert r.status_code == 200
+    frames = list(iter_sse([r.text]))
+    assert frames[0]["event"] == "message_start" and frames[-1]["event"] == "message_stop"
+    assert frames[-1]["data"]["status"] == "done"
+    assert client.get("/v1/sessions/{}/export".format(sid), params={"format": "md"}).status_code == 200
+    assert client.delete("/v1/sessions/{}".format(sid)).status_code == 204
+
+
+def test_the_readme_is_allow_listed_past_the_md_rule():
+    assert "!app/README.md" in (REPO / ".gitignore").read_text(encoding="utf-8").splitlines()
 
 
 # ---- beyond the brief: what makes /docs a reference rather than a list of function names ----------------------------
