@@ -626,6 +626,83 @@ def test_a_home_that_was_given_is_left_to_its_owner(tmp_path):
     assert proc.returncode == 0 and home.exists()
 
 
+def _tiny_turn(engine: Any, max_new_tokens: int = 16):
+    """What a turn hands Engine.generate: the encoded synthetic image, and the options of a short turn."""
+    from app.schemas import Options
+    from tests.app_helpers import png_bytes
+    _, prepared = engine.preprocess(png_bytes(320, 320))
+    _, encoded = engine.encode(prepared)
+    return encoded, Options(max_new_tokens=max_new_tokens)
+
+
+def test_a_held_tiny_turn_stops_after_its_first_snapshot_and_goes_on_when_the_hold_is_released(tmp_path, monkeypatch):
+    """The reload step of the browser check needs a turn that is still running when the page has been reloaded, whatever the load on the
+    machine: the tiny engine runs on its own clock, and a reload that took longer than the turn found it done. While the file exists, the
+    turn sends the snapshot it has made and then waits (App.hold); the file's removal lets it go on."""
+    from app.engine import TinyEngine, build_engine
+    monkeypatch.setattr(TinyEngine, "generate", TinyEngine.generate)   # put back at the end of the test, whatever hold_turns does to it
+    hold = tmp_path / "hold"
+    chat_ui_cdp.hold_turns(str(hold))
+    engine = build_engine("tiny")
+    encoded, options = _tiny_turn(engine)
+    hold.touch()
+    snapshots, finished, cancel = [], [], threading.Event()
+    worker = threading.Thread(target=lambda: finished.append(engine.generate(encoded, options, lambda step, text: snapshots.append(step), cancel)))
+    worker.start()
+    try:
+        assert _until(lambda: len(snapshots) >= 1, 30), "the turn made no snapshot"
+        time.sleep(0.5)   # 25 steps of the 20 ms engine, had it gone on
+        assert snapshots == [0] and worker.is_alive(), "the turn went on while it was held: {}".format(snapshots)
+        hold.unlink()
+        worker.join(timeout=30)
+        assert not worker.is_alive() and snapshots == list(range(16)) and len(finished) == 1, "the released turn did not run to its end"
+    finally:
+        cancel.set()
+        worker.join(timeout=10)
+
+
+def test_a_stop_ends_a_held_turn_with_the_hold_still_on(tmp_path, monkeypatch):
+    """Stop must work on a held turn: a check that fails while it holds one stops the app, and the page's Stop is the user's."""
+    from app.engine import Cancelled, TinyEngine, build_engine
+    monkeypatch.setattr(TinyEngine, "generate", TinyEngine.generate)
+    hold = tmp_path / "hold"
+    chat_ui_cdp.hold_turns(str(hold))
+    engine = build_engine("tiny")
+    encoded, options = _tiny_turn(engine)
+    hold.touch()
+    snapshots, outcome, cancel = [], [], threading.Event()
+
+    def run() -> None:
+        try:
+            engine.generate(encoded, options, lambda step, text: snapshots.append(step), cancel)
+            outcome.append("finished")
+        except Cancelled:
+            outcome.append("cancelled")
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert _until(lambda: len(snapshots) >= 1, 30)
+        cancel.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive() and outcome == ["cancelled"] and hold.exists(), (outcome, hold.exists())
+    finally:
+        cancel.set()
+        worker.join(timeout=10)
+
+
+def test_an_app_holds_and_releases_by_the_file_its_launcher_watches(tmp_path):
+    app = chat_ui_cdp.App.__new__(chat_ui_cdp.App)
+    app.home = str(tmp_path)
+    app.hold()
+    app.hold()   # holding what is held is the same
+    assert (tmp_path / chat_ui_cdp.HOLD_FILE).exists()
+    app.release()
+    app.release()   # and so is releasing what is free
+    assert not (tmp_path / chat_ui_cdp.HOLD_FILE).exists()
+    assert 'hold_turns(os.path.join(args[0], "{}"))'.format(chat_ui_cdp.HOLD_FILE) in chat_ui_cdp.LAUNCH   # the app process watches the same file
+
+
 def test_exit_on_sigterm_turns_the_signal_into_a_system_exit_so_that_finally_runs():
     before = signal.getsignal(signal.SIGTERM)
     try:

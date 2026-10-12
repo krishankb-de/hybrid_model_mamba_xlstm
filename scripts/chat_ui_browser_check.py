@@ -8,14 +8,16 @@ one `CHECK <name> PASS|FAIL <detail>` line each:
 
   stream    a turn streams: all six stages settle, the report grows over many snapshots, then the card says done
   reload    Page.reload shows the identical card (its markup, text and stage states; a picture's object URL names the document that
-            made it, so the server path in its data-src is what is compared, P6-B)
+            made it, so the server path in its data-src is what is compared, P6-B); a reload in the middle of a turn finds it running
+            and follows it to its end (the app of the check holds the turn while the page reloads, App.hold: it is not a race)
   sessions  a second chat switches cleanly with the first, also when a turn is left running: no leaked stream, no stale image (every
             picture on the page names a message of the chat it shows)
   exports   the JSON and Markdown exports download and open
   stop      Stop aborts a 150-token turn within a step: aborted, fewer than 150 snapshots, the card says stopped
   keyboard  Tab visits the controls in DOM order; Enter sends; Enter on Settings opens the drawer and Esc closes it, to Settings
   narrow    375 x 812: a full turn, its details open, the sidebar and the drawer, with no horizontal overflow
-  a11y      the accessibility tree: stage buttons named from their text with their expanded state, label chips that say
+  a11y      the accessibility tree: stage buttons (counted on the page, and read against what the server runs: three on the app of
+            the check, five on a server with a gallery) named from their text with their expanded state, label chips that say
             positive or negative (and whether each agrees with the reference), a status region that says "Report ready"
   error     a server 422 shows the dismissible notice and keeps the composer as it was; a clicked Dismiss leaves the focus where the
             click put it (a tap must not open a phone's keyboard), and one pressed from the keyboard hands it to the note field (P6-A)
@@ -39,11 +41,13 @@ with tiny_gallery (P5-E: the synthetic gallery and the keyword labeller), its no
 and scored and every chip says whether it agrees. Screenshots go to docs/chat_ui/evidence/p4e/ with checklist.json (the result
 and each check's measurements); --no-evidence runs without writing anything.
 
-    venv/bin/python scripts/chat_ui_browser_check.py [--url http://127.0.0.1:8000/] [--out DIR] [--no-evidence]
+    venv/bin/python scripts/chat_ui_browser_check.py [--url http://127.0.0.1:8000/] [--out DIR] [--no-evidence] [--only CHECK[,CHECK...]]
 
 Prints `RESULT {"checks": N, "failures": [...]}` last. Exits 1 on any failed check and 2 when Chrome or the app cannot be
 started (or the run overruns --timeout seconds). With --url the app should pace its decoding (create_app's
-tiny_step_delay_s), or the stop check has no time to press Stop. Every process it starts is killed on exit.
+tiny_step_delay_s), or the stop check has no time to press Stop, and the reload step cannot hold its turn (the app is not the
+check's), so that step is as sensitive to the load of the machine as it was. --only runs the named checks, and only without evidence.
+Every process it starts is killed on exit.
 """
 import argparse
 import datetime
@@ -51,6 +55,7 @@ import io
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import sys
@@ -78,8 +83,17 @@ EVIDENCE_FILES = ["streaming_1280x900_light.png", "settled_1280x900_light.png", 
                   "labelled_chips_1280x900_light.png", "settings_1280x900_light.png", "drawer_error_1280x900_light.png",
                   "checklist.json"]   # what a full run writes, and the only files it replaces
 STAGES = ["preprocess", "encode", "retrieve", "generate", "label", "score"]
-DETAILED = ("preprocess", "encode", "generate")   # the stages of the tiny pipeline that have a detail, so a disclosure button
 SETTLED = ("done", "skipped")  # what a stage of a finished turn can be
+
+
+def detailed_stages(features: Dict[str, bool], reference: bool = False) -> List[str]:
+    """The stages of a turn that have a detail table, so a disclosure button the page opens it with (render.js renderTimeline), on a server
+    with these features (/v1/models): preprocess, encode and generate always; retrieve when the server has its gallery; label when it has a
+    labeller; score only for a turn that was given a reference (it is skipped, no_reference, without one). In stage order. The others are
+    skipped, and have no button: the app of the checks (no gallery, no labeller) has three buttons, a tiny_gallery server five."""
+    runs = {"preprocess": True, "encode": True, "retrieve": bool(features.get("retrieval")), "generate": True,
+            "label": bool(features.get("labels")), "score": bool(reference)}
+    return [stage for stage in STAGES if runs[stage]]
 # The a11y check's labelled turn sends this as its note: a reference command, so its report is scored against it. Synthetic text,
 # with words the keyword labeller marks (enlarged, effusion, tube), so the reference has positives to agree or differ with.
 LIVE_REFERENCE = "Findings: The heart is enlarged. Small left pleural effusion. Nasogastric tube in place. Impression: Cardiomegaly."
@@ -428,6 +442,19 @@ class Context:
             self.console.append("uncaught: " + str((details.get("exception") or {}).get("description") or details.get("text"))[:200])
 
 
+def screen_reader_only(selector: str) -> bool:
+    """Whether Chrome's name for a node (its tag and classes: "span.visually-hidden") is the page's text for a screen reader, which is drawn as
+    one clipped pixel. It has no pixels of its own to be too faint, and the audit reads it against the page's ground and not against what it
+    sits in (the ": positive" of a label chip came out at 1.00:1 in light and 1.16:1 in dark, beside a chip whose seen text was fine)."""
+    return re.search(r"\.visually-hidden(?![\w-])", selector) is not None
+
+
+def faint_texts(found: List[Dict[str, Any]]) -> List[str]:
+    """One line per text of the audit's findings that a user can see and is too faint: not the audit's own canary, not text for a screen reader."""
+    return ["{} {:.2f}:1 (needs {})".format(i["selector"], i["contrastRatio"], i["thresholdAA"]) for i in found
+            if "contrast-canary" not in i["selector"] and not screen_reader_only(i["selector"])]
+
+
 def contrast_issues(b: Browser) -> List[str]:
     """Chrome's own contrast audit (WCAG AA) of what the page shows now: one line per text that is too faint, the canary left out."""
     b.call("Audits.enable")
@@ -446,7 +473,7 @@ def contrast_issues(b: Browser) -> List[str]:
     b.evaluate("document.querySelector('#contrast-canary').remove()")
     if not any("contrast-canary" in i["selector"] for i in found):
         raise Failure("Chrome's contrast audit did not report its canary: the audit did not run")
-    return ["{} {:.2f}:1 (needs {})".format(i["selector"], i["contrastRatio"], i["thresholdAA"]) for i in found if "contrast-canary" not in i["selector"]]
+    return faint_texts(found)
 
 
 def one_line(text: Any, limit: int = 220) -> str:
@@ -498,6 +525,27 @@ class Ax:
 
         walk(node)
         return "".join(parts)
+
+
+def focus_target_only(attributes: List[str]) -> bool:
+    """Whether an element, given as the flat attribute list DOM.describeNode returns (name, value, name, value, ...), can be focused and is
+    no stop of Tab: its tabindex is a whole number below zero. The page uses such an element to hold the focus where a control that has
+    gone was (a matching report's text after Show less), which is not a control, and the tree calls it focusable all the same."""
+    value = dict(zip(attributes[0::2], attributes[1::2])).get("tabindex", "").strip()
+    return re.fullmatch(r"-\d+", value) is not None
+
+
+def unnamed_controls(b: Any, exposed: List[Dict[str, Any]]) -> Tuple[List[Tuple[str, Any]], List[Tuple[str, Any]]]:
+    """Of the exposed nodes a user can focus, the ones with no accessible name, as (role, backend DOM node id): -> (those that are controls, those
+    that are focus targets no key reaches and are left out, focus_target_only)."""
+    unnamed, left_out = [], []  # type: List[Tuple[str, Any]], List[Tuple[str, Any]]
+    for node in exposed:
+        if Ax.name(node).strip():
+            continue
+        attributes = b.call("DOM.describeNode", backendNodeId=node["backendDOMNodeId"]).get("node", {}).get("attributes", []) \
+            if node.get("backendDOMNodeId") is not None else []
+        (left_out if focus_target_only(attributes) else unnamed).append((Ax.role(node), node.get("backendDOMNodeId")))
+    return unnamed, left_out
 
 
 # ---- the checks --------------------------------------------------------------------------------------------------------------------
@@ -591,18 +639,36 @@ def check_reload(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     expect(after["text"] == before["text"], "text differs: " + first_difference(before["text"], after["text"]))
     expect(after["html"] == before["html"], "markup differs: " + first_difference(before["html"], after["html"]))
     # A reload in the middle of a turn: the page finds the turn running, follows it to its end, and the card it ends with is the one
-    # that another reload shows.
-    ctx.attach("b")
-    ctx.send("tokens 150")
-    b.wait_for("(() => { const c = (%s)(); return c && c.cards === 2 && c.status === 'running' && c.report.length > 0 ? c : null; })()" % CARD_JS,
-               20, "the second turn to start writing")
-    b.call("Page.reload")
-    b.wait_for("document.readyState === 'complete' && !!document.querySelector('#exports')", what="the page to reload")
-    b.wait_for("(() => { const c = (%s)(); return c && c.cards === 2 && c.status === 'running' ? c : null; })()" % CARD_JS,
-               10, "the turn found running after the reload")
-    found = b.evaluate("({ send: !document.querySelector('#send').disabled, stop: !document.querySelector('#stop').hidden,"
-                       " busy: document.querySelector('#conversation').hasAttribute('aria-busy') })")
-    expect(found == {"send": False, "stop": True, "busy": True}, "the page that found a running turn has Send/Stop/aria-busy {}".format(found))
+    # that another reload shows. The turn is held (App.hold) after its first snapshot while the page is reloaded and has found it: the tiny
+    # engine runs on its own clock, and a 150-token turn of 20 ms steps is over in 3 s, so a reload that took longer than that (a loaded
+    # machine; it did about one run in four) found the turn done, and the step failed. It is released in a finally, so that a step that fails
+    # while it holds a turn does not leave the checks after it waiting on it. With --url the app is someone else's and cannot be held: the
+    # step then runs as it did, and is as sensitive to the load as it was.
+    held = ctx.app is not None
+    if held:
+        ctx.app.hold()
+    try:
+        ctx.attach("b")
+        ctx.send("tokens 150")
+        b.wait_for("(() => { const c = (%s)(); return c && c.cards === 2 && c.status === 'running' && c.report.length > 0 ? c : null; })()" % CARD_JS,
+                   20, "the second turn to start writing")
+        message = ctx.card()["id"]
+        b.call("Page.reload")
+        b.wait_for("document.readyState === 'complete' && !!document.querySelector('#exports')", what="the page to reload")
+        b.wait_for("(() => { const c = (%s)(); return c && c.cards === 2 && c.status === 'running' ? c : null; })()" % CARD_JS,
+                   10, "the turn found running after the reload")
+        found = b.evaluate("({ send: !document.querySelector('#send').disabled, stop: !document.querySelector('#stop').hidden,"
+                           " busy: document.querySelector('#conversation').hasAttribute('aria-busy') })")
+        expect(found == {"send": False, "stop": True, "busy": True}, "the page that found a running turn has Send/Stop/aria-busy {}".format(found))
+        if held:   # the hold is in force, which a launcher that did not install it would not say: the server's own count of snapshots stands still
+            count_then, status_then = snapshot_count(b, message)
+            time.sleep(0.3)   # 15 steps of the 20 ms engine, had the turn gone on
+            count_now, status_now = snapshot_count(b, message)
+            expect(status_then == status_now == "running" and count_then == count_now,
+                   "the held turn did not hold: {} snapshots, then {} after 0.3 s (status {}, then {})".format(count_then, count_now, status_then, status_now))
+    finally:
+        if held:
+            ctx.app.release()
     followed = ctx.wait_card("done", timeout=30, message="the turn the reloaded page was following")
     ended = b.evaluate("({ send: !document.querySelector('#send').disabled, stop: document.querySelector('#stop').hidden })")
     expect(ended == {"send": True, "stop": True}, "when the followed turn ended Send/Stop were {}".format(ended))
@@ -611,11 +677,12 @@ def check_reload(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     replayed = ctx.wait_card("done", message="the replayed second card")
     expect(replayed["id"] == followed["id"] and replayed["cards"] == 2, "another turn is shown after the second reload: {}".format(replayed["id"]))
     expect(replayed["html"] == followed["html"], "the followed card is not the replayed one: " + first_difference(followed["html"], replayed["html"]))
-    return ("the card after Page.reload equals the live one ({} characters of markup, the same six stage states); a reload mid-turn followed "
-            "the running turn to the card another reload shows".format(len(after["html"])),
+    return ("the card after Page.reload equals the live one ({} characters of markup, the same six stage states); a reload mid-turn ({}) followed "
+            "the running turn to the card another reload shows".format(len(after["html"]), "the turn held while the page reloaded" if held
+                                                                         else "no hold: the app is not this check's"),
             {"markup_chars": len(after["html"]), "text_chars": len(after["text"]), "stages": after["stages"],
-             "mid_turn_reload": {"found_running": found, "ended": ended, "followed_equals_replayed": True,
-                                 "markup_chars": len(replayed["html"])}})
+             "mid_turn_reload": {"turn_held": held, "snapshots_while_held": [count_then, count_now] if held else None, "found_running": found,
+                                 "ended": ended, "followed_equals_replayed": True, "markup_chars": len(replayed["html"])}})
 
 
 def server_status(base: str, message: str) -> str:
@@ -983,12 +1050,18 @@ def check_a11y(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     expect(said and said[-1] == "Report ready", "the status region ended on {!r}".format(said[-1] if said else None))
     ax = Ax(b)
     exposed = [n for n in ax.by_id.values() if not n.get("ignored") and Ax.prop(n, "focusable") is True and Ax.role(n) != "RootWebArea"]
-    unnamed = [(Ax.role(n), n.get("backendDOMNodeId")) for n in exposed if not Ax.name(n).strip()]
+    unnamed, focus_targets = unnamed_controls(b, exposed)   # the clamped texts of matching reports (a server with a gallery) are focus targets, no controls
     expect(not unnamed, "controls a user can focus have no accessible name: {}".format(unnamed))
     buttons = []
+    # The stage buttons are counted on the page, and read against what the server runs (/v1/models): the app of the checks has no gallery and no
+    # labeller, so three stages have a detail and a button; a tiny_gallery server runs retrieve and label too, and has five.
+    features = b.evaluate("(%s)()" % MODELS_JS)["features"]
+    expected = detailed_stages(features)
+    on_page = b.evaluate("[...document.querySelectorAll('#conversation li[data-stage] > button')].map((x) => x.closest('li').getAttribute('data-stage'))")
+    expect(on_page == expected, "the page has stage buttons for {}, where a server with the features {} has them for {}".format(on_page, features, expected))
     ids = b.backend_ids('#conversation li[data-stage] > button')
-    expect(len(ids) == len(DETAILED), "{} stage buttons on the page, not {}".format(len(ids), len(DETAILED)))   # zip would stop at the shorter
-    for stage, backend in zip(DETAILED, ids):
+    expect(len(ids) == len(on_page), "{} stage buttons in the document, {} read off the page".format(len(ids), len(on_page)))   # zip would stop at the shorter
+    for stage, backend in zip(on_page, ids):
         node = ax.by_backend.get(backend)
         expect(node is not None, "the {} button is not in the accessibility tree".format(stage))
         visible = b.evaluate("document.querySelector('#conversation li[data-stage=\"%s\"] > button').textContent" % stage)
@@ -1000,12 +1073,12 @@ def check_a11y(ctx: Context) -> Tuple[str, Dict[str, Any]]:
         expect(name[:1].isalpha(), "the {} button is named {!r}: a glyph comes before its label".format(stage, name))
         expect(Ax.prop(node, "expanded") is False, "the {} button's expanded state is {!r}, not false".format(stage, Ax.prop(node, "expanded")))
         buttons.append({"stage": stage, "visible": visible, "name": name, "expanded": False})
-    expect(len(buttons) == len(DETAILED), "{} stage buttons were checked, not {}".format(len(buttons), len(DETAILED)))
+    expect(len(buttons) == len(on_page), "{} stage buttons were checked, not {}".format(len(buttons), len(on_page)))
     b.click('#conversation li[data-stage="encode"] > button')
     ax2 = Ax(b)
     opened = ax2.by_backend[b.backend_ids('#conversation li[data-stage="encode"] > button')[0]]
     expect(Ax.prop(opened, "expanded") is True, "after a click the encode button's expanded state is {!r}".format(Ax.prop(opened, "expanded")))
-    buttons[1]["expanded_after_click"] = True
+    next(x for x in buttons if x["stage"] == "encode")["expanded_after_click"] = True
     items = {}  # type: Dict[str, str]
     for stage in STAGES:
         li = ax2.by_backend[b.backend_ids('#conversation li[data-stage="%s"]' % stage)[0]]
@@ -1013,7 +1086,7 @@ def check_a11y(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     glyphed = {stage: spoken[:12] for stage, spoken in items.items() if not spoken[:1].isalpha()}
     expect(not glyphed, "stage items read a glyph before their label (the ::before shape is part of what a screen reader hears): {}".format(glyphed))
     plain = []
-    for stage in ("retrieve", "label", "score"):
+    for stage in (s for s in STAGES if s not in on_page):   # the stages with no button are the skipped ones (no gallery, no labeller, no reference)
         expect(stage in items[stage] and "skipped" in items[stage], "the skipped {} stage reads as {!r}".format(stage, items[stage]))
         plain.append(items[stage])
     status = [n for n in ax2.by_id.values() if Ax.role(n) == "status"]
@@ -1079,7 +1152,9 @@ def check_a11y(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     return ("stage buttons: their text, then state, with expanded, no glyph first; status region live=polite reads 'Report ready'; 14 chips of "
             "a live labelled turn read '<name>: positive|negative' and whether each agrees with the reference; every control named; no text "
             "under AA contrast in 4 states",
-            {"contrast_issues_under_aa": faint, "focusable_controls_named": len(exposed), "stage_buttons": buttons, "skipped_stages": plain,
+            {"contrast_issues_under_aa": faint, "focusable_controls_named": len(exposed) - len(focus_targets),
+             "focus_targets_left_out": [role for role, _ in focus_targets], "server_features": features,
+             "stage_buttons_on_page": on_page, "stage_buttons": buttons, "skipped_stages": plain,
              "stage_items_as_read": items,
              "status_region": {"live": "polite", "text": "Report ready", "history": said}, "chips_on_live_labelled_turn": chips})
 
@@ -1529,6 +1604,21 @@ CHECKS = [("stream", check_stream), ("reload", check_reload), ("sessions", check
           ("settings", check_settings)]
 
 
+def select_checks(only: Optional[str]) -> List[Tuple[str, Callable[["Context"], Tuple[str, Dict[str, Any]]]]]:
+    """The checks to run: all of them, or the ones `only` names (comma-separated), in the order of CHECKS. A name that is no check's, or no name
+    at all, is a ValueError."""
+    if only is None:
+        return list(CHECKS)
+    known = [name for name, _ in CHECKS]
+    names = [name.strip() for name in only.split(",") if name.strip()]
+    for name in names:
+        if name not in known:
+            raise ValueError("no check named {} (the checks are {})".format(name, ", ".join(known)))
+    if not names:
+        raise ValueError("no check named: --only takes one or more of {}".format(", ".join(known)))
+    return [(name, fn) for name, fn in CHECKS if name in names]
+
+
 def run_check(ctx: Context, name: str, fn: Callable[[Context], Tuple[str, Dict[str, Any]]]) -> Dict[str, Any]:
     mark = len(ctx.console)
     started = time.time()
@@ -1575,8 +1665,9 @@ def warm_up(base: str) -> float:
     return time.time() - started
 
 
-def run_all(browser: Browser, app: Optional[App], base: str, work: str, out_dir: Optional[str]) -> Tuple[List[Dict[str, Any]], Context]:
-    """Every check in order, on this browser and this app; -> (one result per check, the context with the screenshots)."""
+def run_all(browser: Browser, app: Optional[App], base: str, work: str, out_dir: Optional[str],
+            checks: Optional[List[Tuple[str, Callable[[Context], Tuple[str, Dict[str, Any]]]]]] = None) -> Tuple[List[Dict[str, Any]], Context]:
+    """Every check in order (or the `checks` given), on this browser and this app; -> (one result per check, the context with the screenshots)."""
     browser.call("Runtime.enable")
     browser.call("Emulation.setFocusEmulationEnabled", enabled=True)   # the page behaves as the focused one, so key events move focus
     ctx = Context(browser, app, base, work, out_dir)
@@ -1584,7 +1675,7 @@ def run_all(browser: Browser, app: Optional[App], base: str, work: str, out_dir:
         for name in EVIDENCE_FILES:
             if os.path.exists(os.path.join(out_dir, name)):
                 os.remove(os.path.join(out_dir, name))
-    return [run_check(ctx, name, fn) for name, fn in CHECKS], ctx
+    return [run_check(ctx, name, fn) for name, fn in (CHECKS if checks is None else checks)], ctx
 
 
 def environment(browser: Browser, app: Optional[App], warm: Optional[float]) -> Dict[str, Any]:
@@ -1611,13 +1702,27 @@ def environment(browser: Browser, app: Optional[App], warm: Optional[float]) -> 
                       "Every screenshot was confirmed by the page itself (a DOM rule per picture, true before and after the capture)."]}
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="The browser checklist for the chat page, in headless Chrome.")
     parser.add_argument("--url", help="check this running app instead of starting one (its page URL, e.g. http://127.0.0.1:8000/)")
     parser.add_argument("--out", default=EVIDENCE_DIR, help="where screenshots and checklist.json go (default: docs/chat_ui/evidence/p4e)")
     parser.add_argument("--no-evidence", action="store_true", help="run the checks and write no screenshots and no checklist.json")
+    parser.add_argument("--only", metavar="CHECK[,CHECK...]",
+                        help="run only these checks (names as printed, in the order of the checklist); needs --no-evidence")
     parser.add_argument("--timeout", type=int, default=420, help="seconds the whole run may take (default 420)")
     args = parser.parse_args(argv)
+    if args.only is not None:
+        if not args.no_evidence:   # a part of the checklist would replace the pictures and checklist.json of the whole of it
+            parser.error("--only needs --no-evidence: the evidence of a partial run would replace that of the full one")
+        try:
+            select_checks(args.only)
+        except ValueError as exc:
+            parser.error(str(exc))
+    return args
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv)
     exit_on_sigterm()   # a SIGTERM runs the finally below, which stops Chrome and the app
     chrome = find_chrome()
     if chrome is None:
@@ -1644,7 +1749,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             base = app.url
         warm = warm_up(base)
         browser = Browser(chrome, label="chat_ui_browser_chrome")
-        results, ctx = run_all(browser, app, base, work, out_dir)
+        results, ctx = run_all(browser, app, base, work, out_dir, select_checks(args.only))
         env = environment(browser, app, warm)
     except Overrun as exc:
         print("ERROR {}".format(exc))

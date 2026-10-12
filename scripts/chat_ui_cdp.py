@@ -42,21 +42,46 @@ KEEP_EVENTS = 5000   # DevTools events kept per Browser (Browser.events): the ol
 CLOSE_WAIT_S = 3.0   # how long, in all, Chrome has to answer the DevTools Browser.close and to exit, before it is sent SIGTERM
 TERM_WAIT_S = 5.0    # how long a process has to exit after SIGTERM, before it is sent SIGKILL
 
+HOLD_FILE = "hold"   # in the app's home: while it exists, the turns of the tiny engine wait (App.hold, hold_turns)
+
 # The app as the checks run it. The uvicorn CLI cannot pass create_app its arguments (the step delay of the tiny engine is
 # one), so this is a short launcher. argv: home, step delay in seconds, port, and optionally a directory of static files;
-# --tiny-gallery, anywhere after them, gives the app the synthetic gallery and the keyword labeller (P5-E).
+# --tiny-gallery, anywhere after them, gives the app the synthetic gallery and the keyword labeller (P5-E). It also lets a check hold the
+# turns of the app (hold_turns): the file HOLD_FILE in the home is the switch.
 LAUNCH = """\
+import os
 import sys
 from pathlib import Path
 import uvicorn
 import app.server as server
+from scripts.chat_ui_cdp import hold_turns
 args = [a for a in sys.argv[1:] if a != "--tiny-gallery"]
 if len(args) > 3:
     server.STATIC_DIR = Path(args[3])
+hold_turns(os.path.join(args[0], "hold"))
 uvicorn.run(server.create_app(engine="tiny", home=args[0], tiny_step_delay_s=float(args[1]),
                               tiny_gallery="--tiny-gallery" in sys.argv[1:]),
             host="127.0.0.1", port=int(args[2]), log_level="warning")
 """
+
+
+def hold_turns(path: str) -> None:
+    """Run in the app's process, before it serves (LAUNCH): while the file `path` exists, a turn of the tiny engine waits after each snapshot it
+    has sent, and goes on when the file is gone, or at once when the turn is stopped. The turn stays running for as long as it is held, and
+    the page can find it so. The tiny engine runs on its own clock (a step every STEP_DELAY_S), and a check that needs a turn to be running
+    at a moment that it does not control (a reload, which on a loaded machine takes longer than a short turn) holds it there instead of racing it."""
+    import app.engine as engine
+    generate = engine.TinyEngine.generate
+
+    def held(self: Any, enc: Any, opts: Any, on_snapshot: Any, cancel: Any) -> Any:
+        def snapshot(step: int, text: str) -> None:
+            on_snapshot(step, text)
+            while os.path.exists(path) and not cancel.is_set():
+                cancel.wait(0.02)
+
+        return generate(self, enc, opts, snapshot, cancel)
+
+    engine.TinyEngine.generate = held
 
 
 class WebSocket:
@@ -494,6 +519,18 @@ class App:
                 return handle.read()[-n:]
         except OSError:
             return ""
+
+    def hold(self) -> None:
+        """From the next snapshot of every turn on, the turns wait (hold_turns) until release(). A turn that is waiting is running."""
+        with open(os.path.join(self.home, HOLD_FILE), "w"):
+            pass
+
+    def release(self) -> None:
+        """The held turns go on. Nothing to release is no error."""
+        try:
+            os.remove(os.path.join(self.home, HOLD_FILE))
+        except FileNotFoundError:
+            pass
 
     def stop(self) -> None:
         stop_group(self.proc)   # uvicorn leaves on SIGTERM; its store is closed by the app's own shutdown

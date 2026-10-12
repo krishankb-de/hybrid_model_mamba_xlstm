@@ -48,6 +48,129 @@ def test_the_labelled_turn_runs_every_stage_and_scores_its_report_against_that_r
     assert sorted(n for n, v in score["reference_chexbert_14"].items() if v) == ["Cardiomegaly", "Pleural Effusion", "Support Devices"]
 
 
+# ---- the a11y item on a server with a gallery: the stage buttons are counted on the page, and expected from the server's features ----------
+
+def test_the_stages_with_a_button_are_those_the_server_runs():
+    assert check.detailed_stages({"retrieval": False, "labels": False}) == ["preprocess", "encode", "generate"]   # the app of the checks
+    assert check.detailed_stages({"retrieval": True, "labels": True}) == ["preprocess", "encode", "retrieve", "generate", "label"]   # a tiny_gallery server
+    assert check.detailed_stages({"retrieval": True, "labels": False}) == ["preprocess", "encode", "retrieve", "generate"]
+    assert check.detailed_stages({"retrieval": False, "labels": True}) == ["preprocess", "encode", "generate", "label"]
+    assert check.detailed_stages({"retrieval": True, "labels": True}, reference=True) == check.STAGES   # a reference makes score run too
+    assert check.detailed_stages({}) == ["preprocess", "encode", "generate"]   # a server that says nothing of its features runs none of them
+
+
+@pytest.mark.parametrize("tiny_gallery", [False, True], ids=["no-gallery-server", "gallery-server"])
+def test_the_stages_that_have_a_detail_in_a_live_turn_are_the_stages_the_check_expects_buttons_for(tmp_path, tiny_gallery):
+    """Both servers of the a11y item, live: a turn's stages with a detail table (render.js draws a button for each) are exactly what
+    detailed_stages says for that server's /v1/models features, and the others are skipped (the item reads them as such)."""
+    with TestClient(create_app(engine="tiny", home=str(tmp_path), tiny_gallery=tiny_gallery)) as client:
+        features = client.get("/v1/models").json()["features"]
+        sid = client.post("/v1/sessions", json={}).json()["id"]
+        r = client.post("/v1/sessions/{}/messages".format(sid), files={"image": ("xray_a.png", png_bytes(320, 320), "image/png")},
+                        data={"text": "", "options": json.dumps({"max_new_tokens": 24})})
+    ends = {f["data"]["stage"]: f["data"] for f in iter_sse([r.text]) if f["event"] == "stage_end"}
+    assert features == {"retrieval": tiny_gallery, "labels": tiny_gallery}
+    detailed = [stage for stage in check.STAGES if ends[stage].get("detail")]
+    assert detailed == check.detailed_stages(features)
+    assert [stage for stage in check.STAGES if "skipped" in ends[stage]] == [s for s in check.STAGES if s not in detailed]
+
+
+class FakeDom:
+    """The DOM end of the a11y item: DOM.describeNode answers with the flat attribute list of the element a backend id names."""
+
+    def __init__(self, attributes: Dict[int, List[str]]) -> None:
+        self.attributes = attributes
+
+    def call(self, method: str, **params: Any) -> Dict[str, Any]:
+        assert method == "DOM.describeNode"
+        return {"node": {"attributes": self.attributes.get(params["backendNodeId"], [])}}
+
+
+def test_a_focus_target_that_no_key_reaches_is_no_control_that_needs_a_name():
+    """A server with a gallery shows matching reports, whose text is a <p tabindex="-1" class="clamp-text">: the page focuses it after Show
+    less (render.js clampedText) and no Tab stops on it. Chrome's tree calls it focusable and a paragraph has no name of its own, so the item
+    that wants a name of everything focusable failed on such a server, on three of them (one per matching report), before it reached the
+    stage buttons. A focusable thing that a key does reach, with no name, is still one."""
+    assert check.focus_target_only(["class", "clamp-text clamped", "tabindex", "-1", "data-action", "clamp"]) is True
+    assert check.focus_target_only(["tabindex", " -2 "]) is True
+    for attributes in (["tabindex", "0"], ["id", "image-well", "role", "button", "tabindex", "0"], ["class", "x"], [], ["tabindex", "-1x"], ["tabindex", ""]):
+        assert check.focus_target_only(attributes) is False, attributes
+    nodes = [_node("1", "paragraph", backend=10, focusable=True),            # a focus target: tabindex -1
+             _node("2", "paragraph", backend=11, focusable=True),            # a Tab stop with no name
+             _node("3", "button", backend=12, focusable=True),               # a control with no name
+             _node("4", "button", "Send", backend=13, focusable=True)]       # named
+    dom = FakeDom({10: ["class", "clamp-text", "tabindex", "-1"], 11: ["tabindex", "0"], 12: [], 13: []})
+    unnamed, left_out = check.unnamed_controls(dom, nodes)
+    assert unnamed == [("paragraph", 11), ("button", 12)] and left_out == [("paragraph", 10)]
+
+
+def test_the_contrast_audit_reports_what_a_user_can_see_and_not_text_made_for_a_screen_reader():
+    """Chrome's audit names a node by its tag and classes. A .visually-hidden span (text for a screen reader, drawn as one clipped pixel) has no
+    pixels of its own, and the audit reads it against the page's ground and not against the chip it sits in: the ": positive" of a label chip
+    on a server with a gallery came out at 1.00:1 in light and 1.16:1 in dark, while the chip's own text, which is seen, was fine."""
+    assert check.screen_reader_only("span.visually-hidden") is True
+    assert check.screen_reader_only("p.note.visually-hidden") is True
+    for selector in ("li.chip.label.positive", "span.visually-hidden-not", "span.not-visually-hidden", "span#contrast-canary", ""):
+        assert check.screen_reader_only(selector) is False, selector
+    found = [{"selector": "span.visually-hidden", "contrastRatio": 1.0, "thresholdAA": 4.5},
+             {"selector": "li.chip.label.positive", "contrastRatio": 3.0, "thresholdAA": 4.5},
+             {"selector": "span#contrast-canary", "contrastRatio": 1.05, "thresholdAA": 4.5}]
+    assert check.faint_texts(found) == ["li.chip.label.positive 3.00:1 (needs 4.5)"]   # the canary is the audit's own, the hidden span is not seen
+    assert check.faint_texts([found[0], found[2]]) == []
+
+
+def test_the_a11y_item_counts_the_stage_buttons_the_page_has_and_no_longer_a_fixed_three():
+    import inspect
+    source = inspect.getsource(check.check_a11y)
+    assert "detailed_stages(" in source and "DETAILED" not in source
+    assert not hasattr(check, "DETAILED")
+
+
+# ---- --only: some checks, by name (the reload step is shown stable by running it on its own, many times) -------------------------------------
+
+def test_select_checks_takes_names_and_keeps_the_order_of_the_checklist():
+    assert [name for name, _ in check.select_checks(None)] == [name for name, _ in check.CHECKS]
+    assert [name for name, _ in check.select_checks("reload")] == ["reload"]
+    assert [name for name, _ in check.select_checks("stop, reload")] == ["reload", "stop"]   # the order of the checklist, not of the request
+    with pytest.raises(ValueError, match="no check named reloads"):
+        check.select_checks("reloads")
+    with pytest.raises(ValueError, match="no check named"):
+        check.select_checks("")   # nothing named is not "everything"
+
+
+def test_only_runs_no_evidence_because_a_part_of_the_checklist_would_replace_all_of_it(capsys):
+    assert check.parse_args(["--only", "reload", "--no-evidence"]).only == "reload"
+    assert check.parse_args([]).only is None
+    with pytest.raises(SystemExit) as refused:
+        check.parse_args(["--only", "reload"])
+    assert refused.value.code == 2 and "--no-evidence" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        check.parse_args(["--only", "nonesuch", "--no-evidence"])
+
+
+# ---- the reload step holds its turn instead of racing it ------------------------------------------------------------------------------
+
+def test_the_reload_step_holds_the_turn_before_it_sends_it_and_always_releases_it():
+    """The step reloads in the middle of a turn, and the turn used to be a race (a 150-token turn of the 20 ms engine is over in 3 s, and a
+    reload on a loaded machine can take longer than that). The app the check owns holds its turns (App.hold): held before the turn is
+    sent, released in a finally, so that a step that fails while it holds one does not leave every later check waiting on it."""
+    import ast
+    import inspect
+    import textwrap
+    tree = ast.parse(textwrap.dedent(inspect.getsource(check.check_reload)))
+
+    def calls(node: Any, name: str) -> List[Any]:
+        return [c for c in ast.walk(node) if isinstance(c, ast.Call) and ast.unparse(c.func) == name]
+
+    [hold] = calls(tree, "ctx.app.hold")
+    [release] = calls(tree, "ctx.app.release")
+    in_finally = [t for t in ast.walk(tree) if isinstance(t, ast.Try) and any(release in ast.walk(s) for s in t.finalbody)]
+    assert in_finally, "ctx.app.release() is not in a finally"
+    sends = [c for c in calls(tree, "ctx.send") if "tokens 150" in ast.unparse(c)]
+    assert len(sends) == 1 and hold.lineno < sends[0].lineno, "the turn is sent before it is held"
+    assert hold.lineno < in_finally[0].lineno, "the hold is not made before the try that releases it"
+
+
 # ---- the accessibility-tree reader ----------------------------------------------------------------------------------------------------
 
 class FakeTree:
