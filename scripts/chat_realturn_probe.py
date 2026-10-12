@@ -18,23 +18,26 @@ one turn after another, on test-split rows picked by number (--rows, default 0-4
      and the ms, and whether the report holds a complete sentence (worked out here, in memory); at 100 tokens also what it saved against pass 1.
   3  The EOS model (hybrid_150m_m3_rrg_eos) on the same rows at --eos-tokens (default 200, the budget its registry note was measured at), and on
      one picture drawn here. Per turn: the stop reason (`eos` is expected), the tokens and the words, whether the last sentence is terminated,
-     and the neighbour and matching-report counts.
+     the neighbour and matching-report counts, and the four timings pass 1 records (first byte, total, the server's own, each stage's ms); the
+     pass's line has the slowest first byte, turn and generate stage of its turns, the rows and the picture alike (the default model's turn time).
 
 Output. Stdout is one `RESULT {json}` line per pass (each says whether the pass `ran`: every turn ended done and its session was deleted; that is not a
 verdict on what it measured) and then `RESULT {"gate": {...}}`: published_equal (every pass 1 row), eos_stops (every EOS turn
 stopped by `eos`), features_ok (every pass 1 row has its counts as asked, its own-report rank, one label agreement per neighbour and every image and
 gallery request answered 200 with a body, and every EOS turn its counts), first_byte_ms_max and turn_ms_max (the slowest of pass 1, for the reader to
-set against the targets), sessions_deleted and ok. Exit status 0 when the gate holds, which also wants every turn of all three passes to have ended
-in a message_stop with status done and no gap in its seq, no session left behind and nothing else gone wrong (`error` names it); 1 when it does not
-hold; 2 for an argument it refuses, which is one `ERROR ...` line on stderr, before anything is sent. A test row number is printed as it was given: it
-is this project's row number, not a MIMIC id. On a CPU server a turn takes about 4 s, and the default rows are 5 + 10 + 6 turns: 2 to 3 minutes.
+set against the targets), eos_turn_ms_max (the slowest EOS turn, a number that is not judged), sessions_deleted and ok. Exit status 0 when the gate
+holds, which also wants every turn of all three passes to have ended in a message_stop with status done and no gap in its seq, no session left
+behind and nothing else gone wrong (`error` names it); 1 when it does not hold; 2 for an argument it refuses, which is one `ERROR ...` line on
+stderr, before anything is sent. A test row number is printed as it was given: it is this project's row number, not a MIMIC id. On a CPU server a
+turn takes about 4 s, and the default rows are 5 + 10 + 6 turns: 2 to 3 minutes.
 
 R7 (DUA). The stream carries MIMIC-derived text. This script reads every frame in memory, keeps of it only stage names it knows, milliseconds, skip
 reasons from a fixed list, counts (neighbours, matches, label agreement n/14, the own-report rank), `live_equals_published`, the stop reason, the status
-word of message_stop, token and word counts and HTTP status codes, and drops the rest as it reads it. Images are fetched for their status and byte length
-only and dropped as they are counted. Nothing of a frame, or of any answer, is printed, logged or written to a file, a failure included: an exception is
-named by its class, never by its text. The only writes are the RESULT lines, the refusals and the help text, through the drill's one function, and what
-they hold is numbers, booleans and fixed words.
+word of message_stop, token and word counts and HTTP status codes, and drops the rest as it reads it. A number is kept only as a plain int (a time
+may be a float) from 0 to below a trillion: a bool, a NaN, an infinity or an integer of 400 digits is dropped as a string is. Images are fetched
+for their status and byte length only and dropped as they are counted. Nothing of a frame, or of any answer, is printed, logged or written to a file,
+a failure included: an exception is named by its class, never by its text. The only writes are the RESULT lines, the refusals and the help text,
+through the drill's one function, and what they hold is numbers, booleans and fixed words.
 
 Transport. As scripts/chat_load_drill.py (P8-C), whose helpers it imports: httpx only, one client that goes straight to the URL it was given (no proxy
 named in the environment is used, no redirect is followed). The token comes from the environment variable CHAT_TOKEN or from --token-file (a regular
@@ -45,7 +48,6 @@ the pass ends, also when something went wrong or Ctrl-C was pressed: the server 
 """
 import argparse
 import json
-import math
 import os
 import re
 import sys
@@ -84,6 +86,7 @@ ROWS = re.compile(r"([0-9]{1,7})(?:-([0-9]{1,7}))?")
 ROWS_REFUSAL = "must be test rows such as 0-4 or 1,3,5: whole numbers from 0, none twice, at most {} of them".format(MAX_ROWS)
 ID = re.compile(r"[A-Za-z0-9_-]{1,64}")   # a message id goes into a path: only a plain one is used
 ROW_LIMIT = 2 ** 31                       # a gallery row goes into a path as a number: only a whole number below this is used
+NUMBER_LIMIT = 10 ** 12                   # a count or a time that a frame holds is kept only below this (a trillion ms is 31 years); more is dropped
 
 # The sentence rule of scripts/repair_generations.py (the app's own: app/engine.py reads it through split_sentences), restated so that the
 # probe stays free of the app and the model stack; a test holds each of the three equal to the original.
@@ -237,8 +240,8 @@ def frames(chunks: Iterable[str]) -> Iterator[Tuple[str, str]]:
 
 
 def _count(value: Any) -> Optional[int]:
-    """The value when it is a whole number from 0 (a bool is none), else None."""
-    return value if type(value) is int and value >= 0 else None
+    """The value when it is a whole number from 0 to below NUMBER_LIMIT (a bool is none), else None."""
+    return value if type(value) is int and 0 <= value < NUMBER_LIMIT else None
 
 
 def _flag(value: Any) -> Optional[bool]:
@@ -246,8 +249,10 @@ def _flag(value: Any) -> Optional[bool]:
 
 
 def _ms(value: Any) -> Optional[float]:
-    """The value as milliseconds to a tenth, when it is a finite number from 0, else None."""
-    if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+    """The value as milliseconds to a tenth, when it is a plain int or float from 0 to below NUMBER_LIMIT, else None. JSON allows an integer of
+    any length, so the bound is the first thing asked: a huge int is compared and dropped, never converted to a float (math.isfinite of one
+    raises OverflowError), and NaN and an infinity fail it as well."""
+    if type(value) in (int, float) and 0 <= value < NUMBER_LIMIT:
         return round(float(value), 1)
     return None
 
@@ -561,16 +566,19 @@ def _highest(values: List[Optional[float]]) -> Optional[float]:
 
 def gate_payload(runs: Sequence[PassRun], error: Optional[str]) -> Dict[str, Any]:
     """The gate: published_equal (every pass 1 row's live report equals its published line), eos_stops (every EOS turn stopped by `eos`),
-    features_ok (every pass 1 row has its features, and every EOS turn its neighbours and matching reports), the two timing maxima (of pass 1)
-    and whether every session was deleted. `ok`, the exit status, also wants all three passes to have run every turn without a failure and no
-    error of the run itself (`error`: a code, a class name, "timeout" or "interrupted")."""
+    features_ok (every pass 1 row has its features, and every EOS turn its neighbours and matching reports), the two timing maxima (of pass 1),
+    eos_turn_ms_max (the slowest turn of pass 3, the default model's turn time: a number, not judged) and whether every session was deleted.
+    `ok`, the exit status, also wants all three passes to have run every turn without a failure and no error of the run itself (`error`: a
+    code, a class name, "timeout" or "interrupted")."""
     by_number = {run.number: run for run in runs}
     one, three = by_number.get(1), by_number.get(3)
     facts = [t.facts for t in one.turns] if one is not None else []
+    eos_facts = [t.facts for t in three.turns] if three is not None else []
     problem = error or next((run.error for run in runs if run.error), None)
     gate: Dict[str, Any] = {
         "published_equal": _published_equal(one), "eos_stops": _eos_stops(three), "features_ok": _features_ok(one) and _eos_counts_ok(three),
         "first_byte_ms_max": _highest([f.first_byte_ms for f in facts]), "turn_ms_max": _highest([f.total_ms for f in facts]),
+        "eos_turn_ms_max": _highest([f.total_ms for f in eos_facts]),
         "sessions_deleted": bool(runs) and all(run.session_deleted is True for run in runs)}
     gate["ok"] = (gate["published_equal"] and gate["eos_stops"] and gate["features_ok"] and gate["sessions_deleted"] and problem is None
                   and all(_ran(by_number.get(n)) for n in PASS_NAMES))
@@ -590,11 +598,15 @@ def _trouble(f: Facts) -> Dict[str, Any]:
     return {key: value for key, value in (("error", f.error), ("refusal", f.refusal), ("stream_error", f.stream_error)) if value is not None}
 
 
+def _timings(f: Facts) -> Dict[str, Any]:
+    """A turn's times as pass 1 and pass 3 both print them: to the first byte, to the end of the stream, the server's own, and each stage's (ms)."""
+    return {"first_byte_ms": f.first_byte_ms, "total_ms": f.total_ms, "server_ms": f.server_ms, "stages_ms": dict(f.stages_ms)}
+
+
 def _gate_row(turn: Turn) -> Dict[str, Any]:
     f, features = turn.facts, turn.features
     row: Dict[str, Any] = {
-        "row": turn.row, "status": f.status, "final": f.final, "seq_contiguous": f.seq_contiguous, "first_byte_ms": f.first_byte_ms,
-        "total_ms": f.total_ms, "server_ms": f.server_ms, "stages_ms": dict(f.stages_ms), "skipped": dict(f.skipped),
+        "row": turn.row, "status": f.status, "final": f.final, "seq_contiguous": f.seq_contiguous, **_timings(f), "skipped": dict(f.skipped),
         "live_equals_published": f.live_equals_published, "stopped": f.stopped, "tokens": f.tokens, "neighbors": f.neighbors,
         "matches": f.matches, "own_rank": f.own_rank, "own_rank_dedup": f.own_rank_dedup, "own_of": f.own_of, "agreement": list(f.agreement),
         "images": {"thumb": _pair(features.thumb) if features else [None, None],
@@ -665,9 +677,9 @@ def _stop_line(run: PassRun, baseline: Optional[PassRun]) -> Dict[str, Any]:
 
 def _eos_entry(turn: Turn) -> Dict[str, Any]:
     f = turn.facts
-    entry: Dict[str, Any] = {"status": f.status, "final": f.final, "eos_trained": f.eos_trained, "stopped": f.stopped, "tokens": f.tokens,
-                             "words": f.words, "last_sentence_terminated": f.last_sentence_terminated, "neighbors": f.neighbors,
-                             "matches": f.matches, "skipped": dict(f.skipped)}
+    entry: Dict[str, Any] = {"status": f.status, "final": f.final, **_timings(f), "eos_trained": f.eos_trained, "stopped": f.stopped,
+                             "tokens": f.tokens, "words": f.words, "last_sentence_terminated": f.last_sentence_terminated,
+                             "neighbors": f.neighbors, "matches": f.matches, "skipped": dict(f.skipped)}
     entry.update(_trouble(f))
     return entry
 
@@ -675,8 +687,11 @@ def _eos_entry(turn: Turn) -> Dict[str, Any]:
 def _eos_line(run: PassRun) -> Dict[str, Any]:
     picked = [t for t in run.turns if t.row is not None]
     drawn = next((t for t in run.turns if t.row is None), None)
+    facts = [t.facts for t in run.turns]
     return {"max_new_tokens": run.turns[0].budget if run.turns else None, "rows": [dict({"row": t.row}, **_eos_entry(t)) for t in picked],
-            "upload": _eos_entry(drawn) if drawn is not None else None, "eos_stops": _eos_stops(run), "counts_ok": _eos_counts_ok(run)}
+            "upload": _eos_entry(drawn) if drawn is not None else None, "eos_stops": _eos_stops(run), "counts_ok": _eos_counts_ok(run),
+            "first_byte_ms_max": _highest([f.first_byte_ms for f in facts]), "turn_ms_max": _highest([f.total_ms for f in facts]),
+            "generate_ms_max": _highest([f.stages_ms.get("generate") for f in facts])}
 
 
 def pass_payload(run: PassRun, baseline: Optional[PassRun] = None) -> Dict[str, Any]:

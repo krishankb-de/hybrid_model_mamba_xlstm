@@ -8954,7 +8954,7 @@ def test_the_realturn_probe_imports_httpx_the_standard_library_and_the_drill_bes
     if not hasattr(sys, "stdlib_module_names"):
         pytest.skip("sys.stdlib_module_names needs Python 3.10")
     roots, first_party = _imports_of(_PROBE)
-    allowed = {"argparse", "json", "math", "os", "re", "sys", "time", "dataclasses", "typing", "httpx", "scripts"}
+    allowed = {"argparse", "json", "os", "re", "sys", "time", "dataclasses", "typing", "httpx", "scripts"}   # no `math`: a number is bounded, not converted
     assert roots <= allowed, sorted(roots - allowed)
     assert roots - {"httpx", "scripts"} <= set(sys.stdlib_module_names)
     assert not first_party and not roots & {"app", "tests", "hybrid_xmamba", "torch", "numpy", "PIL"}, sorted(roots)
@@ -9045,6 +9045,40 @@ def test_the_realturn_probe_prints_and_writes_nothing_but_result_lines_help_and_
     assert {_probe_outer(n, parents) for n in streams} == {"main"} and len(streams) == 2, "the process's own streams are main's defaults"
 
 
+def test_the_realturn_probe_takes_a_number_from_a_frame_only_below_a_bound_and_the_timings_it_prints_hold_numbers_and_nothing_else():
+    """P7-D follow-up, R7. A frame's numbers are taken by two readers, `_count` and `_ms`, and each asks for the bound before it does anything with
+    the value: a plain int (for ms also a float) from 0 to below NUMBER_LIMIT. An integer of 400 digits is compared and dropped, never converted
+    (math.isfinite of one raises OverflowError, which ended the turn), so the script's one float() is in `_ms`, behind that guard. The four timings
+    that pass 1 and pass 3 print for a turn come from one builder, `_timings`, out of four fields of Facts that are typed as numbers, and each is
+    set only from the clock (`_since`) or from `_ms`: no text of a frame can be in one."""
+    tree, parents = _probe_tree()
+    functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    limits = [n for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "NUMBER_LIMIT" for t in n.targets)]
+    assert len(limits) == 1 and ast.unparse(limits[0].value) == "10 ** 12", "a trillion: ms are 31 years, and no count is as big"
+    assert [ast.unparse(r.value) for r in ast.walk(functions["_count"]) if isinstance(r, ast.Return)] == [
+        _normalized("value if type(value) is int and 0 <= value < NUMBER_LIMIT else None")]
+    assert [ast.unparse(i.test) for i in ast.walk(functions["_ms"]) if isinstance(i, ast.If)] == [
+        _normalized("type(value) in (int, float) and 0 <= value < NUMBER_LIMIT")]
+    assert [_probe_outer(n, parents) for n in _probe_calls(tree, "float")] == ["_ms"], "the one conversion of a frame's number: behind the bound"
+    facts = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Facts")
+    fields = {s.target.id: ast.unparse(s.annotation) for s in facts.body if isinstance(s, ast.AnnAssign)}
+    timings = {"first_byte_ms": "Optional[float]", "total_ms": "Optional[float]", "server_ms": "Optional[float]", "stages_ms": "Dict[str, float]"}
+    assert {name: fields.get(name) for name in timings} == timings, "four fields that hold numbers"
+    assert [ast.unparse(r.value) for r in ast.walk(functions["_timings"]) if isinstance(r, ast.Return)] == [_normalized(
+        '{"first_byte_ms": f.first_byte_ms, "total_ms": f.total_ms, "server_ms": f.server_ms, "stages_ms": dict(f.stages_ms)}')]
+    assert sorted(_probe_outer(n, parents) for n in _probe_calls(tree, "_timings")) == ["_eos_entry", "_gate_row"], "pass 1's rows and pass 3's turns"
+    written = []   # every write to a timing field of Facts
+    for node in ast.walk(tree):
+        for target in node.targets if isinstance(node, ast.Assign) else []:
+            on = target.value if isinstance(target, ast.Subscript) else target
+            if isinstance(on, ast.Attribute) and ast.unparse(on.value) == "facts" and on.attr in timings:
+                written.append(ast.unparse(node.value))
+    assert sorted(written) == sorted(_normalized(s) for s in ('_since(started, clock)', '_since(started, clock)', '_ms(data.get("total_ms"))', "ms"))
+    millis = [ast.unparse(n.value) for n in ast.walk(functions["_stage_end"]) if isinstance(n, ast.Assign)
+              and any(isinstance(t, ast.Name) and t.id == "ms" for t in n.targets)]
+    assert millis == [_normalized('_ms(data.get("ms"))')], "a stage's ms is `_ms` of what the frame said"
+
+
 def test_the_realturn_probe_keeps_nothing_of_a_frame_but_numbers_booleans_and_fixed_words_and_names_exceptions_by_class():
     """P7-D, R7. A frame is parsed in one place (read_into) and looked at in four small functions that take its data; what leaves them is the
     fields of Facts, and those hold numbers, booleans and a few words, each of which is chosen from a fixed list by `_word` (the stop reason, the
@@ -9081,7 +9115,7 @@ def test_the_realturn_probe_keeps_nothing_of_a_frame_but_numbers_booleans_and_fi
     assert names == {"message_id", "neighbor_rows"}
     reads = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in names and isinstance(n.ctx, ast.Load)]
     assert {_probe_outer(n, parents) for n in reads} == {"_retrieve", "fetch_features"}, "only the image requests, and the reader that fills them"
-    for name in ("_gate_row", "_stop_entry", "_eos_entry", "_gate_line", "_stop_line", "_eos_line", "pass_payload", "gate_payload"):
+    for name in ("_timings", "_gate_row", "_stop_entry", "_eos_entry", "_gate_line", "_stop_line", "_eos_line", "pass_payload", "gate_payload"):
         assert "handles" not in {n.id for n in ast.walk(functions[name]) if isinstance(n, ast.Name)}, name
     caught = [n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler) and n.name]
     assert caught, "the pin looks at something"

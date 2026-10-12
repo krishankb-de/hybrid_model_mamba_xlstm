@@ -248,9 +248,10 @@ def stage_data(frames, stage):
 def private_turn(report="SECRET-report one. SECRET-report two.", stopped="budget", tokens=100, neighbor_rows=(10, 158, 63, 74), matches=3,
                  agree=(11, 9, 12, 10), live=True, skip=None, eos=False, final="done", own=(28, 40, 27)):
     """The frames of one private turn as the server sends them, the stages in order, each with its detail, and a SECRET marker in every text
-    that is MIMIC-derived or could be: the generated report and its snapshots, a matched report, a study id, an image url, the sha, the file
-    name, a label name. `skip` maps a stage to the reason it ended skipped (its normal end is then not sent); `own` is the own report's
-    (rank, of, rank_dedup)."""
+    that is MIMIC-derived or could be: the generated report and its snapshots, a matched report, the reference report the turn was given
+    (options.reference), a study id, an image url, the sha, the file name, a label name, and every string of a warning frame (its code and its
+    message), which the probe has no branch for and so never reads. `skip` maps a stage to the reason it ended skipped (its normal end is then
+    not sent); `own` is the own report's (rank, of, rank_dedup)."""
     skip, seq, out = skip or {}, iter(range(1, 1000)), []
 
     def add(event, **data):
@@ -270,8 +271,8 @@ def private_turn(report="SECRET-report one. SECRET-report two.", stopped="budget
     rank = {"rank": own[0], "of": own[1], "rank_dedup": own[2], "n_tied": 0, "hit_at_10": False, "protocol": "SECRET-protocol"}
     add("message_start", message_id="m_assistant0000000000000", user_message_id="m_user0000000000000000", session_id="s_session",
         mode="private", model={"name": "SECRET-model", "eos_trained": eos, "checkpoint": "/SECRET/path.ckpt"},
-        options={"model": "SECRET-model", "test_row": 0}, image={"sha256": "SECRET-sha", "filename": "SECRET.png", "source": "test_split",
-                                                                  "urls": {"thumb": "/v1/messages/m_user/image?variant=thumb"}})
+        options={"model": "SECRET-model", "test_row": 0, "reference": "SECRET-reference Findings: the heart is normal."},
+        image={"sha256": "SECRET-sha", "filename": "SECRET.png", "source": "test_split", "urls": {"thumb": "/v1/messages/m_user/image?variant=thumb"}})
     stage("preprocess", 3.24, {"test_row": 0, "source": "test_split", "image_sha256": "SECRET-sha"})
     stage("encode", 120.46, {"patch_grid": [197, 768], "device": "cpu"})
     stage("retrieve", 5.06, {"image_neighbors": neighbors, "report_matches": reports, "true_report_rank": rank,
@@ -285,6 +286,7 @@ def private_turn(report="SECRET-report one. SECRET-report two.", stopped="budget
     stage("label", 80.0, {"chexbert_14": named(), "positives": ["SECRET-label"], "neighbor_agreement": [
         {"rank": i + 1, "agree": n, "of": 14, "both_positive": ["SECRET-label"], "neighbor_only": [], "generated_only": []}
         for i, n in enumerate(agree)]})
+    add("warning", code="SECRET-warning-code", message="SECRET-warning-message: the reference Findings are not used.")   # where the app sends its own
     stage("score", 90.0, {"rouge_l": 0.2, "reference_source": "test_split", "reference_chexbert_14": named(), "published": {
         "model_report": "SECRET-published line.", "floor_report": "SECRET-floor line.", "live_equals_published": live}})
     add("message_stop", message_id="m_assistant0000000000000", status=final, total_ms=4123.44, report=report, display_report=report,
@@ -331,18 +333,20 @@ def test_first_byte_is_the_first_chunk_and_total_is_the_end_of_the_stream_both_f
     assert (empty.first_byte_ms, empty.total_ms, empty.final, empty.seq_contiguous) == (None, 2500.0, None, None)
 
 
-def test_every_string_the_server_sends_is_dropped_whatever_it_says_and_only_the_fixed_words_get_through():
-    """Every string of every frame is a SECRET: the stage names, the stop word, the skip reason, the statuses, the error kind. A stage the probe
-    does not know is not read; a stop word, a status or an error kind that is not one of the fixed words is `unknown`, and a skip reason is
-    `other`. Nothing of a SECRET reaches the facts, which are all the probe prints of a turn."""
-    def secret(value):
-        if isinstance(value, dict):
-            return {k: secret(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [secret(v) for v in value]
-        return "SECRET-{}".format(value) if isinstance(value, str) else value
+def secreted(value):
+    """`value` with every string in it made a SECRET (a number, a bool and a None stay as they are): a stage name, a stop word, a text."""
+    if isinstance(value, dict):
+        return {k: secreted(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [secreted(v) for v in value]
+    return "SECRET-{}".format(value) if isinstance(value, str) else value
 
-    frames = [(event, secret(data)) for event, data in private_turn()]
+
+def test_every_string_the_server_sends_is_dropped_whatever_it_says_and_only_the_fixed_words_get_through():
+    """Every string of every frame is a SECRET: the stage names, the stop word, the skip reason, the statuses, the error kind, the code and the
+    message of a warning. A stage the probe does not know is not read; a stop word, a status or an error kind that is not one of the fixed words
+    is `unknown`, and a skip reason is `other`. Nothing of a SECRET reaches the facts, which are all the probe prints of a turn."""
+    frames = [(event, secreted(data)) for event, data in private_turn()]
     frames.append(("error", {"seq": len(frames) + 1, "type": "error", "error": {"type": "SECRET-kind", "message": "SECRET-message"}}))
     facts, handles = read(sse(frames))
     assert "SECRET" not in json.dumps(asdict(facts)), asdict(facts)
@@ -401,6 +405,47 @@ def test_a_malformed_frame_a_wrong_type_a_bad_number_or_a_bad_id_is_dropped_and_
     assert facts.stopped == "unknown", "a stop word that is no fixed word"
     assert facts.agreement == [14] and facts.live_equals_published is None and facts.server_ms is None and facts.words is None
     assert facts.seq_contiguous is False and facts.final == "done"
+
+
+def with_ms(value):
+    """A private turn whose retrieve and generate stages, and its message_stop, carry `value` as their milliseconds."""
+    turn = private_turn()
+    for stage in ("retrieve", "generate"):
+        stage_data(turn, stage)["ms"] = value
+    next(data for event, data in turn if event == "message_stop")["total_ms"] = value
+    return turn
+
+
+WITHOUT_THOSE_MS = dict(GOOD_FACTS, stages_ms={"preprocess": 3.2, "encode": 120.5, "label": 80.0, "score": 90.0}, server_ms=None)
+NO_MS = {"a 400-digit int": 10 ** 400, "minus a 400-digit int": -(10 ** 400), "a trillion": 10 ** 12, "a trillion as a float": 1e12, "1e300": 1e300,
+         "infinity": float("inf"), "minus infinity": float("-inf"), "NaN": float("nan"), "negative": -1, "negative float": -0.5,
+         "True": True, "False": False, "a string": "12", "null": None, "a list": [5], "an object": {"ms": 5}}
+
+
+@pytest.mark.parametrize("value", list(NO_MS.values()), ids=list(NO_MS))
+def test_a_number_that_is_no_milliseconds_is_dropped_and_the_rest_of_its_frame_is_still_read(value):
+    """A number is taken as milliseconds only when it is a plain int or float from 0 to below the limit. A 400-digit integer is JSON like any
+    other, and `math.isfinite` of one raises OverflowError: it must be compared with the limit and dropped, never converted. The stages and the
+    message_stop that carried it still give every other fact they hold (the tokens, the neighbours, the stop word, the comparison)."""
+    facts, handles = read(sse(with_ms(value)))
+    assert facts == probe.Facts(**WITHOUT_THOSE_MS)
+    assert handles.neighbor_rows == [10, 158, 63, 74]
+
+
+@pytest.mark.parametrize("value, kept", [(0, 0.0), (7, 7.0), (3.24, 3.2), (0.04, 0.0), (86_400_000, 86400000.0), (10 ** 12 - 1, 999999999999.0)])
+def test_milliseconds_are_any_plain_number_from_0_to_below_the_limit_to_a_tenth(value, kept):
+    assert probe.NUMBER_LIMIT == 10 ** 12, "a trillion milliseconds is 31 years: no turn is that long, and no count is that big"
+    facts, _ = read(sse(with_ms(value)))
+    assert (facts.server_ms, facts.stages_ms["generate"], facts.stages_ms["retrieve"]) == (kept, kept, kept)
+
+
+def test_a_count_of_400_digits_is_dropped_as_milliseconds_are_so_that_no_line_meets_a_number_it_cannot_average():
+    turn = private_turn()
+    stage_data(turn, "generate")["detail"]["tokens"] = 10 ** 400
+    stage_data(turn, "retrieve")["detail"]["true_report_rank"].update(rank=10 ** 400, rank_dedup=10 ** 12)
+    facts, _ = read(sse(turn))
+    assert (facts.tokens, facts.own_rank, facts.own_rank_dedup, facts.own_of) == (None, None, None, 40), "the rank's `of` is a count and stays"
+    assert facts.final == "done" and facts.stopped == "budget" and facts.neighbors == 4
 
 
 def test_ids_that_could_not_stand_in_a_path_are_not_kept_and_a_row_is_a_whole_number_from_0():
@@ -499,7 +544,8 @@ def runs_of(rows=(0, 1)):
 def test_a_gate_whose_three_passes_went_as_they_should_holds_and_its_numbers_are_pass_1s():
     gate = probe.gate_payload(runs_of(), None)
     assert gate == {"published_equal": True, "eos_stops": True, "features_ok": True, "first_byte_ms_max": 20.0, "turn_ms_max": 900.0,
-                    "sessions_deleted": True, "ok": True}, "pass 2 and pass 3 are slower and later: the maxima are of the gate's own pass"
+                    "eos_turn_ms_max": 5000.0, "sessions_deleted": True, "ok": True}, \
+        "pass 2 and pass 3 are slower and later: the first two maxima are of the gate's own pass, the third is the EOS pass's"
 
 
 def test_the_timing_maxima_are_the_slowest_of_pass_1_and_none_when_it_has_none():
@@ -512,6 +558,27 @@ def test_the_timing_maxima_are_the_slowest_of_pass_1_and_none_when_it_has_none()
         turn.facts.first_byte_ms = turn.facts.total_ms = None
     gate = probe.gate_payload(runs, None)
     assert (gate["first_byte_ms_max"], gate["turn_ms_max"]) == (None, None)
+
+
+def test_the_slowest_eos_turn_is_in_the_gate_over_the_rows_and_the_upload_and_it_is_not_judged():
+    """`eos_turn_ms_max` is the default model's turn time for the reader to set against a target: a number, or None when no EOS turn has one. It
+    is no clause of the gate: whatever it says, and whether or not it is there, `ok` is what the passes made it."""
+    runs = runs_of(rows=(2, 5))
+    for turn, ms in zip(runs[2].turns, (5120.7, 6100.1, 5300.0)):   # two rows and the upload: the slowest is a row
+        turn.facts.total_ms = ms
+    gate = probe.gate_payload(runs, None)
+    assert gate["eos_turn_ms_max"] == 6100.1 and gate["ok"] is True
+    runs[2].turns[-1].facts.total_ms = 9.0e9   # the upload is the slowest: it counts as the rows do
+    gate = probe.gate_payload(runs, None)
+    assert gate["eos_turn_ms_max"] == 9.0e9 and gate["ok"] is True, "however slow: it is not judged"
+    for turn in runs[2].turns:
+        turn.facts.total_ms = None
+    gate = probe.gate_payload(runs, None)
+    assert gate["eos_turn_ms_max"] is None and gate["ok"] is True, "no number: None, and the gate is as it was"
+    assert probe.gate_payload(runs[:2], None)["eos_turn_ms_max"] is None, "no EOS pass at all"
+    runs = runs_of()
+    runs[0].turns[0].facts.total_ms = 99999.0
+    assert probe.gate_payload(runs, None)["eos_turn_ms_max"] == 5000.0, "pass 1's slowest turn is not pass 3's"
 
 
 def first_turn(run, **changes):
@@ -654,12 +721,67 @@ def test_pass_3_says_per_row_and_for_the_picture_how_the_eos_model_stopped_and_h
     runs = runs_of(rows=(2, 5))
     runs[2].turns[1].facts.last_sentence_terminated = False
     runs[2].turns[-1].facts.neighbors = 0
-    entry = {"status": 200, "final": "done", "eos_trained": True, "stopped": "eos", "tokens": 70, "words": 44, "last_sentence_terminated": True,
-             "neighbors": 4, "matches": 3, "skipped": {}}
+    entry = {"status": 200, "final": "done", "first_byte_ms": 500.0, "total_ms": 5000.0, "server_ms": 880.0, "stages_ms": {"generate": 800.0},
+             "eos_trained": True, "stopped": "eos", "tokens": 70, "words": 44, "last_sentence_terminated": True, "neighbors": 4, "matches": 3,
+             "skipped": {}}
     line = probe.pass_payload(runs[2])
     assert line == {"pass": 3, "name": "eos", "model": "hybrid_150m_m3_rrg_eos", "max_new_tokens": 200,
                     "rows": [dict(entry, row=2), dict(entry, row=5, last_sentence_terminated=False)],
-                    "upload": dict(entry, neighbors=0), "eos_stops": True, "counts_ok": False, "session_deleted": True, "ran": True}
+                    "upload": dict(entry, neighbors=0), "eos_stops": True, "counts_ok": False,
+                    "first_byte_ms_max": 500.0, "turn_ms_max": 5000.0, "generate_ms_max": 800.0, "session_deleted": True, "ran": True}
+
+
+TIMINGS = ("first_byte_ms", "total_ms", "server_ms", "stages_ms")   # what pass 1 records of a turn's time, and pass 3 records of each of its turns
+
+
+def test_pass_3_records_for_each_eos_turn_the_timings_pass_1_records_and_the_slowest_of_them_over_the_rows_and_the_upload():
+    runs = runs_of(rows=(2, 5))
+    first, second, upload = (t.facts for t in runs[2].turns)
+    timed = [(410.2, 5120.7, 5100.3, {"preprocess": 3.0, "generate": 4000.5, "score": 90.0}),
+             (380.0, 6100.1, 6080.0, {"generate": 4900.2}),     # the slowest turn and the slowest generate stage: a row
+             (760.9, 5300.0, 5250.5, {"generate": 4100.0, "label": 70.0})]   # the slowest first byte: the upload
+    for facts, (first_byte, total, server, stages) in zip((first, second, upload), timed):
+        facts.first_byte_ms, facts.total_ms, facts.server_ms, facts.stages_ms = first_byte, total, server, stages
+    line = probe.pass_payload(runs[2])
+    entries = line["rows"] + [line["upload"]]
+    for entry, (first_byte, total, server, stages) in zip(entries, timed):
+        assert [entry[k] for k in TIMINGS] == [first_byte, total, server, stages]
+    assert (line["first_byte_ms_max"], line["turn_ms_max"], line["generate_ms_max"]) == (760.9, 6100.1, 4900.2)
+    assert probe.gate_payload(runs, None)["eos_turn_ms_max"] == line["turn_ms_max"] == 6100.1
+    one = probe.pass_payload(runs[0])["rows"][0]
+    for entry in entries:   # the same four fields as a pass 1 row, under the same names and in the same order
+        assert [k for k in entry if k in TIMINGS] == [k for k in one if k in TIMINGS] == list(TIMINGS)
+
+
+def test_pass_3_has_no_slowest_for_a_timing_none_of_its_turns_has_and_a_turn_that_failed_still_says_what_it_timed():
+    runs = runs_of(rows=(2,))
+    for turn in runs[2].turns:
+        turn.facts.first_byte_ms = turn.facts.total_ms = turn.facts.server_ms = None
+        turn.facts.stages_ms = {"encode": 12.5}   # no generate stage
+    line = probe.pass_payload(runs[2])
+    assert (line["first_byte_ms_max"], line["turn_ms_max"], line["generate_ms_max"]) == (None, None, None)
+    assert [line["rows"][0][k] for k in TIMINGS] == [None, None, None, {"encode": 12.5}]
+    runs[2].turns[0] = probe.Turn(2, probe.Facts(error="ReadTimeout", first_byte_ms=12.0, stages_ms={"preprocess": 3.0}), None, 200)
+    line = probe.pass_payload(runs[2])
+    assert line["rows"][0]["error"] == "ReadTimeout" and line["rows"][0]["first_byte_ms"] == 12.0 and line["rows"][0]["stages_ms"] == {"preprocess": 3.0}
+    assert (line["first_byte_ms_max"], line["turn_ms_max"], line["generate_ms_max"]) == (12.0, None, None) and line["ran"] is False
+
+
+def test_no_line_the_probe_prints_holds_a_word_of_what_a_hostile_stream_says():
+    """The sentinel at the printing end, with no network: every turn of the three passes is read from a private turn whose texts, its warning's and
+    its reference's among them, are SECRETs, and then from one in which every string is. The lines the probe would print for them, the three
+    passes' and the gate's, are looked at: nothing of a stream is in them, only the numbers and the fixed words (unknown, other) it came to."""
+    for stream, said in ((private_turn(), '"stopped":"budget"'), ([(event, secreted(data)) for event, data in private_turn()], '"final":"unknown"')):
+        runs = runs_of()
+        for run in runs:
+            for turn in run.turns:
+                turn.facts = read(sse(stream))[0]
+        lines = [probe.result_line(probe.pass_payload(run, runs[0])) for run in runs] + [probe.result_line({"gate": probe.gate_payload(runs, None)})]
+        printed = "\n".join(lines)
+        assert len(lines) == 4 and said in printed, "the lines say what the stream came to"
+        assert "SECRET" not in printed, printed
+        for name in CHEXBERT_14:
+            assert name not in printed, name
 
 
 # ---- the requests that follow a turn: images, for their status and length only ------------------------------------------------------
@@ -835,7 +957,8 @@ def test_a_full_run_prints_one_result_line_per_pass_then_the_gate_and_exits_0(fu
     assert all(p["ran"] is True and p["session_deleted"] is True for p in full_run.passes)
     one = full_run.passes[0]
     assert full_run.gate == {"published_equal": True, "eos_stops": True, "features_ok": True, "first_byte_ms_max": one["first_byte_ms_max"],
-                             "turn_ms_max": one["turn_ms_max"], "sessions_deleted": True, "ok": True}
+                             "turn_ms_max": one["turn_ms_max"], "eos_turn_ms_max": full_run.passes[2]["turn_ms_max"], "sessions_deleted": True,
+                             "ok": True}
 
 
 def test_pass_1_runs_each_row_on_the_published_model_under_the_published_protocol_and_checks_what_the_page_would_show(full_run):
@@ -879,6 +1002,26 @@ def test_pass_3_runs_the_eos_model_on_the_same_rows_and_on_a_picture_it_draws_an
         assert (entry["status"], entry["final"], entry["eos_trained"], entry["stopped"], entry["tokens"]) == (200, "done", True, "eos", 15)
         assert (entry["words"], entry["last_sentence_terminated"], entry["neighbors"], entry["matches"]) == (15, True, 4, 3)
     assert three["eos_stops"] is True and three["counts_ok"] is True and "row" not in three["upload"]
+
+
+def test_pass_3_records_the_timings_of_every_eos_turn_the_rows_and_the_upload_alike_and_they_are_numbers_only(full_run):
+    """The default model's turn time, for the plan's targets (P8-F): the same four fields pass 1 records, on each of the three EOS turns, and the
+    slowest of the turns in the pass's line and, as a number that is not judged, in the gate's."""
+    one, three, gate = full_run.passes[0], full_run.passes[2], full_run.gate
+    entries = three["rows"] + [three["upload"]]
+    assert len(entries) == 3, "two test rows and the picture the probe draws"
+    for entry in entries:
+        assert [k for k in entry if k in TIMINGS] == list(TIMINGS) == [k for k in one["rows"][0] if k in TIMINGS], "pass 1's fields, in its order"
+        for key in ("first_byte_ms", "total_ms", "server_ms"):
+            assert type(entry[key]) is float and entry[key] > 0, (key, entry[key])
+        assert entry["first_byte_ms"] <= entry["total_ms"] and entry["server_ms"] <= entry["total_ms"]
+        assert type(entry["stages_ms"]) is dict and "generate" in entry["stages_ms"] and set(entry["stages_ms"]) <= set(probe.STAGES)
+        assert all(type(ms) is float and ms >= 0 for ms in entry["stages_ms"].values()), "a stage is a number of ms, never a text"
+    assert [list(e["stages_ms"]) for e in three["rows"]] == [list(probe.STAGES)] * 2, "a test row runs all six stages"
+    assert list(three["upload"]["stages_ms"]) == [s for s in probe.STAGES if s != "score"] and three["upload"]["skipped"] == {"score": "no_reference"}
+    assert three["first_byte_ms_max"] == max(e["first_byte_ms"] for e in entries) and three["turn_ms_max"] == max(e["total_ms"] for e in entries)
+    assert three["generate_ms_max"] == max(e["stages_ms"]["generate"] for e in entries) > 0
+    assert gate["eos_turn_ms_max"] == three["turn_ms_max"] and gate["ok"] is True
 
 
 # ---- the gate, failing: a live server that is wrong in one way at a time ----------------------------------------------------------
@@ -1101,6 +1244,7 @@ def test_a_server_that_cannot_be_reached_ends_in_a_pass_line_and_a_gate_with_the
     passes, gate = split_result(out)
     assert code == 1 and err == "" and out.count("\n") == 2 and passes[0]["rows"] == [] and passes[0]["session_deleted"] is None
     assert gate["ok"] is False and gate["sessions_deleted"] is False and gate["published_equal"] is False and gate["first_byte_ms_max"] is None
+    assert gate["eos_turn_ms_max"] is None
 
 
 # ---- R7: nothing of the stream is printed or saved --------------------------------------------------------------------------------
@@ -1219,6 +1363,23 @@ class Refusal:
         return False
 
 
+class Streaming:
+    """A 200 answer a fake client hands out, as a context manager: `text` as the stream's chunks of `size` characters."""
+
+    def __init__(self, text, size=700):
+        self.status_code, self.text, self.size = 200, text, size
+
+    def iter_text(self):
+        for start in range(0, len(self.text), self.size):
+            yield self.text[start:start + self.size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 class Fake:
     """In place of httpx.Client for run_turn alone: its stream is `answer`, or raises it when that is an exception."""
 
@@ -1262,6 +1423,17 @@ def test_a_turn_that_fails_in_transport_is_named_by_the_class_of_the_failure_and
                     RuntimeError("SECRET Findings: report text")):
         facts, handles = probe.run_turn(Fake(failure), "s_abc", spec_of(), 1e18)
         assert (facts.status, facts.error) == (None, type(failure).__name__) and "SECRET" not in json.dumps(asdict(facts))
+
+
+@pytest.mark.parametrize("value", [10 ** 400, -(10 ** 400)], ids=["a 400-digit int", "minus a 400-digit int"])
+def test_a_stream_with_a_400_digit_number_in_its_milliseconds_is_read_to_its_end_and_the_turn_has_no_error(value):
+    """Before the fix the turn ended where the number was read, with `error` "OverflowError" and the stream's later frames unread: the retrieve
+    stage's counts, the generate stage's stop word, the label and score stages, message_stop. The number is dropped, and the turn is as good."""
+    facts, handles = probe.run_turn(Fake(Streaming(sse(with_ms(value)))), "s_abc", spec_of(), 1e18)
+    assert (facts.status, facts.error, facts.refusal, facts.final, facts.seq_contiguous) == (200, None, None, "done", True)
+    assert facts.stages_ms == WITHOUT_THOSE_MS["stages_ms"] and facts.server_ms is None
+    assert (facts.tokens, facts.stopped, facts.neighbors, facts.matches, facts.live_equals_published) == (100, "budget", 4, 3, True)
+    assert facts.agreement == [11, 9, 12, 10] and facts.words == 4 and handles.neighbor_rows == [10, 158, 63, 74]
 
 
 def test_a_turn_sends_its_options_as_the_form_the_page_sends_and_a_picture_only_when_it_has_one():
