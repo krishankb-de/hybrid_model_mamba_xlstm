@@ -1051,7 +1051,7 @@ def test_the_viewer_opens_a_similar_xray_beside_yours_zooms_in_and_escape_gives_
     size; the page behind is inert. + zooms both panes (linked), the wheel zooms further at the cursor, and Esc closes the viewer, frees the
     page and puts the focus back on the button that opened it."""
     page = ui.open()
-    card = ui.turn(images["xray_a.png"])
+    card = ui.turn(images["xray_smooth.png"])   # not noise: the viewer fills the page with this picture, and a screenshot of that is over the evidence limit (P6-F fix 1)
     assert card["status"] == "done"
     page.wait_for_function(NEIGHBOURS_LOADED)
     opener = page.locator("section.neighbors button[data-action='view']").first

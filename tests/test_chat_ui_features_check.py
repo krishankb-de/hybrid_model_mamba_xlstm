@@ -154,6 +154,45 @@ def test_each_page_rule_is_a_function_body_that_returns_and_reads_the_page_only(
         assert rule.count("(") == rule.count(")") and rule.count("'") % 2 == 0, key
 
 
+def _page_item(rank: int, overflows: bool, more: Any = None) -> Dict[str, Any]:
+    return {"rank": str(rank), "overflows": overflows, "more": more}
+
+
+def test_what_the_matches_item_states_of_show_all_is_what_it_held_every_report_to_and_whether_it_clicked():
+    """P6-F fix 1. The item's facts said 'Show all and Show less' and every show_all of the committed checklist was null: the tiny reports have
+    12 to 15 words, so none overflows its three lines, and the branch that clicks Show all never ran. What is checked on every report is the rule
+    (the button is offered exactly when the text overflows); the click is made only on a report that overflows, and the facts say which it was."""
+    none_overflow = check.show_all_facts([{"width": 760, "items": [_page_item(1, False), _page_item(2, False), _page_item(3, False)]},
+                                          {"width": 760, "items": [_page_item(1, False), _page_item(2, False), _page_item(3, False)]}], None)
+    assert none_overflow["reports_checked"] == 6 and none_overflow["reports_that_overflow"] == 0 and none_overflow["reports_with_the_button"] == 0
+    assert none_overflow["list_width_px"] == [760, 760] and none_overflow["clicked_show_all_and_show_less"] is False
+    assert "overflow" in none_overflow["not_clicked_because"] and "three lines" in none_overflow["not_clicked_because"]
+    one_overflows = check.show_all_facts([{"width": 320, "items": [_page_item(1, True, "Show all"), _page_item(2, False)]}],
+                                         {"report": 1, "opened_whole": True, "closed_again": True})
+    assert one_overflows["reports_that_overflow"] == 1 and one_overflows["reports_with_the_button"] == 1
+    assert one_overflows["clicked_show_all_and_show_less"] is True and one_overflows["not_clicked_because"] is None
+
+
+def test_the_features_check_says_no_more_of_show_all_and_of_the_thumbnail_than_it_checks_and_cites_who_ruled():
+    doc = check.__doc__
+    assert "clamped to three lines with Show all" not in doc and "Show all" in doc and "overflow" in doc   # the item checks when it is offered, not a click
+    assert "tests/frontend/render.test.mjs" in doc
+    assert "Show all opens a clamped report and Show less closes it" in (Path(__file__).resolve().parents[1] / "tests" / "frontend" / "render.test.mjs").read_text(encoding="utf-8")
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "by design" not in source and source.count("ruled at P6 fix 1") == 2   # the viewer item's note and the environment's note
+
+
+def test_the_features_check_runs_its_items_and_reads_the_console_with_the_browser_checks_own_functions():
+    """P6-F fix 1. drain_console was a verbatim copy of the browser check's and run_check a near copy; one implementation now, imported."""
+    from scripts import chat_ui_browser_check as browser_check
+    assert check.run_check is browser_check.run_check
+    for name in ("run_check", "drain_console"):
+        assert getattr(check, name, None) in (None, getattr(browser_check, name)), name   # never a copy of its own
+    assert not hasattr(check.Context, "drain_console") and not hasattr(browser_check.Context, "drain_console")
+    run_all_source = Path(check.__file__).read_text(encoding="utf-8")
+    assert "claim=claim" in run_all_source and "keep=1500" in run_all_source   # what the features check says differently: the claim, and the whole of a failure
+
+
 # ---- the environment of a run: what the app said of itself, read from it (P6-F fix 1) ------------------------------------------------
 
 class _Version:

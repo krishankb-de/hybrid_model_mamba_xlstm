@@ -51,7 +51,8 @@ CLOSE_WAIT_S = 3.0   # how long, in all, Chrome has to answer the DevTools Brows
 TERM_WAIT_S = 5.0    # how long a process has to exit after SIGTERM, before it is sent SIGKILL
 
 # What a --url may not be (see url_problem, tiny_only_problem). The two ports are the laptop's dev server and the tunnel to the cluster's private
-# server: the checks send uploads and turns, and screenshot what an app shows, and neither may be the app. No other script names these numbers.
+# server: the checks drive an app's page (two of them send it uploads and turns, and write screenshots of what it shows), and neither may be the
+# app. No other script names these numbers.
 REFUSED_PORTS = (8000, 8010)
 TINY_MODEL = "tiny"                    # app.engine.TinyEngine.name: the one model of the app a check may be given with --url
 TINY_NOTE = "tiny random-init model"   # app.engine.TinyEngine.drift_note: what that engine says of itself in its card
@@ -59,17 +60,17 @@ MODELS_BYTES = 1024 * 1024             # the most of a /v1/models answer that is
 MODELS_UNREADABLE = ("the app at this address did not answer GET /v1/models with JSON (no answer, an error status, a redirect, or something "
                      "else), so it cannot be shown to be the tiny app; these checks run on the tiny app only")
 NOT_THE_TINY_APP = ("the app at this address is not the tiny app: its /v1/models names a model that is not the tiny engine with no checkpoint. "
-                    "These checks send an app uploads and turns and screenshot what it shows, so they run on the tiny stack (random weights, "
-                    "no checkpoint, no data) only")
+                    "These checks drive the tiny stack (random weights, no checkpoint, no data) only, and never an app that serves anything else")
 URL_NEEDS_NO_EVIDENCE = ("--url needs --no-evidence: the pictures and the checklist of a run are evidence of the tiny stack that the check "
                          "started itself, and an app that someone else started is not that")
 
 # What Chrome is started with, besides its profile, its DevTools port and the blank page. A fresh profile is not a quiet one: some seconds after
-# Chrome starts it installs its default apps and extensions into it (its log shows web-app and extension installs, a burst of about 70 ms), and a
-# fetch that a page makes in that moment fails inside Chrome: TypeError "Failed to fetch" after 1 ms, net::ERR_ABORTED with canceled set, no
-# request in the NetLog and none at the server, while the same document's other fetches work. The features check's first click fetches about 7 s
-# after Chrome starts, and that fetch failed in about one run of three (10 of 30; with these flags 0 of 30, runs alternating). They are the flags
-# that automation tools start Chrome with, to keep it to what it was asked to do.
+# Chrome starts, its own log shows its default-app and extension installer at work (a burst of about 70 ms) and a background check-in to
+# android.clients.google.com, and a fetch that a page makes around then can fail inside Chrome: TypeError "Failed to fetch" after 1 ms,
+# net::ERR_ABORTED with canceled set, no request in the NetLog and none at the server, while the same document's other fetches work. The failure
+# coincides with that activity; that the activity causes it is not shown. The features check's first click fetches about 7 s after Chrome starts,
+# and that fetch failed in about one run of three with Chrome's default flags (10 of 30 runs) and in none with these five together (0 of 30, runs
+# alternating). Which of the five matters is not established. They are the flags that automation tools start Chrome with.
 CHROME_FLAGS = ("--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--disable-extensions", "--disable-default-apps",
                 "--disable-background-networking", "--disable-component-update", "--disable-sync")
 HOLD_FILE = "hold"   # in the app's home: while it exists, the turns of the tiny engine wait (App.hold, hold_turns)
@@ -324,7 +325,7 @@ def url_problem(url: str) -> Optional[str]:
     if port is None or port == 0:
         return "the URL names no port: give the port of the app, as in http://127.0.0.1:PORT/"
     if port in REFUSED_PORTS:
-        return "port {} is refused: {} are the dev server's port and the tunnel's to the cluster's server, and these checks send uploads and turns".format(
+        return "port {} is refused: {} are the dev server's port and the tunnel's to the cluster's server, and these checks never drive either".format(
             port, " and ".join(str(p) for p in REFUSED_PORTS))
     return None
 

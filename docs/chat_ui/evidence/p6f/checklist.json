@@ -8,14 +8,35 @@
     "browser": "Chrome/146.0.7680.178 (headless)",
     "python": "3.14.3",
     "os": "Darwin",
-    "server": "create_app(engine='tiny', tiny_gallery=True), started by the check on a free loopback port",
-    "server_mode": "private",
-    "server_features": {
-      "retrieval": true,
-      "labels": true
+    "server": {
+      "started_by_the_check": true,
+      "mode": "private",
+      "default_model": "tiny",
+      "features": {
+        "retrieval": true,
+        "labels": true
+      }
     },
-    "engine": "tiny (random weights, toy vocabulary; no checkpoint, no data)",
-    "gallery": "the synthetic tiny gallery: 200 train images, 40 test studies, 14-label vectors, 320 px gray JPEGs; the keyword labeller",
+    "models": [
+      {
+        "name": "tiny",
+        "checkpoint": null,
+        "checkpoint_sha256": null,
+        "train_experiment": null,
+        "drift_note": "tiny random-init model",
+        "device": "cpu",
+        "prefix_k": 4,
+        "eos_trained": false,
+        "cached_decode_available": true
+      }
+    ],
+    "gallery": {
+      "build_id": "tiny",
+      "images": 200,
+      "report_rows": 240,
+      "report_groups": 78,
+      "towers_identical": true
+    },
     "uploaded_pictures": "phantoms drawn by the check (scripts/chat_ui_features_check.py phantom_png); nothing is from a patient or from MIMIC",
     "viewports": {
       "desktop": [
@@ -31,7 +52,7 @@
       "The serving command (python -m app.server --engine tiny --gallery DIR --labeler rule) cannot serve the tiny gallery: its manifest names a tower whose hash is not the tiny engine's, and the server refuses a gallery it cannot match to its engine ('the gallery was built with another image tower', exit 1). The check starts the app as the laptop's dev server does, create_app(tiny_gallery=True).",
       "Real input: the click on the well (Chrome's file chooser is intercepted and answered with a file: a headless Chrome has no dialog), the file dropped from disk (Input.dispatchDragEvent), the mouse and the keyboard of the viewer. Not real: the paste, which is a ClipboardEvent made in the page that holds a File or text, because a headless Chrome has no clipboard of its own and a real Cmd+V would read the user's.",
       "Brightness and contrast are measured on pixels: a screenshot of the left picture's box, its luma mean (brightness) and spread (contrast). Zoom and pan are measured on the picture's drawn box, and compared with the page's own data-scale.",
-      "The user turn's own thumbnail is a picture and no more by design (render.js userCtx has no viewer): the card's images row opens the same X-ray.",
+      "The user turn's own thumbnail is a picture and no more, ruled at P6 fix 1 (render.js userCtx has no viewer): the card's images row opens the same X-ray.",
       "Every screenshot was confirmed by the page itself (a DOM rule per picture, true before and after the capture)."
     ]
   },
@@ -41,7 +62,7 @@
       "claim": "click, drag-drop and paste each attach with a preview, and a refused file shows its message",
       "status": "PASS",
       "detail": "click, drop and paste each attached a picture with its preview (name, pixel size, size on disk; Remove puts the focus back on the well); the drag showed on the well; a drop beside it and a paste of text did nothing; the page refused a GIF, a DICOM name and 21 MB without a request, and showed the server's 422 for a 32 px picture and deleted its chat",
-      "seconds": 0.7,
+      "seconds": 0.6,
       "data": {
         "well_text": "Drop, paste or click to attach an X-ray (PNG, JPEG, WEBP)",
         "click": {
@@ -124,7 +145,7 @@
       "claim": "after a reload, and after reopening the session, the X-ray and the 224×224 model input are both shown",
       "status": "PASS",
       "detail": "the X-ray (288x256 px) and the 224x224 model input were shown, loaded, inside the card, live, after a reload and after reopening the chat from the sidebar; the model input's brightness is the X-ray's",
-      "seconds": 2.2,
+      "seconds": 1.9,
       "data": {
         "x_ray_px": [
           288,
@@ -146,8 +167,8 @@
             ]
           ],
           "paths": [
-            "/v1/messages/m_01a1316ff75b0000ebd111/image?variant=thumb",
-            "/v1/messages/m_01a1316ff75b0000ebd111/image?variant=model_input"
+            "/v1/messages/m_01a131baedbe00007ff794/image?variant=thumb",
+            "/v1/messages/m_01a131baedbe00007ff794/image?variant=model_input"
           ],
           "user_turn_picture": "preview",
           "luma_mean_std": [
@@ -178,8 +199,8 @@
             ]
           ],
           "paths": [
-            "/v1/messages/m_01a1316ff75b0000ebd111/image?variant=thumb",
-            "/v1/messages/m_01a1316ff75b0000ebd111/image?variant=model_input"
+            "/v1/messages/m_01a131baedbe00007ff794/image?variant=thumb",
+            "/v1/messages/m_01a131baedbe00007ff794/image?variant=model_input"
           ],
           "user_turn_picture": "server",
           "luma_mean_std": [
@@ -210,8 +231,8 @@
             ]
           ],
           "paths": [
-            "/v1/messages/m_01a1316ff75b0000ebd111/image?variant=thumb",
-            "/v1/messages/m_01a1316ff75b0000ebd111/image?variant=model_input"
+            "/v1/messages/m_01a131baedbe00007ff794/image?variant=thumb",
+            "/v1/messages/m_01a131baedbe00007ff794/image?variant=model_input"
           ],
           "user_turn_picture": "server",
           "luma_mean_std": [
@@ -234,7 +255,7 @@
       "claim": "the similar-X-rays grid shows scores and 'n/14 labels agree'",
       "status": "PASS",
       "detail": "4 similar X-rays, each with its stored 320 px picture, '#rank . similarity' and a bar of that length, and 'n/14 labels agree' (n recounted here from the labels, as the server says) with the chips of the labels that differ",
-      "seconds": 1.5,
+      "seconds": 1.3,
       "data": {
         "k_images": 4,
         "neighbours": [
@@ -321,7 +342,7 @@
       "claim": "the matching-reports list and, for a picked test study, the own-rank badge",
       "status": "PASS",
       "detail": "3 matching reports (rank, similarity, group size, the stored text clamped to three lines, the positive labels) and no badge for an upload; a test study picked in the composer shows 'Own report: rank 4 of 40 test reports · R@10 hit'",
-      "seconds": 2.5,
+      "seconds": 2.3,
       "data": {
         "k_reports": 3,
         "upload": {
@@ -367,8 +388,20 @@
               "show_all": null
             }
           ],
-          "own_rank_badge": null,
-          "show_all_and_less": "not offered, as the page intends: no stored report is longer than its three lines at this width, and each row's Show all is shown exactly when its text overflows (checked for every report)"
+          "own_rank_badge": null
+        },
+        "show_all": {
+          "rule": "a report's Show all is offered exactly when its text overflows its three lines (held to it on every report read)",
+          "reports_checked": 6,
+          "reports_that_overflow": 0,
+          "reports_with_the_button": 0,
+          "list_width_px": [
+            726,
+            726
+          ],
+          "clicked_show_all_and_show_less": false,
+          "clicked": null,
+          "not_clicked_because": "no report of the upload's list overflows its three lines at this width, so no Show all was offered there to click"
         },
         "picked_study": {
           "test_row": 3,
@@ -438,7 +471,7 @@
       "claim": "the viewer opens from every image, side by side for a neighbour, with zoom, pan, brightness and contrast working by mouse and by keyboard",
       "status": "PASS",
       "detail": "the viewer opened from all 6 pictures of the card (the X-ray, the model input, 4 similar X-rays: each closed to the picture that opened it) and, on a similar X-ray beside the turn's own, zoom (wheel about the cursor, + and -, the buttons, 1:1), pan (drag, arrows), brightness and contrast (a click, then the keys) all worked, measured on the pictures drawn and on their pixels",
-      "seconds": 5.9,
+      "seconds": 5.5,
       "data": {
         "opens_from": [
           "image:thumb",
@@ -449,7 +482,7 @@
           "neighbor:4"
         ],
         "user_turn_thumbnail_is_an_opener": false,
-        "user_turn_thumbnail_note": "a picture and no more, by design: the images row opens the same X-ray",
+        "user_turn_thumbnail_note": "a picture and no more, ruled at P6 fix 1: the card's 'Your X-ray' tile opens the same picture",
         "each": {
           "image:thumb": {
             "label": "Image viewer: Your X-ray",
@@ -650,7 +683,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 153320,
+      "bytes": 153248,
       "page_confirmed": true
     },
     {
@@ -661,7 +694,7 @@
         900
       ],
       "scheme": "light",
-      "bytes": 154982,
+      "bytes": 154795,
       "page_confirmed": true
     },
     {
@@ -672,7 +705,7 @@
         2300
       ],
       "scheme": "light",
-      "bytes": 328675,
+      "bytes": 328547,
       "page_confirmed": true
     },
     {
@@ -683,7 +716,7 @@
         2300
       ],
       "scheme": "dark",
-      "bytes": 334936,
+      "bytes": 334770,
       "page_confirmed": true
     },
     {

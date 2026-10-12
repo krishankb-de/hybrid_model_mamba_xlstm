@@ -369,7 +369,7 @@ class Context:
             self.stop_script = self.browser.call("Page.addScriptToEvaluateOnNewDocument", source=STOP_OFF_JS)["identifier"]
 
     def stop_default(self) -> None:
-        """Back to the page's defaults: the script is removed and whatever it stored is forgotten. run_check does this before every check."""
+        """Back to the page's defaults: the script is removed and whatever it stored is forgotten. run_all has run_check do this before every check."""
         if self.stop_script is not None:
             self.browser.call("Page.removeScriptToEvaluateOnNewDocument", identifier=self.stop_script)
             self.stop_script = None
@@ -435,15 +435,17 @@ class Context:
         self.shots.append({"file": file_name, "shows": what, "viewport": list(viewport), "scheme": scheme, "bytes": size,
                            "page_confirmed": True})
 
-    def drain_console(self) -> None:
-        """Pull what the page logged since the last call: errors and uncaught exceptions only."""
-        self.browser.evaluate("0")   # an answer from the page: the events that came before it are in the record
-        for params in self.browser.events("Runtime.consoleAPICalled"):
-            if params.get("type") == "error":
-                self.console.append("console.error: " + " ".join(str(a.get("value", a.get("description", ""))) for a in params.get("args", []))[:200])
-        for params in self.browser.events("Runtime.exceptionThrown"):
-            details = params.get("exceptionDetails", {})
-            self.console.append("uncaught: " + str((details.get("exception") or {}).get("description") or details.get("text"))[:200])
+
+def drain_console(browser: Browser, console: List[str]) -> None:
+    """Pull what the page logged since the last call, appended to `console`: errors and uncaught exceptions only. The features check reads its
+    console with this too (P6-F fix 1)."""
+    browser.evaluate("0")   # an answer from the page: the events that came before it are in the record
+    for params in browser.events("Runtime.consoleAPICalled"):
+        if params.get("type") == "error":
+            console.append("console.error: " + " ".join(str(a.get("value", a.get("description", ""))) for a in params.get("args", []))[:200])
+    for params in browser.events("Runtime.exceptionThrown"):
+        details = params.get("exceptionDetails", {})
+        console.append("uncaught: " + str((details.get("exception") or {}).get("description") or details.get("text"))[:200])
 
 
 def screen_reader_only(selector: str) -> bool:
@@ -531,12 +533,19 @@ class Ax:
         return "".join(parts)
 
 
-def focus_target_only(attributes: List[str]) -> bool:
-    """Whether an element, given as the flat attribute list DOM.describeNode returns (name, value, name, value, ...), can be focused and is
-    no stop of Tab: its tabindex is a whole number below zero. The page uses such an element to hold the focus where a control that has
-    gone was (a matching report's text after Show less), which is not a control, and the tree calls it focusable all the same."""
+# The roles of the accessibility tree that are no control: text and structure. The list is closed on purpose: a role that is not on it (a control,
+# or one nobody has said is not) is reported when it has no name, so that nothing a user can operate is let through by its tabindex.
+NON_CONTROL_ROLES = ("paragraph", "generic", "heading", "group", "region", "main", "article", "list", "listitem", "figure", "StaticText")
+
+
+def focus_target_only(attributes: List[str], role: str) -> bool:
+    """Whether an element, given as the flat attribute list DOM.describeNode returns (name, value, name, value, ...) and the role the tree gives it,
+    can be focused and is no control and no stop of Tab: its role is one of NON_CONTROL_ROLES and its tabindex is a whole number below zero ('-1',
+    '-2'; not '-0', which is zero, nor anything that is not a whole number). The page uses such an element to hold the focus where a control that
+    has gone was (a matching report's text after Show less), and the tree calls it focusable all the same. An unnamed <button tabindex="-1">
+    is not one: it is a control, and a key reaches it by an arrow."""
     value = dict(zip(attributes[0::2], attributes[1::2])).get("tabindex", "").strip()
-    return re.fullmatch(r"-\d+", value) is not None
+    return role in NON_CONTROL_ROLES and re.fullmatch(r"-0*[1-9]\d*", value) is not None
 
 
 def unnamed_controls(b: Any, exposed: List[Dict[str, Any]]) -> Tuple[List[Tuple[str, Any]], List[Tuple[str, Any]]]:
@@ -548,7 +557,7 @@ def unnamed_controls(b: Any, exposed: List[Dict[str, Any]]) -> Tuple[List[Tuple[
             continue
         attributes = b.call("DOM.describeNode", backendNodeId=node["backendDOMNodeId"]).get("node", {}).get("attributes", []) \
             if node.get("backendDOMNodeId") is not None else []
-        (left_out if focus_target_only(attributes) else unnamed).append((Ax.role(node), node.get("backendDOMNodeId")))
+        (left_out if focus_target_only(attributes, Ax.role(node)) else unnamed).append((Ax.role(node), node.get("backendDOMNodeId")))
     return unnamed, left_out
 
 
@@ -1626,27 +1635,38 @@ def select_checks(only: Optional[str]) -> List[Tuple[str, Callable[["Context"], 
     return [(name, fn) for name, fn in CHECKS if name in names]
 
 
-def run_check(ctx: Context, name: str, fn: Callable[[Context], Tuple[str, Dict[str, Any]]]) -> Dict[str, Any]:
+def run_check(ctx: Any, name: str, fn: Callable[[Any], Tuple[str, Dict[str, Any]]], claim: Optional[str] = None,
+              before: Optional[Callable[[Any], None]] = None, keep: int = 400, failure_chars: int = 220) -> Dict[str, Any]:
+    """Run one check against a context (anything with .browser and .console: this file's, the features check's) and make its entry of the
+    checklist, `{name, [claim,] status, detail, seconds, data, console_errors}`, printing `CHECK <name> <status> <detail>`. A failed expectation
+    or any other exception is a failed check and not a crashed run, and so is an error the page logged while the check ran. This is the one
+    implementation of both checks (P6-F fix 1); what they say differently is a parameter: `claim` is kept in the entry when given, `before(ctx)`
+    runs first inside the same guard (this check resets the page's defaults), `keep` is how much of the detail the entry holds, and
+    `failure_chars` how much of a failure is printed (a pass prints 220)."""
     mark = len(ctx.console)
     started = time.time()
     status, detail, data = "PASS", "", {}  # type: str, str, Dict[str, Any]
     try:
-        ctx.stop_default()   # each check starts from the page's defaults; one that needs a long turn asks for the switch off itself
+        if before is not None:
+            before(ctx)
         detail, data = fn(ctx)
     except Failure as exc:
         status, detail = "FAIL", str(exc)
     except Exception as exc:   # a CDP error, a timeout waiting for the page: a failed check, not a crashed run
         status, detail = "FAIL", "{}: {}".format(type(exc).__name__, exc)
     try:
-        ctx.drain_console()
+        drain_console(ctx.browser, ctx.console)
     except Exception as exc:
         ctx.console.append("could not read the console: {}".format(exc))
     logged = ctx.console[mark:]
     if status == "PASS" and logged:
         status, detail = "FAIL", "the page logged {} error(s): {}".format(len(logged), logged[0])
-    print("CHECK {} {} {}".format(name, status, one_line(detail)), flush=True)
-    return {"name": name, "status": status, "detail": one_line(detail, 400), "seconds": round(time.time() - started, 1), "data": data,
-            "console_errors": logged}
+    print("CHECK {} {} {}".format(name, status, one_line(detail, 220 if status == "PASS" else failure_chars)), flush=True)
+    entry = {"name": name}  # type: Dict[str, Any]
+    if claim is not None:
+        entry["claim"] = claim
+    entry.update(status=status, detail=one_line(detail, keep), seconds=round(time.time() - started, 1), data=data, console_errors=logged)
+    return entry
 
 
 def warm_up(base: str) -> float:
@@ -1682,7 +1702,8 @@ def run_all(browser: Browser, app: Optional[App], base: str, work: str, out_dir:
         for name in EVIDENCE_FILES:
             if os.path.exists(os.path.join(out_dir, name)):
                 os.remove(os.path.join(out_dir, name))
-    return [run_check(ctx, name, fn) for name, fn in (CHECKS if checks is None else checks)], ctx
+    return [run_check(ctx, name, fn, before=Context.stop_default)   # each check starts from the page's defaults; one that needs a long turn asks for the switch off itself
+            for name, fn in (CHECKS if checks is None else checks)], ctx
 
 
 def environment(browser: Browser, app: Optional[App], warm: Optional[float]) -> Dict[str, Any]:

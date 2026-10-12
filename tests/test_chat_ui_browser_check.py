@@ -93,10 +93,11 @@ def test_a_focus_target_that_no_key_reaches_is_no_control_that_needs_a_name():
     less (render.js clampedText) and no Tab stops on it. Chrome's tree calls it focusable and a paragraph has no name of its own, so the item
     that wants a name of everything focusable failed on such a server, on three of them (one per matching report), before it reached the
     stage buttons. A focusable thing that a key does reach, with no name, is still one."""
-    assert check.focus_target_only(["class", "clamp-text clamped", "tabindex", "-1", "data-action", "clamp"]) is True
-    assert check.focus_target_only(["tabindex", " -2 "]) is True
+    target = ["class", "clamp-text clamped", "tabindex", "-1", "data-action", "clamp"]
+    assert check.focus_target_only(target, "paragraph") is True
+    assert check.focus_target_only(["tabindex", " -2 "], "generic") is True
     for attributes in (["tabindex", "0"], ["id", "image-well", "role", "button", "tabindex", "0"], ["class", "x"], [], ["tabindex", "-1x"], ["tabindex", ""]):
-        assert check.focus_target_only(attributes) is False, attributes
+        assert check.focus_target_only(attributes, "paragraph") is False, attributes
     nodes = [_node("1", "paragraph", backend=10, focusable=True),            # a focus target: tabindex -1
              _node("2", "paragraph", backend=11, focusable=True),            # a Tab stop with no name
              _node("3", "button", backend=12, focusable=True),               # a control with no name
@@ -104,6 +105,29 @@ def test_a_focus_target_that_no_key_reaches_is_no_control_that_needs_a_name():
     dom = FakeDom({10: ["class", "clamp-text", "tabindex", "-1"], 11: ["tabindex", "0"], 12: [], 13: []})
     unnamed, left_out = check.unnamed_controls(dom, nodes)
     assert unnamed == [("paragraph", 11), ("button", 12)] and left_out == [("paragraph", 10)]
+
+
+def test_only_a_role_that_is_no_control_is_a_focus_target_that_needs_no_name():
+    """P6-F fix 1. The exemption was any unnamed node with a negative tabindex, whatever it was, so an unnamed <button tabindex="-1"> (a roving
+    control that a key reaches by an arrow) passed 'every control has a name'. It is now only for a role that is not a control: a control, and a
+    role that nobody has said is not one (the list is closed), is reported."""
+    target = ["class", "clamp-text", "tabindex", "-1"]
+    for role in ("paragraph", "generic", "heading", "group", "region", "main", "article", "list", "listitem", "figure", "StaticText"):
+        assert check.focus_target_only(target, role) is True, role
+    for role in ("button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox", "listbox", "option", "slider", "spinbutton", "switch", "tab",
+                 "menuitem", "menuitemcheckbox", "treeitem", "gridcell", "", "somethingnew"):
+        assert check.focus_target_only(target, role) is False, role
+    nodes = [_node("1", "button", backend=20, focusable=True), _node("2", "paragraph", backend=21, focusable=True)]
+    unnamed, left_out = check.unnamed_controls(FakeDom({20: ["tabindex", "-1"], 21: ["tabindex", "-1"]}), nodes)
+    assert unnamed == [("button", 20)] and left_out == [("paragraph", 21)]   # the roving button is a control without a name
+
+
+@pytest.mark.parametrize("value", ["0", "-0", "-00", "+1", "1", "-", "- 1", "-1x", "-1.5", "", "−1"])   # the last is a Unicode minus
+def test_only_a_whole_number_below_zero_is_a_tabindex_that_no_key_reaches(value):
+    """'-0' is zero, which is a Tab stop (an unnamed element with it is one a keyboard user lands on), and so is anything that is not a whole number
+    below zero. The regex was -\\d+, which let '-0' through."""
+    assert check.focus_target_only(["tabindex", value], "paragraph") is False, value
+    assert check.focus_target_only(["tabindex", " -1 "], "paragraph") is True
 
 
 def test_the_contrast_audit_reports_what_a_user_can_see_and_not_text_made_for_a_screen_reader():
@@ -199,6 +223,113 @@ def test_the_reload_step_holds_the_turn_before_it_sends_it_and_always_releases_i
     sends = [c for c in calls(tree, "ctx.send") if "tokens 150" in ast.unparse(c)]
     assert len(sends) == 1 and hold.lineno < sends[0].lineno, "the turn is sent before it is held"
     assert hold.lineno < in_finally[0].lineno, "the hold is not made before the try that releases it"
+
+
+# ---- run_check and drain_console: the one implementation of the browser check and the features check (P6-F fix 1) ----------------------------
+
+class _Page:
+    """The browser end of a check's run: evaluate() answers, and the DevTools events the page raised are given out once, by method."""
+
+    def __init__(self, events: Any = ()) -> None:
+        self.recorded = list(events)   # (method, params)
+        self.asked = []  # type: List[str]
+
+    def evaluate(self, expression: str) -> Any:
+        self.asked.append(expression)
+        return None
+
+    def events(self, method: str) -> List[Dict[str, Any]]:
+        taken = [params for m, params in self.recorded if m == method]
+        self.recorded = [(m, params) for m, params in self.recorded if m != method]
+        return taken
+
+
+class _Ctx:
+    def __init__(self, events: Any = ()) -> None:
+        self.browser = _Page(events)
+        self.console = []  # type: List[str]
+
+
+def _console(kind: str, text: str) -> Any:
+    return ("Runtime.consoleAPICalled", {"type": kind, "args": [{"value": text}]})
+
+
+def test_the_console_is_read_once_after_an_answer_from_the_page_and_only_errors_and_exceptions_are_kept():
+    ctx = _Ctx([_console("log", "fine"), _console("error", "bad " + "x" * 300), _console("warning", "meh"),
+                ("Runtime.exceptionThrown", {"exceptionDetails": {"exception": {"description": "TypeError: no"}, "text": "Uncaught"}}),
+                ("Runtime.exceptionThrown", {"exceptionDetails": {"text": "Uncaught (in promise)"}})])
+    check.drain_console(ctx.browser, ctx.console)
+    assert ctx.browser.asked == ["0"]   # an answer from the page first: the events that came before it are in the record
+    assert ctx.console == ["console.error: bad " + "x" * 196, "uncaught: TypeError: no", "uncaught: Uncaught (in promise)"]   # 200 characters of what was logged
+    check.drain_console(ctx.browser, ctx.console)
+    assert len(ctx.console) == 3   # given out once
+
+
+def test_a_check_that_passes_is_one_entry_and_one_line(capsys):
+    entry = check.run_check(_Ctx(), "stream", lambda ctx: ("six stages", {"snapshots": 30}))
+    assert list(entry) == ["name", "status", "detail", "seconds", "data", "console_errors"]
+    assert (entry["name"], entry["status"], entry["detail"], entry["data"], entry["console_errors"]) == ("stream", "PASS", "six stages", {"snapshots": 30}, [])
+    assert capsys.readouterr().out == "CHECK stream PASS six stages\n"
+
+
+def test_a_claim_is_kept_in_the_entry_after_the_name_when_one_is_given():
+    entry = check.run_check(_Ctx(), "attach", lambda ctx: ("ok", {}), claim="click, drop and paste")
+    assert list(entry) == ["name", "claim", "status", "detail", "seconds", "data", "console_errors"] and entry["claim"] == "click, drop and paste"
+
+
+def test_a_failed_expectation_and_any_other_exception_are_a_failed_check_and_not_a_crashed_run(capsys):
+    def fails(ctx: Any) -> Any:
+        raise check.Failure("the card is not done")
+
+    def crashes(ctx: Any) -> Any:
+        raise TimeoutError("waited 10 s for the turn")
+
+    assert [e["detail"] for e in (check.run_check(_Ctx(), "a", fails), check.run_check(_Ctx(), "b", crashes))] == [
+        "the card is not done", "TimeoutError: waited 10 s for the turn"]
+    assert capsys.readouterr().out == "CHECK a FAIL the card is not done\nCHECK b FAIL TimeoutError: waited 10 s for the turn\n"
+
+
+def test_a_page_that_logged_an_error_fails_a_check_that_passed_and_only_the_checks_own_errors_count(capsys):
+    ctx = _Ctx()
+    ctx.console.append("console.error: from an earlier check")   # not this check's
+    ctx.browser.recorded.append(_console("error", "boom"))
+    entry = check.run_check(ctx, "reload", lambda c: ("ok", {}))
+    assert entry["status"] == "FAIL" and entry["detail"] == "the page logged 1 error(s): console.error: boom"
+    assert entry["console_errors"] == ["console.error: boom"]
+
+
+def test_a_console_that_cannot_be_read_is_an_error_of_the_check_too(capsys):
+    class Mute(_Page):
+        def evaluate(self, expression: str) -> Any:
+            raise RuntimeError("the page is gone")
+
+    ctx = _Ctx()
+    ctx.browser = Mute()
+    entry = check.run_check(ctx, "a", lambda c: ("ok", {}))
+    assert entry["status"] == "FAIL" and entry["console_errors"] == ["could not read the console: the page is gone"]
+
+
+def test_what_runs_before_a_check_is_inside_its_guard_and_comes_first(capsys):
+    order = []  # type: List[str]
+    entry = check.run_check(_Ctx(), "a", lambda c: order.append("check") or ("ok", {}), before=lambda c: order.append("before"))
+    assert order == ["before", "check"] and entry["status"] == "PASS"
+
+    def breaks(c: Any) -> None:
+        raise RuntimeError("could not reset")
+
+    entry = check.run_check(_Ctx(), "b", lambda c: order.append("never") or ("ok", {}), before=breaks)
+    assert order == ["before", "check"] and entry["status"] == "FAIL" and entry["detail"] == "RuntimeError: could not reset"
+
+
+def test_how_much_of_a_detail_is_printed_and_kept_is_the_checks_to_say(capsys):
+    long = "word " * 400
+    entry = check.run_check(_Ctx(), "a", lambda c: (long, {}))
+    printed = capsys.readouterr().out
+    assert len(printed.split(" ", 3)[3].strip()) == 220 and len(entry["detail"]) == 400   # the browser check's own limits
+    entry = check.run_check(_Ctx(), "b", lambda c: (long, {}), keep=1500, failure_chars=1500)
+    assert len(capsys.readouterr().out.split(" ", 3)[3].strip()) == 220 and len(entry["detail"]) == 1500   # a pass says 220 whatever
+    check.run_check(_Ctx(), "c", lambda c: (_ for _ in ()).throw(check.Failure(long)), failure_chars=1500)
+    assert len(capsys.readouterr().out.split(" ", 3)[3].strip()) == 1500   # and a failure says all of what it knows
 
 
 # ---- the keyboard item walks the tab order of a page that is the browser's active one ----------------------------------------------------

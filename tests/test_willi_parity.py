@@ -10020,3 +10020,168 @@ def test_the_features_check_installs_the_sigterm_handler_before_anything_and_sto
     finally:
         signal.signal(signal.SIGTERM, before)
         signal.alarm(0)
+
+
+# ── CHAT_UI_PLAN.md P6-F fix 1: the harness the three checks share, and what each check does with a --url ─────────────────────────────
+# Static and behavioural pins on scripts/chat_ui_cdp.py and the three scripts that use it (chat_ui_layout_check, chat_ui_browser_check,
+# chat_ui_features_check). Their behaviour is tested in tests/test_chat_ui_layout_check.py, test_chat_ui_browser_check.py and
+# test_chat_ui_features_check.py; these hold what an edit could break without any of those noticing.
+
+_CHAT_UI_CHECKS = ("chat_ui_layout_check", "chat_ui_browser_check", "chat_ui_features_check")
+
+
+def _chat_ui_tree(name):
+    """-> (the syntax tree of scripts/<name>.py, its text)."""
+    text = (REPO_ROOT / "scripts" / (name + ".py")).read_text(encoding="utf-8")
+    return ast.parse(text), text
+
+
+def _chat_ui_modules_imported(source):
+    """The scripts.chat_ui_* modules a source imports, by every spelling: `import scripts.chat_ui_cdp`, `from scripts.chat_ui_cdp import x`,
+    `from scripts import chat_ui_cdp`, and a string that names one for an importer or for a command (`importlib.import_module("scripts.chat_ui_cdp")`)."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found += [a.name for a in node.names if a.name.startswith("scripts.chat_ui_")]
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "").startswith("scripts.chat_ui_"):
+                found.append(node.module)
+            elif node.module == "scripts":
+                found += ["scripts." + a.name for a in node.names if a.name.startswith("chat_ui_")]
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and re.search(r"scripts[./]chat_ui_", node.value):
+            found.append(node.value[:60])
+    return found
+
+
+def test_nothing_that_is_served_imports_or_names_the_check_harness_or_its_turn_hold():
+    """P6-F fix 1. hold_turns patches TinyEngine.generate in the process that LAUNCH starts, so that a check can hold a turn: it must never reach an
+    app that is served. Nothing under app/ imports scripts.chat_ui_cdp or any scripts.chat_ui_* module, by any spelling, and the name hold_turns
+    is in no file of app/, hybrid_xmamba/ or scripts/ but the harness, which calls it only from the launcher's source (LAUNCH)."""
+    for source, expected in (("import scripts.chat_ui_cdp", ["scripts.chat_ui_cdp"]), ("import scripts.chat_ui_cdp as c, os", ["scripts.chat_ui_cdp"]),
+                             ("from scripts.chat_ui_cdp import hold_turns", ["scripts.chat_ui_cdp"]),
+                             ("from scripts import chat_ui_browser_check, repair_generations", ["scripts.chat_ui_browser_check"]),
+                             ("import importlib\nimportlib.import_module('scripts.chat_ui_layout_check')", ["scripts.chat_ui_layout_check"]),
+                             ("import scripts.repair_generations\nfrom scripts import build_retrieval_gallery", [])):
+        assert _chat_ui_modules_imported(source) == expected, source   # the finder finds each spelling, and nothing else
+    imports = {str(p.relative_to(REPO_ROOT)): _chat_ui_modules_imported(p.read_text(encoding="utf-8")) for p in sorted((REPO_ROOT / "app").rglob("*.py"))}
+    assert {path: found for path, found in imports.items() if found} == {}, imports
+    named = [str(p.relative_to(REPO_ROOT)) for root in ("app", "hybrid_xmamba", "scripts") for p in sorted((REPO_ROOT / root).rglob("*.py"))
+             if "hold_turns" in p.read_text(encoding="utf-8")]
+    assert named == ["scripts/chat_ui_cdp.py"], named
+    cdp, _ = _chat_ui_tree("chat_ui_cdp")
+    [launch] = [n for n in cdp.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "LAUNCH" for t in n.targets)]
+    launcher = ast.literal_eval(launch.value)
+    assert launcher.count("hold_turns(") == 1 and 'create_app(engine="tiny"' in launcher   # the held turns are the tiny engine's, in the app a check starts
+    calls = [n for n in ast.walk(cdp) if isinstance(n, ast.Call) and ast.unparse(n.func) == "hold_turns"]
+    assert calls == [], "the harness calls hold_turns itself, outside the launcher's source"
+
+
+def _flags_comment_problems(text):
+    """What the comment above CHROME_FLAGS must not claim and must say: the failure coincides with Chrome's installer and check-in activity (that it
+    causes it is not shown), the five flags as a set remove it, and which of them matters is not established."""
+    problems = []
+    if "coincides" not in text:
+        problems.append("it does not say that the failure only coincides with the installer's activity")
+    if "not established" not in text:
+        problems.append("it does not say that which flag matters is not established")
+    if re.search(r"installs its default apps and extensions|in that moment fails", text):
+        problems.append("it says that the installer is what makes the fetch fail")
+    return problems
+
+
+def test_chrome_is_started_with_the_five_flags_that_keep_it_quiet_and_the_comment_says_what_is_known_of_why():
+    """P6-F fix 1. CHROME_FLAGS holds the five flags of b382751 (the failure of the features check's first click was 10 of 30 runs without them and
+    0 of 30 with them, alternating) on top of what Chrome was always started with, and Browser starts Chrome with all of them. The comment above
+    it said that Chrome 'installs its default apps and extensions' and that a fetch 'in that moment fails': the failure coincides with the installer
+    burst and a background check-in, a cause is not shown, and which flag matters is not established."""
+    tree, text = _chat_ui_tree("chat_ui_cdp")
+    [assign] = [n for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "CHROME_FLAGS" for t in n.targets)]
+    flags = ast.literal_eval(assign.value)
+    assert isinstance(flags, tuple) and flags[:4] == ("--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check")
+    assert set(flags[4:]) == {"--disable-extensions", "--disable-default-apps", "--disable-background-networking", "--disable-component-update",
+                              "--disable-sync"}, flags
+    popen = [c for c in ast.walk(tree) if isinstance(c, ast.Call) and ast.unparse(c.func) == "subprocess.Popen" and c.args and isinstance(c.args[0], ast.List)]
+    assert [ast.unparse(e.value) for c in popen for e in c.args[0].elts if isinstance(e, ast.Starred)] == ["CHROME_FLAGS"]
+    lines, block, i = text.splitlines(), [], assign.lineno - 2
+    while i >= 0 and lines[i].startswith("#"):
+        block.insert(0, lines[i])
+        i -= 1
+    assert _flags_comment_problems(" ".join(block)) == [], block
+    old = ("A fresh profile is not a quiet one: some seconds after Chrome starts it installs its default apps and extensions into it (its log shows "
+           "web-app and extension installs, a burst of about 70 ms), and a fetch that a page makes in that moment fails inside Chrome")
+    assert len(_flags_comment_problems(old)) == 3   # the comment as it was says what is not known, and leaves out what is
+
+
+@pytest.mark.parametrize("name", ["chat_ui_browser_check", "chat_ui_features_check"])
+def test_a_url_needs_no_evidence_in_each_check_that_writes_evidence(name, capsys):
+    """P6-F fix 1. --url is an app that someone else started; what such a run shows is not evidence of the tiny stack. --only, which would write
+    part of a checklist over a whole one, needs it in the browser check in the same way."""
+    import importlib
+    module = importlib.import_module("scripts." + name)
+    with pytest.raises(SystemExit) as refused:
+        module.parse_args(["--url", "http://127.0.0.1:51234/"])
+    assert refused.value.code == 2 and "--url needs --no-evidence" in capsys.readouterr().err
+    assert module.parse_args(["--url", "http://127.0.0.1:51234/", "--no-evidence"]).no_evidence is True
+    if name == "chat_ui_browser_check":
+        with pytest.raises(SystemExit) as refused:
+            module.parse_args(["--only", "reload"])
+        assert refused.value.code == 2 and "--only needs --no-evidence" in capsys.readouterr().err
+        assert module.parse_args(["--only", "reload", "--no-evidence"]).only == "reload"
+
+
+def test_the_checks_that_write_evidence_are_those_that_have_a_no_evidence_switch_and_the_layout_check_writes_none():
+    """P6-F fix 1. A check writes evidence when it dumps a checklist or takes a screenshot; it then has --no-evidence (and a --url needs it). The
+    layout check does neither, so it has no such switch and its --url needs none: it writes no file at all."""
+    for name in _CHAT_UI_CHECKS:
+        tree, text = _chat_ui_tree(name)
+        names = {ast.unparse(c.func) for c in ast.walk(tree) if isinstance(c, ast.Call)}
+        writes = "json.dump" in names or any(n.endswith(".screenshot") for n in names)
+        assert writes == ('"--no-evidence"' in text), name
+        if not writes:
+            assert not [c for c in ast.walk(tree) if isinstance(c, ast.Call) and ast.unparse(c.func) in ("open", "os.makedirs", "os.remove", "shutil.copy")
+                        and (ast.unparse(c.func) != "open" or len(c.args) > 1)], name
+    assert [name for name in _CHAT_UI_CHECKS if '"--no-evidence"' not in _chat_ui_tree(name)[1]] == ["chat_ui_layout_check"]
+
+
+@pytest.mark.parametrize("name", _CHAT_UI_CHECKS)
+def test_the_main_of_each_check_refuses_a_url_with_the_shared_functions_before_it_starts_or_sends_anything(name):
+    """P6-F fix 1. The refusal of an address (the dev server's port and the tunnel's, a host that is not this machine's loopback) and of an app that
+    is not the tiny one are written once, in scripts/chat_ui_cdp.py. Each main imports them and calls both, in one statement, the first after the
+    arguments: before the SIGTERM handler, the look for Chrome, the app, the browser and the warm-up turn. None of the checks has a copy."""
+    import importlib
+    from scripts import chat_ui_cdp
+    module = importlib.import_module("scripts." + name)
+    assert module.url_problem is chat_ui_cdp.url_problem and module.tiny_only_problem is chat_ui_cdp.tiny_only_problem
+    tree, _ = _chat_ui_tree(name)
+    assert not [n.name for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("url_problem", "models_problem", "tiny_only_problem")]
+    assert {"REFUSED_PORTS", "TINY_MODEL", "NOT_THE_TINY_APP"}.isdisjoint({t.id for n in tree.body if isinstance(n, ast.Assign) for t in n.targets
+                                                                         if isinstance(t, ast.Name)})
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    refusals = [b for b in ast.walk(main) if isinstance(b, ast.BoolOp) and isinstance(b.op, ast.Or)
+                and [ast.unparse(v.func) for v in b.values if isinstance(v, ast.Call)] == ["url_problem", "tiny_only_problem"]]
+    assert len(refusals) == 1, "main does not refuse with `url_problem(args.url) or tiny_only_problem(args.url)`, once: {}".format(len(refusals))
+    refusal = refusals[0]
+    assert [ast.unparse(v.args[0]) for v in refusal.values] == ["args.url", "args.url"]
+
+    def first_line(call):
+        lines = [c.lineno for c in ast.walk(main) if isinstance(c, ast.Call) and ast.unparse(c.func) == call]
+        return min(lines) if lines else None
+
+    for later in ("exit_on_sigterm", "find_chrome", "App", "Browser", "warm_up"):
+        assert first_line(later) is None or refusal.lineno < first_line(later), later
+
+
+def test_the_two_refused_ports_are_written_once_and_no_script_of_the_checks_says_them_in_its_usage():
+    """P6-F fix 1. 8000 and 8010 are the refusal list, REFUSED_PORTS in scripts/chat_ui_cdp.py: no other number or string of the four scripts names
+    them (the usage of each check says http://127.0.0.1:PORT/), so that no example invites a run against the dev server or the tunnel."""
+    for name in ("chat_ui_cdp",) + _CHAT_UI_CHECKS:
+        tree, _ = _chat_ui_tree(name)
+        numbers = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, int) and not isinstance(n.value, bool)
+                   and n.value in (8000, 8010)]
+        strings = [n.value[:50] for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str) and ("8000" in n.value or "8010" in n.value)]
+        assert (numbers, strings) == (([8000, 8010] if name == "chat_ui_cdp" else []), []), name
+        if name != "chat_ui_cdp":
+            assert "http://127.0.0.1:PORT/" in ast.get_docstring(tree), name
+    cdp, _ = _chat_ui_tree("chat_ui_cdp")
+    [ports] = [n for n in cdp.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "REFUSED_PORTS" for t in n.targets)]
+    assert ast.unparse(ports.value) == "(8000, 8010)"

@@ -14,22 +14,30 @@ import socket
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 from scripts import chat_ui_cdp
 
 MARKER = "SECRET-MARKER-8731"   # text a server could send: it must not come back in a refusal
-_TINY = {}  # type: Dict[bool, Dict[str, Any]]
+
+
+def _live_models(gallery: bool) -> Dict[str, Any]:
+    from fastapi.testclient import TestClient
+    from app.server import create_app
+    with tempfile.TemporaryDirectory() as home:
+        with TestClient(create_app(engine="tiny", home=home, tiny_gallery=gallery)) as client:
+            return client.get("/v1/models").json()
+
+
+# The /v1/models answers of the live tiny app, create_app(engine="tiny") without the gallery and with it, read when the test modules are collected
+# and not when a test first asks. The app prints its start-up to stdout and makes its temporary home with tempfile; built inside a test, as
+# the first test to ask in the files' alphabetical order was (browser check, features check, layout check), the build landed in the output that
+# the test reads with capsys, and in the tempfile.mkdtemp that the test had made to fail: four cases failed in the suite and passed alone.
+_TINY = {False: _live_models(False), True: _live_models(True)}  # type: Dict[bool, Dict[str, Any]]
 
 
 def tiny_models(gallery: bool = False) -> Dict[str, Any]:
-    """The /v1/models answer of the live tiny app, create_app(engine="tiny") with or without the synthetic gallery: read once per run."""
-    if gallery not in _TINY:
-        from fastapi.testclient import TestClient
-        from app.server import create_app
-        with tempfile.TemporaryDirectory() as home:
-            with TestClient(create_app(engine="tiny", home=home, tiny_gallery=gallery)) as client:
-                _TINY[gallery] = client.get("/v1/models").json()
+    """The /v1/models answer of the live tiny app, with or without the synthetic gallery: a copy, to be changed."""
     return copy.deepcopy(_TINY[gallery])
 
 

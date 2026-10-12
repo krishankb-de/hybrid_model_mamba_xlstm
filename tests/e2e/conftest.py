@@ -199,15 +199,28 @@ def noise_png(w: int, h: int) -> bytes:
     return buf.getvalue()
 
 
+def smooth_png(w: int, h: int) -> bytes:
+    """A smooth picture: a soft torso with two darker lung fields, no noise. Noise cannot be compressed, so a screenshot of a viewer that shows
+    a noise upload across half the page is over the 400 KB of a committed picture (643 KB at 1280 x 900); this one comes to a few dozen KB."""
+    y, x = np.mgrid[0:h, 0:w].astype(float)
+    u, v = (x - w / 2) / (w / 2), (y - h / 2) / (h / 2)
+    body = np.exp(-((np.abs(u) / 0.85) ** 4 + (np.abs(v) / 0.95) ** 4))
+    lungs = np.minimum(np.exp(-(((u - 0.4) / 0.3) ** 2 + ((v + 0.1) / 0.55) ** 2)) + np.exp(-(((u + 0.4) / 0.3) ** 2 + ((v + 0.1) / 0.55) ** 2)), 1.0)
+    buf = io.BytesIO()
+    Image.fromarray(np.clip(30 + 140 * body - 70 * lungs * body, 0, 255).astype(np.uint8)).save(buf, "PNG")
+    return buf.getvalue()
+
+
 @pytest.fixture(scope="session")
 def images(tmp_path_factory) -> Dict[str, str]:
-    """name -> path: three usable X-rays (noise) and the five uploads the page or the server must refuse."""
+    """name -> path: three usable X-rays (noise), a smooth one for a screenshot that is mostly the picture, and the five uploads the page or the
+    server must refuse."""
     d = tmp_path_factory.mktemp("images")
     jpeg = io.BytesIO()
     Image.open(io.BytesIO(noise_png(300, 300))).convert("RGB").save(jpeg, "JPEG", quality=90)
     gif = io.BytesIO()
     Image.new("L", (128, 128), 128).save(gif, "GIF")
-    files = {"xray_a.png": noise_png(320, 320), "xray_b.png": noise_png(288, 256), "xray_c.jpg": jpeg.getvalue(),
+    files = {"xray_a.png": noise_png(320, 320), "xray_b.png": noise_png(288, 256), "xray_c.jpg": jpeg.getvalue(), "xray_smooth.png": smooth_png(320, 320),
              "notes.png": b"This is a text file that was renamed to .png.\n" * 20, "scan.gif": gif.getvalue(),
              "tiny_32.png": noise_png(32, 32), "huge.png": noise_png(64, 64) + b"\0" * (21 * 1024 * 1024),
              "scan.dcm": b"\0" * 128 + b"DICM" + b"\0" * 64}   # a DICOM preamble and magic only: the page refuses it by its name (P6-A)

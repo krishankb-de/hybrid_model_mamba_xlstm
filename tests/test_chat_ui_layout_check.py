@@ -129,10 +129,11 @@ def test_a_devtools_connection_that_fails_after_chrome_started_closes_chrome(tmp
 
 
 def test_chrome_is_started_without_the_default_apps_extensions_and_background_work_it_does_in_a_fresh_profile(tmp_path):
-    """P6-F. A fresh profile is not a quiet one: some seconds after Chrome starts it installs its default apps and extensions into it, and a fetch
-    that a page makes in the moments that takes fails inside Chrome (TypeError: Failed to fetch, net::ERR_ABORTED, canceled; no request in the
-    NetLog, nothing at the server). A check that happened to click then (the features check's picker, at about 7 s) failed about one run in three,
-    and none failed with these flags (30 runs each, alternating). The test reads the arguments the process was really started with."""
+    """P6-F. A fresh profile is not a quiet one: some seconds after Chrome starts, its log shows its default-app and extension installer and a
+    background check-in at work, and a fetch that a page makes around then can fail inside Chrome (TypeError: Failed to fetch, net::ERR_ABORTED,
+    canceled; no request in the NetLog, nothing at the server). The features check's picker clicks then (at about 7 s), and failed about one run in
+    three with the default flags (10 of 30) and none with these five together (0 of 30, runs alternating); which of the five matters is not
+    established, and neither is that the activity causes the failure. The test reads the arguments the process was really started with."""
     script = tmp_path / "chrome"
     script.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "{}"\nexec sleep 30\n'.format(tmp_path / "argv"))
     script.chmod(0o755)

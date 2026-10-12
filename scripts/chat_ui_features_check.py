@@ -18,9 +18,14 @@ engine, which is why this script starts the app the way the dev server does.) It
   similar  the similar-X-rays grid of a card: for each neighbour its stored picture, "#rank . similarity" and a bar as long as the
            similarity, and "n/14 labels agree" with a chip for each positive only one side has; all of it equal to what the server stored
            for the turn, and the n recounted here from the 14 labels of the neighbour and of the report
-  matches  the matching-reports list of a card (rank, similarity, how many reports read the same, the text clamped to three lines with
-           Show all, and the positive labels) and, for a test study picked in the composer's list, the badge that says where its own
-           report ranks among the test reports; an upload has no such badge
+  matches  the matching-reports list of a card (rank, similarity, how many reports read the same, the text clamped to three lines, and
+           the positive labels; Show all is held to its rule on every report: it is offered exactly when the text overflows the three
+           lines) and, for a test study picked in the composer's list, the badge that says where its own report ranks among the test
+           reports; an upload has no such badge. The reports of the tiny gallery are 10 to 19 words (168 characters at most), so none
+           overflows its three lines at the width checked (a 1280 px page) and Show all is never offered here: the item clicks Show all
+           and Show less only on a report that overflows, which none does, and its facts say so (show_all). The click path (Show all
+           opens the whole text, Show less closes it, the focus comes back) is covered by tests/frontend/render.test.mjs, not by a real
+           Chrome
   viewer   the viewer opens from every picture of a card (the two of the images row and each similar X-ray, which opens beside the
            turn's own X-ray), closes to the control that opened it, and on a side-by-side pair zoom (wheel, + and -, the buttons, 1:1),
            pan (drag, the arrow keys), brightness and contrast (a click on the slider, the arrow keys on it) work, by mouse and by
@@ -60,7 +65,7 @@ import sys
 import tempfile
 import time
 import urllib.request
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -71,7 +76,7 @@ from PIL import Image  # noqa: E402
 
 from app.imaging import TOO_SMALL_MSG  # noqa: E402
 from app.labels import CHEXBERT_14  # noqa: E402
-from scripts.chat_ui_browser_check import CARD_JS, Failure, Overrun, expect, one_line, warm_up  # noqa: E402
+from scripts.chat_ui_browser_check import CARD_JS, Failure, Overrun, expect, run_check, warm_up  # noqa: E402
 from scripts.chat_ui_cdp import (App, Browser, exit_on_sigterm, find_chrome, tiny_only_problem, url_needs_no_evidence,  # noqa: E402
                                  url_problem)
 
@@ -177,6 +182,20 @@ def own_rank_text(rank: Dict[str, Any]) -> str:
 def positives(labels: Optional[Dict[str, Any]]) -> List[str]:
     """The names of the labels that are on, in the order the chips list them."""
     return [name for name in CHEXBERT_14 if isinstance(labels, dict) and labels.get(name)]
+
+
+def show_all_facts(pages: List[Dict[str, Any]], clicked: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """What the matches item states of Show all, from the lists it read (MATCHES_JS answers: the upload's first, where a click is made, then the
+    picked study's): the rule it held every report to (the button is offered exactly when its text overflows the three lines), how many reports
+    that was, how many overflowed and how many had the button, the width of each list, and whether Show all and Show less were clicked. They are
+    clicked only on a report of the upload's list that overflows; where none does, nothing was offered to click, and the facts say so."""
+    items = [item for page in pages for item in page["items"]]
+    return {"rule": "a report's Show all is offered exactly when its text overflows its three lines (held to it on every report read)",
+            "reports_checked": len(items), "reports_that_overflow": sum(1 for i in items if i["overflows"]),
+            "reports_with_the_button": sum(1 for i in items if i["more"] == "Show all"), "list_width_px": [page["width"] for page in pages],
+            "clicked_show_all_and_show_less": clicked is not None, "clicked": clicked,
+            "not_clicked_because": None if clicked is not None else
+            "no report of the upload's list overflows its three lines at this width, so no Show all was offered there to click"}
 
 
 def wheel_factor(delta_y: float, delta_mode: int = 0) -> float:
@@ -323,14 +342,14 @@ NEIGHBOURS_JS = """() => {
            }) };
 }"""
 
-# The newest card's matching reports: the title, the own-report badge (its text and its tooltip), and per report its rank and score, how many
-# reports read the same, its text, whether the text is clamped and overflows its three lines, its Show all (when shown) and its label chips.
+# The newest card's matching reports: the title, the width of the list, the own-report badge (its text and its tooltip), and per report its rank and
+# score, how many reports read the same, its text, whether the text is clamped and overflows its three lines, its Show all (when shown) and its label chips.
 MATCHES_JS = """() => {
   const c = [...document.querySelectorAll('#conversation article.card')].pop();
   const s = c && c.querySelector('section.matches');
   if (!s) return null;
   const badge = s.querySelector('.own-rank');
-  return { title: s.querySelector('h3').textContent,
+  return { title: s.querySelector('h3').textContent, width: Math.round(s.getBoundingClientRect().width),
            badge: badge ? { text: badge.childNodes[0].textContent, title: badge.getAttribute('title'), shown: badge.getClientRects().length > 0 } : null,
            items: [...s.querySelectorAll('li.match')].map((li) => {
              const text = li.querySelector('.clamp-text'), more = li.querySelector('button[data-action="show"]'), size = li.querySelector('.group-size');
@@ -640,16 +659,6 @@ class Context:
             raise Failure("screenshot {} is {} bytes, over the {} of a committed picture".format(file_name, size, MAX_SHOT_BYTES))
         self.shots.append({"file": file_name, "shows": what, "viewport": list(viewport), "scheme": scheme, "bytes": size, "page_confirmed": True})
 
-    def drain_console(self) -> None:
-        """Pull what the page logged since the last call: errors and uncaught exceptions only."""
-        self.browser.evaluate("0")
-        for params in self.browser.events("Runtime.consoleAPICalled"):
-            if params.get("type") == "error":
-                self.console.append("console.error: " + " ".join(str(a.get("value", a.get("description", ""))) for a in params.get("args", []))[:200])
-        for params in self.browser.events("Runtime.exceptionThrown"):
-            details = params.get("exceptionDetails", {})
-            self.console.append("uncaught: " + str((details.get("exception") or {}).get("description") or details.get("text"))[:200])
-
     def clip_stats(self, box: Sequence[float]) -> Tuple[float, float]:
         """The luma mean and spread of what is drawn in this box of the page (left, top, width, height), from a screenshot of exactly it."""
         shot = self.browser.call("Page.captureScreenshot", format="png", clip={"x": box[0], "y": box[1], "width": box[2], "height": box[3], "scale": 1})
@@ -928,9 +937,8 @@ def check_matches(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     b.set_viewport(DESKTOP[0], DESKTOP[1], "light")
     return ("{} matching reports (rank, similarity, group size, the stored text clamped to three lines, the positive labels) and no badge for an upload; a test "
             "study picked in the composer shows '{}'".format(k, page["badge"]["text"]),
-            {"k_reports": k, "upload": {"reports": upload_items, "own_rank_badge": None,
-                                        "show_all_and_less": show_all or "not offered, as the page intends: no stored report is longer than its three lines at this width, "
-                                                                          "and each row's Show all is shown exactly when its text overflows (checked for every report)"},
+            {"k_reports": k, "upload": {"reports": upload_items, "own_rank_badge": None},
+             "show_all": show_all_facts([shown, page], show_all),
              "picked_study": {"test_row": study["test_row"], "badge": page["badge"]["text"], "tooltip": tip, "stored_rank": {x: rank[x] for x in ("rank", "of", "rank_dedup", "hit_at_10") if x in rank},
                               "user_turn": bubble, "reports": picked_items, "studies_listed": len(served)}})
 
@@ -1214,7 +1222,8 @@ def check_viewer(ctx: Context) -> Tuple[str, Dict[str, Any]]:
             "on a similar X-ray beside the turn's own, zoom (wheel about the cursor, + and -, the buttons, 1:1), pan (drag, arrows), brightness and contrast "
             "(a click, then the keys) all worked, measured on the pictures drawn and on their pixels".format(len(keys), len(neighbours)),
             {"opens_from": keys, "user_turn_thumbnail_is_an_opener": bubble["thumbIsOpener"],
-             "user_turn_thumbnail_note": "a picture and no more, by design: the images row opens the same X-ray", "each": opened, "side_by_side_controls": facts})
+             "user_turn_thumbnail_note": "a picture and no more, ruled at P6 fix 1: the card's 'Your X-ray' tile opens the same picture", "each": opened,
+             "side_by_side_controls": facts})
 
 
 CHECKS = [("attach", "click, drag-drop and paste each attach with a preview, and a refused file shows its message", check_attach),
@@ -1225,28 +1234,6 @@ CHECKS = [("attach", "click, drag-drop and paste each attach with a preview, and
            check_viewer)]
 
 
-def run_check(ctx: Context, name: str, claim: str, fn: Callable[[Context], Tuple[str, Dict[str, Any]]]) -> Dict[str, Any]:
-    mark = len(ctx.console)
-    started = time.time()
-    status, detail, data = "PASS", "", {}  # type: str, str, Dict[str, Any]
-    try:
-        detail, data = fn(ctx)
-    except Failure as exc:
-        status, detail = "FAIL", str(exc)
-    except Exception as exc:   # a CDP error, a timeout waiting for the page: a failed item, not a crashed run
-        status, detail = "FAIL", "{}: {}".format(type(exc).__name__, exc)
-    try:
-        ctx.drain_console()
-    except Exception as exc:
-        ctx.console.append("could not read the console: {}".format(exc))
-    logged = ctx.console[mark:]
-    if status == "PASS" and logged:
-        status, detail = "FAIL", "the page logged {} error(s): {}".format(len(logged), logged[0])
-    print("CHECK {} {} {}".format(name, status, one_line(detail, 220 if status == "PASS" else 1500)), flush=True)   # a failure says all of what it knows
-    return {"name": name, "claim": claim, "status": status, "detail": one_line(detail, 1500), "seconds": round(time.time() - started, 1), "data": data,
-            "console_errors": logged}
-
-
 def run_all(browser: Browser, base: str, work: str, out_dir: Optional[str]) -> Tuple[List[Dict[str, Any]], Context]:
     """Every item in order, on this browser and this app; -> (one result per item, the context with the screenshots)."""
     browser.call("Runtime.enable")
@@ -1254,7 +1241,8 @@ def run_all(browser: Browser, base: str, work: str, out_dir: Optional[str]) -> T
     ctx = Context(browser, base, work, out_dir)
     if out_dir is not None:
         clear_evidence(out_dir)
-    return [run_check(ctx, name, claim, fn) for name, claim, fn in CHECKS], ctx
+    return [run_check(ctx, name, fn, claim=claim, keep=1500, failure_chars=1500)   # a failure says all of what it knows
+            for name, claim, fn in CHECKS], ctx
 
 
 def get_json(url: str) -> Any:
@@ -1287,7 +1275,7 @@ def environment(browser: Browser, own_app: bool, models: Dict[str, Any], gallery
                       "in the page that holds a File or text, because a headless Chrome has no clipboard of its own and a real Cmd+V would read the user's.",
                       "Brightness and contrast are measured on pixels: a screenshot of the left picture's box, its luma mean (brightness) and spread (contrast). "
                       "Zoom and pan are measured on the picture's drawn box, and compared with the page's own data-scale.",
-                      "The user turn's own thumbnail is a picture and no more by design (render.js userCtx has no viewer): the card's images row opens the same X-ray.",
+                      "The user turn's own thumbnail is a picture and no more, ruled at P6 fix 1 (render.js userCtx has no viewer): the card's images row opens the same X-ray.",
                       "Every screenshot was confirmed by the page itself (a DOM rule per picture, true before and after the capture)."]}
 
 
