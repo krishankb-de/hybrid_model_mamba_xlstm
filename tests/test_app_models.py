@@ -486,6 +486,21 @@ def test_the_flags_drift_note_is_built_into_the_published_models_only_and_the_eo
         assert notes == {PUBLISHED[0]: flag, PUBLISHED[1]: flag, EOS_MODEL: EOS_DRIFT}, flag
 
 
+@pytest.mark.parametrize("device, sentence", [("cpu", EOS_DRIFT), ("cuda", "")])
+def test_the_eos_models_sentence_says_a_cpu_decode_was_not_probed_so_only_a_cpu_server_carries_it(tmp_path, monkeypatch, device, sentence):
+    """P9-G5b fix 1 (2): on `--device cuda` the card would say "CPU decode was not probed against a GPU decode" beside its own device: cuda. A
+    GPU server has no CPU decode to speak of, so the model carries none there, as a published model carries none when --drift-note is empty;
+    the flag's sentence is the operator's and goes to the published models on either device, as it did."""
+    home = tmp_path / "home"
+    eos_run(home)
+    calls = fake_builder(monkeypatch)
+    with TestClient(create_app(engine="real", home=str(home), models=PUBLISHED + (EOS_MODEL,), drift_note=FLAG, device=device)):
+        pass
+    notes = {kw.get("name") or kw["model_config"]: kw["drift_note"] for _, kw in calls}
+    assert notes == {PUBLISHED[0]: FLAG, PUBLISHED[1]: FLAG, EOS_MODEL: sentence}, device
+    assert {kw["device"] for _, kw in calls} == {device}
+
+
 def test_a_card_and_a_generate_stage_carry_the_drift_note_of_their_own_model(tmp_path, monkeypatch, keep_threads):
     """Through RealEngine itself, so what is checked is what a page receives: the card of each model in /v1/models, and the detail of the
     generate stage of a turn on it. The sentence the flag carries was measured for the published models; the EOS model says it was not probed."""

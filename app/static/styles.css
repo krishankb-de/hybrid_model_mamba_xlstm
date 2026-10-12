@@ -178,8 +178,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   text-transform: uppercase;
 }
 /* "test model": the server's default is the tiny engine, whose text is no report (app.js, render.js TEST_NOTICE; P9-G5b). It follows the toggle in the
-   markup: on a phone the disclaimer takes a row of its own, and the rest of the toggle's row is empty, whereas after the mode the badge would push the
-   health strip onto another row and take 24 px from the composer at 320 x 568. */
+   markup. At 320 px the disclaimer takes a row of its own with the badge or without it, and the rest of the toggle's row is empty, so the badge costs
+   nothing there, whereas after the mode it would push the health strip onto another row and take 24 px from the composer at 320 x 568. From 360 to
+   414 px the disclaimer fits beside the toggle, and the badge pushes it onto a row of its own: on a page of the tiny engine the banner is 124 px tall,
+   against 100.5 px, a 24 px row. A real engine has no badge, and the banner no such row. */
 #test-badge {
   padding: 0 8px;
   border: 1px solid var(--warn);
@@ -624,7 +626,11 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
    by whether the composer scrolls) the three do not fit at their usual padding, so Stop, whose label is the longest ("Cancel upload"), wrapped onto
    a row of its own, the composer's last, and at 320 x 568 it showed 9 px above the composer's fold (the re-review of P6 fix 2). With 6 px of padding
    each side they fit with room to spare. Below 261 px (801 px with the drawer open) the rule above takes over, and Stop keeps the row it has always had.
-   Above 319 px the three fit as they are. Checked at 320 x 568 by layout check k (busy). */
+   Above 319 px the three fit as they are. Checked at 320 x 568 by layout check k (busy). That holds while the composer's rows fit the 306 px that the
+   page leaves it at 320 x 568, with 9 px to spare. One row more (the "Settings saved" row, a third row of chips) makes it scroll: its classic scrollbar
+   takes 15 px, the container is 251 px, and the three buttons, 260 px wide at that padding, no longer share a row. Stop is then on a row of its own,
+   and app.js scrolls the busy composer to its end (keepStopInView, P9-G5b fix 1), so that it is in sight there too; layout check k (busy-after-save,
+   busy-save, busy-8-chips) holds it to that. */
 @container composer (min-width: 261px) and (max-width: 319px) {
   #composer:has(#stop:not([hidden])) > button { padding-inline: 6px; }
 }

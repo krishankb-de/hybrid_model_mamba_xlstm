@@ -35,7 +35,15 @@ page); six chips and a 140-character unbroken word are injected, and Stop is sho
      composer's box and the viewport with nothing scrolled (never below the composer's fold), its centre hitting it. P6 fix 2 adds a third
      case at the drawer-open sizes (COMPOSER_BUSY_CASES): an upload on its way, the preview still shown, Send off and Stop reading "Cancel
      upload", its longest label; Stop is held to what Send is. P9-G5b adds that case at 320 x 568 (both drawer states), where Stop must also
-     share Send's row: on a row of its own it lay 9 px above the composer's fold (the re-review of P6 fix 2)
+     share Send's row: on a row of its own it lay 9 px above the composer's fold (the re-review of P6 fix 2). P9-G5b fix 1 (the review of that
+     fix, which held only while the composer's content exactly fit): the busy state is no longer set by the check. The image is attached as
+     above, the turn's upload is held (HOLD_UPLOAD_JS: the page's fetch never answers the POST of a turn) and Send is clicked, so that the
+     page's own send() makes the chat, switches Send off, shows Stop reading "Cancel upload" and scrolls the composer to its end; each busy
+     case has a page of its own, and the composer is measured where the page left it, scrolled. Stop must be in sight and, where the composer
+     does not scroll, on Send's row (one that scrolls has a classic scrollbar, three buttons do not fit in what is left, and Stop wraps: the
+     page's scroll is what keeps it in sight). Three more busy cases at 320 x 568, the drawer closed (COMPOSER_STRESS_CASES), put more in the
+     composer than its rows: a Save, then a Send within 4 s, with seven chips (the "Settings saved" row must be gone, the page takes it down at
+     Send); a Save while the upload goes up (the row is there, and Stop is still in sight); and eight chips, three rows of them
   l  (P6-E, two more cases for every viewport in every scheme) the image viewer open, with one picture and with two: neither the page nor
      the viewer overflows horizontally, the viewer lies inside the viewport's width, each pane's picture has loaded and is drawn whole
      inside its stage, each stage is at least 40 px each way, each footer gives its picture's pixel size, two panes are side by side from
@@ -102,6 +110,19 @@ COMPOSER_STATES = ["hint", "preview"]   # the page shows the re-run hint only wi
 # P9-G5b: and at 320 x 568, the phone, where the rows stacked above them left Stop ("Cancel upload") 9 px above the composer's fold (the re-review
 # of P6 fix 2): with the drawer closed and open, which is the same composer, as the page's drawer covers the conversation only below 800 px.
 COMPOSER_BUSY_CASES = [case for case in COMPOSER_CASES if (case[2] and case[0] > 800) or case[:2] == (320, 568)]
+# P9-G5b fix 1 (the review of the fix above, which held only while the composer's content exactly fit): one more row in the composer (the "Settings
+# saved" row for 4 s after a Save, a third row of chips) put Stop ("Cancel upload") below the fold again, by 49 to 105 px at 320 x 568, as the classic
+# scrollbar that the overflow adds narrows the composer by 15 px and Stop wraps onto a row of its own. These busy cases put more in the composer than
+# its rows, at the phone with its drawer closed (the Save they make goes through the page's own drawer, which has to be shut when they start):
+#   busy-after-save  Save, then Send within 4 s, seven chips: the page takes the saved row down at Send (its sentence is about the next Send)
+#   busy-save        Save while the upload is on its way: the row is there, and Stop is still in sight (the page scrolls the composer to its end)
+#   busy-8-chips     eight chips, three rows of them (the page's "compiled" chip needs --allow-compile, which the layout must take all the same)
+COMPOSER_STRESS_CASES = [(320, 568, False)]
+STRESS_STATES = ["busy-after-save", "busy-save", "busy-8-chips"]
+BUSY_STATES = ["busy"] + STRESS_STATES   # "busy" is the P6 fix 2 / P9-G5b case: six chips, the upload on its way
+SEVEN_CHIPS = ["beam 3", "100 tok", "cached", "k 4/3", "labels off", "raw text", "full budget"]   # the page's own words: all it shows with a gallery, but one
+EIGHT_CHIPS = SEVEN_CHIPS + ["compiled"]   # and with --allow-compile
+BUSY_CHIPS = {"busy": CHIPS, "busy-after-save": SEVEN_CHIPS, "busy-save": CHIPS, "busy-8-chips": EIGHT_CHIPS}   # injected before Send (a Save draws the page's own)
 BUSY_STOP_LABEL = "Cancel upload"   # what Stop reads while an image goes up: the longest of its labels
 PHONE_MAX_PX = 800                  # the page is one column up to here (styles.css): the composer is as wide as the page, and Stop shares Send's row
 ROW_SLACK_PX = 2                    # two buttons whose tops are this close lie in the same row
@@ -411,15 +432,13 @@ MEASURE_PICKER_JS = """() => {
 
 
 # Check k: the composer as the page leaves it with the re-run hint shown (no image attached) or with an image attached (the preview, built by
-# composer.js from a pasted file, as a paste anywhere on the page does), or busy with that image's upload (P6 fix 2: Send off, Stop reading
-# args.stop, as app.js sets them between Send and the accept). args: chips, name, state ('hint', 'preview' or 'busy'), drawer, stop.
+# composer.js from a pasted file, as a paste anywhere on the page does). args: chips, name, state ('hint' or 'preview'), drawer. A busy composer
+# (P6 fix 2) starts from 'preview' and goes busy by the page's own Send (P9-G5b fix 1: HOLD_UPLOAD_JS, then a click): nothing of the busy state
+# is written here, so that what is measured is what the user sees.
 INJECT_COMPOSER_JS = """async (args) => {
   const q = (s) => document.querySelector(s);
-  const hint = q('#rerun-hint'), preview = q('#preview'), stop = q('#stop'), send = q('#send');
-  if (!hint || !preview || !stop || !send) return false;
-  stop.hidden = true;   // idle, as the page is between turns
-  stop.textContent = 'Stop';
-  send.disabled = false;
+  const hint = q('#rerun-hint'), preview = q('#preview');
+  if (!hint || !preview || !q('#stop') || !q('#send')) return false;
   q('#drawer').hidden = !args.drawer;
   q('#chips').replaceChildren(...args.chips.map((t) => { const s = document.createElement('span'); s.textContent = t; return s; }));
   const remove = preview.querySelector('button');
@@ -442,25 +461,50 @@ INJECT_COMPOSER_JS = """async (args) => {
   if (!img || preview.hidden) return false;
   await img.decode().catch(() => null);
   for (let i = 0; i < 50 && !/ px /.test(preview.textContent); i++) await new Promise((r) => setTimeout(r, 10));   // its line has the pixel size
-  if (args.state === 'busy') {
-    send.disabled = true;
-    stop.textContent = args.stop;
-    stop.hidden = false;
-  }
   return true;
 }"""
 
-MEASURE_COMPOSER_JS = """() => {
+# The chips as the check sets them (the page draws its own again after a Save and at start-up): args.chips, as text.
+SET_CHIPS_JS = """(args) => {
   const q = (s) => document.querySelector(s);
-  const doc = document.documentElement, composer = q('#composer'), send = q('#send'), stop = q('#stop');
+  q('#chips').replaceChildren(...args.chips.map((t) => { const s = document.createElement('span'); s.textContent = t; return s; }));
+  return q('#chips').children.length;
+}"""
+
+# The turn's upload, held: the page's own fetch never answers the POST of a turn (/v1/sessions/<id>/messages) and ends it only when the page aborts it
+# (Cancel upload still works), and passes every other request through, so the page makes the chat for real and then waits, as it does on a slow
+# tunnel. The held request ends with the page: each case that uses it has a page of its own.
+HOLD_UPLOAD_JS = """() => {
+  const original = window.fetch.bind(window);
+  window.__heldUploads = 0;
+  window.fetch = (url, init) => {
+    if (init && init.method === 'POST' && /\\/v1\\/sessions\\/[^/]+\\/messages$/.test(String(url))) {
+      window.__heldUploads += 1;
+      return new Promise((resolve, reject) => {
+        if (init.signal) init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+      });
+    }
+    return original(url, init);
+  };
+  return true;
+}"""
+
+# args.keep: a busy composer is measured where the page left it (it scrolls it to its end, so that Stop is in sight); the others as they are drawn,
+# nothing scrolled. The page's own words come back with it: what Stop reads, whether Send is off, and the saved row (shown when it has text and a height).
+MEASURE_COMPOSER_JS = """(args) => {
+  const q = (s) => document.querySelector(s);
+  const doc = document.documentElement, composer = q('#composer'), send = q('#send'), stop = q('#stop'), saved = q('#saved');
   const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
   const shown = (el) => !!el && !el.hidden && el.getClientRects().length > 0;
   const name = (e) => !e ? null : (e.id ? '#' + e.id : e.tagName.toLowerCase());
   window.scrollTo(0, 0);
-  composer.scrollTop = 0;   // as it is drawn: nothing scrolled
-  const out = { doc: [doc.scrollWidth, doc.clientWidth], composer: { box: box(composer), sw: composer.scrollWidth, cw: composer.clientWidth },
+  if (!args.keep) composer.scrollTop = 0;   // as it is drawn: nothing scrolled
+  const out = { doc: [doc.scrollWidth, doc.clientWidth],
+                composer: { box: box(composer), sw: composer.scrollWidth, cw: composer.clientWidth, sh: composer.scrollHeight, ch: composer.clientHeight,
+                            st: composer.scrollTop },
                 conversation: q('#conversation').clientHeight, rows: {}, send: shown(send) ? box(send) : null, hit: null,
-                stop: shown(stop) ? box(stop) : null, stop_hit: null };
+                stop: shown(stop) ? box(stop) : null, stop_hit: null, stop_text: stop.textContent, send_disabled: send.disabled,
+                saved: { text: saved ? saved.textContent : '', shown: !!saved && saved.textContent.trim() !== '' && saved.getBoundingClientRect().height > 5 } };
   for (const s of ['#rerun-hint', '#preview']) out.rows[s] = shown(q(s)) ? box(q(s)) : null;
   const hit = (el, b) => { const top = document.elementFromPoint((b[0] + b[2]) / 2, (b[1] + b[3]) / 2);
                            return { ok: !!top && (top === el || el.contains(top)), got: name(top) }; };
@@ -489,9 +533,12 @@ def check_composer(m: Dict[str, Any], width: int, height: int, state: str) -> Li
     """The failures in one measurement of the composer's rows (check k): the row the case shows is rendered inside the composer and the other
     is not; nothing overflows horizontally; the report keeps its floor; and Send lies inside the composer's box (its fold: the composer
     scrolls inside, and a Send under its bottom is out of sight until it is scrolled) and inside the viewport, its centre hitting it. A busy
-    composer (P6 fix 2) shows the preview, and its Stop is held to the same. On a phone (800 px and narrower: one column, the composer as
-    wide as the page) Stop also shares Send's row (P9-G5b): the longest label, "Cancel upload", on a row of its own was the composer's last,
-    which at 320 x 568 lay under its fold."""
+    composer (P6 fix 2; every state of BUSY_STATES) shows the preview, and its Stop is held to the same, where the page left the composer (it
+    scrolls it to its end, P9-G5b fix 1). On a phone (800 px and narrower: one column, the composer as wide as the page) Stop also shares
+    Send's row (P9-G5b), unless the composer scrolls: the longest label, "Cancel upload", on a row of its own was the composer's last, which at
+    320 x 568 lay under its fold, and a composer that scrolls has a classic scrollbar, which leaves the three buttons no room for one row. The
+    busy case must be the upload (Stop reads "Cancel upload", Send is off): it was entered by the page's own Send. The saved row is gone after a
+    Save and a Send ("busy-after-save": its sentence is about the next Send) and there where a Save came during the upload ("busy-save")."""
     failures = []
     for name, (sw, cw) in (("documentElement", m["doc"]), ("#composer", (m["composer"]["sw"], m["composer"]["cw"]))):
         if sw > cw:
@@ -508,17 +555,64 @@ def check_composer(m: Dict[str, Any], width: int, height: int, state: str) -> Li
         failures.append("{} is rendered with {}, which the page never shows together".format(other, row))
     if m["conversation"] < MIN_REPORT_PX:
         failures.append("the report area is {} px tall, under {}".format(m["conversation"], MIN_REPORT_PX))
-    if state == "busy":
+    if state.startswith("busy"):
+        scrolls = m["composer"].get("sh", 0) > m["composer"].get("ch", 0) + 1
         if m.get("stop") is None:
             failures.append("#stop is not rendered, but the case shows it")
         else:
             failures += _in_sight("#stop", "Stop", m["stop"], m.get("stop_hit"), composer, width, height)
-            if width <= PHONE_MAX_PX and m["send"] is not None and abs(m["stop"][1] - m["send"][1]) > ROW_SLACK_PX:
+            if width <= PHONE_MAX_PX and not scrolls and m["send"] is not None and abs(m["stop"][1] - m["send"][1]) > ROW_SLACK_PX:
                 failures.append("#stop is not on Send's row at {} px: Stop starts at {:.0f}, Send at {:.0f}".format(width, m["stop"][1], m["send"][1]))
+        if m.get("stop_text") != BUSY_STOP_LABEL:
+            failures.append("#stop reads {!r}, not {!r}: the case is not measuring the upload".format(m.get("stop_text"), BUSY_STOP_LABEL))
+        if not m.get("send_disabled"):
+            failures.append("#send is on while the upload goes up")
+        saved = m.get("saved") or {}
+        if state == "busy-after-save" and saved.get("shown"):
+            failures.append("the saved row is still showing after Send ({!r}): its sentence is about the next Send, which this was".format(saved.get("text")))
+        if state == "busy-save" and not saved.get("shown"):
+            failures.append("the saved row is not showing: the case is not measuring a Save while the upload goes up")
     send = m["send"]
     if send is None:
         return failures + ["#send is not rendered"]
     return failures + _in_sight("#send", "Send", send, m["hit"], composer, width, height)
+
+
+def _press_send(browser: Browser) -> None:
+    """Send, as a click on its centre, with the turn's upload held (HOLD_UPLOAD_JS): the page makes its chat, goes busy and waits for an answer that
+    never comes. Returns once Stop reads what it reads while an image goes up. TimeoutError or RuntimeError when the page does not get there."""
+    browser.run(HOLD_UPLOAD_JS, None)
+    browser.click("#send")
+    browser.wait_for("window.__heldUploads === 1 && !document.querySelector('#stop').hidden && document.querySelector('#stop').textContent === {}".format(
+        json.dumps(BUSY_STOP_LABEL)), what="the upload to be on its way, Stop reading {!r}".format(BUSY_STOP_LABEL))
+
+
+def _save_settings(browser: Browser) -> None:
+    """Settings, then Save in the drawer, as clicks: the page closes the drawer and says "Settings saved." beside the chips, which it draws
+    again from its own settings. Returns once the row is there."""
+    browser.click("#settings")
+    browser.wait_for("!document.querySelector('#drawer').hidden", what="the drawer to open")
+    browser.click("#drawer-save")
+    browser.wait_for("document.querySelector('#saved').textContent.trim() !== ''", what="the saved row")
+
+
+def enter_busy(browser: Browser, state: str, drawer: bool) -> Optional[str]:
+    """The page in the busy composer of one case, by what a user does (P9-G5b fix 1): the image attached as in the idle cases, then, for
+    "busy" and "busy-8-chips", Send with the upload held; for "busy-after-save" Save, the seven chips again (the page drew its own), Send;
+    for "busy-save" Send, then Save while the upload goes up. -> None, or why the page did not get there (a failure of that case, in words)."""
+    chips = BUSY_CHIPS[state]
+    if not browser.run(INJECT_COMPOSER_JS, {"chips": chips, "name": LONG_FILE, "state": "preview", "drawer": drawer}):
+        return "the image was not attached"
+    try:
+        if state == "busy-after-save":
+            _save_settings(browser)
+            browser.run(SET_CHIPS_JS, {"chips": chips})   # a Save draws the page's own chips: the seven are put back, as a server with a gallery shows them
+        _press_send(browser)
+        if state == "busy-save":
+            _save_settings(browser)
+    except (RuntimeError, TimeoutError) as exc:
+        return str(exc)
+    return None
 
 
 # Check l (P6-E): the page's own viewer.js opened over the page with generated pictures (data: URLs, so nothing is fetched): a 512x640 one, and
@@ -813,17 +907,29 @@ def run_checks(browser: Browser, url: str) -> Tuple[int, List[str]]:
                 for failure in check_viewer(browser.run(MEASURE_VIEWER_JS, None), width, height, pair, scroll):
                     seen.setdefault(where + (failure,), []).append(scheme)
     for width, height, drawer in COMPOSER_CASES:   # the composer's rows where its column is narrowest (P6-A)
+        busy_states = ((["busy"] if (width, height, drawer) in COMPOSER_BUSY_CASES else [])   # P6 fix 2
+                       + (STRESS_STATES if (width, height, drawer) in COMPOSER_STRESS_CASES else []))   # P9-G5b fix 1
         for scheme in SCHEMES:
             serial += 1
             browser.open("{}?case={}".format(url, serial), width, height, scheme)
-            for state in COMPOSER_STATES + (["busy"] if (width, height, drawer) in COMPOSER_BUSY_CASES else []):   # busy: P6 fix 2
+            for state in COMPOSER_STATES:
                 cases += 1
                 where = ("{}x{}".format(width, height), "drawer={} composer {}".format("open" if drawer else "closed", state))
-                if not browser.run(INJECT_COMPOSER_JS, {"chips": CHIPS, "name": LONG_FILE, "state": state, "drawer": drawer,
-                                                        "stop": BUSY_STOP_LABEL}):
+                if not browser.run(INJECT_COMPOSER_JS, {"chips": CHIPS, "name": LONG_FILE, "state": state, "drawer": drawer}):
                     seen.setdefault(where + ("the page did not show the {}".format(state),), []).append(scheme)
                     continue
-                for failure in check_composer(browser.run(MEASURE_COMPOSER_JS, None), width, height, state):
+                for failure in check_composer(browser.run(MEASURE_COMPOSER_JS, {"keep": False}), width, height, state):
+                    seen.setdefault(where + (failure,), []).append(scheme)
+            for state in busy_states:   # a busy page is busy for good (an upload held, a chat made): each busy case has a page of its own
+                serial += 1
+                browser.open("{}?case={}".format(url, serial), width, height, scheme)
+                cases += 1
+                where = ("{}x{}".format(width, height), "drawer={} composer {}".format("open" if drawer else "closed", state))
+                reason = enter_busy(browser, state, drawer)
+                if reason is not None:
+                    seen.setdefault(where + ("the page did not get to the busy composer: {}".format(reason),), []).append(scheme)
+                    continue
+                for failure in check_composer(browser.run(MEASURE_COMPOSER_JS, {"keep": True}), width, height, state):
                     seen.setdefault(where + (failure,), []).append(scheme)
     for width, height in VIEWER_TOUCH_VIEWPORTS:   # the viewer on a landscape phone, where it is stacked and scrolls by touch (P6 fix 1)
         for scheme in SCHEMES:

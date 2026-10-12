@@ -742,21 +742,29 @@ def test_the_picker_case_fails_on_overflow_a_covered_header_or_a_picker_that_is_
     assert any("#pick-study cannot be reached by scrolling: its centre hits #composer" in f for f in layout.check_picker(low, 375, 568))
 
 
+SAVED_SENTENCE = "Settings saved. They apply from your next Send."
+
+
 def _composer(width: int = 801, height: int = 568, state: str = "hint") -> Dict[str, Any]:
     """What MEASURE_COMPOSER_JS reports for a composer in order (check k, P6-A): the row the case shows (the re-run hint, or the preview, as
     a busy composer shows it too) is rendered inside the composer, the other is not, nothing overflows, and Send lies inside the composer's box
-    and the viewport, hit at its centre, with nothing scrolled. A busy one (P6 fix 2) has Stop there too: a row above Send beside the drawer
-    (801 px and up), and on Send's row, left of it, on a phone (P9-G5b)."""
+    and the viewport, hit at its centre. A busy one (P6 fix 2; any state of layout.BUSY_STATES) has Stop there too: a row above Send beside the
+    drawer (801 px and up), and on Send's row, left of it, on a phone (P9-G5b); it reads "Cancel upload" beside a Send that is off, as the
+    page's own Send leaves them (P9-G5b fix 1), and the saved row is showing only where Save came during the upload."""
     left, right = (16.0, width - 16.0) if width <= 800 else (276.0, width - 336.0)
     composer = [left, height - 330.0, right, height - 16.0]
     row = [left + 10, height - 280.0, right - 10, height - 260.0]
-    busy = state == "busy"
+    busy = state.startswith("busy")
     stop = [right - 240.0, height - 66.0, right - 100.0, height - 26.0] if width <= 800 else [right - 130.0, height - 116.0, right - 10.0, height - 76.0]
-    return {"doc": [width, width], "composer": {"box": composer, "sw": right - left - 2, "cw": right - left - 2}, "conversation": 150,
+    return {"doc": [width, width],
+            "composer": {"box": composer, "sw": right - left - 2, "cw": right - left - 2, "sh": 300, "ch": 300, "st": 0},
+            "conversation": 150,
             "rows": {"#rerun-hint": row if state == "hint" else None, "#preview": row if state != "hint" else None},
             "send": [right - 90.0, height - 66.0, right - 10.0, height - 26.0], "hit": {"ok": True, "got": "#send"},
             "stop": stop if busy else None,
-            "stop_hit": {"ok": True, "got": "#stop"} if busy else None}
+            "stop_hit": {"ok": True, "got": "#stop"} if busy else None,
+            "stop_text": layout.BUSY_STOP_LABEL if busy else "Stop", "send_disabled": busy,
+            "saved": {"text": SAVED_SENTENCE, "shown": True} if state == "busy-save" else {"text": "", "shown": False}}
 
 
 def test_a_composer_whose_rows_keep_send_in_sight_has_no_failures():   # P6-A (5a)
@@ -843,6 +851,79 @@ def test_a_busy_composer_on_a_phone_has_stop_on_sends_row_and_in_sight_and_a_sto
     beside_the_drawer = _composer(801, 568, "busy")   # from 801 px the composer is 170 px wide: Stop keeps the row above Send
     assert beside_the_drawer["stop"][1] != beside_the_drawer["send"][1] and layout.check_composer(beside_the_drawer, 801, 568, "busy") == []
     assert (layout.PHONE_MAX_PX, layout.ROW_SLACK_PX) == (800, 2)
+
+
+def test_the_busy_cases_with_more_in_the_composer_than_its_rows_are_the_phone_with_its_drawer_closed():   # P9-G5b fix 1 (1)
+    """The review of 2c: the fix held only while the composer's content exactly fit. One more row (the saved row after a Save, a third row of
+    chips) put Stop below the fold again: 49 to 105 px at 320 x 568. The drawer is closed at the start of these, as the Save they do goes through
+    the page's own drawer."""
+    assert layout.COMPOSER_STRESS_CASES == [(320, 568, False)]
+    assert layout.STRESS_STATES == ["busy-after-save", "busy-save", "busy-8-chips"]
+    assert layout.BUSY_STATES == ["busy"] + layout.STRESS_STATES
+    for case in layout.COMPOSER_STRESS_CASES:
+        assert case in layout.COMPOSER_CASES
+    assert len(layout.SEVEN_CHIPS) == 7 and len(layout.EIGHT_CHIPS) == 8 and layout.EIGHT_CHIPS == layout.SEVEN_CHIPS + ["compiled"]
+    assert "full budget" in layout.SEVEN_CHIPS and "labels off" in layout.SEVEN_CHIPS and "raw text" in layout.SEVEN_CHIPS   # the page's own words
+
+
+def test_the_busy_state_is_entered_by_the_pages_own_send_with_the_upload_held_and_never_set_by_the_check():   # P9-G5b fix 1 (iii)
+    """What the case measures is what the user sees: nothing of the busy state is written into the page (Send off, Stop shown, its label), the
+    page's own send() does it, with the turn's upload held (the page's fetch, for the POST of a turn only, never answers)."""
+    for source in (layout.INJECT_COMPOSER_JS,):
+        assert "disabled" not in source and "stop.hidden" not in source and "textContent = 'Stop'" not in source   # no control's state is written
+        assert "args.state === 'busy'" not in source and "args.stop" not in source
+    assert "window.fetch" in layout.HOLD_UPLOAD_JS and "'POST'" in layout.HOLD_UPLOAD_JS and "/messages$/" in layout.HOLD_UPLOAD_JS
+    assert "abort" in layout.HOLD_UPLOAD_JS   # Cancel upload still works on a held request, as on a slow one
+    assert layout.BUSY_STOP_LABEL == "Cancel upload"
+
+
+def test_a_busy_composer_that_scrolls_may_have_stop_on_a_row_of_its_own_if_the_page_has_scrolled_it_in_sight():   # P9-G5b fix 1 (ii)
+    """A composer with more in it than its rows scrolls inside itself; its classic scrollbar takes 15 px of its width, three buttons do not fit
+    in what is left, and Stop wraps onto a row of its own. The page scrolls the busy composer to its end, so that row is in sight, which is the
+    ruling's other way of keeping Stop in view: the check takes it as it takes the first, and measures the composer where the page left it."""
+    m = _composer(320, 568, "busy-8-chips")
+    m["composer"].update(sw=251, cw=251, sh=380, ch=300, st=80)
+    m["send"] = [225.0, 445.0, 278.0, 487.0]
+    m["stop"] = [161.0, 495.0, 278.0, 537.0]   # a row of its own, under Send's: inside the composer, which ends at 552
+    assert layout.check_composer(m, 320, 568, "busy-8-chips") == []
+    unscrolled = _composer(320, 568, "busy-8-chips")
+    unscrolled["composer"].update(sw=251, cw=251, sh=380, ch=300, st=0)
+    unscrolled["send"] = [225.0, 509.0, 278.0, 551.0]
+    unscrolled["stop"], unscrolled["stop_hit"] = [161.0, 559.0, 278.0, 601.0], {"ok": False, "got": "body"}   # the review's 49 px below the fold
+    failures = layout.check_composer(unscrolled, 320, 568, "busy-8-chips")
+    assert "#stop is below the composer's fold: Stop 559 to 601, composer 238 to 552 (it is out of sight until the composer is scrolled)" in failures
+    assert not any("is not on Send's row" in f for f in failures)   # a composer that scrolls is not held to the one row
+    fits = _composer(320, 568, "busy")
+    fits["stop"] = [145.0, 495.0, 278.0, 537.0]   # but one that does not scroll still is: Stop beside Send is what the CSS rule is for
+    assert any("#stop is not on Send's row at 320 px" in f for f in layout.check_composer(fits, 320, 568, "busy"))
+
+
+def test_the_saved_row_is_gone_after_send_and_showing_where_save_came_during_the_upload():   # P9-G5b fix 1 (i)
+    """The sentence says "from your next Send": a Send makes it stale, so the page takes it down then (a Save, then a Send within 4 s was the
+    review's routine case). Where Save came while the upload was on its way, the row is on the page, and the case must be measuring it."""
+    after = _composer(320, 568, "busy-after-save")
+    assert layout.check_composer(after, 320, 568, "busy-after-save") == []
+    after["saved"] = {"text": SAVED_SENTENCE, "shown": True}
+    assert any("the saved row is still showing after Send" in f for f in layout.check_composer(after, 320, 568, "busy-after-save"))
+    during = _composer(320, 568, "busy-save")
+    assert during["saved"]["shown"] and layout.check_composer(during, 320, 568, "busy-save") == []
+    during["saved"] = {"text": "", "shown": False}
+    assert any("the saved row is not showing" in f for f in layout.check_composer(during, 320, 568, "busy-save"))
+    for state in ("busy", "busy-8-chips"):   # the other busy cases say nothing of it
+        quiet = _composer(320, 568, state)
+        quiet["saved"] = {"text": SAVED_SENTENCE, "shown": True}
+        assert layout.check_composer(quiet, 320, 568, state) == [], state
+
+
+def test_a_busy_case_the_page_did_not_enter_by_its_own_send_fails():   # P9-G5b fix 1 (iii)
+    """Stop reads "Cancel upload" and Send is off while the image goes up: a case whose Stop reads another word, or whose Send is on, is not
+    measuring the upload."""
+    accepted = _composer(320, 568, "busy")
+    accepted["stop_text"] = "Stop"
+    assert "#stop reads 'Stop', not 'Cancel upload': the case is not measuring the upload" in layout.check_composer(accepted, 320, 568, "busy")
+    free = _composer(320, 568, "busy")
+    free["send_disabled"] = False
+    assert "#send is on while the upload goes up" in layout.check_composer(free, 320, 568, "busy")
 
 
 def test_the_composer_cases_are_the_carried_widths_with_the_drawer_open_and_320_px():   # P6-A (5a)
@@ -1001,21 +1082,46 @@ class FakePage:
     """Stands in for Browser in run_checks: it follows the hidden attribute of #drawer and #stop that the harness writes, and answers
     each measurement from _measure, so that the loop's own wiring (which case claims what) is what is under test."""
 
-    def __init__(self, stop_renders: bool = True, floor: bool = True, save_renders: bool = True) -> None:
-        self.stop_renders, self.floor, self.save_renders = stop_renders, floor, save_renders
+    def __init__(self, stop_renders: bool = True, floor: bool = True, save_renders: bool = True, busy_fails: bool = False) -> None:
+        self.stop_renders, self.floor, self.save_renders, self.busy_fails = stop_renders, floor, save_renders, busy_fails
         self.width, self.height = 0, 0
         self.drawer, self.stop = False, False
         self.opened = 0
         self.sections_drawn, self.sections_measured, self.picker_measured = 0, 0, 0
         self.composer_set_up, self.composer_measured = [], 0
+        self.flow, self.chips, self.held, self.injected_drawer, self.state = [], 0, False, False, "hint"
+        self.busy_measured, self.busy_flows, self.keep_scroll = [], [], []
         self.viewers_opened, self.viewer_measured = [], 0
 
     def open(self, url: str, width: int, height: int, scheme: str) -> None:
         self.width, self.height, self.drawer, self.stop = width, height, False, False
+        self.flow, self.chips, self.held, self.state = [], 0, False, "hint"   # a new page: what the user did in the last one is gone
         self.opened += 1
 
     def key(self, *args: Any, **kwargs: Any) -> None:
         pass
+
+    def click(self, selector: str) -> None:
+        """A real click: the loop's busy cases do what a user does, so the clicks are what a case is (P9-G5b fix 1)."""
+        assert selector != "#send" or self.held, "Send was clicked with the upload not yet held: the turn would have been answered"
+        self.flow.append(selector)
+
+    def wait_for(self, expression: str, timeout: float = 15.0, what: Optional[str] = None, interval: float = 0.04) -> bool:
+        if self.busy_fails:
+            raise TimeoutError("waited {:g} s for {}".format(timeout, what or expression))
+        return True
+
+    def composer_state(self) -> str:
+        """Which case the page is in, told by what was done to it: the busy cases are the clicks that led to them."""
+        if not self.flow:
+            return self.state
+        if self.flow == ["#send"]:
+            return "busy-8-chips" if self.chips == len(layout.EIGHT_CHIPS) else "busy"
+        if self.flow == ["#settings", "#drawer-save", "#send"]:
+            return "busy-after-save"
+        if self.flow == ["#send", "#settings", "#drawer-save"]:
+            return "busy-save"
+        raise AssertionError("a busy case that does what no case is: {}".format(self.flow))
 
     def evaluate(self, expression: str) -> bool:
         if "#drawer').hidden" in expression:
@@ -1049,10 +1155,19 @@ class FakePage:
             self.sections_drawn += 1
         if function == layout.INJECT_COMPOSER_JS:
             self.composer_set_up.append((self.width, self.height, argument["drawer"], argument["state"], argument["name"]))
-            self.state = argument["state"]
+            self.state, self.chips, self.injected_drawer = argument["state"], len(argument["chips"]), argument["drawer"]
+        if function == layout.SET_CHIPS_JS:
+            self.chips = len(argument["chips"])
+        if function == layout.HOLD_UPLOAD_JS:
+            self.held = True
         if function == layout.MEASURE_COMPOSER_JS:
             self.composer_measured += 1
-            return _composer(self.width, self.height, self.state)
+            state = self.composer_state()
+            if state.startswith("busy"):
+                self.busy_measured.append((self.width, self.height, self.injected_drawer, state))
+                self.busy_flows.append((state, self.chips, tuple(self.flow)))
+            self.keep_scroll.append((state, argument["keep"]))
+            return _composer(self.width, self.height, state)
         if function == layout.INJECT_VIEWER_JS:
             self.viewers_opened.append((self.width, self.height, argument["pair"]))
             self.pair = argument["pair"]
@@ -1074,21 +1189,33 @@ def test_the_loop_runs_every_case_and_passes_on_a_page_in_order():
                 + len(layout.COMPOSER_CASES) * len(layout.SCHEMES) * len(layout.COMPOSER_STATES)    # P6-A: the composer's rows
                 + viewports * len(layout.SCHEMES) * len(layout.VIEWER_STATES)    # P6-E: the viewer open, one picture and two
                 + len(layout.VIEWER_TOUCH_VIEWPORTS) * len(layout.SCHEMES) * len(layout.VIEWER_STATES)    # P6 fix 1: and on a landscape phone
-                + len(layout.COMPOSER_BUSY_CASES) * len(layout.SCHEMES))   # P6 fix 2: the composer busy, where it is narrowest
-    assert cases == expected == 360
+                + len(layout.COMPOSER_BUSY_CASES) * len(layout.SCHEMES)   # P6 fix 2: the composer busy, where it is narrowest
+                + len(layout.COMPOSER_STRESS_CASES) * len(layout.STRESS_STATES) * len(layout.SCHEMES))   # P9-G5b fix 1: and with more in it than its rows
+    assert cases == expected == 366
     assert failures == []
+    busy_loads = (len(layout.COMPOSER_BUSY_CASES) + len(layout.COMPOSER_STRESS_CASES) * len(layout.STRESS_STATES)) * len(layout.SCHEMES)
     assert page.opened == ((len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)) * len(layout.SCHEMES)
                            + len(layout.TALL_WIDTHS) * len(layout.SCHEMES)
                            + len(layout.COMPOSER_CASES) * len(layout.SCHEMES)
+                           + busy_loads   # a busy page is busy for good (an upload held, a chat made): each busy case has a page of its own
                            + len(layout.VIEWER_TOUCH_VIEWPORTS) * len(layout.SCHEMES))   # one load per viewport and scheme, the drawer and Stop are toggled in it
     assert page.sections_drawn == viewports * len(layout.SCHEMES)                  # the card drawn once per viewport and scheme,
     assert page.sections_measured == viewports * len(layout.SCHEMES) * 2           # and measured with the drawer closed and open
     assert page.picker_measured == viewports * len(layout.SCHEMES)
-    assert page.composer_measured == (len(layout.COMPOSER_CASES) * len(layout.COMPOSER_STATES) + len(layout.COMPOSER_BUSY_CASES)) * len(layout.SCHEMES)
+    assert page.composer_measured == len(layout.COMPOSER_CASES) * len(layout.SCHEMES) * len(layout.COMPOSER_STATES) + busy_loads
     assert {(w, h, drawer, state) for w, h, drawer, state, _ in page.composer_set_up} == (
-        {(w, h, drawer, state) for w, h, drawer in layout.COMPOSER_CASES for state in layout.COMPOSER_STATES}
-        | {(w, h, drawer, "busy") for w, h, drawer in layout.COMPOSER_BUSY_CASES})
+        {(w, h, drawer, state) for w, h, drawer in layout.COMPOSER_CASES for state in layout.COMPOSER_STATES}   # the busy cases attach the image as "preview" does
+        | {(w, h, drawer, "preview") for w, h, drawer in layout.COMPOSER_BUSY_CASES + layout.COMPOSER_STRESS_CASES})
     assert {name for *_, name in page.composer_set_up} == {layout.LONG_FILE}   # every case with the long file name
+    assert {(w, h, drawer, state) for w, h, drawer, state in page.busy_measured} == (   # P9-G5b fix 1: each busy case, reached by its own clicks
+        {(w, h, drawer, "busy") for w, h, drawer in layout.COMPOSER_BUSY_CASES}
+        | {(w, h, drawer, state) for w, h, drawer in layout.COMPOSER_STRESS_CASES for state in layout.STRESS_STATES})
+    assert sorted(set(page.busy_flows)) == sorted([
+        ("busy", len(layout.CHIPS), ("#send",)),
+        ("busy-after-save", len(layout.SEVEN_CHIPS), ("#settings", "#drawer-save", "#send")),   # Save, then Send within 4 s: the review's routine case
+        ("busy-save", len(layout.CHIPS), ("#send", "#settings", "#drawer-save")),               # Save while the upload goes up
+        ("busy-8-chips", len(layout.EIGHT_CHIPS), ("#send",))])
+    assert all(keep == state.startswith("busy") for state, keep in page.keep_scroll)   # the page's own scroll is measured as it left it, in busy cases only
     assert page.viewer_measured == (viewports + len(layout.VIEWER_TOUCH_VIEWPORTS)) * len(layout.SCHEMES) * len(layout.VIEWER_STATES)
     assert {(w, h) for w, h, _ in page.viewers_opened} == ({(w, h) for h in layout.HEIGHTS for w in layout.WIDTHS} | set(layout.SHORT_VIEWPORTS)
                                                            | set(layout.VIEWER_TOUCH_VIEWPORTS))
@@ -1098,12 +1225,22 @@ def test_the_loop_runs_every_case_and_passes_on_a_page_in_order():
 def test_the_loop_reports_a_stop_button_that_never_renders_in_the_cases_that_show_it():
     cases, failures = layout.run_checks(FakePage(stop_renders=False), "http://x/")
     assert failures and all("#stop is not rendered, but the case shows it" in f and "stop=shown" in f for f in failures)
-    assert cases == 360
+    assert cases == 366
+
+
+def test_the_loop_reports_a_page_that_never_gets_busy_as_a_failure_of_the_busy_cases_and_does_not_stop():   # P9-G5b fix 1 (iii)
+    """The busy cases click, and a page that does not do what a click should (Send never held, the drawer never opening) times the wait out:
+    that is a failure of that case, in words, and the sweep goes on with the rest."""
+    cases, failures = layout.run_checks(FakePage(busy_fails=True), "http://x/")
+    assert cases == 366
+    assert failures and all("the page did not get to the busy composer" in f and "waited 15 s for" in f for f in failures), failures
+    named = {state for state in layout.BUSY_STATES if any("composer {}:".format(state) in f for f in failures)}
+    assert named == set(layout.BUSY_STATES), named   # every busy state is named, and every failure is of one
 
 
 def test_the_loop_reports_a_save_button_that_never_renders_in_the_save_cases_only():
     cases, failures = layout.run_checks(FakePage(save_renders=False), "http://x/")
-    assert cases == 360 and len(failures) == len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)   # once per viewport: both schemes fail alike
+    assert cases == 366 and len(failures) == len(layout.WIDTHS) * len(layout.HEIGHTS) + len(layout.SHORT_VIEWPORTS)   # once per viewport: both schemes fail alike
     assert all("light+dark" in f and "save" in f and "#drawer-save is not rendered" in f for f in failures), failures
 
 

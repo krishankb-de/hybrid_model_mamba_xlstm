@@ -1197,6 +1197,7 @@ COMPOSER_BOXES_JS = """() => {
   const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
   const c = q('#composer');
   return { composer: box(c), scrolled: c.scrollTop, overflow: c.scrollHeight > c.clientHeight, viewport: [innerWidth, innerHeight],
+           at_end: c.scrollTop + c.clientHeight >= c.scrollHeight - 1, saved: q('#saved').textContent,
            settings: box(q('#settings')), send: box(q('#send')), stop: q('#stop').hidden ? null : box(q('#stop')),
            stop_text: q('#stop').textContent, send_disabled: q('#send').disabled };
 }"""
@@ -1221,6 +1222,49 @@ def test_a_phone_keeps_cancel_upload_on_the_row_of_send_and_settings_and_in_sigh
     assert seen["settings"][2] <= seen["send"][0] <= seen["send"][2] <= seen["stop"][0] and seen["stop"][2] <= right, seen
     assert top <= seen["stop"][1] and seen["stop"][3] <= bottom + 0.5 and seen["stop"][3] <= seen["viewport"][1], seen
     ui.shot("busy_composer_320x568_light.png", page)
+    while not held:
+        page.wait_for_timeout(20)
+    held[0].continue_()   # let the upload through: the turn runs and ends as any turn does
+    assert ui.wait_settled(0, page)["status"] == "done"
+    ui.assert_clean()
+
+
+UPLOAD_ON_ITS_WAY_JS = "document.querySelector('#stop').textContent === 'Cancel upload' && !document.querySelector('#stop').hidden"
+
+
+@pytest.mark.parametrize("order", ["Save, then Send", "Send, then Save"])
+def test_a_phone_keeps_cancel_upload_in_sight_when_a_save_comes_before_the_send_or_while_the_upload_goes_up(ui, images, order):
+    """P9-G5b fix 1: the test above held only while the composer's content exactly fit. A Save and then a Send within 4 s left "Settings saved." in
+    the composer and Stop ("Cancel upload") 49 px under its fold; a Save while the upload went up put the row there and Stop 55 px under. The
+    page now takes the row down at Send, and scrolls a busy composer to its end whenever a row comes to it. Both orders in a real Chrome at 320 x
+    568, with the upload held: Stop lies inside the composer and the viewport, whether or not it shares Send's row, and the row is where the
+    order puts it."""
+    page = ui.new_page(viewport=(320, 568))
+    ui.open(page)
+    held = []
+    page.route("**/v1/sessions/*/messages", lambda route: held.append(route))   # the turn's upload is on its way and nothing answers it
+    ui.attach(images["xray_a.png"], page)
+    saved_first = order == "Save, then Send"
+
+    def save() -> None:
+        page.click("#settings")
+        page.click("#drawer-save")
+        assert ui.composer(page)["saved"] == SAVED, order
+
+    if saved_first:
+        save()
+    page.click("#send")
+    page.wait_for_function(UPLOAD_ON_ITS_WAY_JS)
+    if not saved_first:
+        save()
+    seen = page.evaluate(COMPOSER_BOXES_JS)
+    assert seen["send_disabled"] and seen["stop"] is not None, (order, seen)
+    assert seen["saved"] == ("" if saved_first else SAVED), (order, seen)   # a Send takes the row down; a Save during the upload puts it there
+    left, top, right, bottom = seen["composer"]
+    assert top <= seen["stop"][1] and seen["stop"][3] <= bottom + 0.5 and seen["stop"][3] <= seen["viewport"][1], (order, seen)   # in sight, as it is
+    assert seen["settings"][3] <= bottom + 0.5 and seen["send"][3] <= bottom + 0.5 and seen["send"][1] >= top, (order, seen)   # and Send and Settings with it
+    if seen["overflow"]:   # more in the composer than its rows (the row after a Save during the upload): the page has scrolled it to its end
+        assert seen["at_end"], (order, seen)
     while not held:
         page.wait_for_timeout(20)
     held[0].continue_()   # let the upload through: the turn runs and ends as any turn does

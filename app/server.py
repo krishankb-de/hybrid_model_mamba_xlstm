@@ -66,7 +66,8 @@ MODEL_CHECKPOINTS = {   # resolved against the repo root (ruling 1): the publish
 # entry would carry the note above and decode like a published model.
 # P9-G5b: `drift_note` is the entry's own drift sentence, which its card and its generate stage carry in place of the server's --drift-note. That
 # flag is the P1-D measurement (CPU decode against the published GPU decode, 20/20 probe studies), made for the published models, so only their
-# cards carry it (_engines); this model was never probed, and says so.
+# cards carry it (_engines); this model was never probed, and says so, on a CPU server: on `--device cuda` there is no CPU decode to say it of,
+# and its card carries none, as a published card carries none when the flag is empty (P9-G5b fix 1).
 EOS_MODEL_NOTE = ("EOS-trained: at a 200-token budget, 2,662 of 2,663 test reports end by themselves (44.2 words on average). Against the "
                   "published model: ROUGE-L 0.1948 vs 0.1920, CheXbert-14 micro F1 0.4464 vs 0.4661; BLEU and all four CheXbert F1 scores are "
                   "significantly lower.")
@@ -483,7 +484,8 @@ def _engines(kind: str, models: Sequence[str], tiny_step_delay_s: float, drift_n
     """Ruling 1: tiny is one engine and ignores models, device and threads; real is one engine per model on `device` (a CPU one by
     default), the first the default. Without a thread count the engine keeps its own default. A published model is built from the repo root
     under its config's name, and carries `drift_note`, the server's --drift-note: that sentence was measured for the published models. A model
-    of HOME_MODELS (P9-G5a) is built from CHAT_HOME (`home`), under its own name, with its note and its own drift sentence (P9-G5b)."""
+    of HOME_MODELS (P9-G5a) is built from CHAT_HOME (`home`), under its own name, with its note and its own drift sentence (P9-G5b), which on
+    a GPU server it has not: the sentence says a CPU decode was not probed, and there is none there to speak of (P9-G5b fix 1)."""
     if kind == "tiny":
         return {"tiny": build_engine("tiny", step_delay_s=tiny_step_delay_s)}
     extra = {} if threads is None else {"threads": threads}
@@ -492,7 +494,8 @@ def _engines(kind: str, models: Sequence[str], tiny_step_delay_s: float, drift_n
         if name in HOME_MODELS:
             spec = HOME_MODELS[name]
             engines[name] = build_engine("real", checkpoint=str(Path(home) / spec["checkpoint"]), model_config=spec["config"], name=name,
-                                         evaluation_note=spec["note"], device=device, drift_note=spec["drift_note"], **extra)
+                                         evaluation_note=spec["note"], device=device, **extra,
+                                         drift_note=spec["drift_note"] if device == "cpu" else "")
         else:
             engines[name] = build_engine("real", checkpoint=str(REPO_ROOT / MODEL_CHECKPOINTS[name]), model_config=name,
                                          device=device, drift_note=drift_note, **extra)

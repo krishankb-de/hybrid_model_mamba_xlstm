@@ -727,6 +727,14 @@ export function createApp(env) {
     else frame(() => { if (!state.busy) ui.conversation.removeAttribute('aria-busy'); });
   }
 
+  // While a turn runs the composer is scrolled to its end, where Stop is (P9-G5b fix 1). The composer scrolls inside itself where its rows are taller
+  // than the page leaves it (a phone, a short window). One row more than fits (the "Settings saved" row, a third row of chips) adds a scrollbar,
+  // which takes 15 px of its width, Stop wraps onto a row of its own, and that row lay below the fold: out of sight, the control that ends the turn.
+  // Called when the page goes busy, once Stop is shown and has its label, and when a row comes while it is busy (a Save during the turn).
+  function keepStopInView() {
+    if (state.busy) ui.composer.scrollTop = ui.composer.scrollHeight;
+  }
+
   function setBusy(on) {
     const wasBusy = state.busy;
     state.busy = on;
@@ -739,6 +747,7 @@ export function createApp(env) {
       if (wasBusy && (doc.activeElement === ui.stop || doc.activeElement === ui.send)) ui.prompt.focus();   // the control that had focus is going away
     }
     syncControls();
+    if (on) keepStopInView();   // after the controls: Stop is shown, and the row it is on is laid out
   }
 
   // ---- one turn: the stream, the watchdog, the poll, Stop ----------------------------------------------------------------
@@ -1028,13 +1037,15 @@ export function createApp(env) {
     const session = state.session;
     if (!file && picked === null && !session.turns.length) { showNotice('Attach an X-ray first.'); return; }
     clearNotice();
+    clearSaved();   // "Settings saved. They apply from your next Send." is about this Send now: it is stale, and a row more in the composer (P9-G5b fix 1)
     const options = optionsFromSettings(state.settings, state.models);
     if (picked !== null) options.test_row = picked;
-    setBusy(true);
     ui.stop.disabled = true;   // until the request is on its way (the chat may still be being made): there is nothing to cancel
     // Until the page has the turn's id, Stop aborts the request (P6-A c): "Cancel upload" while an image goes up, "Cancel" for a turn that
-    // uploads nothing, a re-run or a test study (P6 fix 1).
+    // uploads nothing, a re-run or a test study (P6 fix 1). Set before the page goes busy: it scrolls the composer to its end then, with Stop
+    // laid out as it will stay (its longest label is the one that decides whether it shares Send's row).
     ui.stop.textContent = file ? CANCEL_UPLOAD : CANCEL_SEND;
+    setBusy(true);
     announce(file ? UPLOADING_TEXT : SENDING_TEXT);
     const fresh = !session.id;   // this Send makes the chat
     try {
@@ -1614,6 +1625,7 @@ export function createApp(env) {
     ui.saved.textContent = message;
     if (warn) ui.saved.setAttribute('data-state', 'warn');
     state.savedTimer = later(clearSaved, SAVED_MS);
+    keepStopInView();   // a Save while a turn runs adds this row to a busy composer: Stop, its last row, stays in sight (P9-G5b fix 1)
   }
 
   // Save, which is the form's submit: Enter in a text field submits it too. Every number field the page lets the user edit must hold a

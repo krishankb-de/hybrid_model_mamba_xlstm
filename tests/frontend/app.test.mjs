@@ -6059,3 +6059,113 @@ test('a request the server answers in time is not touched by the timeout, and a 
   await flush();
   assert.equal(q($('notice'), 'p').textContent, 'Session not found.');   // a refusal says what it says: the transport did not fail
 });
+
+// ---- P9-G5b fix 1: the busy composer keeps Stop in view, and "Settings saved" is not about a Send that has happened ------------------------
+
+// The composer records what it is scrolled to, and what Stop was (its label, shown or not) at that moment. The shim has no layout, so the test says
+// how tall the composer's content is: scrollHeight, which the page scrolls to when it scrolls to the end.
+function watchComposer(height) {
+  const composer = $('composer');
+  const scrolls = [];
+  let top = 0;
+  composer.scrollHeight = height;
+  Object.defineProperty(composer, 'scrollTop', {
+    get: () => top, set: (to) => { top = to; scrolls.push({ to, stop: $('stop').textContent, shown: !$('stop').hidden }); }, configurable: true,
+  });
+  return { composer, scrolls };
+}
+
+test('Send takes the "Settings saved" row down at once: its sentence is about the next Send, and this is it; the timer that would have is gone', async () => {
+  for (const [name, options, row, warn] of [['stored', {}, SAVED, null], ['not stored', { options: { storage: brokenStorage() } }, STORAGE_NOTE, 'warn']]) {
+    const h = await ready(options);
+    $('settings').click();
+    save().click();
+    assert.deepEqual([$('saved').textContent, $('saved').getAttribute('data-state')], [row, warn], name);   // the row is there ...
+    const turn = h.app.send();
+    await flush();
+    assert.deepEqual([$('saved').textContent, $('saved').hasAttribute('data-state')], ['', false], name);   // ... and gone with the Send, not 4 s on
+    h.timers.advance(4100);
+    assert.equal($('saved').textContent, '', name);   // the timer of the row that was there did not bring anything back
+    const run = h.api.streams[0];
+    run.accept('m_a');
+    await flush();
+    for (const e of fullTurn()) run.channel.push(e);
+    run.channel.end();
+    await turn;
+  }
+});
+
+test('a Send the page refuses before it starts (no image in a new chat) leaves the row alone: nothing was sent, so "your next Send" is still to come', async () => {
+  const h = harness({ sessions: [] });   // an empty chat, nothing attached
+  await h.app.start();
+  await flush();
+  $('settings').click();
+  save().click();
+  assert.equal($('saved').textContent, SAVED);
+  await h.app.send();
+  assert.equal(q($('notice'), 'p').textContent, 'Attach an X-ray first.');
+  assert.equal($('saved').textContent, SAVED);   // until its own 4 s are up
+  h.timers.advance(4100);
+  assert.equal($('saved').textContent, '');
+});
+
+test('the composer is scrolled to its end while a turn runs, where Stop is: after Stop is shown and reads "Cancel upload", the label it keeps for the upload', async () => {
+  const h = await ready();
+  const { composer, scrolls } = watchComposer(480);
+  const turn = h.app.send();
+  await flush();
+  assert.deepEqual(scrolls.at(-1), { to: 480, stop: 'Cancel upload', shown: true });   // the end: Stop is on its last row, and it is laid out as it will stay
+  assert.equal(composer.scrollTop, 480);
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  for (const e of fullTurn()) run.channel.push(e);
+  run.channel.end();
+  await turn;
+  const after = scrolls.length;
+  $('settings').click();
+  save().click();   // the turn is over: a Save is a Save at rest, and scrolls nothing
+  assert.equal(scrolls.length, after);
+});
+
+test('a Save while a turn runs adds its row under the chips and scrolls the composer to its end again, so that the row does not push Stop out of sight; a Save at rest scrolls nothing', async () => {
+  const h = await ready();
+  const { composer, scrolls } = watchComposer(400);
+  $('settings').click();
+  save().click();
+  assert.deepEqual(scrolls, []);   // at rest the composer is where the user has it
+  const turn = h.app.send();
+  await flush();
+  assert.equal(scrolls.at(-1).to, 400);
+  composer.scrollHeight = 452;   // the saved row (two lines at a phone's width) makes the composer taller
+  $('settings').click();
+  save().click();
+  assert.equal($('saved').textContent, SAVED);
+  assert.deepEqual(scrolls.at(-1), { to: 452, stop: 'Cancel upload', shown: true });   // and Stop, the last row, is where the scroll leaves it
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  for (const e of fullTurn()) run.channel.push(e);
+  run.channel.end();
+  await turn;
+});
+
+test('a turn found running when its chat is opened scrolls the composer to its end as well: the page is busy then too', async () => {
+  resetEvents();
+  const started = [startEv({ message_id: 'm_r' }), stageStartEv('generate', 3), snapEv('Findings: so far')];
+  const h = harness({
+    sessions: [sess('s_r', 'chest.png', 1)],
+    routes: {
+      'GET /v1/sessions/s_r': { ...sess('s_r', 'chest.png', 1), messages: [userMsg('u_r', '', 'chest.png'), botMsg('m_r', 'running', START_DATA.options)] },
+      'GET /v1/messages/m_r': { ...botMsg('m_r', 'running', START_DATA.options), events: rows(started) },
+    },
+  });
+  const { scrolls } = watchComposer(360);
+  await h.app.start();
+  await flush();
+  assert.equal($('stop').hidden, false);   // it runs: Stop, which ends it
+  assert.deepEqual(scrolls.at(-1), { to: 360, stop: 'Stop', shown: true });
+  h.api.polls[0].channel.push(stopEv('done', { message_id: 'm_r', report: 'Findings: so far', display_report: 'Findings: so far' }));
+  h.api.polls[0].channel.end();
+  await flush();
+});
