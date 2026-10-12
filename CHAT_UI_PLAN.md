@@ -4006,7 +4006,7 @@ def test_six_concurrent_turns_four_accepted_two_refused(tmp_path):
             assert [f["data"]["seq"] for f in frames] == list(range(1, len(frames) + 1))
 ``` The same drill runs from the laptop against the cluster server through the tunnel (`scripts/chat_load_drill.py URL TOKEN`, httpx only). Record both. Commit `"P8-C: load drill"`.
 
-- [ ] **P8-D** Chaos checklist: API killed mid-turn, tunnel dropped mid-stream, oversize upload, wrong token, labeller down, gallery missing, disk quota error on upload.
+- [x] **P8-D** Chaos checklist: API killed mid-turn, tunnel dropped mid-stream, oversize upload, wrong token, labeller down, gallery missing, disk quota error on upload.
 
 Each item with its expected behaviour, run and recorded: kill → turn `error/server_restart` after restart; tunnel drop → polling completes the card; oversize → 413 and the preview stays; wrong token → 401 and the drawer asks for the token; labeller down → `label` skipped, turn `done`; gallery missing → `retrieve` skipped, turn `done`; `OSError` on upload write → `error` event with a readable message, no partial files. Commit `"P8-D: chaos checklist"`.
 
@@ -4030,6 +4030,18 @@ Record the numbers from P7-D and a laptop tiny run; the static checks already ex
 The aim is to find where the live per-step cost (77-88 ms against P1-C's ~30 ms) comes from.
 
 - **Prediction (R4, recorded 2026-10-12 before submission):** A ≈ 3.0 s per report (P1-C's ~30 ms per step, 100 tokens, beam 3); B and C within 10% of A. The mean first exceeds 1.5× A at D (the worker thread) 45%; at E or E-local (the store/emit path) 25%; at F (HTTP + event loop) 10%; at no arm 20% (then the probe's 77-88 ms per step was node load at that time). A-end within 10% of A (no drift over the run) 80%. fs_home a network filesystem (nfs, gpfs, lustre or beegfs) 90%; fs_local node-local (tmpfs, xfs or ext4) 85%.
+- **Result (job 2647689, gx14, code d283b69).** The prediction was right.
+  - Mean per 100-token report: A 2960 ms; B 2994 (1.01×); C 3003 (1.01×); **D 9193 (3.11×)**; E 8999 (3.04×); E-local 9186 (3.10×); F 8329 (2.81×); A-end 2946 (1.00×).
+  - `first_over_1_5x` is D, and every arm produced the same report.
+  - fs_local is xfs and fs_home is nfs. Both CPU threads ran 8 OpenMP threads. Load was 8.9 before and 12.2 after.
+  - So the whole gap is the worker thread itself. D is C run on a `ThreadPoolExecutor(max_workers=1)` thread while the main thread waits in `Future.result()`.
+  - The store, NFS, the emit path and HTTP add nothing beyond D.
+  - Grad mode (generate has its own `no_grad`), the thread count and precision are ruled out: the reports are identical.
+- **Part 2: diagnosis (proposed; runs on the user's go-ahead).** No code change: the same job runs three times, with one change each, in parallel on gx14.
+  - **J1 `MALLOC_ARENA_MAX=1`.** Every thread uses glibc's main arena. A worker thread's own arena is made of 64 MB heaps, mapped and unmapped as the cached decode allocates and frees its per-step states.
+  - **J2 `--cpus-per-task=1`.** One thread, so no OpenMP team.
+  - **J3 `OMP_WAIT_POLICY=PASSIVE`.** OpenMP threads do not spin while they wait.
+- **Prediction (R4, recorded 2026-10-12, before any of these runs):** J1 MALLOC_ARENA_MAX=1: D/A ≤ 1.3 55%. J2 one CPU: A 6-12 s per report; D/A ≤ 1.3 45% (≈1 points at the OpenMP team or TLB shootdowns; ≥1.5 points at per-thread allocation or thread-local state). J3 OMP_WAIT_POLICY=PASSIVE: A within ±25% of 2.96 s 70%; D/A ≤ 1.3 20%.
 
 
 ### P9 — Demo and close

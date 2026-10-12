@@ -138,7 +138,8 @@
     "P5-F": "50/50 self-retrieval at rank 1; live CPU own-rank == build rank on >=48/50; labeller == published labels 100/100",
     "P9-G3": "preflight code eos_flag true + module_in_cwd true; recipe ok with changed = the 6 root-derived keys (checkpoint_dir, experiment_name, log_dir, output_dir, trainer.default_root_dir, wandb.name), added = [dataset.report_eos_target], removed = [] (80%); wall 1.1-1.8 h for 12,000 steps on 4 H100 (published ~1.3 h); final val/lm_loss within 0.03 of the published run's last value, slightly higher more likely (one more target per report); DONE written with steps 12000",
     "P7-A": "all 3 probes pass in ~1 min (85%); fastapi >= 0.115 (overlay), transformers 4.x < 5 (.venv_chexbert); chexbert label order true with f1chexbert 0.0.2 (92%)",
-    "P8-F-timing": "A ≈ 3.0 s per report (P1-C's ~30 ms per step, 100 tokens, beam 3); B and C within 10% of A. The mean first exceeds 1.5× A at D (the worker thread) 45%; at E or E-local (the store/emit path) 25%; at F (HTTP + event loop) 10%; at no arm 20% (then the probe's 77-88 ms per step was node load at that time). A-end within 10% of A (no drift over the run) 80%. fs_home a network filesystem (nfs, gpfs, lustre or beegfs) 90%; fs_local node-local (tmpfs, xfs or ext4) 85%."
+    "P8-F-timing": "A ≈ 3.0 s per report (P1-C's ~30 ms per step, 100 tokens, beam 3); B and C within 10% of A. The mean first exceeds 1.5× A at D (the worker thread) 45%; at E or E-local (the store/emit path) 25%; at F (HTTP + event loop) 10%; at no arm 20% (then the probe's 77-88 ms per step was node load at that time). A-end within 10% of A (no drift over the run) 80%. fs_home a network filesystem (nfs, gpfs, lustre or beegfs) 90%; fs_local node-local (tmpfs, xfs or ext4) 85%.",
+    "P8-F-diag": "J1 MALLOC_ARENA_MAX=1: D/A ≤ 1.3 55%. J2 one CPU: A 6-12 s per report; D/A ≤ 1.3 45% (≈1 points at the OpenMP team or TLB shootdowns; ≥1.5 points at per-thread allocation or thread-local state). J3 OMP_WAIT_POLICY=PASSIVE: A within ±25% of 2.96 s 70%; D/A ≤ 1.3 20%."
   },
   "decisions": {
     "branch": "chat_ui, cut from h100_efficiency @ 5c45527 (has cached decode, E6/E7 decode verification, ISBI neighbour code, partition rename)",
@@ -590,7 +591,7 @@
           "desc": "Load drill: 6 concurrent turns → 4 accepted, 2 × 429; all 4 complete with contiguous seq."
         },
         "P8-D": {
-          "done": false,
+          "done": true,
           "desc": "Chaos checklist: API killed mid-turn, tunnel dropped mid-stream, oversize upload, wrong token, labeller down, gallery missing, disk quota error on upload."
         },
         "P8-E": {
@@ -617,7 +618,15 @@
         "p8e_commits": "40a7239,038a59d,a07b695",
         "p8e_openapi_tests": "33 passed (the walkthrough runs the README's own curl calls; 9 drift cases caught)",
         "p8e_hook_tests": "163 passed",
-        "p8e_validate": "All gates passed on 967b536: 4713 passed, 1 skipped, 21 xfailed; node 473/473"
+        "p8e_validate": "All gates passed on 967b536: 4713 passed, 1 skipped, 21 xfailed; node 473/473",
+        "p8d_commits": "9705d60,473245b",
+        "p8d_checklist": "1 kill mid-turn PASS; 2 tunnel drop PASS (4 cut modes); 3 oversize PASS; 4 wrong token FIX (9705d60); 5 labeller down PASS; 6 gallery missing PASS (6c by design: in-memory index, file reads fail by name); 7 OSError on upload PASS",
+        "p8d_tests": "12 API (tests/test_app_chaos.py) + 7 e2e (tests/e2e/test_chaos_e2e.py) + 3 pins + 1 node",
+        "p8d_gates": "473245b: validate All gates passed (4728 passed, node 474), e2e 36, layout 366/0, browser 10/0",
+        "p8f_timing_job": "2647689 (gx14, code d283b69, exit 0, 5:45)",
+        "p8f_timing_means_ms": "A 2960, B 2994, C 3003, D 9193, E 8999, E-local 9186, F 8329, A-end 2946",
+        "p8f_timing_first_over_1_5x": "D (3.11x); same_report all arms; prediction right",
+        "p8f_timing_env": "Xeon Platinum 8480CL, affinity 8, cores 4, fs_local xfs, fs_home nfs, threads 8/8, load 8.9 -> 12.2"
       },
       "verdict": null
     },
@@ -785,9 +794,11 @@
     "2026-10-12: 2026-10-12: P7-D probe (scripts/chat_realturn_probe.py, merged 375c521) vs serve 2638789: gate ok — published_equal 5/5, eos_stops 6/6 (rows 0-4 + upload), features_ok; first byte <= 89 ms, published turn 7.7-8.4 s (generate 2.5x the P1-C 3.05 s on the same node; cause under investigation in P8-F; store commits ruled out). P7-D tick waits on the user's visual check of the five features on real data. P9-G6 LP1.5 (2638779-81): no effect (44.6 words, metrics within 0.002 of alpha=1.0), gate fail; alpha cannot act under top-hypothesis stopping (plan P9-G6 note).",
     "EOS model in the UI: G5a (registry, card, EOS guard) + G5b (EOS copy: 'ended the report' chip, per-model stop hint, drawer note; tiny-engine notice + badge; per-model drift note, CPU-only EOS sentence; busy composer fix) merged; cluster check by the R7-safe probe: every EOS turn stopped by eos with 4 similar X-rays and 3 matching reports",
     "2026-10-12: stopped by the user with P8-F fix 1, P6-F and P8-D in flight (uncommitted work kept in their worktrees and backed up in the SDD workspace wip/); P8-E committed and reviewed (tick after a clean validate); probe run 2 on 610fe8f: gate ok, EOS default turn mean 5.9 s.",
-    "P8-E runbook: app/README.md (40a7239) + review fixes 038a59d, a07b695; review + two scoped re-reviews, all findings addressed; validate clean on 967b536"
+    "P8-E runbook: app/README.md (40a7239) + review fixes 038a59d, a07b695; review + two scoped re-reviews, all findings addressed; validate clean on 967b536",
+    "P8-D chaos checklist merged (9705d60 fix: the token notice goes once the right token is accepted; 473245b checklist); review Approved; gates on 473245b green",
+    "P8-F timing job 2647689: the live turn's 3x is the worker thread itself (D 3.11x; store/NFS/HTTP add nothing); part 2 (proposed, on the user's go-ahead) diagnoses it with three no-code-change runs (MALLOC_ARENA_MAX=1, one CPU, OMP_WAIT_POLICY=PASSIVE)"
   ],
-  "last_updated": "2026-10-12T15:36:30+02:00",
+  "last_updated": "2026-10-12T16:01:22+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -866,7 +877,11 @@
       "no layout case for the gallery page (Test-study button) busy flow at 320x568 (it scrolls; Stop stays in sight); a notice shown while busy is not re-scrolled (Chrome scroll anchoring keeps Stop in sight; other engines unverified)",
       "probe: restated vocabularies partly tied to the app by literal/regex (ERROR_KINDS, SKIP_REASONS, STOPPED); private-name coupling to the drill (_write, _Parser, _whole, _seconds, _json_or_none) and a duplicated SSE splitter/SESSION_ID; tests import private helpers from two test modules",
       "probe pins: the timing write scan sees only plain Assign (tuple-unpack or setattr side-writes pass); `Streaming` is a third near-identical fake beside Answer/Refusal",
-      "browser check 'reload' step flakes ~25% (pre-existing on 4a71f55; also P6-F)"
+      "browser check 'reload' step flakes ~25% (pre-existing on 4a71f55; also P6-F)",
+      "P8-D minors: near-duplicate test helpers (free_port, kill_group, FakeLabeler, closed_port_url) → hoist to tests/app_helpers.py; the API chaos file has no SIGTERM→teardown guard; the e2e ui fixture builds the server before its try",
+      "pre-existing: pytest.ini uses [tool:pytest], which pytest ignores in a pytest.ini, so --strict-markers/--disable-warnings are likely inactive — check what pytest loads",
+      "P8-F timing minors: worker.shutdown() waits without bound after turn_deadline; http_turn deadline up to one ping (15 s) late, a silent stream ends as ReadTimeout at 120 s; the mount-table sentinel does not assert absence of every SECRET-* string; the deadline's nested wait_for was tested only on py3.14 (cluster 3.11)",
+      "P8-D's page fix (app.js token notice, 9705d60) is not on the cluster yet: the live serve job serves app/static from CLUSTER_REPO, so sync it together with the next planned serve restart"
     ],
     "P9-G5": [],
     "P5-D": [
@@ -881,20 +896,21 @@
       "parked: the endpoint re-read has only ConnectTimeout; a read that connects then stalls blinds the watch loop -> add -o ServerAliveInterval=5 -o ServerAliveCountMax=2 to the read (pinned argv changes)"
     ],
     "P8-followup": [],
-    "P8-E": [
-      "R8 heads-up: the first P8-B start on the cluster CHAT_HOME runs the retention sweep (public sessions > 7 d, private > 45 d, soft-deleted sessions, orphan upload dirs) -> the user is told before the first cluster start; the runbook says so",
-      "runbook: RECHECK_S=60 / DEMO_RECHECK_S=10; requeue followed within ~RECHECK_S; MAX_ATTEMPTS counts attempts only; macOS wildcard listener reads free; safe to background; demo closes itself (exit 1) when the server stops saying public; after a demo check pgrep cloudflared (a SIGKILLed public_demo.sh leaves it running)",
-      "runbook (P8-A/B): RETENTION_DAYS (env, 1-3650; other mode keeps its default), rate limit (public, 6 turns / client / 10 min, Retry-After), JSON request log on stderr (no query), X-Request-Id, 413 above 21 MB",
-      "runbook: an abort sent as a TCP reset within ~5 ms of the last upload byte can still start a turn (kernel never delivers the reset before the server writes); browsers and the ssh tunnel close with FIN, so it does not arise in the deployed path"
-    ],
+    "P8-E": [],
     "P9-D": [
       "verify how fast the public link closes after the watchdog's SIGTERM (cloudflared grace period)",
       "/healthz must answer within 5 s under CPU-bound generation, or the demo watchdog closes the link",
       "free notes are unlimited per client but each holds a queue slot briefly and writes rows: add a separate generous note cap before a public demo (P9-G5b/P8f review)"
     ],
     "P8-F": [
-      "live generate stage 7.4-8.1 s per 100 tokens vs P1-C 3.05 s per report on the same node (gx14, 8 CPUs); store commits ruled out (WAL exclusive, 0.007 ms); timing job (P8-F part 1, arms A-F) to locate it",
-      "the EOS (default) model's turn time: probe pass 3 records it from the P7-D follow-up on (eos_turn_ms_max)"
+      "LOCATED (timing job 2647689, gx14): the live generate's ~3x over P1-C is the worker thread itself — D (generate on a ThreadPoolExecutor thread) 3.11x A, while store/NFS/emit/HTTP add nothing (E 3.04x, E-local 3.10x, F 2.81x); store commits were already ruled out (WAL exclusive, 0.007 ms)",
+      "the EOS (default) model's turn time: probe pass 3 records it from the P7-D follow-up on (eos_turn_ms_max)",
+      "part 2 (proposed, on the user's go-ahead): diagnose the worker-thread 3x with the same job, no code change — J1 MALLOC_ARENA_MAX=1, J2 --cpus-per-task=1, J3 OMP_WAIT_POLICY=PASSIVE (predictions in the plan + predictions[P8-F-diag]); then fix (likely a wrapper env line or an allocator), redeploy the serve job, re-run the probe",
+      "then tick P8-F: record first byte (probe ≤ 144 ms), full turn (EOS default 5.9 s mean, published ~8 s; after the fix, re-measured), 375 px (layout check), no external requests + no EventSource (static tests)"
+    ],
+    "P8-D-followup": [
+      "store failure mid-turn (sqlite 'database or disk is full'): today the stream ends with no error/message_stop and the message stays running until the next start, so the page polls forever; fix per .superpowers/sdd/CHAT_UI_PLAN/task-P8-D-followup-rulings.md (error{store_failed} + message_stop emitted unstored with contiguous seq; one in-memory overlay applied by every read; chaos item 8 + e2e) — not started (user stop 2026-10-12)",
+      "P8-D review minors folded into that task: test_app_chaos.py docstring '1 MB image' (is ~103 KB) and 'refused before parsed' unshown; the refused-CLI test promises 'no endpoint file' without passing --endpoint-file; e2e TokenServer.direct_url unused; token file needs os.fchmod(fd, 0o600); 6c test needs a baseline 200 before the rmtree"
     ]
   }
 }
