@@ -71,7 +71,7 @@ PUBLISHED_PROTOCOL = {"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "
 STAGES = ("preprocess", "encode", "retrieve", "generate", "label", "score")
 SKIP_REASONS = ("gallery_unavailable", "k_zero", "label_off", "labeler_unavailable", "no_reference")   # app/pipeline.py's, as written there
 STOPPED = ("budget", "repeat", "eos")                                                                   # generate.detail.stopped
-ERROR_KINDS = ("validation_error", "model_error", "overloaded_error", "server_restart")                 # error.error.type, the kinds the app sends
+ERROR_KINDS = ("validation_error", "model_error", "overloaded_error", "server_restart", "store_failed")  # error.error.type, the kinds the app sends
 REFUSAL_KINDS = ("invalid_request_error", "authentication_error", "permission_error", "not_found_error", "validation_error",
                  "overloaded_error", "internal_error", "unavailable_error", "rate_limited")             # error.type of a refusal: app/server.py ERROR_KINDS
 N_LABELS = 14                        # CheXbert-14: the `of` of a label agreement

@@ -9850,7 +9850,7 @@ def test_the_decode_timing_script_says_that_its_worker_arms_measure_the_old_serv
 
 
 # ── CHAT_UI_PLAN.md P8-D: the chaos checklist ─────────────────────────────────
-# Seven items, run as tests: tests/test_app_chaos.py (the API side: real processes, the labeller, the gallery, the store; part of validate.sh)
+# Eight items, run as tests: tests/test_app_chaos.py (the API side: real processes, the labeller, the gallery, the store; part of validate.sh)
 # and tests/e2e/test_chaos_e2e.py (the page side, in a real Chrome; run with -m e2e). Each test is named test_chaos_<item>_... and says its item
 # and what is expected in its docstring. These pins hold what a later edit could lose without a test noticing: an item with no test, a test that
 # does not say what it expects, a page test that would run in validate.sh, or a port that belongs to someone else.
@@ -9867,9 +9867,10 @@ def _chaos_test_functions(tree):
 
 
 def test_every_item_of_the_chaos_checklist_has_a_test_and_each_test_says_its_item_and_what_is_expected():
-    """P8-D. Items 1 to 7 each have at least one test across the two files, and every test has a docstring that begins "Chaos item <n>" for the
-    item its name carries and holds an "Expected" sentence. The page side covers items 1 to 4 (the ones with a page to look at), the API side
-    1 and 3 to 7: 2 (the tunnel) is the page's alone, because the page is what polls."""
+    """P8-D. Items 1 to 8 each have at least one test across the two files, and every test has a docstring that begins "Chaos item <n>" for the
+    item its name carries and holds an "Expected" sentence. The page side covers items 1 to 4 and 8 (the ones with a page to look at), the API
+    side 1 and 3 to 8: 2 (the tunnel) is the page's alone, because the page is what polls. Item 8 (the P8-D follow-up) is the store failing
+    while a turn runs."""
     covered = {}
     for side in _CHAOS_TESTS:
         for function in _chaos_test_functions(_chaos_tree(side)):
@@ -9877,9 +9878,9 @@ def test_every_item_of_the_chaos_checklist_has_a_test_and_each_test_says_its_ite
             doc = ast.get_docstring(function) or ""
             assert doc.startswith("Chaos item {}".format(item)) and "Expected" in doc, "{}: {}".format(side, function.name)
             covered.setdefault(item, set()).add(side)
-    assert sorted(covered) == [1, 2, 3, 4, 5, 6, 7], sorted(covered)
-    assert {item for item, sides in covered.items() if "page" in sides} == {1, 2, 3, 4}
-    assert {item for item, sides in covered.items() if "api" in sides} == {1, 3, 4, 5, 6, 7}
+    assert sorted(covered) == [1, 2, 3, 4, 5, 6, 7, 8], sorted(covered)
+    assert {item for item, sides in covered.items() if "page" in sides} == {1, 2, 3, 4, 8}
+    assert {item for item, sides in covered.items() if "api" in sides} == {1, 3, 4, 5, 6, 7, 8}
 
 
 def test_the_chaos_page_tests_run_in_a_real_chrome_and_stay_out_of_validate_sh_and_the_api_tests_need_no_browser():

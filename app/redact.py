@@ -48,8 +48,9 @@ U2_LISTS = frozenset({"image_neighbors", "report_matches"})
 U2_KEYS = ("rank", "similarity")
 
 # A public error event keeps its message only for these kinds, whose text the server authors. Any other message is
-# replaced by the fixed one. Warning messages are left alone: they are authored literals.
-AUTHORED_ERROR_KINDS = frozenset({"validation_error", "overloaded_error", "server_restart"})
+# replaced by the fixed one. Warning messages are left alone: they are authored literals. store_failed (P8-D follow-up) is
+# one fixed sentence, app/pipeline.py STORE_FAILED_MSG: a public user is told the turn could not be saved, not that the model failed.
+AUTHORED_ERROR_KINDS = frozenset({"validation_error", "overloaded_error", "server_restart", "store_failed"})
 PUBLIC_ERROR_MESSAGE = "The model could not finish this turn."
 
 

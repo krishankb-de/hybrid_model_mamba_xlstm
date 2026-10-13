@@ -375,10 +375,10 @@ def test_the_stages_and_skip_reasons_it_knows_are_those_the_pipeline_has():
     written |= set(re.findall(r'_Skipped\("([a-z_]+)"\)', source))
     assert written == set(probe.SKIP_REASONS), (sorted(written), sorted(probe.SKIP_REASONS))
     assert set(probe.STOPPED) == {"budget", "repeat", "eos"} and set(probe.ERROR_KINDS) == {
-        "validation_error", "model_error", "overloaded_error", "server_restart"}
+        "validation_error", "model_error", "overloaded_error", "server_restart", "store_failed"}
 
 
-@pytest.mark.parametrize("kind", ["validation_error", "model_error", "overloaded_error", "server_restart"])
+@pytest.mark.parametrize("kind", ["validation_error", "model_error", "overloaded_error", "server_restart", "store_failed"])
 def test_an_error_event_keeps_its_kind_when_it_is_one_the_server_has_and_never_its_message(kind):
     frames = [("message_start", {"seq": 1, "user_message_id": "m_u", "model": {"eos_trained": False}}),
               ("error", {"seq": 2, "type": "error", "error": {"type": kind, "message": "SECRET Internal error"}}),

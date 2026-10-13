@@ -1,8 +1,8 @@
-"""CHAT_UI_PLAN.md P8-D: the chaos checklist, the page side (items 1 to 4; 5 to 7 have no page of their own and are in tests/test_app_chaos.py,
-which also holds the API side of 1, 3 and 4). Each item is run in a real Chrome (Playwright) against the tiny engine on a free loopback port
+"""CHAT_UI_PLAN.md P8-D: the chaos checklist, the page side (items 1 to 4 and 8; 5 to 7 have no page of their own and are in tests/test_app_chaos.py,
+which also holds the API side of 1, 3, 4 and 8). Each item is run in a real Chrome (Playwright) against the tiny engine on a free loopback port
 (never 8000 or 8010), with its expected behaviour asserted on what the user sees and on what the server stored. The harness, the server and the
-synthetic images are in conftest.py; two TinyServer subclasses here put the server behind a tunnel that can be cut, and start it from the serving
-command line with a token file.
+synthetic images are in conftest.py; three TinyServer subclasses here put the server behind a tunnel that can be cut, start it from the serving
+command line with a token file, and give it a database that fills up when the test says (item 8, the P8-D follow-up).
 
     venv/bin/python -m pytest tests/e2e/test_chaos_e2e.py -m e2e -q
 """
@@ -22,11 +22,13 @@ import pytest
 pytest.importorskip("playwright.sync_api", reason="the e2e tests need `pip install -r requirements-e2e.txt`")
 
 from app.imaging import MAX_UPLOAD_BYTES  # noqa: E402
+from app.pipeline import STORE_FAILED_MSG  # noqa: E402
 from tests.e2e.conftest import REPO_ROOT, TinyServer, noise_png, squeezed  # noqa: E402
 
 pytestmark = [pytest.mark.e2e, pytest.mark.slow]
 
 RESTART_ERROR = "Error: The server restarted while this turn was running."
+NOT_SAVED_ERROR = "Error: " + STORE_FAILED_MSG   # "Could not save this turn: ...": the card of a turn whose store failed (item 8)
 TOO_BIG = "Image is larger than 20 MB."          # the page's own refusal and the server's 413 say the same sentence
 ASK_FOR_TOKEN = "Enter the access token in Settings"
 SETTLED_STAGES = {"preprocess": "done", "encode": "done", "retrieve": "skipped", "generate": "done", "label": "skipped", "score": "skipped"}
@@ -213,6 +215,62 @@ class TokenFileServer(TinyServer):
                 return response.status
         except urllib.error.HTTPError as exc:
             return exc.code
+
+
+# ---- a database that fills up ---------------------------------------------------------------------------------------------------------
+
+# The tiny app, as conftest.py's LAUNCH starts it, with one fault planted: while the file store_full is in its home, the store's event append
+# raises sqlite3.OperationalError("database or disk is full"), as a database that has hit its disk quota does. argv: home, step delay, port.
+STORE_FULL_FLAG = "store_full"
+STORE_FAULT_LAUNCH = """\
+import os
+import sqlite3
+import sys
+
+import uvicorn
+import app.server as server
+from app.store import Store
+
+FULL = os.path.join(sys.argv[1], %r)
+_append_event = Store.append_event
+
+
+def append_event(self, message_id, event, data):
+    if os.path.exists(FULL):
+        raise sqlite3.OperationalError("database or disk is full")
+    return _append_event(self, message_id, event, data)
+
+
+Store.append_event = append_event
+uvicorn.run(server.create_app(engine="tiny", home=sys.argv[1], tiny_step_delay_s=float(sys.argv[2])),
+            host="127.0.0.1", port=int(sys.argv[3]), log_level="warning")
+""" % STORE_FULL_FLAG
+
+
+class StoreFaultServer(TunnelServer):
+    """The tiny server behind a Tunnel (TunnelServer) whose database fills up when the test says: fill() puts the file store_full in its home,
+    and from then on the store takes no event; free() takes the file away, and the store works again."""
+
+    def start(self, timeout: float = 90.0) -> None:
+        with open(self.log_path, "a") as log:
+            self.proc = subprocess.Popen([sys.executable, "-c", STORE_FAULT_LAUNCH, self.home, repr(self.step_delay_s), str(self.port)],
+                                         cwd=REPO_ROOT, env=dict(os.environ, PYTHONPATH=REPO_ROOT), stdin=subprocess.DEVNULL, stdout=log,
+                                         stderr=subprocess.STDOUT, start_new_session=True)
+        deadline = time.time() + timeout
+        while time.time() < deadline and self.proc.poll() is None:
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:{}/healthz".format(self.port), timeout=2):   # the server itself, not the tunnel
+                    return
+            except OSError:
+                time.sleep(0.2)
+        self.stop()
+        raise RuntimeError("the store-fault server did not start:\n" + self.log_tail())
+
+    def fill(self) -> None:
+        open(os.path.join(self.home, STORE_FULL_FLAG), "w").close()
+
+    def free(self) -> None:
+        os.remove(os.path.join(self.home, STORE_FULL_FLAG))
 
 
 @pytest.fixture(scope="session")
@@ -423,4 +481,72 @@ def test_chaos_4_a_wrong_token_is_a_401_the_page_asks_for_the_token_in_settings_
     assert card["status"] == "done" and card["stages"] == SETTLED_STAGES
     [session] = ui.server.sessions()
     assert session["turns"] == 1 and ui.server.session(session["id"])["messages"][0]["image_filename"] == "xray_a.png"
+    ui.assert_clean()
+
+
+# ---- 8: the store fails while a turn runs ---------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("ui", [{"server": StoreFaultServer}], indirect=True, ids=["store_fault"])
+@pytest.mark.parametrize("how", ["streaming", "reloaded", "stream_cut"])
+def test_chaos_8_a_store_that_fills_up_mid_turn_ends_the_card_as_an_error_with_the_fixed_message_and_the_page_stops_asking(ui, images, how):
+    """Chaos item 8, the store fails while a turn runs, the page side (the API side is in tests/test_app_chaos.py). A 200-token turn runs on the
+    page, and the database fills up (sqlite3.OperationalError "database or disk is full" at every event append from then on) while the page
+    follows the turn: on its own stream (streaming), after a reload that found the turn running (reloaded), or by polling once the tunnel cut
+    its stream (stream_cut). Expected: the card ends as an error with the fixed sentence ("Error: Could not save this turn: ...") and no other
+    note, with no stage spinning, and the composer is usable with no notice; the page that kept its stream got the ending there and never
+    asked for the message; a page that polled stops asking: its count of GET /v1/messages/<id> does not grow once the card has ended; a reload
+    then replays the same error card from one read of the turn, and does not poll it; the server stored the events before the failure and is
+    not left running a turn, and its log names the class and the turn, not the database's own words; and with room on the disk again the next
+    Send runs to `done`."""
+    server = ui.server
+    page = ui.open()
+    ui.apply_settings(max_new_tokens=200, stop_on_repeat=False)
+    if how == "stream_cut":
+        server.tunnel.cut_next_stream(3)
+        ui.server_down(True)   # the cut is a failed request of the page, which is the point: the harness is told
+    ui.attach(images["xray_a.png"])
+    page.click("#send")
+    ui.wait_running(snapshots=4)
+    mid = ui.card()["id"]
+
+    def asked() -> int:
+        return len([path for method, path in ui.requests if method == "GET" and path == "/v1/messages/" + mid])
+
+    if how == "reloaded":
+        ui.reload()   # the page that comes back reads the turn, finds it running and polls it
+    if how != "streaming":
+        least = 2 if how == "reloaded" else 1   # a reload reads the turn once before it polls
+        for _ in range(200):
+            if asked() >= least:
+                break
+            page.wait_for_timeout(50)
+        assert asked() >= least, "the page follows the turn by polling it before the store fills up"
+    server.fill()
+    card = ui.wait_settled(0, timeout=30)
+    ui.server_down(False)
+    assert card["status"] == "error" and card["notes"] == [NOT_SAVED_ERROR] and card["spinning"] == 0, card
+    composer = ui.composer()
+    assert composer["notice"] is None and composer["stop_hidden"] and not composer["send_disabled"], composer
+    ended = asked()
+    page.wait_for_timeout(2500)   # five of the page's poll intervals
+    assert asked() == ended, "the page stopped asking once the card had ended: {} asks, then {}".format(ended, asked())
+    if how == "streaming":
+        assert ended == 0, "the ending came on the stream: the page never asked for the message"
+    ui.reload()   # the chat as a page that loads it now replays it: the same card, read once and not polled
+    page.wait_for_timeout(1500)
+    replayed = ui.card()
+    assert replayed["status"] == "error" and replayed["notes"] == [NOT_SAVED_ERROR] and replayed["spinning"] == 0, replayed
+    assert asked() == ended + 1, "the replay read the turn once and did not poll it: {} asks after {}".format(asked(), ended)
+
+    stored = server.message(mid)
+    events = stored["events"]
+    assert stored["status"] == "error" and [e["seq"] for e in events] == list(range(1, len(events) + 1))
+    assert [e["event"] for e in events[-2:]] == ["error", "message_stop"] and events[-2]["data"]["error"]["type"] == "store_failed"
+    assert "content_block_delta" in [e["event"] for e in events], "what was stored before the failure is kept"
+    assert server.get("healthz")["turns_in_flight"] == 0
+    log = server.log_tail(20000)
+    assert "could not store an event of turn {}: OperationalError".format(mid) in log and "database or disk is full" not in log
+    server.free()
+    card = ui.turn(note="tokens 16")
+    assert card["status"] == "done" and card["n"] == 2
     ui.assert_clean()

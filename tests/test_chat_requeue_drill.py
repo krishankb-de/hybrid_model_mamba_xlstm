@@ -630,11 +630,11 @@ def test_a_delta_is_counted_by_its_name_alone_its_data_is_never_parsed_and_only_
     assert len(parsed) == 1 and "SECRET error message" in parsed[0], "the one frame it parsed is the error's: {} parsed".format(len(parsed))
 
 
-@pytest.mark.parametrize("kind", ["validation_error", "model_error", "overloaded_error", "server_restart"])
+@pytest.mark.parametrize("kind", ["validation_error", "model_error", "overloaded_error", "server_restart", "store_failed"])
 def test_an_error_event_keeps_its_kind_when_it_is_one_the_server_has_and_never_its_message(kind):
     stream, _ = counted(sse(hostile_turn(deltas=1, error=kind)))
     assert (stream.error_event, stream.error_kind) == (True, kind)
-    assert set(probe.ERROR_KINDS) == {"validation_error", "model_error", "overloaded_error", "server_restart"}
+    assert set(probe.ERROR_KINDS) == {"validation_error", "model_error", "overloaded_error", "server_restart", "store_failed"}
 
 
 @pytest.mark.parametrize("data", [{"error": {"type": "SECRET-kind", "message": "SECRET"}}, {"error": {"type": 7}}, {"error": "SECRET"}, {"type": "error"},

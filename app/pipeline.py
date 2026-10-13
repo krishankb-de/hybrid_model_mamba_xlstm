@@ -3,7 +3,13 @@
 Every event is redacted for the turn's mode, stored, then handed on, in that order, so the stored log is exactly what
 was streamed: a reload replays it, and a client whose stream dropped polls it (D7). The worker never dies. Every turn
 ends with a stored message_stop (done, error or aborted), and an error event carries only text the server wrote: an
-UploadError's message, the store's restart message, or "Internal error (<class>)" with the traceback in the server log.
+UploadError's message, the store's restart message, the store_failed sentence, or "Internal error (<class>)" with the
+traceback in the server log.
+
+A store that fails while a turn runs (P8-D follow-up: sqlite3.Error from its database, OSError from its files) ends the
+turn error/store_failed, with a fixed sentence and only the exception's class in the log. What of the ending the store
+then cannot take is held in memory by the store (Store.hold_ending), numbered on from the last event it took, and sent all
+the same: the stream ends as every read of the turn ends, and a page that polls it stops.
 
 The server stores an upload before it accepts the turn (fix-1 I1), so preprocess only reads it; a test-split study (the
 picker's options.test_row) is read where the dataset keeps it and never copied.
@@ -17,6 +23,7 @@ against its reference, which public mode never does (R1).
 """
 import hashlib
 import logging
+import sqlite3
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -43,6 +50,8 @@ PUBLISHED_MODEL = "hybrid_150m_m3_rrg"   # the published dumps are this model's:
 # stop_on_repeat off among it (P4-G), and uncompiled.
 PUBLISHED_PROTOCOL = {"decode": "beam", "beam_size": 3, "max_new_tokens": 100, "stop_on_repeat": False, "compile": False}
 TEST_IMAGE_MSG = "Could not read the test-split image."   # its path holds subject and study ids: never in a message or the log
+STORE_FAILED_MSG = "Could not save this turn: the server's storage is full or failing. Try again later."   # error type store_failed
+STORE_ERRORS = (sqlite3.Error, OSError)   # how the store fails: its database, and its files
 LABELER_DOWN_TTL_S = 30.0   # a labeller found down is not asked again for this long, so it cannot stall every turn
 _clock = time.monotonic     # the labeller's down window runs on this (a test replaces it)
 
@@ -134,6 +143,15 @@ class _Gone(Exception):
     """The turn's session was deleted mid-turn: the turn ends quietly, without a result."""
 
 
+class StoreFailed(Exception):
+    """The store failed while a turn ran (STORE_ERRORS): the turn ends error/store_failed, never model_error (P8-D follow-up). It keeps the
+    class of what the store raised and nothing else: that text can hold a path, SQL or the database's own words, and none of it may reach an
+    event or the log."""
+
+    def __init__(self, exc: BaseException):
+        super().__init__(type(exc).__name__)
+
+
 class ImageUnreadable(RuntimeError):
     """A test study's image could not be read once the turn was running. The message is fixed: the OSError's would hold the
     file's path, which holds subject and study ids."""
@@ -176,6 +194,7 @@ class _Turn:
     t0: float = field(default_factory=time.perf_counter)
     card: Optional[Dict[str, Any]] = None   # the engine's card, for the provenance; None when no model ran
     test_row: Optional[int] = None          # private mode: the test study this turn runs (picked, or its image uploaded)
+    seq: int = 0                            # the seq of the last event the store took for this turn
 
 
 class Pipeline:
@@ -213,7 +232,8 @@ class Pipeline:
         return redact_event("stage_end", {"stage": "retrieve", "detail": detail}, self.mode)["detail"]
 
     def run(self, job: TurnJob, emit: Emit, cancel: threading.Event) -> None:
-        """Run one turn and store its ending; emit gets each stored event. Never raises (ruling 8)."""
+        """Run one turn and store its ending; emit gets each stored event, and the events of an ending the store did not take (_hold).
+        Never raises (ruling 8)."""
         # A private server also lists the sessions a public run of the same CHAT_HOME made: redact for public then.
         mode = "public" if "public" in (job.mode, self.mode) else "private"
         turn = _Turn(job, mode, emit, cancel)
@@ -233,14 +253,15 @@ class Pipeline:
         except _Gone:
             status = "aborted"
             log.warning("turn %s: its session was deleted mid-turn; the turn stops here", job.message_id)
+        except StoreFailed as exc:   # named, with the class alone in the log: the store's own text can hold a path or SQL (P8-D follow-up)
+            log.warning("could not store an event of turn %s: %s", job.message_id, exc)
+            status, error = "error", error_body("store_failed", STORE_FAILED_MSG)
         except Exception as exc:   # never its text in an event: it can hold report text or paths
             log.exception("turn %s failed", job.message_id)
             status, error = "error", error_body("model_error", "Internal error ({})".format(type(exc).__name__))
         try:
-            if error is not None:
-                self._send(turn, "error", error)
-            self._stop(turn, status, gen)
-        except Exception:   # the store failed, or the turn's rows were purged: log it; the worker lives on
+            self._end(turn, status, gen, error)
+        except Exception:   # the turn's rows were purged, or something unforeseen: log it; the worker lives on
             log.exception("turn %s: could not store its ending", job.message_id)
 
     def _stages(self, turn: _Turn) -> Optional[Generated]:
@@ -299,7 +320,7 @@ class Pipeline:
             except OSError:   # gone since the server read it: its path holds ids, so it stays out of the message and the log
                 raise ImageUnreadable() from None
         else:
-            path = self.store.upload_path(job.session_id, job.previous_sha256, "original")
+            path = self._store(self.store.upload_path, job.session_id, job.previous_sha256, "original")
             try:
                 if path is None:
                     raise FileNotFoundError("the turn's image is no longer stored")
@@ -454,8 +475,18 @@ class Pipeline:
     def _require_session(self, message_id: str) -> None:
         """_Gone once the turn's session is deleted: a message is resolved through its session. An existence query, since the generate
         stage asks at every step."""
-        if not self.store.message_visible(message_id):
+        if not self._store(self.store.message_visible, message_id):
             raise _Gone()
+
+    def _store(self, call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """A call of the store during a turn: a failure of the store (STORE_ERRORS) is StoreFailed, where it happens (P8-D follow-up), and a
+        message that no longer exists (KeyError: its rows were purged) is _Gone, as it always was."""
+        try:
+            return call(*args, **kwargs)
+        except KeyError:
+            raise _Gone() from None
+        except STORE_ERRORS as exc:
+            raise StoreFailed(exc) from None
 
     def _stage(self, turn: _Turn, name: str, run: Callable[[], Tuple[StageResult, Any]]) -> Any:
         self._check(turn)
@@ -472,19 +503,48 @@ class Pipeline:
         self._send(turn, "stage_end", {"stage": name, "skipped": reason})
 
     def _send(self, turn: _Turn, event: str, data: Dict[str, Any]) -> None:
-        """Redact, store, hand on (D7). None from redact_event drops the event: it is neither stored nor sent."""
+        """Redact, store, hand on (D7). None from redact_event drops the event: it is neither stored nor sent. Nor is an event the store
+        fails to take (StoreFailed)."""
         out = redact_event(event, data, turn.mode)
         if out is None:
             return
-        try:
-            stored = self.store.append_event(turn.job.message_id, event, out)
-        except KeyError:
-            raise _Gone() from None
+        stored = self._store(self.store.append_event, turn.job.message_id, event, out)
+        turn.seq = stored["seq"]
         turn.emit(event, stored)
 
-    def _stop(self, turn: _Turn, status: str, gen: Optional[Generated]) -> None:
-        """message_stop, stored, then the turn finished in the store, then sent: a client that acts on message_stop
-        reads the final status. The provenance is the redacted card (ruling 13); message_stop carries none."""
+    def _end(self, turn: _Turn, status: str, gen: Optional[Generated], error: Optional[Dict[str, Any]]) -> None:
+        """The turn's ending: its error event when it has one, then message_stop, stored, then the turn finished in the store, then sent, so
+        that a client that acts on message_stop reads the final status. A store that fails here (P8-D follow-up): what of the ending it did not
+        take is held and sent all the same (_hold); and a turn with no error yet, whose message_stop the store did not take, could not be
+        saved, so it ends store_failed instead, which the store may still take."""
+        job = turn.job
+        if error is not None:
+            try:
+                self._send(turn, "error", error)
+            except StoreFailed as exc:   # neither it nor the message_stop after it is stored
+                stop, finished = self._stop_event(turn, status, gen)
+                self._hold(turn, exc, [("error", redact_event("error", error, turn.mode)), ("message_stop", stop)], finished)
+                return
+        stop, finished = self._stop_event(turn, status, gen)
+        try:
+            stored = self._store(self.store.append_event, job.message_id, "message_stop", stop)
+        except StoreFailed as exc:
+            if error is None:
+                log.warning("could not store an event of turn %s: %s", job.message_id, exc)
+                self._end(turn, "error", None, error_body("store_failed", STORE_FAILED_MSG))
+            else:
+                self._hold(turn, exc, [("message_stop", stop)], finished)
+            return
+        turn.seq = stored["seq"]
+        try:
+            self._store(self.store.finish_turn, job.message_id, **finished)
+        except StoreFailed as exc:   # message_stop is stored, so the turn ended as it says: only the message's final fields are held
+            self._hold(turn, exc, [], finished)
+        turn.emit("message_stop", stored)
+
+    def _stop_event(self, turn: _Turn, status: str, gen: Optional[Generated]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """-> (message_stop's data, redacted; what finish_turn stores with it). The provenance is the redacted card (ruling 13); message_stop
+        carries none."""
         job = turn.job
         total_ms = round((time.perf_counter() - turn.t0) * 1000.0, 1)
         out = redact_event("message_stop", {
@@ -492,13 +552,23 @@ class Pipeline:
             "report": gen.report if gen else None, "display_report": gen.display_report if gen else None,
             "truncated_mid_sentence": bool(gen and gen.truncated_mid_sentence), "disclaimer": DISCLAIMER}, turn.mode)
         provenance = None if turn.card is None else redact_card(turn.card, turn.mode)
-        try:
-            stored = self.store.append_event(job.message_id, "message_stop", out)
-            self.store.finish_turn(job.message_id, status, report=out["report"], display_report=out["display_report"],
-                                   provenance=provenance, total_ms=total_ms)
-        except KeyError:
-            raise _Gone() from None
-        turn.emit("message_stop", stored)
+        return out, {"status": status, "report": out["report"], "display_report": out["display_report"], "provenance": provenance,
+                     "total_ms": total_ms}
+
+    def _hold(self, turn: _Turn, exc: StoreFailed, events: List[Tuple[str, Optional[Dict[str, Any]]]], finished: Dict[str, Any]) -> None:
+        """The end of a turn that the store did not take (P8-D follow-up): `events`, redacted as stored events are, in their order, and
+        `finished`, what finish_turn stores. They are numbered on from the last event the store took, so seq stays contiguous, held in memory
+        by the store (Store.hold_ending), where every read of the turn finds them, and then sent: the live page ends the card as the stream
+        says, without polling, and a page that polls or reloads reads the same ending. The log names the class and the turn, nothing else."""
+        log.warning("could not store the end of turn %s: %s; it is held in memory", turn.job.message_id, exc)
+        numbered = []
+        for event, data in events:
+            if data is not None:   # None from redact_event: an event that is never stored or sent
+                turn.seq += 1
+                numbered.append((event, dict(data, seq=turn.seq)))
+        self.store.hold_ending(turn.job.message_id, numbered, **finished)
+        for event, data in numbered:
+            turn.emit(event, data)
 
 
 class Worker:
@@ -506,7 +576,7 @@ class Worker:
     thread too (call), before it attaches the pipeline, so that thread is the only one that runs a torch op (P8-F part 3).
 
     At most `cap` turns are accepted and unfinished at once: reserve() counts a turn in (False means refuse it with
-    429), and the worker's finally counts it out once its ending is stored, before done() ends its stream. Each turn
+    429), and the worker's finally counts it out once its ending is stored (or held, when the store failed), before done() ends its stream. Each turn
     has a Stop that records who stopped it first, so a turn shutdown() stops ends as a server restart while a Stop
     the user pressed earlier still ends its turn aborted (fix-1 (c)).
     """

@@ -1,5 +1,5 @@
 """CHAT_UI_PLAN.md P8-D: the chaos checklist, the API side. Each item is run against the tiny engine on a free loopback port (never 8000 or 8010)
-with its expected behaviour asserted; the page side of items 1 to 4 is tests/e2e/test_chaos_e2e.py. Synthetic data only (R7).
+with its expected behaviour asserted; the page side of items 1 to 4 and 8 is tests/e2e/test_chaos_e2e.py. Synthetic data only (R7).
 
     1  the API is killed mid-turn              test_chaos_1_*   a real server process, SIGKILL, a second process on the same home
     2  the tunnel drops mid-stream             e2e only         a TCP proxy in front of the server; the page polls the card to its end
@@ -8,6 +8,8 @@ with its expected behaviour asserted; the page side of items 1 to 4 is tests/e2e
     5  the labeller is down                    test_chaos_5_*   refused, hung up on, and stopped while a turn runs
     6  the gallery is missing                  test_chaos_6_*   never there, not openable and allowed, and gone after the start
     7  a disk-quota error while an upload is written    test_chaos_7_*
+    8  the store fails while a turn runs       test_chaos_8_*   full for good, once, on the ending only, a write that lands, a restart;
+                                                                the page: e2e (the P8-D follow-up)
 """
 import errno
 import http.server
@@ -17,6 +19,7 @@ import os
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -31,9 +34,10 @@ from fastapi.testclient import TestClient
 from app import cli
 from app.imaging import TOO_LARGE_MSG
 from app.labels import CHEXBERT_14
+from app.pipeline import STORE_FAILED_MSG as TURN_NOT_SAVED_MSG
 from app.pipeline import TEST_IMAGE_MSG
 from app.server import GALLERY_IMAGE_MSG, create_app
-from app.store import RESTART_MESSAGE
+from app.store import RESTART_MESSAGE, Store
 from tests.app_helpers import iter_sse, png_bytes, start_live_server, wait_until
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -490,3 +494,221 @@ def test_chaos_7_a_disk_quota_error_in_the_upload_write_is_a_readable_error_with
         assert frames[-1]["data"]["status"] == "done"
         [copy] = list((home / "uploads" / sid).iterdir())
         assert sorted(p.name for p in copy.iterdir()) == ["model_input.png", "original.png", "thumb.jpg"]
+
+
+# ---- 8: the store fails while a turn runs (the P8-D follow-up) ----------------------------------------------------------------------
+
+STORE_FULL = "database or disk is full"   # SQLite's own words for a database that hit its quota: they reach no answer and no log line
+NOT_STORED = "could not store an event of turn {}: OperationalError"
+HELD = "could not store the end of turn {}: OperationalError; it is held in memory"
+
+
+class StoreFault:
+    """The chat database failing as one that has hit its disk quota does, with sqlite3.OperationalError("database or disk is full"): the store's
+    event append fails at each call that append(n, event) names (n counts the appends from 1), and finish_turn at every call when finish is set.
+    A call that lands(n, event) names writes its event first and is reported failed all the same: a write that reached the disk before its
+    error came back. off() takes the fault away, as room on the disk again does."""
+
+    def __init__(self, monkeypatch, store, append=lambda n, event: False, finish=False, lands=lambda n, event: False):
+        self.on, self.appends = True, 0
+        real_append, real_finish = store.append_event, store.finish_turn
+
+        def append_event(message_id, event, data):
+            self.appends += 1
+            if not (self.on and append(self.appends, event)):
+                return real_append(message_id, event, data)
+            if lands(self.appends, event):
+                real_append(message_id, event, data)
+            raise sqlite3.OperationalError(STORE_FULL)
+
+        def finish_turn(message_id, status, **kwargs):
+            if self.on and finish:
+                raise sqlite3.OperationalError(STORE_FULL)
+            return real_finish(message_id, status, **kwargs)
+
+        monkeypatch.setattr(store, "append_event", append_event)
+        monkeypatch.setattr(store, "finish_turn", finish_turn)
+
+    def off(self) -> None:
+        self.on = False
+
+
+def _sent(c, sid):
+    """One turn, however its stream ends: -> (its message id, its frames, the response's body)."""
+    r = _post(c, sid)
+    assert r.status_code == 200, r.text
+    return r.headers["x-message-id"], list(iter_sse([r.text])), r.text
+
+
+def _read(c, mid, after=0):
+    """GET /v1/messages/<id>?after=<after>: -> (the message, its events as frames of the stream: {"event", "data"}, the response's body)."""
+    r = c.get("/v1/messages/{}".format(mid), params={"after": after})
+    assert r.status_code == 200, r.text
+    return r.json(), [{"event": e["event"], "data": e["data"]} for e in r.json()["events"]], r.text
+
+
+def _seqs(frames):
+    return [f["data"]["seq"] for f in frames]
+
+
+def _leaks(text, tmp_path):
+    """What an answer or a log line must not carry: a path, SQL, or the database's own words for its failure (errno text among them)."""
+    return [bad for bad in (str(tmp_path), STORE_FULL, "chat.db", "INSERT INTO", "SELECT ", "Errno", "No space") if bad in text]
+
+
+def test_chaos_8_a_store_that_stays_full_from_mid_turn_on_ends_the_turn_store_failed_on_the_stream_and_in_every_read(tmp_path, monkeypatch, caplog):
+    """Chaos item 8, the store fails while a turn runs, for good: from the 6th event append on (the turn's skipped stage_end of retrieve) the
+    store raises sqlite3.OperationalError("database or disk is full"), so the turn's ending cannot be stored either. Expected: the live stream
+    ends with an `error` of type `store_failed`, whose message is the fixed sentence ("Could not save this turn: ..."), and a `message_stop` of
+    status `error` with no report, its seq 1 to 7 without a gap; the turn is not left polling: GET /v1/messages/<id> says `error` and holds the
+    stream's own events, and ?after=5 exactly the two ending events; the chat's read (what a reload replays) says `error`, and so does a cancel;
+    the JSON export holds the stream's events, and the Markdown export says the turn ended in error; the ending is held in memory for that turn
+    alone; the slot is free (turns_in_flight 0) and the upload is whole; no answer and no log line carries a path, SQL or the database's own
+    words, and the two log lines name the class and the turn, with no traceback; and once the disk has room again the next turn ends `done`,
+    while the held ending still answers for the turn that failed."""
+    home = tmp_path / "home"
+    with caplog.at_level(logging.WARNING), TestClient(create_app(engine="tiny", home=str(home))) as c:
+        store = c.app.state.store
+        sid = c.post("/v1/sessions", json={}).json()["id"]
+        fault = StoreFault(monkeypatch, store, append=lambda n, event: n >= 6)
+        mid, frames, body = _sent(c, sid)
+        assert _seqs(frames) == list(range(1, 8)) and [f["event"] for f in frames[-2:]] == ["error", "message_stop"]
+        assert frames[-2]["data"]["error"] == {"type": "store_failed", "message": TURN_NOT_SAVED_MSG}
+        assert frames[-1]["data"]["status"] == "error" and frames[-1]["data"]["report"] is None
+
+        message, events, read = _read(c, mid)
+        assert (message["status"], message["report"], message["display_report"]) == ("error", None, None) and events == frames
+        assert _read(c, mid, after=5)[1] == frames[-2:], "a poll from the last stored event gets exactly the ending"
+        chat = c.get("/v1/sessions/" + sid)
+        assert [(m["role"], m["status"]) for m in chat.json()["messages"]] == [("user", "done"), ("assistant", "error")]
+        cancel = c.post("/v1/messages/{}/cancel".format(mid))
+        assert cancel.json() == {"id": mid, "status": "error", "cancel_requested": False}
+        exported = c.get("/v1/sessions/{}/export".format(sid))
+        turn = exported.json()["messages"][1]
+        assert turn["status"] == "error" and [{"event": e["event"], "data": e["data"]} for e in turn["events"]] == frames
+        markdown = c.get("/v1/sessions/{}/export".format(sid), params={"format": "md"})
+        assert "Status: error · Error: " + TURN_NOT_SAVED_MSG in markdown.text
+        assert store.held_endings() == {mid: ["error", "message_stop"]}
+        assert c.get("/healthz").json()["turns_in_flight"] == 0
+        [copy] = list((home / "uploads" / sid).iterdir())
+        assert sorted(p.name for p in copy.iterdir()) == ["model_input.png", "original.png", "thumb.jpg"], "the upload is whole, and alone"
+
+        for text in (body, read, chat.text, cancel.text, exported.text, markdown.text, caplog.text):
+            assert _leaks(text, tmp_path) == []
+        assert [rec.getMessage() for rec in caplog.records if rec.name == "app.pipeline"] == [NOT_STORED.format(mid), HELD.format(mid)]
+        assert [rec.name for rec in caplog.records if rec.exc_info] == [], "no traceback: its last line is the database's own words"
+
+        fault.off()
+        assert _turn(c, sid=sid)[-1]["data"]["status"] == "done"
+        assert _read(c, mid)[0]["status"] == "error", "the held ending still answers for the turn that failed"
+
+
+def test_chaos_8_a_store_that_fails_once_mid_turn_ends_the_turn_store_failed_on_disk_and_holds_nothing(tmp_path, monkeypatch, caplog):
+    """Chaos item 8, the store fails while a turn runs, once: only the 6th event append fails (a transient failure). Expected: the turn ends
+    `error` with `store_failed`, and that ending is stored on disk as any ending is: the error event at seq 6 and the message_stop after it, the
+    message finished `error`, as the stream said and as a store opened on the same home after this server stopped reads it; nothing is held in
+    memory; and the log has one line, which names the class and the turn."""
+    home = tmp_path / "home"
+    with caplog.at_level(logging.WARNING), TestClient(create_app(engine="tiny", home=str(home))) as c:
+        store = c.app.state.store
+        sid = c.post("/v1/sessions", json={}).json()["id"]
+        StoreFault(monkeypatch, store, append=lambda n, event: n == 6)
+        mid, frames, _ = _sent(c, sid)
+        assert store.held_endings() == {}
+        assert _seqs(frames) == list(range(1, 8)) and [f["event"] for f in frames[-2:]] == ["error", "message_stop"]
+        assert frames[-2]["data"]["error"] == {"type": "store_failed", "message": TURN_NOT_SAVED_MSG}
+        assert frames[-1]["data"]["status"] == "error" and _read(c, mid)[1] == frames
+        assert [rec.getMessage() for rec in caplog.records if rec.name == "app.pipeline"] == [NOT_STORED.format(mid)]
+    disk = Store(home)   # the database as the stopped server left it on disk, with nothing of that process's memory
+    try:
+        assert disk.get_message(mid, None)["status"] == "error" and disk.held_endings() == {}
+        assert [{"event": e["event"], "data": e["data"]} for e in disk.events_after(mid)] == frames
+    finally:
+        disk.close()
+
+
+@pytest.mark.parametrize("step", ["message_stop", "finish_turn"])
+@pytest.mark.parametrize("before", ["ran_through", "failed_once_mid_turn"])
+def test_chaos_8_a_store_that_fails_on_the_ending_only_ends_the_turn_alike_on_the_stream_and_in_every_read(tmp_path, monkeypatch, step, before):
+    """Chaos item 8, the store fails while a turn runs, on its ending only: every append of a message_stop fails (step message_stop), or every
+    finish_turn (step finish_turn), on a turn that ran through, or on one whose 6th event append failed once, so that it ends `store_failed`
+    with its error event stored. Expected: the stream and every read give the same ending, seq contiguous, and the message is not left running.
+    With its message_stop not stored, the turn ends `error` with `store_failed`: its error event is stored (a turn that ran through has no error
+    yet when its message_stop fails, and gets that one) and its message_stop is held in memory right after it, so that a poll from the event
+    before the error gets the two. With finish_turn failing, the error event and the message_stop are stored and only the message's final
+    status is held. A turn that ran through and whose finish_turn fails has its message_stop stored by then: it ends `done`, with its report,
+    as its stream said."""
+    with TestClient(create_app(engine="tiny", home=str(tmp_path / "home"))) as c:
+        store = c.app.state.store
+        sid = c.post("/v1/sessions", json={}).json()["id"]
+        StoreFault(monkeypatch, store, finish=step == "finish_turn",
+                   append=lambda n, event: (before == "failed_once_mid_turn" and n == 6) or (step == "message_stop" and event == "message_stop"))
+        mid, frames, _ = _sent(c, sid)
+        message, events, _ = _read(c, mid)
+        assert events == frames and _seqs(events) == list(range(1, len(events) + 1))
+        if (before, step) == ("ran_through", "finish_turn"):
+            assert "error" not in [f["event"] for f in frames] and frames[-1]["event"] == "message_stop"
+            assert frames[-1]["data"]["status"] == message["status"] == "done"
+            assert message["report"] == frames[-1]["data"]["report"] and message["report"]
+            assert store.held_endings() == {mid: []}
+        else:
+            assert [f["event"] for f in frames[-2:]] == ["error", "message_stop"]
+            assert frames[-2]["data"]["error"] == {"type": "store_failed", "message": TURN_NOT_SAVED_MSG}
+            assert frames[-1]["data"]["status"] == message["status"] == "error" and message["report"] is None
+            assert store.held_endings() == {mid: ["message_stop"] if step == "message_stop" else []}
+            assert _read(c, mid, after=len(frames) - 2)[1] == frames[-2:]
+        if before == "failed_once_mid_turn":
+            assert _seqs(frames) == list(range(1, 8)), "the event that failed never reached the stream: the error took its seq"
+
+
+def test_chaos_8_a_held_ending_keeps_its_order_and_never_takes_a_seq_the_store_holds(tmp_path, monkeypatch):
+    """Chaos item 8, the store fails while a turn runs, with a write that lands: the 6th event append writes its event (the skipped stage_end of
+    retrieve, seq 6) and is reported failed all the same, and every append after it fails. Expected: the stream ends error then message_stop,
+    seq 1 to 7 without a gap. The reads number the held ending on from the last event the store holds, so that no seq comes twice and the order
+    stays: the stored 1 to 6, then error 7 and message_stop 8, in GET /v1/messages/<id> and in the export, while ?after=6 gives the two and
+    ?after=7 the message_stop. Once the store takes the turn's ending after all (its error event and message_stop appended, the turn finished),
+    the held ending no longer applies, and is let go: every read gives the stored ending, once."""
+    with TestClient(create_app(engine="tiny", home=str(tmp_path / "home"))) as c:
+        store = c.app.state.store
+        sid = c.post("/v1/sessions", json={}).json()["id"]
+        fault = StoreFault(monkeypatch, store, append=lambda n, event: n >= 6, lands=lambda n, event: n == 6)
+        mid, frames, _ = _sent(c, sid)
+        assert _seqs(frames) == list(range(1, 8)) and [f["event"] for f in frames[-2:]] == ["error", "message_stop"]
+        message, events, _ = _read(c, mid)
+        assert _seqs(events) == list(range(1, 9)) and [e["event"] for e in events[-3:]] == ["stage_end", "error", "message_stop"]
+        assert events[:5] == frames[:5] and [e["data"] for e in events[-2:]] == [dict(f["data"], seq=f["data"]["seq"] + 1) for f in frames[-2:]]
+        assert message["status"] == "error"
+        assert _read(c, mid, after=6)[1] == events[-2:] and _read(c, mid, after=7)[1] == events[-1:]
+        exported = c.get("/v1/sessions/{}/export".format(sid)).json()["messages"][1]["events"]
+        assert [{"event": e["event"], "data": e["data"]} for e in exported] == events
+
+        fault.off()   # the store takes the turn's ending after all
+        for frame in frames[-2:]:
+            store.append_event(mid, frame["event"], {k: v for k, v in frame["data"].items() if k != "seq"})
+        store.finish_turn(mid, "error")
+        message, events, _ = _read(c, mid)
+        assert _seqs(events) == list(range(1, 9)) and [e["event"] for e in events].count("message_stop") == 1
+        assert message["status"] == "error" and store.held_endings() == {}
+
+
+def test_chaos_8_a_restart_after_the_store_stayed_full_closes_the_turn_as_server_restart_and_the_held_ending_is_gone(tmp_path, monkeypatch, capsys):
+    """Chaos item 8, the store fails while a turn runs, then the server restarts: the store is full for good from the 6th event append on, and
+    the server stops and starts again on the same home. Expected: the next start recovers 1 turn and closes it as it closes any turn a server
+    left running, `error` with `server_restart`, its error event and message_stop stored after the five events that were (seq 6 and 7); the
+    ending that was held in memory did not survive the restart: the new server holds none, and no read says store_failed; and the new server
+    takes the next turn to `done`."""
+    home = tmp_path / "home"
+    with TestClient(create_app(engine="tiny", home=str(home))) as c:
+        sid = c.post("/v1/sessions", json={}).json()["id"]
+        StoreFault(monkeypatch, c.app.state.store, append=lambda n, event: n >= 6)
+        mid, frames, _ = _sent(c, sid)
+        assert frames[-2]["data"]["error"]["type"] == "store_failed" and c.app.state.store.held_endings() == {mid: ["error", "message_stop"]}
+    capsys.readouterr()
+    with TestClient(create_app(engine="tiny", home=str(home))) as c:
+        assert "[server] recovered 1 running turn(s)" in capsys.readouterr().out
+        assert c.app.state.store.held_endings() == {}
+        message, events, read = _read(c, mid)
+        assert message["status"] == "error" and _seqs(events) == list(range(1, 8)) and events[:5] == frames[:5]
+        assert [e["event"] for e in events[-2:]] == ["error", "message_stop"] and "store_failed" not in read
+        assert events[-2]["data"]["error"] == {"type": "server_restart", "message": RESTART_MESSAGE}
+        assert _turn(c, sid=sid)[-1]["data"]["status"] == "done"

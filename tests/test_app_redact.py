@@ -356,7 +356,7 @@ def test_private_mode_keeps_unknown_events_unchanged_and_logs_nothing(caplog):
 # ---- free text in error events (I1) ------------------------------------------------------------------------------
 
 LEAKY = "Findings: SECRET MIMIC TEXT; /sc/home/krishankumar.bhushan/chat_sessions/gallery/g1/labels.npy"
-AUTHORED_KINDS = ["validation_error", "overloaded_error", "server_restart"]
+AUTHORED_KINDS = ["validation_error", "overloaded_error", "server_restart", "store_failed"]   # store_failed: the P8-D follow-up's fixed sentence
 
 
 def _error(block, **top):

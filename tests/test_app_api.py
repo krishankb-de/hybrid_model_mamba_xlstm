@@ -986,8 +986,15 @@ def test_the_runner_never_raises_even_when_the_store_is_gone(tmp_path, caplog):
     store.close()   # every store call now fails
     sent = []
     job = TurnJob(session["id"], uid, mid, "", png_bytes(), "x.png", Options(max_new_tokens=16), mode="private")
-    pipeline.run(job, lambda event, data: sent.append(event), threading.Event())   # returns: the worker lives on
-    assert sent == [] and any(r.exc_info for r in caplog.records if r.name == "app.pipeline")
+    pipeline.run(job, lambda event, data: sent.append((event, data)), threading.Event())   # returns: the worker lives on
+    # P8-D follow-up: the store's failure is named, and the ending it cannot take is held and still sent, so a client does not poll forever
+    assert [(event, data["seq"]) for event, data in sent] == [("error", 1), ("message_stop", 2)]
+    assert sent[0][1]["error"]["type"] == "store_failed" and sent[1][1]["status"] == "error"
+    assert store.held_endings() == {mid: ["error", "message_stop"]}
+    assert [r.getMessage() for r in caplog.records if r.name == "app.pipeline"] == [
+        "could not store an event of turn {}: ProgrammingError".format(mid),
+        "could not store the end of turn {}: ProgrammingError; it is held in memory".format(mid)]
+    assert not any(r.exc_info for r in caplog.records if r.name == "app.pipeline"), "the class alone, no traceback"
 
 
 # ---- rulings 9 and 10: the overload count and cancel ----------------------------------------------------------------

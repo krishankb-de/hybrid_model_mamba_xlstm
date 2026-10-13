@@ -16,7 +16,14 @@ through their session, so the same rule covers them. delete_session soft-deletes
 keeps storing its events; sweep purges rows and files for good, deleted sessions included. It removes a session's
 upload directory before it commits the deletion of the rows, skips a session whose turn is still running, can be
 limited to one mode, and removes upload directories that no live session owns, so uploads cannot outlive retention.
+
+Held endings (P8-D follow-up): when the database fails while a turn runs, the pipeline hands the ending it could not store
+to hold_ending, and the store keeps it in memory (_held) until the process ends or finish_turn takes the turn. Every read
+of a message or of its events applies it, in one place (_held_for, through _message_out and _held_rows), so a read gives
+what the turn's stream gave: the message's final status, and the held events after the last event the database holds,
+numbered on from it. The next start's recover_after_restart closes such a turn on disk, as it closes any turn left running.
 """
+import copy
 import json
 import logging
 import os
@@ -28,7 +35,7 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from app.commands import collapse, parse_command
 from app.ids import new_id
@@ -166,6 +173,7 @@ class Store:
         self._uploads = self.home / "uploads"
         self._lock = threading.Lock()
         self._upload_lock = threading.Lock()   # save_upload puts one copy in place at a time (P8-C)
+        self._held: Dict[str, Dict[str, Any]] = {}   # message id -> the ending the database did not take (hold_ending)
         self.home.mkdir(parents=True, exist_ok=True)
         self._uploads.mkdir(mode=0o700, exist_ok=True)
         db = self.home / "chat.db"
@@ -215,8 +223,8 @@ class Store:
                 return None
             messages = self._con.execute(
                 "SELECT * FROM messages WHERE session_id = ? ORDER BY seq_in_session", (session_id,)).fetchall()
-        out = _session_dict(row)
-        out["messages"] = [_message_dict(m) for m in messages]
+            out = _session_dict(row)
+            out["messages"] = [self._message_out(m) for m in messages]
         return out
 
     def delete_session(self, session_id: str, client_id: Optional[str]) -> bool:
@@ -375,20 +383,23 @@ class Store:
             return self._insert_event(con, message_id, event, data)
 
     def events_after(self, message_id: str, after: int = 0) -> List[Dict[str, Any]]:
+        """The message's events whose seq is above `after`, in order, those of an ending held for it included (_held_rows)."""
         with self._lock:
             rows = self._con.execute(
                 "SELECT seq, event, data_json FROM events WHERE message_id = ? AND seq > ? ORDER BY seq",
                 (message_id, after)).fetchall()
-        return [{"seq": r["seq"], "event": r["event"], "data": json.loads(r["data_json"])} for r in rows]
+            held = self._held_rows(message_id, after)
+        return [{"seq": r["seq"], "event": r["event"], "data": json.loads(r["data_json"])} for r in rows] + held
 
     def get_message(self, message_id: str, client_id: Optional[str]) -> Optional[Dict[str, Any]]:
-        """One message, resolved through its session: hidden by scope or by deletion, it is None."""
+        """One message, resolved through its session: hidden by scope or by deletion, it is None. The final fields of an ending held for
+        it are applied (_message_out)."""
         with self._lock:
             row = self._con.execute(
                 "SELECT m.* FROM messages m JOIN sessions s ON s.id = m.session_id "
                 "WHERE m.id = ? AND s.deleted_at IS NULL AND " + _IN_SCOPE,
                 (message_id, client_id, client_id)).fetchone()
-        return None if row is None else _message_dict(row)
+            return None if row is None else self._message_out(row)
 
     def message_visible(self, message_id: str) -> bool:
         """get_message(message_id, None) is not None, without reading the row: a running turn asks it at every step (P4-H)."""
@@ -400,6 +411,7 @@ class Store:
     def finish_turn(self, message_id: str, status: str, report: Optional[str] = None,
                     display_report: Optional[str] = None, provenance: Optional[Dict[str, Any]] = None,
                     total_ms: Optional[float] = None) -> None:
+        """The turn's final status and result, in its message's row. An ending held for it is let go: the database has the turn now."""
         if status not in FINAL_STATUSES:
             raise ValueError("status must be one of {}, got {!r}".format(FINAL_STATUSES, status))
         with self._tx() as con:
@@ -412,6 +424,28 @@ class Store:
                 raise KeyError(message_id)
             con.execute("UPDATE sessions SET updated_at = ? WHERE id = (SELECT session_id FROM messages WHERE id = ?)",
                         (_now(), message_id))
+        with self._lock:
+            self._held.pop(message_id, None)
+
+    def hold_ending(self, message_id: str, events: Sequence[Tuple[str, Dict[str, Any]]], status: str,
+                    report: Optional[str] = None, display_report: Optional[str] = None,
+                    provenance: Optional[Dict[str, Any]] = None, total_ms: Optional[float] = None) -> None:
+        """Keep in memory the end of a turn that the database did not take (P8-D follow-up): `events`, the (event, data) pairs the pipeline
+        could not store, in their order, and the fields finish_turn would have stored. It is held until the process ends or until
+        finish_turn takes the turn, and every read gives the message as if it had been stored: its final fields, and those events after
+        the last one the database holds for it. Writes nothing to the database, which has just failed."""
+        if status not in FINAL_STATUSES:
+            raise ValueError("status must be one of {}, got {!r}".format(FINAL_STATUSES, status))
+        held = {"events": [(event, copy.deepcopy(data), _now()) for event, data in events],
+                "message": {"status": status, "report": report, "display_report": display_report,
+                            "provenance": copy.deepcopy(provenance), "total_ms": None if total_ms is None else float(total_ms)}}
+        with self._lock:
+            self._held[message_id] = held
+
+    def held_endings(self) -> Dict[str, List[str]]:
+        """-> {message id: the names of its held events, in order} for every turn whose ending is held in memory."""
+        with self._lock:
+            return {message_id: [event for event, _, _ in held["events"]] for message_id, held in self._held.items()}
 
     def recover_after_restart(self) -> int:
         """Close every turn a restart left running; -> how many.
@@ -443,7 +477,8 @@ class Store:
     # ---- export and retention ------------------------------------------------------------------------------------
 
     def export(self, session_id: str, fmt: str, client_id: Optional[str]) -> Tuple[str, str, bytes]:
-        """-> (filename, media type, body) for fmt "json" (the event log) or "md" (the readable record).
+        """-> (filename, media type, body) for fmt "json" (the event log) or "md" (the readable record). An ending held for a turn is
+        part of it, as every read gives it.
 
         Raises KeyError if the session is hidden by scope or deleted, ValueError for another format.
         """
@@ -453,18 +488,20 @@ class Store:
             row = self._session_row(session_id, client_id)
             if row is None:
                 raise KeyError(session_id)
-            messages = self._con.execute(
+            rows = self._con.execute(
                 "SELECT * FROM messages WHERE session_id = ? ORDER BY seq_in_session", (session_id,)).fetchall()
             events = self._con.execute(
                 "SELECT e.message_id, e.seq, e.ts, e.event, e.data_json FROM events e "
                 "JOIN messages m ON m.id = e.message_id WHERE m.session_id = ? ORDER BY e.message_id, e.seq",
                 (session_id,)).fetchall()
+            messages = [self._message_out(m) for m in rows]
+            held = {m["id"]: self._held_rows(m["id"], stamped=True) for m in messages}
         logs: Dict[str, List[Dict[str, Any]]] = {}
         for e in events:
             logs.setdefault(e["message_id"], []).append(
                 {"seq": e["seq"], "ts": e["ts"], "event": e["event"], "data": json.loads(e["data_json"])})
         session = _session_dict(row)
-        docs = [dict(_message_dict(m), events=logs.get(m["id"], [])) for m in messages]
+        docs = [dict(m, events=logs.get(m["id"], []) + held[m["id"]]) for m in messages]
         if fmt == "json":
             body = json.dumps({"session": session, "messages": docs}, indent=2, ensure_ascii=False)
             return "session-{}.json".format(session_id), "application/json", body.encode("utf-8")
@@ -579,6 +616,37 @@ class Store:
     def _session_row(self, session_id: str, client_id: Optional[str]) -> Optional[sqlite3.Row]:
         return self._con.execute(_SESSION_SELECT + "WHERE s.id = ? AND s.deleted_at IS NULL AND " + _IN_SCOPE,
                                  (session_id, client_id, client_id)).fetchone()
+
+    # The one place a read takes a held ending from (P8-D follow-up): every read of a message goes through _message_out, and every read of
+    # its events through _held_rows, and both ask _held_for. A turn the database has finished has its ending there, so nothing held applies.
+    def _held_for(self, message_id: str, status: Any) -> Optional[Dict[str, Any]]:
+        held = self._held.get(message_id)
+        return held if held is not None and status == "running" else None
+
+    def _message_out(self, row: sqlite3.Row) -> Dict[str, Any]:
+        """A message as every read gives it: its row, with the final fields of an ending held for it."""
+        out = _message_dict(row)
+        held = self._held_for(out["id"], out["status"])
+        if held is not None:
+            out.update(copy.deepcopy(held["message"]))
+        return out
+
+    def _held_rows(self, message_id: str, after: int = 0, stamped: bool = False) -> List[Dict[str, Any]]:
+        """The events of an ending held for this message whose seq is above `after`, numbered on from the last event the database holds for
+        it, so that no seq comes twice and their order stays; with `ts` (the time each was held) when stamped, as the export has it."""
+        if message_id not in self._held:
+            return []
+        row = self._con.execute("SELECT status, (SELECT COALESCE(MAX(seq), 0) FROM events WHERE message_id = ?) FROM messages "
+                                "WHERE id = ?", (message_id, message_id)).fetchone()
+        held = None if row is None else self._held_for(message_id, row[0])
+        if held is None:
+            return []
+        out = []
+        for seq, (event, data, ts) in enumerate(held["events"], row[1] + 1):
+            if seq > after:
+                stored = dict(copy.deepcopy(data), seq=seq)
+                out.append({"seq": seq, "ts": ts, "event": event, "data": stored} if stamped else {"seq": seq, "event": event, "data": stored})
+        return out
 
     def _session_alive(self, session_id: str) -> bool:
         return self._con.execute("SELECT 1 FROM sessions WHERE id = ? AND deleted_at IS NULL",
