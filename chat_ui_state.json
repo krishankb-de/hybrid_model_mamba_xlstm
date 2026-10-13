@@ -509,8 +509,8 @@
           "desc": "End-to-end check of the five features on the tiny stack, with screenshots; the cluster re-check is part of P7-D."
         },
         "P6-G": {
-          "done": false,
-          "desc": "The user-turn thumbnail opens the viewer, exactly as the card's 'Your X-ray' tile does (user, 2026-10-13; CHAT_UI_SPEC.md:310)."
+          "done": true,
+          "desc": "The user-turn thumbnail opens the viewer (user, 2026-10-13: \"Yes\", overriding the P6 fix 1 ruling that kept it a plain picture; CHAT_UI_SPEC.md:310). A click..."
         }
       },
       "evidence": {
@@ -530,7 +530,11 @@
         "p6f_checklist": "docs/chat_ui/evidence/p6f/checklist.json: 5/5 PASS (attach, reload, similar, matches, viewer), no console errors; 11 PNGs <= 400 KB; p4e (11) + p4h (7) evidence regenerated",
         "p6f_flake": "Cannot-reach-the-server flake: Chrome fresh-profile background work (fetch never reached the network stack); 5 Chrome flags: 10/30 fail without vs 0/30 with, alternating; 30/30 consecutive then 5/5 after fix 1; which flag matters not established",
         "p6f_review": "task review (opus) Needs fixes (features --url could write MIMIC evidence labelled synthetic; browser/layout --url refused nothing) -> fix 1 -> scoped re-review (sonnet): all 8 findings addressed",
-        "p6f_gates": "606fc6b: validate All gates passed (5214 passed, 1 skipped, 21 xfailed), e2e 36 passed, layout 366/0, browser 10/0, features 5/0"
+        "p6f_gates": "606fc6b: validate All gates passed (5214 passed, 1 skipped, 21 xfailed), e2e 36 passed, layout 366/0, browser 10/0, features 5/0",
+        "p6g_commit": "1bd5b92 (pick of 1631a09); review (sonnet) approved, minors carried",
+        "p6g_tests": "node 474->482 (render +2, app +6); features check viewer item opens from 7 pictures (thumbnail == card tile: label 'Your X-ray', variant original in private mode; public mode never requests the original); e2e viewer test extended (live + after reload, Esc returns focus to .thumb-button)",
+        "p6g_gates": "1bd5b92: validate All gates passed (5231 passed), e2e 36, layout 366/0, browser 10/0 (keyboard walk 32 stops), features 5/0",
+        "p6g_evidence": "p6f checklist + PNGs and p4e checklist + PNGs regenerated (<= 334,867 B; no paths; tiny content)"
       },
       "verdict": null
     },
@@ -822,9 +826,10 @@
     "P6-F ticked: features check (5 items) + browser-check hardening merged (62250fd..606fc6b); --url in all three checks refuses 8000/8010, other hosts and non-tiny servers and needs --no-evidence (review finding: a tunnel could have written MIMIC evidence labelled synthetic). P7-E drill script merged (4ae8633, cfc1709); its box waits for the drill. Stopped per the user.",
     "P9-G6: length-normalised beam search measured at α = 1.5 and 2.0 — no effect under top-hypothesis stopping (44.6 / 44.9 words vs 44.2); gate fails at both; decision rule keeps α = 1.0; EOS-step lever offered to the user",
     "User 2026-10-13: 'Resume the process'; the user-turn thumbnail opens the viewer (new box P6-G); merged agent worktrees deleted (21). Cluster: P9-G6 alpha 2.0 chain completed (ticked: no effect, keep alpha 1.0); serve 2647167 ended at its 24 h limit (TIMEOUT); the restart (sync + submit) was refused by the auto-mode classifier as a production deploy, so it waits for the user.",
-    "P8-F part 3 merged (9680fe6); acceptance prediction recorded (R4) before the serve job runs it"
+    "P8-F part 3 merged (9680fe6); acceptance prediction recorded (R4) before the serve job runs it",
+    "P6-G: the user-turn thumbnail opens the viewer exactly as the card's 'Your X-ray' tile does (ownXraySide shared in render.js; opener passed; focus kept across the message_start redraw); merged 1bd5b92; gates green on 1bd5b92"
   ],
-  "last_updated": "2026-10-13T17:14:49+02:00",
+  "last_updated": "2026-10-13T18:07:53+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -907,7 +912,8 @@
       "P6-F (found by its fix round, predates it): at 320x568 on a gallery (private-mode) server the composer's nowrap button row gains 'Test-split study' (app/static/app.js:2021-2027, styles.css:501), wraps, and Send sits ~33 px below the composer's fold with a preview attached (6 layout-check lines, drawer open/closed, light/dark); the gate's app has no gallery, so the gate never sees it",
       "P6-F minors: tests/chat_ui_url_cases.py:93 type comment uses List without importing it; chat_ui_cdp.py:72 and the flags-test docstring say \"Chrome's default flags (10 of 30)\" where the baseline arm was the four earlier flags; the tiny-only proof reads model cards only",
       "P7-E minors: tests/test_chat_requeue_drill.py duplicates sibling helpers (the_result, offline, no_ambient_token, sse) and re-runs the load drill's refusal matrices (one case per refusal would prove the wiring); the ports pin is name-keyed and does not assert its 4 allowed tests stay process-free; a silent stream's 'timeout' could in theory be relabelled 'reset' (give TurnReader._read's two handlers stream.end = stream.end or ...)",
-      "P8-F part 3 minors: app/cli.py:19-22 docstring drift (SIGINT during loading now waits for start_up on the worker, then exits 130); latent gc-timing flake in older thread-count tests (tests/test_chat_decode_timing.py:882-886/893-898/1059-1063, tests/test_app_retention.py:116-122: compare by identity or gc.collect() first); Worker.call would deadlock if called from the worker thread or block if called from async code (docstring clause); the pins match ast.Call only (check every ast.Name load of _engines/_require_eos_entries_marked/_wire_gallery); nits: the libgomp rationale written 4x, test helper release duplicates cli._release, pins reuse _timing_inner"
+      "P8-F part 3 minors: app/cli.py:19-22 docstring drift (SIGINT during loading now waits for start_up on the worker, then exits 130); latent gc-timing flake in older thread-count tests (tests/test_chat_decode_timing.py:882-886/893-898/1059-1063, tests/test_app_retention.py:116-122: compare by identity or gc.collect() first); Worker.call would deadlock if called from the worker thread or block if called from async code (docstring clause); the pins match ast.Call only (check every ast.Name load of _engines/_require_eos_entries_marked/_wire_gallery); nits: the libgomp rationale written 4x, test helper release duplicates cli._release, pins reuse _timing_inner",
+      "P6-G minors: renderNeighbors (render.js:688) could reuse ownXraySide; refuse() after a pre-accept preview with the viewer open leaves focus on body (app.js:965-973); the features check's open/close alternation shifted by one picture (artifact); ~3 MB of PNG churn from regenerated evidence; the live redraw under an open viewer is covered by the node shim only"
     ],
     "P9-G5": [],
     "P5-D": [
