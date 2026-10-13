@@ -287,10 +287,12 @@ def test_a_full_run_prints_one_result_line_and_exits_0(full_run):
     assert full_run["code"] == 0 and full_run["err"] == ""
     assert full_run["out"].count("\n") == 1 and full_run["out"].endswith("\n")
     result = full_run["result"]
-    assert list(result) == ["demo", "rows", "turns", "statuses", "tokens", "session", "saved", "ok"], "the plan's keys, in its order"
+    assert list(result) == ["demo", "rows", "turns", "statuses", "tokens", "stopped", "eos_trained", "session", "saved", "ok"], \
+        "the plan's keys in its order, and after the tokens the stop word of each turn and whether the model was trained to end its reports"
     assert result["demo"] == "done" and result["ok"] is True
     assert result["rows"] == ROWS and result["turns"] == 5 and result["statuses"] == ["done"] * 5
     assert len(result["tokens"]) == 5 and all(type(t) is int and 0 < t <= 200 for t in result["tokens"])
+    assert result["stopped"] == ["budget"] * 5 and result["eos_trained"] is False, "the tiny engine decodes to its budget and is not trained to stop"
     assert re.fullmatch(r"s_[0-9a-f]{22}", result["session"])
     assert len(result["saved"]) == 2 and result["saved"][0].endswith(".json") and result["saved"][1].endswith(".md")
 
@@ -404,11 +406,14 @@ def test_a_run_that_runs_out_of_time_says_timeout_keeps_the_session_and_saves_no
     server, stop = serve(tmp_path / "home", tiny_step_delay_s=0.05)
     try:
         code, out, err = run_demo([server.base, "--rows", "1,2,3", "--timeout", "1", "--max-new-tokens", "200"])
+        result = the_result(out)
+        kept = httpx.get(server.base + "/v1/sessions/{}".format(result["session"]))   # asked of the server itself, before it goes
     finally:
         stop()
-    result = the_result(out)
     assert code == 1 and err == "" and result["error"] == "timeout" and result["statuses"] == ["timeout"] and result["errors"] == ["timeout"]
     assert result["saved"] == [] and result["turns"] == 1 and re.fullmatch(r"s_[0-9a-f]{22}", result["session"])
+    assert kept.status_code == 200 and kept.json()["id"] == result["session"], "the session is there: the timeout deleted nothing"
+    assert kept.json()["title"] == "Supervisor demo" and [m["test_row"] for m in kept.json()["messages"] if m["role"] == "user"] == [1]
 
 
 def test_an_interrupt_ends_in_the_line_of_what_was_known_the_session_is_kept_and_nothing_is_saved(served, monkeypatch):
@@ -462,8 +467,10 @@ class FakeServer:
     GOOD_JSON = "session-s_0123456789abcdef012345-20261013T181530Z.json"
     GOOD_MD = "session-s_0123456789abcdef012345-20261013T181530Z.md"
 
-    def __init__(self, frames, saves=None, create=None, refuse_turn=None):
-        self.frames, self.refuse_turn = frames, refuse_turn
+    def __init__(self, frames, saves=None, create=None, refuse_turn=None, per_turn=None):
+        """`frames` are the frames every turn is answered with; `per_turn`, a list of frame lists, answers the turns one by one instead (the last
+        one goes on answering when there are more turns than lists)."""
+        self.frames, self.refuse_turn, self.per_turn, self.turns_seen = frames, refuse_turn, per_turn, 0
         self.saves = saves or {"json": (200, {"saved": self.GOOD_JSON, "bytes": 4096}), "md": (200, {"saved": self.GOOD_MD, "bytes": 2048})}
         self.create = create or (200, {"id": self.SESSION, "title": "SECRET-title", "mode": "private"})
         self.requests = []
@@ -497,7 +504,9 @@ class FakeServer:
                 if split.path.endswith("/messages"):
                     if owner.refuse_turn is not None:
                         return self._answer(*owner.refuse_turn)
-                    data = sse(owner.frames).encode()
+                    frames = owner.per_turn[min(owner.turns_seen, len(owner.per_turn) - 1)] if owner.per_turn else owner.frames
+                    owner.turns_seen += 1
+                    data = sse(frames).encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("X-Message-Id", "m_SECRET-id")
@@ -546,10 +555,20 @@ def fake():
         server.stop()
 
 
+CLOSED_STOPPED = set(probe.STOPPED) | {"unknown", None}   # the stop words the probe keeps: its fixed list, `unknown` for any other, null for none
+
+
 def nothing_secret(code_out_err):
+    """What every run against the fake server must hold: no SECRET on either stream, nothing on stderr, and, on the RESULT line, a per-turn stop word
+    that is one of the probe's closed list (or `unknown` or null) and an `eos_trained` that is a boolean or null, whatever the server said."""
     code, out, err = code_out_err
     assert "SECRET" not in out + err, (out, err)
     assert "s_0123456789abcdef012345" not in err and err == ""
+    for line in out.splitlines():
+        if line.startswith("RESULT "):
+            result = json.loads(line[len("RESULT "):])
+            assert all(word in CLOSED_STOPPED for word in result["stopped"]), result["stopped"]
+            assert result["eos_trained"] is None or type(result["eos_trained"]) is bool, result["eos_trained"]
     return code, out, err
 
 
@@ -576,7 +595,75 @@ def test_every_string_of_every_frame_a_secret_and_the_result_line_has_none_of_th
     code, out, err = nothing_secret(run_demo([server.base, "--rows", "1"]))
     result = the_result(out)
     assert code == 1 and result["statuses"] == ["unknown"] and result["errors"] == ["unknown"] and result["tokens"] == [None]
+    assert result["stopped"] == [None] and result["eos_trained"] is False, "no stage it knows, so no stop word; the flag is a bool, and a bool is kept"
     assert result["ok"] is False and len(result["saved"]) == 2, "the saves are asked for all the same: a turn did not go as it should"
+
+
+def test_each_turns_stop_word_and_whether_the_model_was_trained_to_end_its_reports_are_on_the_line(fake):
+    """Review minor 5: a report that was cut. `stopped` is the generate stage's word per turn (`eos` the model ended it, `repeat` the stop on a
+    repeated sentence, `budget` the token budget did), and `eos_trained` says, once, whether the model that ran the turns was trained to end its
+    reports: `budget` with `true` is a report that was cut, `budget` with `false` is how that model always ends."""
+    server = fake(None, per_turn=[private_turn(stopped="eos", eos=True), private_turn(stopped="budget", eos=True), private_turn(stopped="repeat", eos=True)])
+    code, out, err = nothing_secret(run_demo([server.base, "--rows", "1,2,3"]))
+    result = the_result(out)
+    assert code == 0 and result["stopped"] == ["eos", "budget", "repeat"] and result["eos_trained"] is True
+    keys = list(result)
+    assert keys[keys.index("tokens") + 1:keys.index("tokens") + 3] == ["stopped", "eos_trained"]
+    server = fake(private_turn(stopped="budget", eos=False))
+    result = the_result(nothing_secret(run_demo([server.base, "--rows", "1,2"]))[1])
+    assert result["stopped"] == ["budget", "budget"] and result["eos_trained"] is False
+
+
+@pytest.mark.parametrize("stopped, word", [("SECRET-stop", "unknown"), ("EOS", "unknown"), (" eos", "unknown"), ("", "unknown"), (7, "unknown"),
+                                           (["eos"], "unknown"), ({"eos": 1}, "unknown"), (True, "unknown"), (None, "unknown"), ("eos", "eos"),
+                                           ("budget", "budget"), ("repeat", "repeat")])
+def test_the_stop_word_is_one_of_the_probes_closed_words_or_unknown_whatever_the_server_says(stopped, word, fake):
+    turn = private_turn()
+    next(data for event, data in turn if event == "stage_end" and data["stage"] == "generate")["detail"]["stopped"] = stopped
+    server = fake(turn)
+    result = the_result(nothing_secret(run_demo([server.base, "--rows", "1"]))[1])
+    assert result["stopped"] == [word]
+
+
+def test_a_turn_with_no_stop_word_says_null_and_not_a_word_of_its_own(fake):
+    turn = private_turn()
+    del next(data for event, data in turn if event == "stage_end" and data["stage"] == "generate")["detail"]["stopped"]
+    server = fake(turn)
+    assert the_result(nothing_secret(run_demo([server.base, "--rows", "1"]))[1])["stopped"] == [None]
+
+
+NO_FLAG = object()   # in the test below: the card has no eos_trained at all
+
+
+@pytest.mark.parametrize("flag, expected", [(True, True), (False, False), ("SECRET-yes", None), ("true", None), (1, None), (0, None), (None, None),
+                                            ([True], None), ({"x": True}, None), (NO_FLAG, None)],
+                         ids=["true", "false", "text", "text-true", "one", "zero", "null", "list", "object", "absent"])
+def test_eos_trained_is_a_boolean_or_null_whatever_the_server_says(flag, expected, fake):
+    turn = private_turn()
+    model = next(data for event, data in turn if event == "message_start")["model"]
+    if flag is NO_FLAG:
+        del model["eos_trained"]
+    else:
+        model["eos_trained"] = flag
+    server = fake(turn)
+    result = the_result(nothing_secret(run_demo([server.base, "--rows", "1,2"]))[1])
+    assert result["eos_trained"] is expected
+
+
+def test_turns_that_disagree_about_the_flag_and_a_run_with_no_turn_say_null(fake):
+    """The default model ran every turn, so they agree; when they do not, or when no turn ran, the flag is not guessed."""
+    differ = [private_turn(eos=True), private_turn(eos=False)]
+    server = fake(None, per_turn=differ)
+    assert the_result(nothing_secret(run_demo([server.base, "--rows", "1,2"]))[1])["eos_trained"] is None
+    server = fake(private_turn(), create=(500, {"message": "SECRET"}))
+    result = the_result(nothing_secret(run_demo([server.base, "--rows", "1,2"]))[1])
+    assert result["stopped"] == [] and result["eos_trained"] is None
+
+
+def test_a_refused_turn_has_no_stop_word_and_does_not_make_the_flag_up(fake):
+    server = fake(private_turn(), refuse_turn=(422, {"type": "error", "error": {"type": "validation_error", "message": "SECRET"}}))
+    result = the_result(nothing_secret(run_demo([server.base, "--rows", "1"]))[1])
+    assert result["statuses"] == ["refused"] and result["stopped"] == [None] and result["eos_trained"] is None
 
 
 def test_a_save_answer_that_is_not_a_file_name_the_server_could_have_given_is_dropped_whatever_it_says(fake):

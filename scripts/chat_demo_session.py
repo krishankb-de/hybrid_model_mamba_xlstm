@@ -23,8 +23,13 @@ In order:
 Output. Stdout is one line, `RESULT {json}`: demo (`done` when ok, else `failed`), rows (as given), turns (how many ran), statuses (one word per
 turn: `done`, `error`, `aborted` or `unknown` for the status of its message_stop, `refused` for a turn the server answered with a status other than
 200, `timeout`, `failed` for one that no answer came to, `incomplete` for a stream with no message_stop), tokens (the generate stage's token count
-per turn, null where there is none), session (its id, null when none was made), saved (the file names the server gave, json then md, only for a save
-that worked) and ok. A turn that did not go as it should adds `errors`: per turn the word that says why, the `error.type` of its error event
+per turn, null where there is none), stopped (per turn, the generate stage's stop word: `eos`, `budget` or `repeat`, the probe's closed list, or
+`unknown` for any other word the server sent, null where the stage said none), eos_trained (once: whether the model that ran the turns, the
+server's default, was trained to end its reports, as the turns' own message_start says: true or false when they agree, null when none says or they
+differ), session (its id, null when none was made), saved (the file names the server gave, json then md, only for a save that worked) and ok. Of
+the two, `budget` with `eos_trained` true is a report that was cut at the token budget, where `eos` is a report the model ended itself, and `budget`
+with false is how a model that never stops ends every report. A turn that did not go as it should adds `errors`: per turn the word that says why,
+the `error.type` of its error event
 (`model_error`, `store_failed` ...) or of its refusal (`validation_error`, `permission_error` ...) from the probe's closed lists (`unknown` for
 anything else), `seq_gap` for a done turn whose seq has a gap, the class name of a failure or `timeout`, and null for a turn that was fine. The
 driver's own trouble is `error`, a fixed code: the load drill's `session_create_*` codes, `timeout`, `interrupted`, `internal_<class>`, and for the
@@ -200,11 +205,21 @@ def is_ok(rows: Sequence[int], demo: Demo) -> bool:
             and len(demo.saved) == len(SAVE_FORMATS))
 
 
+def eos_trained(turns: Sequence[probe.Facts]) -> Optional[bool]:
+    """Whether the model that ran the turns was trained to end its reports, as their message_start cards say (the probe reads the flag with `_flag`:
+    a bool, or None for anything else). The default model ran them all, so they agree: true or false then; None when no turn says, and when they
+    differ, which is not guessed."""
+    said = {f.eos_trained for f in turns if f.eos_trained is not None}
+    return said.pop() if len(said) == 1 else None
+
+
 def payload(rows: Sequence[int], demo: Demo) -> Dict[str, Any]:
-    """The RESULT line's content: numbers, booleans, fixed words and the names of the files the server wrote."""
+    """The RESULT line's content: numbers, booleans, fixed words and the names of the files the server wrote. `stopped` is the probe's own word per
+    turn (one of its closed list, `unknown` for any other, None for none), and `eos_trained` a boolean or None: nothing else of a turn's stream."""
     ok = is_ok(rows, demo)
     out: Dict[str, Any] = {"demo": "done" if ok else "failed", "rows": list(rows), "turns": len(demo.turns),
-                           "statuses": [status_word(f) for f in demo.turns], "tokens": [f.tokens for f in demo.turns], "session": demo.session_id,
+                           "statuses": [status_word(f) for f in demo.turns], "tokens": [f.tokens for f in demo.turns],
+                           "stopped": [f.stopped for f in demo.turns], "eos_trained": eos_trained(demo.turns), "session": demo.session_id,
                            "saved": list(demo.saved), "ok": ok}
     errors = [error_word(f) for f in demo.turns]
     if any(e is not None for e in errors):

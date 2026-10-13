@@ -15,30 +15,38 @@ What it reads.
              the older of the two formats, is read in that order, as P5-C's reader reads it). The labels of the reference reports are what the
              kinds are decided on. The model's own labels (`y_pred`), its reports and its scores are never read, so the draw cannot favour the
              studies the model does well on.
-  --gallery  the retrieval gallery the server serves: only the test-split size in its manifest.json. The job refuses when the labels' row
-             count is not that size, because a row number must name the same study that the picker shows. (That the gallery's test studies
-             are in the labels' order was proved when the gallery's labels were built: P5-C's cross-check of the gallery's test reports and
-             labels against refs.txt and y_true found 0 differences in 2,663.)
+  --gallery  the retrieval gallery the server serves: its manifest.json, for the test-split size, and its labels_check.json. The job refuses when
+             the labels' row count is not that size, because a row number must name the same study that the picker shows. The count alone does
+             not say the studies are the same and in the same order, so the job also asks the record P5-C leaves in the gallery when it labels it
+             (scripts/label_gallery_reports.py cross_check: the gallery's test reports and labels against the dump's refs.txt and y_true), and
+             refuses unless that record says all of: `stage` is `final`; `reference` is the name of the directory the --labels file is in (the
+             dump the gallery was checked against); `n_test` is the number of labels rows; `refs_mismatch` and `labels_mismatch` are both 0.
+             Only those five keys of it are read (P5-C's own record of the real gallery: 2,663 studies, 0 and 0).
 
 The kinds, on CheXbert-14 and the reference labels:
   normal            No Finding is 1 and every other label is 0
   support_devices   Support Devices is 1
   pneumothorax      Pneumothorax is 1
 
-The draw. A generator seeded with 42 gives one number to each row of a kind, in row order, and the five rows with the lowest numbers are the
-candidates, listed in that order: a uniformly random choice of five rows, in a random order, so that the first two are as fair a pick as the five.
-Only random.Random.random() is used, the one thing Python promises to give the same numbers for the same seed in every version (the laptop runs
-3.14 and the cluster 3.11), so the rows are a function of the labels file alone. A kind with fewer than five rows lists them all.
+The draw. Each kind has a generator of its own, seeded with 42 plus the kind's place in CATEGORIES (42, 43, 44: so that a study that is of two
+kinds is not given the same number in both draws). It gives one number to each row of its kind, in row order, and the five rows with the lowest
+numbers are the candidates, listed in that order: a uniformly random choice of five rows, in a random order, so that the first two are as fair a
+pick as the five. Only random.Random.random() is used, the one thing Python promises to give the same numbers for the same seed in every version
+(the laptop runs 3.14 and the cluster 3.11), so the rows are a function of the labels file alone. A kind with fewer than five rows lists them all.
 
 Output. Stdout is one line, `RESULT {json}`: demo_cases (`done`), n (the studies), counts (the rows of each kind), candidates (the drawn rows of
-each kind) and seed (42). Exit status 0 when it printed that; 1 when it refused, with one `ERROR <code> [name=number ...]` line in its place, the
-code one of ERROR_CODES (`labels_unreadable`, `labels_shape rows=R width=W`, `label_names`, `gallery_unreadable`, `count_mismatch labels=N
-gallery=M`) or `failed <ExceptionClass>`; 64 for a command line it does not take (`ERROR usage`). Nothing is written on stderr or to a file.
+each kind) and seed (42, the first kind's; the others' are 43 and 44). Exit status 0 when it printed that; 1 when it refused, with one `ERROR <code>
+[name=number ...]` line in its place, the code one of ERROR_CODES, which also says which numbers may follow it (`labels_unreadable`, `labels_shape
+rows=R width=W`, `label_names`, `gallery_unreadable`, `count_mismatch labels=N gallery=M`, and for the check file `check_missing`,
+`check_unreadable`, `check_stage`, `check_reference`, `check_n_test labels=N [n_test=M]`, `check_mismatch [refs_mismatch=R] [labels_mismatch=L]`:
+a number of the file is printed only when it is a plain whole number below 10 million) or `failed <ExceptionClass>`; 64 for a command line it
+does not take (`ERROR usage`). Nothing is written on stderr or to a file.
 
 R7 (DUA). The labels file is MIMIC-derived: which test study has which finding. This script prints a row number, which is a number of this
 project, and counts, and nothing else of the file: no label name, no study id, no path (the file names its own source files, which are never
-printed), no part of an exception (an unexpected one is its class's name). Every write is `say`, which has two callers: the help text and a line
-made here of numbers and fixed words.
+printed), no part of an exception (an unexpected one is its class's name). Of the gallery's check file it prints no value either, only the code
+of the field that failed and, for a number, the number. Every write is `say`, which has two callers: the help text and a line made here of
+numbers and fixed words.
 """
 import argparse
 import json
@@ -54,23 +62,34 @@ if REPO_ROOT not in sys.path:   # `python scripts/chat_demo_cases.py` puts scrip
 from app.labels import CHEXBERT_14  # noqa: E402  (standard library only: the one list of the 14 names)
 
 LABELS_KEY, NAMES_KEY = "y_true", "label_names"   # the two keys of chexbert_labels.json this job reads
+CHECK_FILE = "labels_check.json"                  # P5-C's record in the gallery directory: scripts/label_gallery_reports.py, cross_check
+CHECK_KEYS = ("stage", "reference", "n_test", "refs_mismatch", "labels_mismatch")   # the five keys of that record this job reads, and no other
 SEED = 42
 PER_CATEGORY = 5
 CATEGORIES = ("normal", "support_devices", "pneumothorax")
 N_LABELS = len(CHEXBERT_14)
 NO_FINDING, SUPPORT_DEVICES, PNEUMOTHORAX = (CHEXBERT_14.index(name) for name in ("No Finding", "Support Devices", "Pneumothorax"))
+NUMBER_LIMIT = 10 ** 7   # a number on an ERROR line has at most 7 digits, which the wrapper's allowlist holds to: a larger one is left out
 
 EXIT_REFUSED = 1
 EXIT_USAGE = 64   # as scripts/label_gallery_reports.py: argparse's own 2 is a refusal elsewhere
-# Every reason this job stops with, as the code of an `ERROR <code> [name=number ...]` line. The wrapper's allowlist names exactly these.
-ERROR_CODES = ("usage", "labels_unreadable", "labels_shape", "label_names", "gallery_unreadable", "count_mismatch")
+# Every reason this job stops with, as the code of an `ERROR <code> [name=number ...]` line, and for each the number keys that may follow it, in the
+# order they follow it: Refused refuses any other key. The wrapper's allowlist names exactly these codes and these keys, and no others.
+ERROR_CODES = {
+    "usage": (), "labels_unreadable": (), "labels_shape": ("rows", "width"), "label_names": (), "gallery_unreadable": (),
+    "count_mismatch": ("labels", "gallery"),
+    "check_missing": (), "check_unreadable": (), "check_stage": (), "check_reference": (),
+    "check_n_test": ("labels", "n_test"), "check_mismatch": ("refs_mismatch", "labels_mismatch"),
+}
 
 
 class Refused(Exception):
-    """A reason to stop that the job log may show: a code from ERROR_CODES and whole numbers, never a path, a name, an id or text."""
+    """A reason to stop that the job log may show: a code from ERROR_CODES and whole numbers under the code's own keys, never a path, a name, an
+    id or text."""
 
     def __init__(self, code: str, **numbers: int):
         assert code in ERROR_CODES, code
+        assert list(numbers) == [key for key in ERROR_CODES[code] if key in numbers], (code, list(numbers))   # only the code's keys, in its order
         super().__init__(code)
         self.code, self.numbers = code, numbers
 
@@ -148,6 +167,47 @@ def read_test_count(gallery: str) -> int:
     return test
 
 
+def number_or_none(value: Any) -> Optional[int]:
+    """The value when it is a plain whole number from 0 to below NUMBER_LIMIT, else None: a boolean, a float, text and a number of 400 digits are
+    none. Only such a number of the check file is put on an ERROR line."""
+    return value if type(value) is int and 0 <= value < NUMBER_LIMIT else None
+
+
+def dump_name(labels: str) -> str:
+    """The name of the directory the labels file is in: what P5-C calls the `reference` of its check, the last part of the dump's path (it takes
+    `Path(reference_dir).name`). The path is made absolute and tidied, so that a bare file name, `./` and `..` read as what they point at, and no
+    link is followed."""
+    return os.path.basename(os.path.dirname(os.path.abspath(labels)))
+
+
+def check_binding(gallery: str, reference: str, studies: int) -> None:
+    """Bind the gallery to the dump: the gallery's labels_check.json, which P5-C writes when it labels the gallery, must say that the gallery's test
+    reports and labels were checked against THIS dump (`reference` is the dump's directory name), over as many studies as there are labels rows
+    (`n_test`), in the final stage, and found no difference of either kind (`refs_mismatch` and `labels_mismatch` are both 0). Then a row number
+    names the same study in the labels and in the picker, which the count alone does not say. Refused, by the first field that does not say so:
+    `check_missing` (no file), `check_unreadable` (not a JSON object), `check_stage`, `check_reference`, `check_n_test` (with the labels' count and,
+    when the file's is a plain whole number, that), `check_mismatch` (with the counts that are plain whole numbers). No value of the file is ever
+    printed: a field is judged here and only its code, and a number of it that is one, leaves."""
+    try:
+        record = json.loads((Path(gallery) / CHECK_FILE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise Refused("check_missing") from None
+    except (OSError, ValueError, RecursionError):
+        raise Refused("check_unreadable") from None
+    if not isinstance(record, dict):
+        raise Refused("check_unreadable")
+    stage, name, n_test, refs, differing = (record.get(key) for key in CHECK_KEYS)   # the five keys, and no other of the record
+    if stage != "final":
+        raise Refused("check_stage")
+    if not (reference and name == reference):
+        raise Refused("check_reference")
+    if not (type(n_test) is int and n_test == studies):
+        raise Refused("check_n_test", labels=studies, **({} if number_or_none(n_test) is None else {"n_test": n_test}))
+    if not (type(refs) is int and refs == 0 and type(differing) is int and differing == 0):
+        shown = (("refs_mismatch", number_or_none(refs)), ("labels_mismatch", number_or_none(differing)))
+        raise Refused("check_mismatch", **{key: value for key, value in shown if value is not None})
+
+
 # ---- the kinds and the draw -------------------------------------------------------------------------------------------------------
 
 def categories(rows: Sequence[Sequence[int]]) -> Dict[str, List[int]]:
@@ -173,8 +233,10 @@ def draw(rows: Sequence[int], seed: int = SEED, k: int = PER_CATEGORY) -> List[i
 
 
 def payload(n: int, found: Dict[str, List[int]]) -> Dict[str, Any]:
+    """The RESULT line's content. Each kind is drawn with a seed of its own, SEED plus its place in CATEGORIES, so that a study of two kinds is not
+    given one number in both draws; `seed` says the first, the one the plan names."""
     return {"demo_cases": "done", "n": n, "counts": {name: len(found[name]) for name in CATEGORIES},
-            "candidates": {name: draw(found[name]) for name in CATEGORIES}, "seed": SEED}
+            "candidates": {name: draw(found[name], SEED + CATEGORIES.index(name)) for name in CATEGORIES}, "seed": SEED}
 
 
 def result_line(content: Dict[str, Any]) -> str:
@@ -197,6 +259,7 @@ def main(argv: Optional[Sequence[str]] = None, stdout: Optional[TextIO] = None) 
         studies = read_test_count(args.gallery)
         if len(labels) != studies:
             raise Refused("count_mismatch", labels=len(labels), gallery=studies)
+        check_binding(args.gallery, dump_name(args.labels), len(labels))   # before any row is drawn: the gallery and the dump are one pair
         say(stdout, result_line(payload(len(labels), categories(labels))))
         return 0
     except Refused as exc:

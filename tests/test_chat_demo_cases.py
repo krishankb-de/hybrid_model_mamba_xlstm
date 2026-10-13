@@ -4,12 +4,13 @@ scripts/chat_demo_cases_h100.sh.
 The job reads the published run's per-sample CheXbert labels (`chexbert_labels.json`, written by scripts/score_chexbert_standalone.py: the
 keys `y_true`, `y_pred`, `label_names`, `five_label_indices`, `hyp_file` and `ref_file`), takes the reference labels `y_true` (one row of 14 per
 test study, in test-split order), and lists up to five candidate test rows for each of three kinds of study: normal, support devices and
-pneumothorax. The draw is seeded and fair: it looks at nothing but `y_true`. It prints row numbers and counts only (rule R7: no MIMIC text,
-image or study id ever reaches an agent), and it refuses when the number of studies is not the gallery's test-split count, because a row
-number must name the study the picker shows.
+pneumothorax. The draw is seeded and fair: it looks at nothing but `y_true`, and each kind has a seed of its own (fix 1). It prints row numbers
+and counts only (rule R7: no MIMIC text, image or study id ever reaches an agent), and it refuses when the number of studies is not the
+gallery's test-split count, and when the gallery's labels_check.json (P5-C's record) does not say it was checked against this dump over this
+many studies with no difference (fix 1), because a row number must name the study the picker shows.
 
-Everything here is synthetic: a labels file built in the test from a table of kinds, the tiny gallery of P5-B, and a temp tree standing in
-for the cluster. No MIMIC file is read, so an assertion may print whatever it compares.
+Everything here is synthetic: a labels file built in the test from a table of kinds, the tiny gallery of P5-B with a labels_check.json written
+the way P5-C writes it, and a temp tree standing in for the cluster. No MIMIC file is read, so an assertion may print whatever it compares.
 """
 import ast
 import io
@@ -89,6 +90,24 @@ def write_manifest(directory, test=40, images=200, report_rows=None, **extra):
     return directory
 
 
+GONE = object()   # in write_check: a field to leave out of the file
+DUMP_NAME = "report_gen_m3_test_split_s42"
+
+
+def write_check(directory, labels, **changes):
+    """The gallery's labels_check.json as P5-C writes it (scripts/label_gallery_reports.py, cross_check) for the labels file `labels`: the final
+    stage, the name of the dump's directory as the reference, as many test studies as the file has rows, no difference of either kind, and the other
+    fields the real record has (which the job never reads). `changes` replace a field; GONE leaves it out."""
+    rows = len(json.loads(Path(labels).read_text())["y_true"])
+    record = {"stage": "final", "reference": Path(labels).parent.name, "n_test": rows, "refs_mismatch": 0, "labels_mismatch": 0,
+              "labels_mismatch_own_text": 0, "labels_mismatch_shared_text": 0, "test_rows_sharing_a_text": 23, "label_names_source": "dump"}
+    record.update(changes)
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "labels_check.json").write_text(json.dumps({k: v for k, v in record.items() if v is not GONE}))
+    return directory
+
+
 def run_cases(args, expect_code=None):
     """main() with its own stream. -> (code, stdout)."""
     out = io.StringIO()
@@ -106,9 +125,13 @@ def the_result(stdout):
 
 @pytest.fixture
 def world(tmp_path, tiny_gallery):
-    """The tiny gallery (40 test studies) and a labels file of 40 rows, the kinds in turn."""
+    """The tiny gallery (40 test studies) and a labels file of 40 rows, the kinds in turn, in a directory named as the published dump is; the
+    gallery has the labels_check.json that P5-C leaves, which says it was checked against that dump."""
     n = json.loads((tiny_gallery / "manifest.json").read_text())["counts"]["test"]
-    return {"labels": write_labels(tmp_path / "chexbert_labels.json", y_true_of(n)), "gallery": tiny_gallery, "n": n, "tmp": tmp_path}
+    (tmp_path / DUMP_NAME).mkdir()
+    labels = write_labels(tmp_path / DUMP_NAME / "chexbert_labels.json", y_true_of(n))
+    write_check(tiny_gallery, labels)
+    return {"labels": labels, "gallery": tiny_gallery, "n": n, "tmp": tmp_path}
 
 
 def args_of(world):
@@ -195,6 +218,7 @@ def test_a_labels_file_that_will_not_do_is_refused_with_a_fixed_code_and_numbers
     code, out = run_cases(args_of(world))
     assert code == 1 and out == line + "\n", (what, out)
     assert SECRET not in out and str(world["tmp"]) not in out
+    assert matches(shapes_of_the_wrapper(), line), "the wrapper's allowlist lets this line into the job log"
 
 
 # ---- the gallery's test-split count -----------------------------------------------------------------------------------------------
@@ -226,6 +250,7 @@ def test_a_gallery_whose_manifest_will_not_do_is_refused_with_a_fixed_code(what,
     code, out = run_cases(["--labels", str(labels), "--gallery", str(gallery)])
     assert code == 1 and out == "ERROR gallery_unreadable\n", (what, out)
     assert SECRET not in out and str(tmp_path) not in out
+    assert matches(shapes_of_the_wrapper(), "ERROR gallery_unreadable")
 
 
 def test_a_label_count_that_is_not_the_test_count_is_refused_before_any_row_is_drawn(world):
@@ -235,6 +260,127 @@ def test_a_label_count_that_is_not_the_test_count_is_refused_before_any_row_is_d
     assert (code, out) == (1, "ERROR count_mismatch labels=39 gallery=40\n")
     write_labels(world["labels"], y_true_of(world["n"] + 3))
     assert run_cases(args_of(world)) == (1, "ERROR count_mismatch labels=43 gallery=40\n")
+    assert matches(shapes_of_the_wrapper(), "ERROR count_mismatch labels=43 gallery=40")
+
+
+# ---- the gallery is bound to the dump: P5-C's labels_check.json ---------------------------------------------------------------------
+
+CHECK_REFUSALS = [   # (what is wrong with an otherwise matching check, the fields it changes, the ERROR line it is refused with)
+    ("a stage that is preflight", {"stage": "preflight"}, "ERROR check_stage"),
+    ("no stage", {"stage": GONE}, "ERROR check_stage"),
+    ("a stage that is text", {"stage": SECRET}, "ERROR check_stage"),
+    ("a reference that is another dump", {"reference": "report_gen_full_ext_4gpu_tower13d"}, "ERROR check_reference"),
+    ("no reference", {"reference": GONE}, "ERROR check_reference"),
+    ("a reference that is no text", {"reference": 7}, "ERROR check_reference"),
+    ("an empty reference", {"reference": ""}, "ERROR check_reference"),
+    ("a reference that is a SECRET", {"reference": SECRET}, "ERROR check_reference"),
+    ("a reference with the dump's name and more", {"reference": DUMP_NAME + "_v2"}, "ERROR check_reference"),
+    ("an n_test of 39", {"n_test": 39}, "ERROR check_n_test labels=40 n_test=39"),
+    ("an n_test of 41", {"n_test": 41}, "ERROR check_n_test labels=40 n_test=41"),
+    ("an n_test of 0", {"n_test": 0}, "ERROR check_n_test labels=40 n_test=0"),
+    ("no n_test", {"n_test": GONE}, "ERROR check_n_test labels=40"),
+    ("an n_test that is text", {"n_test": "40"}, "ERROR check_n_test labels=40"),
+    ("an n_test that is a boolean", {"n_test": True}, "ERROR check_n_test labels=40"),
+    ("an n_test that is a float", {"n_test": 40.0}, "ERROR check_n_test labels=40"),
+    ("an n_test that is negative", {"n_test": -40}, "ERROR check_n_test labels=40"),
+    ("an n_test of a billion", {"n_test": 10 ** 9}, "ERROR check_n_test labels=40"),
+    ("an n_test of 400 digits", {"n_test": 10 ** 400}, "ERROR check_n_test labels=40"),
+    ("refs that differ", {"refs_mismatch": 3}, "ERROR check_mismatch refs_mismatch=3 labels_mismatch=0"),
+    ("labels that differ", {"labels_mismatch": 2}, "ERROR check_mismatch refs_mismatch=0 labels_mismatch=2"),
+    ("both that differ", {"refs_mismatch": 1, "labels_mismatch": 5}, "ERROR check_mismatch refs_mismatch=1 labels_mismatch=5"),
+    ("a labels_mismatch that is null, as a preflight record has it", {"labels_mismatch": None}, "ERROR check_mismatch refs_mismatch=0"),
+    ("no mismatch fields", {"refs_mismatch": GONE, "labels_mismatch": GONE}, "ERROR check_mismatch"),
+    ("a mismatch that is false, not 0", {"refs_mismatch": False}, "ERROR check_mismatch labels_mismatch=0"),
+    ("a mismatch that is 0.0, not 0", {"labels_mismatch": 0.0}, "ERROR check_mismatch refs_mismatch=0"),
+    ("a mismatch that is negative", {"labels_mismatch": -1}, "ERROR check_mismatch refs_mismatch=0"),
+    ("a mismatch that is text", {"refs_mismatch": SECRET}, "ERROR check_mismatch labels_mismatch=0"),
+    ("a mismatch of a billion", {"labels_mismatch": 10 ** 9}, "ERROR check_mismatch refs_mismatch=0"),
+]
+
+
+def test_a_gallery_whose_check_says_it_was_made_against_this_dump_over_these_studies_with_no_difference_is_taken(world):
+    """What P5-C leaves in the gallery (labels_check.json, final stage): the dump it was checked against (its directory's name), the studies it was
+    checked over and 0 differences of either kind. The four together say that the labels file and the gallery are one pair, so that a row number
+    names the study the picker shows: the count alone does not say it."""
+    record = json.loads((world["gallery"] / "labels_check.json").read_text())
+    assert (record["stage"], record["reference"], record["n_test"], record["refs_mismatch"], record["labels_mismatch"]) == ("final", DUMP_NAME, 40, 0, 0)
+    code, out = run_cases(args_of(world))
+    assert code == 0 and the_result(out)["n"] == 40
+
+
+def test_the_checks_other_fields_are_never_read_or_printed(world):
+    write_check(world["gallery"], world["labels"], labels_mismatch_own_text=SECRET, labels_mismatch_shared_text=[SECRET], test_rows_sharing_a_text=SECRET,
+                label_names_source=SECRET, extra_key={"nested": SECRET})
+    code, out = run_cases(args_of(world))
+    assert code == 0 and "SECRET" not in out and re.fullmatch(r'RESULT \{[0-9A-Za-z_":,\[\]{}]*\}\n', out)
+
+
+@pytest.mark.parametrize("what, changes, line", CHECK_REFUSALS, ids=[c[0] for c in CHECK_REFUSALS])
+def test_each_field_of_the_check_that_does_not_say_so_is_refused_with_its_own_code_and_numbers_only(what, changes, line, world):
+    write_check(world["gallery"], world["labels"], **changes)
+    code, out = run_cases(args_of(world))
+    assert code == 1 and out == line + "\n", (what, out)
+    assert "SECRET" not in out and str(world["tmp"]) not in out and DUMP_NAME not in out, "no value of the file is quoted"
+    assert matches(shapes_of_the_wrapper(), line), "the wrapper's allowlist lets this line into the job log"
+
+
+def test_a_gallery_with_no_check_file_is_refused_with_a_code_of_its_own(world):
+    (world["gallery"] / "labels_check.json").unlink()
+    assert run_cases(args_of(world)) == (1, "ERROR check_missing\n")
+    assert matches(shapes_of_the_wrapper(), "ERROR check_missing")
+
+
+@pytest.mark.parametrize("text", [SECRET + " {", "[1, 2]", '"final"', "null", "7", ""])
+def test_a_check_file_that_is_no_json_object_is_unreadable(text, world):
+    (world["gallery"] / "labels_check.json").write_text(text)
+    code, out = run_cases(args_of(world))
+    assert (code, out) == (1, "ERROR check_unreadable\n") and SECRET not in out
+
+
+def test_a_check_that_is_a_directory_is_unreadable_and_not_missing(world):
+    path = world["gallery"] / "labels_check.json"
+    path.unlink()
+    path.mkdir()
+    assert run_cases(args_of(world)) == (1, "ERROR check_unreadable\n")
+
+
+def test_the_first_field_that_fails_is_the_one_named_in_the_order_stage_reference_n_test_mismatch(world):
+    changes = {"stage": "preflight", "reference": "x", "n_test": 3, "refs_mismatch": 9, "labels_mismatch": 9}
+    for line in ("ERROR check_stage", "ERROR check_reference", "ERROR check_n_test labels=40 n_test=3",
+                 "ERROR check_mismatch refs_mismatch=9 labels_mismatch=9"):
+        write_check(world["gallery"], world["labels"], **changes)
+        assert run_cases(args_of(world)) == (1, line + "\n")
+        del changes[next(iter(changes))]   # the field that failed is put right, and the next one is the first to fail
+
+
+def test_the_count_check_comes_before_the_check_file_is_asked(world):
+    write_check(world["gallery"], world["labels"], stage="preflight")
+    write_manifest(world["gallery"], test=39, images=200)
+    assert run_cases(args_of(world)) == (1, "ERROR count_mismatch labels=40 gallery=39\n")
+
+
+def test_the_reference_is_the_name_of_the_directory_the_labels_file_is_in_however_the_path_is_spelled(tmp_path, tiny_gallery, monkeypatch):
+    dump = tmp_path / "somewhere" / "dump_x"
+    dump.mkdir(parents=True)
+    labels = write_labels(dump / "chexbert_labels.json", y_true_of(40))
+    write_check(tiny_gallery, labels, reference="dump_x")
+    monkeypatch.chdir(dump.parent)
+    for spelled in (str(labels), "dump_x/chexbert_labels.json", "./dump_x/chexbert_labels.json", "dump_x/../dump_x/chexbert_labels.json",
+                    str(dump) + "/./chexbert_labels.json"):
+        assert run_cases(["--labels", spelled, "--gallery", str(tiny_gallery)])[0] == 0, spelled
+    monkeypatch.chdir(dump)
+    assert run_cases(["--labels", "chexbert_labels.json", "--gallery", str(tiny_gallery)])[0] == 0, "a bare file name: the directory it is in"
+    for other in ("somewhere", "chexbert_labels.json", "dump_x/chexbert_labels.json", ""):
+        write_check(tiny_gallery, labels, reference=other)
+        assert run_cases(["--labels", str(labels), "--gallery", str(tiny_gallery)]) == (1, "ERROR check_reference\n"), other
+
+
+def test_a_copy_of_the_labels_in_a_directory_of_another_name_is_not_the_dump_the_gallery_was_checked_against(world, tmp_path):
+    copy_dir = tmp_path / "copy_of_it"
+    copy_dir.mkdir()
+    (copy_dir / "chexbert_labels.json").write_bytes(world["labels"].read_bytes())
+    code, out = run_cases(["--labels", str(copy_dir / "chexbert_labels.json"), "--gallery", str(world["gallery"])])
+    assert (code, out) == (1, "ERROR check_reference\n")
 
 
 # ---- the three kinds of study ------------------------------------------------------------------------------------------------------
@@ -324,19 +470,49 @@ def test_the_result_line_has_the_plans_keys_in_the_plans_order_and_numbers_only(
 
 
 def test_the_draw_for_the_tiny_world_is_pinned_so_that_the_demo_rows_do_not_change_by_accident(world):
-    """A regression pin. The rows were worked out apart from the script, from the definition alone (random.Random(42), one random() per
-    qualifying row in row order, the five lowest numbers: for the six normal rows 0.639, 0.025, 0.275, 0.223, 0.736, 0.677, which put rows 7, 21,
-    14, 0 and 35 first) and they are what the script printed. The rows the controller is given for a labels file are a function of that file
-    alone, and a change here is a change of which studies are shown."""
+    """A regression pin. The rows were worked out apart from the script, from the definition alone: each kind has a generator of its own, seeded
+    with 42 plus the kind's place in CATEGORIES (random.Random(42), (43) and (44)), one random() per qualifying row in row order, the five lowest
+    numbers (for the six normal rows, seed 42: 0.639, 0.025, 0.275, 0.223, 0.736, 0.677, which put rows 7, 21, 14, 0 and 35 first); then the
+    script printed the same. The rows the controller is given for a labels file are a function of that file alone, and a change here is a change
+    of which studies are shown."""
     out = run_cases(args_of(world), 0)[1]
     assert out == ('RESULT {"demo_cases":"done","n":40,"counts":{"normal":6,"support_devices":12,"pneumothorax":12},'
-                   '"candidates":{"normal":[7,21,14,0,35],"support_devices":[3,31,24,36,10],"pneumothorax":[3,31,24,37,10]},"seed":42}\n'), out
+                   '"candidates":{"normal":[7,21,14,0,35],"support_devices":[29,1,8,36,31],"pneumothorax":[24,17,23,30,10]},"seed":42}\n'), out
+
+
+def test_each_kind_is_drawn_with_a_seed_of_its_own_42_plus_its_place_in_the_list_of_kinds(world, monkeypatch):
+    assert cases.SEED == 42 and cases.CATEGORIES == ("normal", "support_devices", "pneumothorax")
+    asked = []
+    real = cases.draw
+
+    def spy(rows, seed=cases.SEED, k=cases.PER_CATEGORY):
+        asked.append((len(rows), seed, k))
+        return real(rows, seed, k)
+
+    monkeypatch.setattr(cases, "draw", spy)
+    out = run_cases(args_of(world), 0)[1]
+    assert asked == [(6, 42, 5), (12, 43, 5), (12, 44, 5)], "normal, support devices, pneumothorax: each with its own seed"
+    assert the_result(out)["seed"] == 42, "the line still says the base seed, the one the plan names"
+
+
+def test_two_kinds_that_qualify_on_the_same_rows_are_not_drawn_alike(tmp_path, tiny_gallery):
+    """A seed shared by the kinds gave the same numbers to the same rows: a study with a pneumothorax and a support device is in both lists, and
+    when the two lists are the same rows (here every study is one) a shared seed would make the two draws one. Each kind has a seed of its own,
+    so the draws of a pool are as independent as the seeds are."""
+    (tmp_path / DUMP_NAME).mkdir()
+    labels = write_labels(tmp_path / DUMP_NAME / "chexbert_labels.json", [list(KINDS["both"]) for _ in range(40)])
+    write_check(tiny_gallery, labels)
+    result = the_result(run_cases(["--labels", str(labels), "--gallery", str(tiny_gallery)], 0)[1])
+    assert result["counts"]["support_devices"] == result["counts"]["pneumothorax"] == 40
+    support, pneumo = result["candidates"]["support_devices"], result["candidates"]["pneumothorax"]
+    assert support != pneumo and len(set(support)) == len(set(pneumo)) == 5
+    assert support == cases.draw(list(range(40)), 43) and pneumo == cases.draw(list(range(40)), 44) and result["candidates"]["normal"] == []
 
 
 def test_a_category_with_fewer_than_five_studies_lists_them_all_and_one_with_none_lists_none(tmp_path):
     rows = [list(KINDS["normal"]), list(KINDS["normal"]), list(KINDS["support"]), list(KINDS["other"]), list(KINDS["other"])]
     labels = write_labels(tmp_path / "chexbert_labels.json", rows)
-    gallery = write_manifest(tmp_path / "gallery", test=5, images=10)
+    gallery = write_check(write_manifest(tmp_path / "gallery", test=5, images=10), labels)
     code, out = run_cases(["--labels", str(labels), "--gallery", str(gallery)])
     result = the_result(out)
     assert code == 0 and result["n"] == 5
@@ -353,7 +529,7 @@ def test_the_longest_line_the_job_can_print_stays_under_the_300_characters_chat_
     n = 2663   # the official test split
     rows = [list(KINDS["both"]) for _ in range(n)]
     labels = write_labels(tmp_path / "chexbert_labels.json", rows)
-    gallery = write_manifest(tmp_path / "gallery", test=n, images=191462)
+    gallery = write_check(write_manifest(tmp_path / "gallery", test=n, images=191462), labels)
     out = run_cases(["--labels", str(labels), "--gallery", str(gallery)], 0)[1]
     assert len(out.rstrip("\n")) < 300, len(out)
     result = the_result(out)
@@ -378,6 +554,7 @@ def test_an_unexpected_failure_is_the_name_of_its_class_and_nothing_of_its_text(
     monkeypatch.setattr(cases, "categories", broken)
     code, out = run_cases(args_of(world))
     assert (code, out) == (1, "ERROR failed RuntimeError\n") and SECRET not in out
+    assert matches(shapes_of_the_wrapper(), "ERROR failed RuntimeError")
 
 
 @pytest.mark.parametrize("argv", [[], ["--labels", "x"], ["--gallery", "y"], ["--labels", "x", "--gallery", "y", "--seed", "7"],
@@ -385,6 +562,7 @@ def test_an_unexpected_failure_is_the_name_of_its_class_and_nothing_of_its_text(
 def test_a_bad_command_line_is_one_fixed_line_that_quotes_nothing_it_was_given(argv):
     code, out = run_cases(argv)
     assert (code, out) == (64, "ERROR usage\n"), (argv, out)
+    assert matches(shapes_of_the_wrapper(), "ERROR usage")
 
 
 def test_help_is_printed_on_the_stream_and_the_exit_status_is_0():
@@ -446,7 +624,8 @@ sys.exit(int(read("exit.txt", "0") or 0))
 
 
 class CasesBox(wr.JobBox):
-    """The wrapper with the real script, over synthetic files: a labels file of 40 rows in results/, and a gallery directory with the manifest."""
+    """The wrapper with the real script, over synthetic files: a labels file of 40 rows in results/, and a gallery directory with the manifest and
+    the labels_check.json that says the gallery was checked against that dump."""
     WRAPPER = WRAPPER
     SCRIPTS = ("chat_demo_cases.py",)
     SLURM_CPUS = "1"
@@ -456,8 +635,8 @@ class CasesBox(wr.JobBox):
         for name in ("__init__.py", "labels.py"):   # the script imports the app's list of the 14 names
             shutil.copy(str(REPO_ROOT / "app" / name), str(self.repo / "app" / name))
         (self.repo / DUMP).mkdir(parents=True)
-        write_labels(self.repo / DUMP / "chexbert_labels.json", y_true_of(40))
-        write_manifest(self.chat / "gallery" / "g13d_m3_v1", test=40, images=200)
+        labels = write_labels(self.repo / DUMP / "chexbert_labels.json", y_true_of(40))
+        write_check(write_manifest(self.chat / "gallery" / "g13d_m3_v1", test=40, images=200), labels)
         (self.bin / "hostname").write_text(HOSTNAME_STUB)
         (self.bin / "hostname").chmod(0o755)
 
@@ -517,8 +696,8 @@ def test_the_default_dump_is_the_one_the_serving_job_defaults_to():
 def test_the_published_model_and_gallery_levers_name_another_dump_and_another_build(box):
     other = box.repo / "results" / "other_dump"
     other.mkdir(parents=True)
-    write_labels(other / "chexbert_labels.json", y_true_of(30))
-    build = write_manifest(box.chat / "gallery" / "other_build_v2", test=30, images=100)
+    labels = write_labels(other / "chexbert_labels.json", y_true_of(30))
+    build = write_check(write_manifest(box.chat / "gallery" / "other_build_v2", test=30, images=100), labels)
     done = box.run(PUBLISHED_MODEL="results/other_dump", GALLERY=str(build))
     lines = job_lines(done)
     assert done.returncode == 0 and "gallery=other_build_v2 ===" in done.stdout and str(box.chat) not in done.stdout and "other_dump" not in done.stdout
@@ -534,6 +713,45 @@ def test_a_gallery_that_does_not_have_the_labels_row_count_is_the_scripts_refusa
     assert "ERROR count_mismatch labels=40 gallery=39" in lines
     assert lines[-1] == "ERROR the demo cases script exited with code 1 (see the logs under CHAT_HOME)" and "END chat demo cases" not in done.stdout
     assert not [l for l in lines if l.startswith("RESULT ")] and all(LINE_OK.match(l) for l in lines)
+
+
+@pytest.mark.parametrize("what, change, shown", [
+    ("a check made against another dump", lambda box: write_check(box.gallery(), box.labels(), reference="some_other_dump"), "ERROR check_reference"),
+    ("a check of a preflight", lambda box: write_check(box.gallery(), box.labels(), stage="preflight"), "ERROR check_stage"),
+    ("a check over 39 studies", lambda box: write_check(box.gallery(), box.labels(), n_test=39), "ERROR check_n_test labels=40 n_test=39"),
+    ("a check that found 3 differences", lambda box: write_check(box.gallery(), box.labels(), labels_mismatch=3),
+     "ERROR check_mismatch refs_mismatch=0 labels_mismatch=3"),
+    ("no check file", lambda box: (box.gallery() / "labels_check.json").unlink(), "ERROR check_missing"),
+])
+def test_a_gallery_that_is_not_bound_to_the_dump_is_the_scripts_refusal_shown_and_the_jobs_failure(what, change, shown, box):
+    change(box)
+    done = box.run()
+    lines = job_lines(done)
+    assert done.returncode == 1 and shown in lines, (what, done.stdout)
+    assert lines[-1] == "ERROR the demo cases script exited with code 1 (see the logs under CHAT_HOME)" and "END chat demo cases" not in done.stdout
+    assert not [l for l in lines if l.startswith("RESULT ")] and all(LINE_OK.match(l) for l in lines)
+    assert "some_other_dump" not in done.stdout and DUMP_NAME not in done.stdout, "no value of the check file is quoted"
+
+
+def test_the_header_says_what_holds_of_what_reaches_the_job_log_and_not_more():
+    """It said "Nothing names a path, a port or an exception text". That holds of the script's lines, which are numbers and fixed words, and not of
+    the log: the job's own mkdir or tee, failing under CHAT_HOME, is an error that the shell writes to the same log, and it names a path of CHAT_HOME,
+    which holds the user name. What holds is that no MIMIC-derived value reaches the log, and the header says that and says what may name a path."""
+    text = (REPO_ROOT / "scripts" / WRAPPER).read_text()
+    header = " ".join(" ".join(l.lstrip("#") for l in text.splitlines() if l.startswith("#") and not l.startswith("#SBATCH")).split())
+    assert "Nothing names a path" not in header and "Nothing names" not in header
+    for phrase in ("No MIMIC-derived value reaches this log", "an infrastructure error", "mkdir", "tee", "may name a path under CHAT_HOME", "the user name",
+                   "no refusal of this wrapper quotes the value it refuses", "labels_check.json"):
+        assert phrase in header, phrase
+
+
+def test_an_infrastructure_error_under_chat_home_may_name_its_path_in_the_log_and_nothing_derived_from_the_data(box):
+    """What the header allows: the job's own mkdir fails (here CHAT_HOME/logs is a file), the shell says so on the job's one log, and the message
+    names the path. It is no MIMIC-derived value, and none of the script ran."""
+    (box.chat / "logs").write_text("a file where the log directory goes")
+    done = box.run()
+    assert done.returncode != 0 and str(box.chat) in done.stdout, done.stdout
+    assert box.calls() == [] and not [l for l in job_lines(done) if l.startswith(("RESULT ", "ERROR "))]
 
 
 def test_the_raw_output_of_the_script_goes_to_files_under_chat_home_and_nowhere_else(box):
@@ -655,6 +873,16 @@ RESULT_LINE = ('RESULT {"demo_cases":"done","n":2663,"counts":{"normal":1200,"su
 MISMATCH_LINE = "ERROR count_mismatch labels=2663 gallery=2662"
 SHAPE_LINE = "ERROR labels_shape rows=2663 width=13"
 FAILED_LINE = "ERROR failed RuntimeError"
+CHECK_N_LINE = "ERROR check_n_test labels=2663 n_test=2662"
+CHECK_MISMATCH_LINE = "ERROR check_mismatch refs_mismatch=3 labels_mismatch=2"
+PRINTED = {   # every ERROR line the script can print: the code, and the number keys that come with it in the scenarios of this module
+    "usage": [()], "labels_unreadable": [()], "label_names": [()], "gallery_unreadable": [()], "check_missing": [()], "check_unreadable": [()],
+    "check_stage": [()], "check_reference": [()],
+    "labels_shape": [("rows", "width")], "count_mismatch": [("labels", "gallery")],
+    "check_n_test": [("labels",), ("labels", "n_test")],
+    "check_mismatch": [(), ("refs_mismatch",), ("labels_mismatch",), ("refs_mismatch", "labels_mismatch")],
+}
+OTHER_KEYS = ("rows", "width", "labels", "gallery", "n_test", "refs_mismatch", "labels_mismatch", "path", "study_id", "secret", "check", "refs")
 DEVIATIONS = [
     (RESULT_LINE, '"demo_cases":"done"', '"demo_cases":"refused"'), (RESULT_LINE, '"n":2663', '"n":"2663"'),
     (RESULT_LINE, '"n":2663', '"n":12345678'), (RESULT_LINE, '"n":2663', '"n":-1'), (RESULT_LINE, '"n":2663', '"n":26.63'),
@@ -669,6 +897,14 @@ DEVIATIONS = [
     (MISMATCH_LINE, "labels=2663", "labels=x"), (MISMATCH_LINE, "gallery=2662", "gallery=12345678"), (MISMATCH_LINE, "count_mismatch", "elsewhere"),
     (MISMATCH_LINE, "gallery=2662", "gallery=2662 path=/sc/home/x"), (SHAPE_LINE, "rows=2663", "rows=/sc/home"),
     (FAILED_LINE, "RuntimeError", "Runtime Error"), (FAILED_LINE, "RuntimeError", "Findings: x"), (FAILED_LINE, "RuntimeError", "R" * 61),
+    # fix 1: a key that is no key of the code (the allowlist once took any `[a-z_]{1,20}=` after any code), another code's key, a key twice
+    (MISMATCH_LINE, "labels=2663", "labels_x=2663"), (MISMATCH_LINE, "labels=2663", "rows=2663"), (MISMATCH_LINE, "labels=2663", "secret=2663"),
+    (SHAPE_LINE, "width=13", "gallery=13"), (SHAPE_LINE, "width=13", "rows=13"), (CHECK_N_LINE, "n_test=2662", "check=2662"),
+    (CHECK_N_LINE, "labels=2663", "labels=SECRET"), (CHECK_N_LINE, "n_test=2662", "n_test=2662 n_test=1"),
+    (CHECK_MISMATCH_LINE, "refs_mismatch=3", "refs=3"), (CHECK_MISMATCH_LINE, "labels_mismatch=2", "labels_mismatch=-2"),
+    (CHECK_MISMATCH_LINE, "refs_mismatch=3 labels_mismatch=2", "labels_mismatch=2 refs_mismatch=3"),
+    ("ERROR usage", "usage", "usage rows=1"), ("ERROR check_stage", "check_stage", "check_stage stage=final"),
+    ("ERROR check_missing", "check_missing", "check_missing path=1"), ("ERROR label_names", "label_names", "label_names labels=14"),
 ]
 
 
@@ -687,8 +923,8 @@ def matches(shapes, line):
 def test_the_wrappers_allowlist_takes_every_line_the_script_prints_in_every_state_it_can_end_in(tmp_path, world):
     shapes = shapes_of_the_wrapper()
     assert all(line for line in shapes.splitlines()), "an empty pattern matches every line"
-    assert len(shapes.splitlines()) == 3 and "'" not in shapes
-    for line in (RESULT_LINE, MISMATCH_LINE, SHAPE_LINE, FAILED_LINE, run_cases(args_of(world))[1].rstrip("\n")):
+    assert len(shapes.splitlines()) == 7 and "'" not in shapes, "the RESULT line, five families of ERROR lines and the failure of the script"
+    for line in (RESULT_LINE, MISMATCH_LINE, SHAPE_LINE, FAILED_LINE, CHECK_N_LINE, CHECK_MISMATCH_LINE, run_cases(args_of(world))[1].rstrip("\n")):
         assert matches(shapes, line), line
     empty = {name: [] for name in cases.CATEGORIES}
     one = {"normal": [0], "support_devices": [1], "pneumothorax": [2]}
@@ -696,19 +932,70 @@ def test_the_wrappers_allowlist_takes_every_line_the_script_prints_in_every_stat
         assert matches(shapes, cases.result_line(cases.payload(7, found))), found
     n = 2663   # the longest line: every row of every kind, five candidates each
     longest = write_labels(tmp_path / "all.json", [list(KINDS["both"]) for _ in range(n)])
-    gallery = write_manifest(tmp_path / "g", test=n, images=191462)
+    gallery = write_check(write_manifest(tmp_path / "g", test=n, images=191462), longest)
     line = run_cases(["--labels", str(longest), "--gallery", str(gallery)], 0)[1].rstrip("\n")
     assert matches(shapes, line) and len(line) < 300, line
-    for code in cases.ERROR_CODES:   # every code the script has is a line the allowlist takes, with the numbers it carries
-        assert matches(shapes, "ERROR " + code), code
-    for name in ("labels", "gallery", "rows", "width"):
-        assert matches(shapes, "ERROR labels_shape {}=1".format(name)), name
+
+
+def error_line(code, keys):
+    return " ".join(["ERROR", code] + ["{}={}".format(key, 7 + i) for i, key in enumerate(keys)])
+
+
+def test_the_scripts_table_of_error_codes_and_the_keys_that_come_with_each_is_what_the_tests_list_as_printed():
+    """ERROR_CODES says, for each code, the number keys its line may carry, in the order it carries them, and Refused refuses any other; PRINTED is the
+    list this module's scenarios produce. The two agree: no code or key is in the table that no scenario prints, and none is printed that is not in it."""
+    assert set(cases.ERROR_CODES) == set(PRINTED)
+    for code, keys in cases.ERROR_CODES.items():
+        assert set(keys) == set().union(*map(set, PRINTED[code])), code
+        assert all(list(shown) == [k for k in keys if k in shown] for shown in PRINTED[code]), (code, "the keys come in the table's order")
+    for code, keys in cases.ERROR_CODES.items():   # and Refused enforces it: a key that is not the code's cannot be printed
+        for key in OTHER_KEYS:
+            if key not in keys:
+                with pytest.raises(AssertionError):
+                    cases.Refused(code, **{key: 1})
+    with pytest.raises(AssertionError):
+        cases.Refused("count_mismatch", gallery=1, labels=2)
+    assert cases.Refused("count_mismatch", labels=2, gallery=1).line() == "ERROR count_mismatch labels=2 gallery=1"
+
+
+@pytest.mark.parametrize("code", sorted(PRINTED))
+def test_every_error_line_the_script_can_print_passes_the_wrappers_allowlist(code):
+    shapes = shapes_of_the_wrapper()
+    for keys in PRINTED[code]:
+        assert matches(shapes, error_line(code, keys)), error_line(code, keys)
+
+
+@pytest.mark.parametrize("code", sorted(PRINTED))
+def test_a_key_that_the_script_does_not_print_with_a_code_is_withheld_whatever_the_number_and_wherever_it_stands(code):
+    """The allowlist once took any `[a-z_]{1,20}=` key after any code. Now each code takes its own keys, in the script's order, and nothing else."""
+    shapes = shapes_of_the_wrapper()
+    own = set().union(*map(set, PRINTED[code]))
+    longest = max(PRINTED[code], key=len)
+    for key in OTHER_KEYS:
+        if key in own:
+            continue
+        assert not matches(shapes, error_line(code, (key,))), (code, key)
+        assert not matches(shapes, error_line(code, longest + (key,))), (code, key, "after its own")
+        assert not matches(shapes, error_line(code, (key,) + longest)), (code, key, "before its own")
+    for key in own:   # a key of its own, twice, or with a number that is no number
+        assert not matches(shapes, error_line(code, longest) + " {}=1".format(key)), (code, key)
+        assert not matches(shapes, error_line(code, longest) + " {}=x".format(key)), (code, key)
+    if longest:
+        assert not matches(shapes, error_line(code, tuple(reversed(longest)))) or len(longest) == 1, (code, "wrong order")
+
+
+def allowlist_codes():
+    """The codes the wrapper's allowlist names in its ERROR lines, whether as one alternative group or on a line of their own (not `failed`)."""
+    found = set()
+    for line in shapes_of_the_wrapper().splitlines():
+        parsed = re.match(r"\^ERROR (?:\(([a-z_|]+)\)|([a-z_]+))", line)
+        if parsed:
+            found |= set((parsed.group(1) or parsed.group(2)).split("|"))
+    return found - {"failed"}
 
 
 def test_the_wrappers_allowlist_names_exactly_the_error_codes_the_script_has_and_no_others():
-    shapes = shapes_of_the_wrapper()
-    group = re.search(r"\^ERROR \(([a-z_|]+)\)", shapes).group(1)
-    assert set(group.split("|")) == set(cases.ERROR_CODES), group
+    assert allowlist_codes() == set(cases.ERROR_CODES), sorted(allowlist_codes() ^ set(cases.ERROR_CODES))
 
 
 @pytest.mark.parametrize("template, old, new", DEVIATIONS, ids=["deviation{}".format(i) for i in range(len(DEVIATIONS))])
@@ -723,6 +1010,8 @@ def test_the_wrappers_allowlist_takes_a_line_with_one_thing_wrong_in_it_for_none
     'RESULT {"gate": {"ok": true}}', 'RESULT {}', 'RESULT ', 'Findings: SECRET', '=== not a result ===', 'ERROR x', 'ERROR ',
     RESULT_LINE + " trailing", " " + RESULT_LINE, "x" + RESULT_LINE, MISMATCH_LINE + " trailing", "  " + FAILED_LINE, FAILED_LINE + " Findings",
     RESULT_LINE.replace('"seed":42', ""), RESULT_LINE.replace('"n":2663,', ""), RESULT_LINE.replace('"demo_cases":"done",', ""),
+    "ERROR count_mismatch", "ERROR count_mismatch labels=1", "ERROR labels_shape", "ERROR labels_shape rows=1", "ERROR check_n_test",
+    "ERROR check_n_test n_test=3", "ERROR check_n_test  labels=1", "ERROR check_mismatch  refs_mismatch=1", "ERROR check_stage ", "ERROR failed",
 ])
 def test_the_wrappers_allowlist_takes_nothing_else(leak):
     assert not matches(shapes_of_the_wrapper(), leak), leak

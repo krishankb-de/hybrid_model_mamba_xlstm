@@ -6,10 +6,13 @@
 #
 # The demo shows five test studies, two normal, two with support devices and one with a pneumothorax, chosen from the published labels. This job
 # reads the published run's per-sample CheXbert labels (${PUBLISHED_MODEL}/chexbert_labels.json: its y_true, the labels of the reference reports,
-# one row of 14 per test study) and lists, for each of the three kinds, up to five candidate rows of the test split: a seeded fair draw (seed 42)
-# from every row of that kind, which never looks at what the model predicted or scored. It refuses when the number of studies is not the gallery's
-# test-split size (GALLERY's manifest.json), because a row number must name the same study the picker shows. scripts/chat_demo_cases.py says
-# exactly what it reads, how it draws and what it prints; the controller then takes the first 2, 2 and 1 candidates, skipping a row already picked.
+# one row of 14 per test study) and lists, for each of the three kinds, up to five candidate rows of the test split: a seeded fair draw (seed 42 for
+# the first kind, 43 and 44 for the others) from every row of that kind, which never looks at what the model predicted or scored. It refuses when
+# the number of studies is not the gallery's test-split size (GALLERY's manifest.json), and when the gallery's labels_check.json, the record P5-C
+# leaves in it, does not say that the gallery was checked against this very dump (its `reference` is the dump's directory name), over this many
+# studies, with no difference: a row number must name the same study the picker shows, which the count alone does not say.
+# scripts/chat_demo_cases.py says exactly what it reads, how it draws and what it prints; the controller then takes the first 2, 2 and 1
+# candidates, skipping a row already picked.
 #
 # Output. The job log carries the sync line, a banner, a notice, one RESULT line and two closing lines. A normal log:
 #   === sync <40-hex commit> <clean|dirty> ===
@@ -23,13 +26,15 @@
 # line, one of a closed list, is shown before the job's own `ERROR the demo cases script exited with code 1`; 64: a bad command line, which the
 # levers below cannot make). Exit 0 without exactly one RESULT line is a failure like any other.
 #
-# R7 (DUA). The labels say which test study has which finding, so what is printed is numbers and fixed words and nothing else: the script's stdout
-# and stderr go to files under ${CHAT_HOME}/logs (demo_cases_<jobid>.out and .err), and of stdout only a line of one of the shapes of CASES_SHAPES
-# below (an allowlist: a report, an id or a path on a RESULT or ERROR line is no known shape) reaches this log; `=== demo case lines withheld: N ===`
-# counts the others. Nothing names a path, a port or an exception text, and no refusal of this wrapper quotes the value it refuses.
+# R7 (DUA). The labels say which test study has which finding. No MIMIC-derived value reaches this log: the script's stdout and stderr go to files
+# under ${CHAT_HOME}/logs (demo_cases_<jobid>.out and .err), and of stdout only a line of one of the shapes of CASES_SHAPES below (an allowlist: a
+# report, an id or a path on a RESULT or ERROR line is no known shape, and an ERROR line takes no number key but its own code's) reaches this log;
+# `=== demo case lines withheld: N ===` counts the others, and no refusal of this wrapper quotes the value it refuses. What the log may name is
+# infrastructure, not data: an infrastructure error, the shell's own message when the job's mkdir or tee fails under CHAT_HOME, is written to the
+# same log and may name a path under CHAT_HOME, which holds the user name and nothing of the studies.
 #
-# Files (R8: additive only). The two files of the job's raw output, owner-only, under ${CHAT_HOME}/logs. Nothing else is written; the labels and
-# the gallery's manifest are only read, and no model, no image and no report text is touched.
+# Files (R8: additive only). The two files of the job's raw output, owner-only, under ${CHAT_HOME}/logs. Nothing else is written; the labels, the
+# gallery's manifest and its labels_check.json are only read, and no model, no image and no report text is touched.
 #
 # Levers, as NAME=value arguments of `chat_remote.sh submit`: CHAT_HOME (default $HOME/chat_sessions), GALLERY (a build directory, default
 # ${CHAT_HOME}/gallery/g13d_m3_v1, the one the server serves), PUBLISHED_MODEL (the published model's dump, a plain path under the repository,
@@ -72,11 +77,16 @@ PUBLISHED_MODEL="${PUBLISHED_MODEL:-results/report_gen_m3_test_split_s42}"
 JOB="${SLURM_JOB_ID:-local}"
 
 # The lines of the script's stdout that may reach this log, as one anchored pattern per line (grep -E reads a newline as "or"). The keys are fixed
-# and so are the error codes; a value is a count or a row number of at most 7 digits, and the candidates are lists of at most five of them. A report,
-# an id or a path on a RESULT or ERROR line matches none of them. tests/test_chat_demo_cases.py runs these very patterns, through grep, over
-# everything the script prints and over lines that carry text. No line may be empty: an empty pattern matches every line.
+# and so are the error codes, and each code takes the number keys the script gives it (ERROR_CODES in scripts/chat_demo_cases.py) and no other; a
+# value is a count or a row number of at most 7 digits, and the candidates are lists of at most five of them. A report, an id or a path on a RESULT
+# or ERROR line matches none of them. tests/test_chat_demo_cases.py runs these very patterns, through grep, over everything the script prints and
+# over lines that carry text. No line may be empty: an empty pattern matches every line.
 CASES_SHAPES='^RESULT \{"demo_cases":"done","n":[0-9]{1,7},"counts":\{"normal":[0-9]{1,7},"support_devices":[0-9]{1,7},"pneumothorax":[0-9]{1,7}\},"candidates":\{"normal":\[([0-9]{1,7}(,[0-9]{1,7}){0,4})?\],"support_devices":\[([0-9]{1,7}(,[0-9]{1,7}){0,4})?\],"pneumothorax":\[([0-9]{1,7}(,[0-9]{1,7}){0,4})?\]\},"seed":[0-9]{1,6}\}$
-^ERROR (usage|labels_unreadable|labels_shape|label_names|gallery_unreadable|count_mismatch)( [a-z_]{1,20}=[0-9]{1,7}){0,4}$
+^ERROR (usage|labels_unreadable|label_names|gallery_unreadable|check_missing|check_unreadable|check_stage|check_reference)$
+^ERROR labels_shape rows=[0-9]{1,7} width=[0-9]{1,7}$
+^ERROR count_mismatch labels=[0-9]{1,7} gallery=[0-9]{1,7}$
+^ERROR check_n_test labels=[0-9]{1,7}( n_test=[0-9]{1,7})?$
+^ERROR check_mismatch( refs_mismatch=[0-9]{1,7})?( labels_mismatch=[0-9]{1,7})?$
 ^ERROR failed [A-Za-z_][A-Za-z0-9_]{0,59}$'
 
 # --- the levers and the tree, before anything runs. A refusal says what is wrong and never the value it was given. -------------------------------

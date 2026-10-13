@@ -10368,7 +10368,9 @@ def test_the_demo_cases_wrapper_keeps_the_scripts_raw_output_in_files_and_lets_o
     assert "set -x" not in code and "xtrace" not in code and not re.search(r"(^|[\s;&|(])(printenv|env|date|nvidia-smi)\s*$", code, re.M)
     shapes = re.search(r"^CASES_SHAPES='(.*?)'$", _CASES_SH.read_text(), re.S | re.M)
     assert shapes and all(line.startswith("^") and line.endswith("$") for line in shapes.group(1).splitlines()), "anchored, one shape per line"
-    assert len(shapes.group(1).splitlines()) == 3 and "'" not in shapes.group(1)
+    assert len(shapes.group(1).splitlines()) == 7 and "'" not in shapes.group(1), "the RESULT line, five families of ERROR lines, the script's failure"
+    error_lines = [l for l in shapes.group(1).splitlines() if l.startswith("^ERROR ")]
+    assert not [l for l in error_lines if "[a-z_]" in l], "no line takes a key of any name: each code takes the keys the script gives it, and no other"
 
 
 def test_the_demo_cases_wrapper_installs_deletes_and_replaces_nothing_and_starts_no_other_job():
@@ -10411,19 +10413,58 @@ def test_the_demo_cases_script_imports_the_standard_library_and_the_apps_label_l
     assert app_roots <= set(sys.stdlib_module_names) and not app_first_party, "app.labels is the standard library alone"
 
 
-def test_the_demo_cases_script_reads_two_keys_of_the_labels_file_and_the_gallerys_counts_and_never_the_models_own_labels():
+def test_the_demo_cases_script_reads_two_keys_of_the_labels_file_the_gallerys_counts_and_five_keys_of_its_check_and_never_the_models_own_labels():
     """The fair draw of the plan decides on the reference labels (y_true) alone: the model's labels (y_pred), its reports (hyps.txt) and the
     reference text itself are never asked for, and the file's own paths (hyp_file, ref_file) are never read. Outside the docstring, which says what
-    the file holds, no string of the script names any of them."""
+    the file holds, no string of the script names any of them. Of P5-C's check record in the gallery (labels_check.json) it reads the five keys the
+    plan's fix 1 names, and not the other fields it holds (the counts split by own and shared text, the number of shared texts, where the label
+    names came from)."""
     tree, parents = _cases_tree()
     docstring = tree.body[0].value
     strings = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str) and n is not docstring}
-    for key in ("y_pred", "hyp_file", "ref_file", "five_label_indices", "hyps.txt", "refs.txt", "report_texts.txt", "test_meta", "study_id"):
+    for key in ("y_pred", "hyp_file", "ref_file", "five_label_indices", "hyps.txt", "refs.txt", "report_texts.txt", "test_meta", "study_id",
+                "labels_mismatch_own_text", "labels_mismatch_shared_text", "test_rows_sharing_a_text", "label_names_source"):
         assert not [s for s in strings if key in s], key
-    assert {"y_true", "label_names", "manifest.json", "counts", "test", "images", "report_rows"} <= strings
+    assert {"y_true", "label_names", "manifest.json", "counts", "test", "images", "report_rows", "labels_check.json", "stage", "final", "reference",
+            "n_test", "refs_mismatch", "labels_mismatch"} <= strings
+    plain = {t.id: ast.unparse(n.value) for n in tree.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)}
+    assert plain["CHECK_FILE"] == "'labels_check.json'" and plain["CHECK_KEYS"] == "('stage', 'reference', 'n_test', 'refs_mismatch', 'labels_mismatch')"
     reads = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "read_text"]
-    assert sorted(ast.unparse(n.func.value) for n in reads) == ["Path(gallery) / 'manifest.json'", "Path(path)"], "the labels file and the manifest"
-    assert sorted(_cases_inner(n, parents) for n in reads) == ["read_labels", "read_test_count"]
+    assert sorted(ast.unparse(n.func.value) for n in reads) == sorted(["Path(gallery) / 'manifest.json'", "Path(gallery) / CHECK_FILE", "Path(path)"]), \
+        "the labels file, the manifest and the check file"
+    assert sorted(_cases_inner(n, parents) for n in reads) == ["check_binding", "read_labels", "read_test_count"]
+    functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    asked = [ast.unparse(c) for c in ast.walk(functions["check_binding"]) if isinstance(c, ast.Call) and ast.unparse(c.func) == "record.get"]
+    assert asked == ["record.get(key)"], "the record is asked in one place"
+    unpacked = [ast.unparse(a) for a in ast.walk(functions["check_binding"]) if isinstance(a, ast.Assign) and "record.get" in ast.unparse(a)]
+    assert unpacked == ["stage, name, n_test, refs, differing = (record.get(key) for key in CHECK_KEYS)"], "and for the five keys of CHECK_KEYS only"
+
+
+def test_every_refusal_the_demo_cases_script_raises_is_a_code_of_its_table_with_only_that_codes_keys_and_no_value_of_a_file():
+    """ERROR_CODES says for each code which number keys may follow it, and the AST agrees with what Refused enforces at run time: every Refused(...)
+    names a code of the table, in a literal; its keywords are keys of that code; every code of the table is raised somewhere. In check_binding, the
+    only module code that reads the gallery's check, the numbers are the labels' own count and numbers of the file that number_or_none has passed:
+    never a value of it as it is."""
+    tree, parents = _cases_tree()
+    table = ast.literal_eval(next(n.value for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "ERROR_CODES"
+                                                                                                  for t in n.targets)))
+    assert isinstance(table, dict) and all(isinstance(keys, tuple) and all(isinstance(k, str) for k in keys) for keys in table.values())
+    raised = {}
+    for call in _cases_calls(tree, "Refused"):
+        assert call.args and isinstance(call.args[0], ast.Constant) and call.args[0].value in table, ast.unparse(call)
+        code = call.args[0].value
+        names = [k.arg for k in call.keywords if k.arg is not None]
+        assert set(names) <= set(table[code]), (code, names)
+        raised.setdefault(code, []).append(ast.unparse(call))
+    assert set(raised) == set(table), sorted(set(table) ^ set(raised))
+    inside = [ast.unparse(c) for c in _cases_calls(tree, "Refused") if _cases_inner(c, parents) == "check_binding" and (c.keywords or len(c.args) > 1)]
+    assert sorted(inside) == sorted([
+        "Refused('check_n_test', labels=studies, **{} if number_or_none(n_test) is None else {'n_test': n_test})",
+        "Refused('check_mismatch', **{key: value for key, value in shown if value is not None})"])
+    shown = [a for a in ast.walk(next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "check_binding"))
+             if isinstance(a, ast.Assign) and ast.unparse(a.targets[0]) == "shown"]
+    assert [ast.unparse(a.value) for a in shown] == [_normalized(
+        '(("refs_mismatch", number_or_none(refs)), ("labels_mismatch", number_or_none(differing)))')]
 
 
 def test_the_demo_cases_draw_is_the_seeded_one_the_plan_names_and_uses_only_the_generators_random_numbers():
@@ -10444,6 +10485,10 @@ def test_the_demo_cases_draw_is_the_seeded_one_the_plan_names_and_uses_only_the_
     names = {n.id for n in ast.walk(functions["categories"]) if isinstance(n, ast.Name)}
     assert names <= {"found", "number", "row", "rows", "enumerate", "sum", "CATEGORIES", "NO_FINDING", "SUPPORT_DEVICES", "PNEUMOTHORAX", "name", "Dict", "List",
                      "str", "int", "Sequence"}, "the kinds are decided on the labels of a row and nothing else"
+    # fix 1: each kind is drawn with a seed of its own, SEED plus its place in CATEGORIES: the one call of draw in the script that is not its definition
+    draws = [ast.unparse(c) for c in _cases_calls(tree, "draw")]
+    assert draws == ["draw(found[name], SEED + CATEGORIES.index(name))"], draws
+    assert ast.unparse(next(r.value for r in ast.walk(functions["payload"]) if isinstance(r, ast.Return))).endswith("'seed': SEED}"), "the line says the base seed"
 
 
 def test_the_demo_cases_script_prints_and_writes_nothing_but_its_one_line_the_help_and_fixed_refusals():
@@ -10755,6 +10800,18 @@ def test_the_demo_session_keeps_nothing_of_a_turn_or_an_answer_but_numbers_boole
             else:   # `type(exc)`: the class, never the text
                 assert isinstance(parent, ast.Call) and ast.unparse(parent.func) == "type", ast.unparse(handler) + " uses " + handler.name
     keys = [ast.unparse(k) for d in ast.walk(functions["payload"]) if isinstance(d, ast.Dict) for k in d.keys]
-    assert keys == ["'demo'", "'rows'", "'turns'", "'statuses'", "'tokens'", "'session'", "'saved'", "'ok'"], "the plan's keys, in its order"
+    assert keys == ["'demo'", "'rows'", "'turns'", "'statuses'", "'tokens'", "'stopped'", "'eos_trained'", "'session'", "'saved'", "'ok'"], \
+        "the plan's keys in its order, and after the tokens the stop word of each turn and whether the model was trained to end its reports (fix 1)"
     subscripts = [ast.unparse(s.slice) for s in ast.walk(functions["payload"]) if isinstance(s, ast.Subscript) and isinstance(s.ctx, ast.Store)]
     assert subscripts == ["'errors'", "'error'"], "and the two that are there only when something went wrong"
+    # fix 1: the two new fields are the probe's own words and a boolean, and nothing else of a stream: `stopped` is the probe's `_word` of the stage's
+    # stop word, taken as it is, and `eos_trained` comes from the probe's `_flag` of the card's flag, through one helper that returns a bool or None
+    values = {ast.unparse(k): ast.unparse(v) for d in ast.walk(functions["payload"]) if isinstance(d, ast.Dict) for k, v in zip(d.keys, d.values)}
+    assert values["'stopped'"] == "[f.stopped for f in demo.turns]" and values["'eos_trained'"] == "eos_trained(demo.turns)"
+    helper = functions["eos_trained"]
+    assert [ast.unparse(r.value) for r in ast.walk(helper) if isinstance(r, ast.Return)] == ["said.pop() if len(said) == 1 else None"]
+    assert [ast.unparse(a.value) for a in ast.walk(helper) if isinstance(a, ast.Assign)] == ["{f.eos_trained for f in turns if f.eos_trained is not None}"]
+    assert {n.attr for n in ast.walk(helper) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "f"} == {"eos_trained"}
+    probe_source = (REPO_ROOT / "scripts" / "chat_realturn_probe.py").read_text(encoding="utf-8")
+    assert "facts.eos_trained = _flag(model.get(\"eos_trained\"))" in probe_source and "facts.stopped = _word(detail[\"stopped\"], STOPPED)" in probe_source, \
+        "the probe's reader is where both are made closed: a bool or None, a word of STOPPED or `unknown`"
