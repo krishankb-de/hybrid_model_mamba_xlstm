@@ -211,9 +211,10 @@ def test_chaos_3_the_413_for_a_request_over_21_mb_is_pinned_by_the_hardening_and
 def test_chaos_4_a_wrong_token_is_a_401_before_anything_is_read_and_stores_nothing(tmp_path):
     """Chaos item 4, a wrong token, API side. A server whose token comes from a token file (mode 0600, as app/cli.py reads it). Expected: a wrong
     token, a missing one and another scheme's all get 401 `authentication_error` with `WWW-Authenticate: Bearer`, on a read, on a session
-    create and on a turn with a 1 MB image, and the message never repeats what was sent; the turn is refused before its body is parsed, so no
-    message, no upload and no slot is taken; /healthz stays open; the right token works, and then the turn is stored as usual. The page asks for
-    the token in Settings: the e2e test of this item."""
+    create, on a turn with an X-ray (a PNG of about 100 KB) and on a turn whose body is no multipart data a parser can read, which the right
+    token gets a 400 for: the token is checked before the body is parsed. The message never repeats what was sent; no message, no upload and
+    no slot is taken; /healthz stays open; the right token works, and then the turn is stored as usual. The page asks for the token in Settings:
+    the e2e test of this item."""
     token_file = tmp_path / "app_token"
     token_file.write_text("chaos-token-7f3a9c\n")
     token_file.chmod(0o600)
@@ -223,16 +224,24 @@ def test_chaos_4_a_wrong_token_is_a_401_before_anything_is_read_and_stores_nothi
     with TestClient(create_app(engine="tiny", home=str(home), token=token)) as c:
         good = {"Authorization": "Bearer " + token}
         sid = c.post("/v1/sessions", json={}, headers=good).json()["id"]
+
+        def unparseable(headers):
+            """A turn whose body a parse refuses: it says it is multipart data, and its one part has no headers."""
+            return c.post("/v1/sessions/{}/messages".format(sid), content=b"--x\r\nnot a part\r\n",
+                          headers=dict(headers, **{"Content-Type": "multipart/form-data; boundary=x"}))
+
+        parsed = unparseable(good)
+        assert parsed.status_code == 400 and parsed.json()["error"]["type"] == "invalid_request_error", "parsed, this body is a 400"
         refused = 0
         for headers in ({"Authorization": "Bearer " + wrong}, {}, {"Authorization": "Basic " + token}):
             for call in (lambda: c.get("/v1/models", headers=headers), lambda: c.post("/v1/sessions", json={}, headers=headers),
-                         lambda: _post(c, sid, headers=headers)):
+                         lambda: _post(c, sid, headers=headers), lambda: unparseable(headers)):
                 r = call()
                 refused += 1
                 assert r.status_code == 401 and r.headers["www-authenticate"] == "Bearer"
                 assert r.json()["error"] == {"type": "authentication_error", "message": "Missing or wrong token: send Authorization: Bearer <token>."}
                 assert wrong not in r.text and token not in r.text
-        assert refused == 9
+        assert refused == 12
         assert c.get("/healthz").status_code == 200, "/healthz stays open"
         chat = c.get("/v1/sessions/" + sid, headers=good).json()
         assert chat["messages"] == [] and [s["id"] for s in c.get("/v1/sessions", headers=good).json()["sessions"]] == [sid]
@@ -379,10 +388,13 @@ def test_chaos_6_the_serving_command_line_refuses_a_gallery_that_will_not_open_a
     --allow-no-gallery the start is refused (exit 1, one ERROR line, and no endpoint file); with it a real server process serves, says so in its
     job log (`[server] gallery unavailable: ...`, `serving: retrieval=off`), and its turn skips the retrieve stage and ends `done`."""
     missing = str(tmp_path / "no_such_gallery")
-    base_args = ["--engine", "tiny", "--mode", "private", "--home", str(tmp_path / "refused_home"), "--port", "0", "--gallery", missing]
-    assert cli.main(base_args) == 1
+    refused_endpoint = tmp_path / "refused_endpoint"
+    assert cli.main(["--engine", "tiny", "--mode", "private", "--home", str(tmp_path / "refused_home"), "--port", "0",
+                     "--endpoint-file", str(refused_endpoint), "--gallery", missing]) == 1
     out = capsys.readouterr().out
-    assert "ERROR the retrieval gallery could not be opened (see the [server] gallery line)" in out and "serving:" not in out
+    assert [line for line in out.splitlines() if line.startswith("ERROR")] == [
+        "ERROR the retrieval gallery could not be opened (see the [server] gallery line)"]
+    assert "serving:" not in out and not refused_endpoint.exists(), "a refused start writes no endpoint file"
 
     endpoint = tmp_path / "endpoint"
     log = tmp_path / "cli_stdout.txt"
@@ -419,7 +431,8 @@ def test_chaos_6_a_gallery_directory_that_disappears_after_the_start_cannot_skip
     what was loaded. Expected: with the directory gone, a turn's retrieve stage still runs (not skipped) and the turn ends `done`. What the
     directory held beyond that fails by name, with a fixed sentence and no path: the neighbours' pictures (GET /v1/gallery/images/<row>) are a 500
     `Could not read the gallery image.`, and a turn that asks for a test-split study (its image is read from there) is a 500 `Could not read the
-    test-split image.`; the server stays up, and a turn on an upload goes on to `done`."""
+    test-split image.`, where the same picture and the same study were a 200 before the directory went; the server stays up, and a turn on an
+    upload goes on to `done`."""
     home = tmp_path / "home"
     with TestClient(create_app(engine="tiny", home=str(home), tiny_gallery=True)) as c:
         assert c.get("/v1/models").json()["features"]["retrieval"] is True
@@ -429,6 +442,8 @@ def test_chaos_6_a_gallery_directory_that_disappears_after_the_start_cannot_skip
         neighbours = [f for f in before if f["event"] == "stage_end" and f["data"]["stage"] == "retrieve"][0]["data"]["detail"]["image_neighbors"]
         image_url = neighbours[0]["image_url"]
         assert c.get(image_url).status_code == 200
+        baseline = _post(c, sid, {"max_new_tokens": 16, "test_row": 0}, image=False)   # the same study, with the directory still there
+        assert baseline.status_code == 200 and list(iter_sse([baseline.text]))[-1]["data"]["status"] == "done"
         shutil.rmtree(str(home / "gallery"))
         with caplog.at_level(logging.WARNING):
             after = _turn(c, sid=sid)

@@ -9,6 +9,7 @@ command line with a token file, and give it a database that fills up when the te
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -21,6 +22,7 @@ import pytest
 
 pytest.importorskip("playwright.sync_api", reason="the e2e tests need `pip install -r requirements-e2e.txt`")
 
+from app import cli  # noqa: E402
 from app.imaging import MAX_UPLOAD_BYTES  # noqa: E402
 from app.pipeline import STORE_FAILED_MSG  # noqa: E402
 from tests.e2e.conftest import REPO_ROOT, TinyServer, noise_png, squeezed  # noqa: E402
@@ -162,7 +164,6 @@ class TunnelServer(TinyServer):
 
     def __init__(self, home: str, **kwargs: Any) -> None:
         super().__init__(home, **kwargs)
-        self.direct_url = self.url
         self.tunnel = Tunnel(self.port)
         self.url = self.tunnel.url
 
@@ -175,6 +176,14 @@ class TunnelServer(TinyServer):
 
 # ---- a server that takes its token from a file ----------------------------------------------------------------------------------------
 
+def write_token_file(path: str, token: str) -> None:
+    """The token file as --token-file takes it (app/cli.py read_token): a new file of the user's, mode 0600."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.fchmod(fd, 0o600)   # read_token takes 0600 exactly, and the umask can narrow the mode os.open asks for
+    with os.fdopen(fd, "w") as handle:
+        handle.write(token + "\n")
+
+
 class TokenFileServer(TinyServer):
     """The serving command line (`python -m app.server`) on the tiny engine, private mode, with --token-file: the server of a tunnel with an access
     token, which is the same one a public demo uses. The harness's own reads carry the right token, as the page does once it has it."""
@@ -183,9 +192,7 @@ class TokenFileServer(TinyServer):
 
     def __init__(self, home: str, **kwargs: Any) -> None:
         self.token_file = os.path.join(home, "app_token")
-        fd = os.open(self.token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as handle:
-            handle.write(self.TOKEN + "\n")
+        write_token_file(self.token_file, self.TOKEN)
         super().__init__(home, **kwargs)
 
     def start(self, timeout: float = 90.0) -> None:
@@ -482,6 +489,18 @@ def test_chaos_4_a_wrong_token_is_a_401_the_page_asks_for_the_token_in_settings_
     [session] = ui.server.sessions()
     assert session["turns"] == 1 and ui.server.session(session["id"])["messages"][0]["image_filename"] == "xray_a.png"
     ui.assert_clean()
+
+
+def test_the_token_file_of_the_token_file_server_is_mode_0600_whatever_the_umask(tmp_path):
+    """read_token takes a file of mode 0600 and no other, and the umask can narrow the mode os.open asks for (0277 leaves 0400): the token file
+    TokenFileServer writes is 0600 under such a umask too, and read_token reads it."""
+    path = str(tmp_path / "app_token")
+    umask = os.umask(0o277)
+    try:
+        write_token_file(path, "chaos-umask-token")
+    finally:
+        os.umask(umask)
+    assert oct(stat.S_IMODE(os.stat(path).st_mode)) == oct(0o600) and cli.read_token(path) == "chaos-umask-token"
 
 
 # ---- 8: the store fails while a turn runs ---------------------------------------------------------------------------------------------
