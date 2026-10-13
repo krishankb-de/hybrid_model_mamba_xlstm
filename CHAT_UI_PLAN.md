@@ -3715,6 +3715,8 @@ Commit `"P6-E: full-screen viewer (side by side, zoom, pan, brightness, contrast
 
 Run `venv/bin/python -m app.server --engine tiny --gallery <tiny gallery dir> --labeler rule` and check each feature: (1) click, drag-drop and paste each attach with a preview, and refused files show the message; (2) after a reload and after reopening the session, the X-ray and the 224×224 model input are both shown; (3) the similar-X-rays grid shows scores and "n/14 labels agree"; (4) the matching-reports list and, for a picked test study, the own-rank badge; (5) the viewer opens from every image, side by side for a neighbour, with zoom, pan, brightness and contrast working by mouse and keyboard. Record screenshots and the checklist in the evidence. Commit `"P6-F: five image features checked end to end (tiny)"`.
 
+- [ ] **P6-G** The user-turn thumbnail opens the viewer (user, 2026-10-13: "Yes", overriding the P6 fix 1 ruling that kept it a plain picture; CHAT_UI_SPEC.md:310). A click on the upload in the user's own message opens the viewer exactly as the card's "Your X-ray" tile does: the original where the mode sends one, else the thumbnail marked as such; a test study with its stored-gallery-size note. Focus returns to the thumbnail on close. Node, e2e and features-check coverage; evidence regenerated.
+
 ### P7 — Cluster serving
 
 Gate: from the laptop, a real test study chosen in the picker decodes through the tunnel; its report equals the P2-E CPU golden line for that study (same node type; otherwise within the P1-C drift, which the card states); the five image features work on real data in private mode; the preemption drill passes.
@@ -4334,7 +4336,7 @@ What it means for the plan:
 
       `message_stop.display_report` settles the card in both.
   - *Rulings (controller, 2026-10-11), after the user's decisions:* the user approved the retention sweep on the cluster CHAT_HOME, and chose the stop-trained model "as the option… if its another choice according to the market then choose something else". The deployed UI therefore lists the EOS model first (`MODELS=m3eos,m3`, the market practice for a product: EOS-terminated generation), with the published model selectable. The code's defaults (R2) do not change. The work is split: P9-G5a is the server side (registry, alias `m3eos`, card, golden driver), and P9-G5b the UI copy plus an unmissable notice on the laptop's tiny random-weights engine, after the user read its output as a broken report.
-- [ ] **P9-G6** (laptop, then cluster) Fuller EOS reports: length-normalised beam search, measured (user, 2026-10-11).
+- [x] **P9-G6** (laptop, then cluster) Fuller EOS reports: length-normalised beam search, measured (user, 2026-10-11).
   - **Why.** The user wants a full written report for an uploaded X-ray. G4 showed that the EOS model ends cleanly but writes 44 words against the references' 72, which costs about 2 points of CheXbert F1. Length-normalised beam search, ranking finished hypotheses by score / length^α with α > 1, is the field's standard lever against short outputs.
   - **Laptop.** Expose the decoders' existing `length_penalty`, today always 1.0, as `--length-penalty` in `scripts/evaluate_report_generation.py`. It is additive: the default 1.0 keeps published decodes byte-identical (R3, the P9-G exception). Add a `LENGTH_PENALTY` lever to `scripts/eval_report_eos_h100.sh`; each arm writes to its own dump directory (`results/chat_report_eos_lp<NNN>_test_split_s42`), and the CheXbert and compare jobs take that DUMP_DIR.
   - **Cluster.** One G4-style chain (decode → CheXbert → compare against the published run, the same gate) per α ∈ {1.5, 2.0}.
@@ -4343,6 +4345,16 @@ What it means for the plan:
   - **Result, α = 1.5 (2026-10-12): no effect.** Jobs 2638779 (decode, 32 min, gx08), 2638780 (CheXbert, 15 min) and 2638781 (compare, 13 min), sync 4a71f55 clean. 2,662 of 2,663 reports end at EOS. 44.6 words (69.0 tokens) against α = 1.0's 44.2 (68.3). Every metric is within 0.002 of α = 1.0: ROUGE-L 0.1949, BLEU-1 0.1941, BLEU-4 0.0468, CheXbert-14 micro 0.4471, 14-macro 0.2619, 5-micro 0.5132, 5-macro 0.4129. Gate: fail, with the same six metrics worse than the published run.
   - **Why (read from the code, 2026-10-12).** `beam_search_decode_eos` (`scripts/evaluate_report_generation.py`) stops as soon as the best finished hypothesis scores at least as well as the best live beam, which is top-hypothesis stopping. When an EOS is set aside, it and every live beam have the same length, so length^α divides both sides alike. The stop decision is therefore independent of α, and so is the ranking within a step. α acts only when a hypothesis that finished earlier meets a longer live beam with a near-equal score. The prediction above assumed that α re-ranks finished hypotheses against longer ones. Under this search it cannot.
   - **Revised prediction for α = 2.0 (recorded 2026-10-12, before its result):** 44.5–46.0 words; at least 2,660 reports end at EOS; the gate fails on the same CheXbert metrics; ROUGE-L between 0.194 and 0.196. If that holds, the 48–60 words above is falsified and the decision rule keeps α = 1.0. A lever that can lengthen reports under this search has to act at the EOS step itself: a penalty on the EOS log-probability, or a minimum number of new tokens that generalises the existing step-0 EOS drop.
+  - **Result, α = 2.0 (2026-10-13): no effect; the revised prediction held on all four counts.** Jobs 2638782 (decode, 31.5 min, gx14), 2638783 (CheXbert, 15 min) and 2638784 (compare, 11 min), sync d283b69 clean.
+    - 2,662 of 2,663 reports end at EOS; 1 is cut at the 200-token budget.
+    - 44.9 words (69.4 tokens), against α = 1.0's 44.2 and α = 1.5's 44.6. The published run writes 58.5 and the references 72.3.
+    - ROUGE-L 0.1952, BLEU-1 0.1960, BLEU-4 0.0474, CheXbert-14 micro 0.4489, 14-macro 0.2635, 5-micro 0.5155, 5-macro 0.4149.
+    - Gate: fail, with the same six metrics worse than the published run (BLEU-1 −0.052, BLEU-4 −0.010, CheXbert −0.016 to −0.021, every CI below 0). ROUGE-L is significantly better (+0.0033, CI 0.0008 to 0.0057).
+    - Per label, Pneumonia, Fracture, Edema and Pleural Effusion are worse and No Finding is better.
+    - Report shape: share unterminated 0.21 against the published 0.77 (references 0.24); share with a repeat 0.019 against 0.141 (references 0.011).
+  - **Decision (the rule above): keep α = 1.0** as the EOS model's serving default. Nothing changes in the served decode.
+    - The trade-off, reported to the user: the EOS model ends its reports cleanly and keeps ROUGE-L, at about 2 points of CheXbert F1 and 5 of BLEU-1.
+    - A lever that can lengthen reports under top-hypothesis stopping has to act at the EOS step: an EOS log-probability penalty, or a minimum-new-tokens floor. It is offered to the user as new work and not started.
 
 ---
 
