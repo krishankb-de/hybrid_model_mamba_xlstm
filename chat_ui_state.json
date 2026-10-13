@@ -163,7 +163,8 @@
     "U9_execution": "subagent-driven development with a review after every task",
     "workspace": "work in place on branch chat_ui (user-declared branch; venv/ and the editable install live in this checkout)",
     "U10_stop_condition": "2026-10-09 user approved the learned stop condition (P9-G1..G5), scheduled right after P4-G. User priority: every turn delivers the similar X-rays and a generated report that ends at its own natural end, then stops.",
-    "P6-G": "2026-10-13 (user): the user-turn thumbnail opens the viewer, as CHAT_UI_SPEC.md:310 says (overrides the P6 fix 1 'accepted as built' ruling) -> P6-G"
+    "P6-G": "2026-10-13 (user): the user-turn thumbnail opens the viewer, as CHAT_UI_SPEC.md:310 says (overrides the P6 fix 1 'accepted as built' ruling) -> P6-G",
+    "P8-D-followup-public": "2026-10-13: store_failed is an authored error kind (public mode keeps its fixed message); accepted from the P8-D follow-up"
   },
   "open_questions": [],
   "phase_order": [
@@ -646,7 +647,8 @@
         "p8f_diag_J2": "2649956 one CPU: A 9235 ms, D 0.98x, all arms ~1.0 (prediction right)",
         "p8f_diag_J3": "2649957 OMP_WAIT_POLICY=PASSIVE: A 9521 ms, D 0.98x (spinning is what makes A fast)",
         "p8f_root_cause": "two libgomp pools (main thread from engine load + worker) -> managed 16 > 8 CPUs -> spin throttled to 100 -> passive -> 8 threads as slow as 1",
-        "p8f_part3_merge": "9680fe6 (pick of 7c194ff; review approved, minors carried); tree == the gated 7c194ff (validate 5228 passed, e2e 36, layout 366/0, browser 10/0)"
+        "p8f_part3_merge": "9680fe6 (pick of 7c194ff; review approved, minors carried); tree == the gated 7c194ff (validate 5228 passed, e2e 36, layout 366/0, browser 10/0)",
+        "p8d_followup": "merged (picks of 47d39d0, 6f297f4; review approved): store failure mid-turn ends error/store_failed; Store._held overlay applied by get_message, events_after, get_session, export; gates on the identical tree: validate 5243 passed, e2e 40, layout 366/0, browser 10/0"
       },
       "verdict": null
     },
@@ -827,9 +829,10 @@
     "P9-G6: length-normalised beam search measured at α = 1.5 and 2.0 — no effect under top-hypothesis stopping (44.6 / 44.9 words vs 44.2); gate fails at both; decision rule keeps α = 1.0; EOS-step lever offered to the user",
     "User 2026-10-13: 'Resume the process'; the user-turn thumbnail opens the viewer (new box P6-G); merged agent worktrees deleted (21). Cluster: P9-G6 alpha 2.0 chain completed (ticked: no effect, keep alpha 1.0); serve 2647167 ended at its 24 h limit (TIMEOUT); the restart (sync + submit) was refused by the auto-mode classifier as a production deploy, so it waits for the user.",
     "P8-F part 3 merged (9680fe6); acceptance prediction recorded (R4) before the serve job runs it",
-    "P6-G: the user-turn thumbnail opens the viewer exactly as the card's 'Your X-ray' tile does (ownXraySide shared in render.js; opener passed; focus kept across the message_start redraw); merged 1bd5b92; gates green on 1bd5b92"
+    "P6-G: the user-turn thumbnail opens the viewer exactly as the card's 'Your X-ray' tile does (ownXraySide shared in render.js; opener passed; focus kept across the message_start redraw); merged 1bd5b92; gates green on 1bd5b92",
+    "P8-D follow-up merged: a store failure mid-turn ends the turn as error/store_failed (live stream and every read agree; polling stops)"
   ],
-  "last_updated": "2026-10-13T18:07:53+02:00",
+  "last_updated": "2026-10-13T19:43:19+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -913,7 +916,8 @@
       "P6-F minors: tests/chat_ui_url_cases.py:93 type comment uses List without importing it; chat_ui_cdp.py:72 and the flags-test docstring say \"Chrome's default flags (10 of 30)\" where the baseline arm was the four earlier flags; the tiny-only proof reads model cards only",
       "P7-E minors: tests/test_chat_requeue_drill.py duplicates sibling helpers (the_result, offline, no_ambient_token, sse) and re-runs the load drill's refusal matrices (one case per refusal would prove the wiring); the ports pin is name-keyed and does not assert its 4 allowed tests stay process-free; a silent stream's 'timeout' could in theory be relabelled 'reset' (give TurnReader._read's two handlers stream.end = stream.end or ...)",
       "P8-F part 3 minors: app/cli.py:19-22 docstring drift (SIGINT during loading now waits for start_up on the worker, then exits 130); latent gc-timing flake in older thread-count tests (tests/test_chat_decode_timing.py:882-886/893-898/1059-1063, tests/test_app_retention.py:116-122: compare by identity or gc.collect() first); Worker.call would deadlock if called from the worker thread or block if called from async code (docstring clause); the pins match ast.Call only (check every ast.Name load of _engines/_require_eos_entries_marked/_wire_gallery); nits: the libgomp rationale written 4x, test helper release duplicates cli._release, pins reuse _timing_inner",
-      "P6-G minors: renderNeighbors (render.js:688) could reuse ownXraySide; refuse() after a pre-accept preview with the viewer open leaves focus on body (app.js:965-973); the features check's open/close alternation shifted by one picture (artifact); ~3 MB of PNG churn from regenerated evidence; the live redraw under an open viewer is covered by the node shim only"
+      "P6-G minors: renderNeighbors (render.js:688) could reuse ownXraySide; refuse() after a pre-accept preview with the viewer open leaves focus on body (app.js:965-973); the features check's open/close alternation shifted by one picture (artifact); ~3 MB of PNG churn from regenerated evidence; the live redraw under an open viewer is covered by the node shim only",
+      "P8-D follow-up minors (review approved): a landed-then-failed ending write repeats the ending in reads (two message_stops; _held_rows could skip held events once a message_stop is stored); a one-off failure on the ending itself is held, never retried (row stays running until restart); the retention sweep skips a held turn's session until restart (exclude held ids in _EXPIRED/_purge, drop the entry on purge); log wording 'could not store an event' also for failed reads (message_visible/upload_path); the store-file read at pipeline.py:327 bypasses _store (EIO ends model_error with a traceback naming the upload path); session reads/exports decode JSON under Store._lock; no test injects OSError or a one-off finish_turn failure; STORE_FAILED_MSG names two different sentences in the tests; the umask test sits under e2e marks so validate never runs it; a held message_stop after a stored error gets a second error (server_restart) at the next start (plan-mandated)"
     ],
     "P9-G5": [],
     "P5-D": [
@@ -941,10 +945,7 @@
       "part 2 (proposed, on the user's go-ahead): diagnose the worker-thread 3x with the same job, no code change — J1 MALLOC_ARENA_MAX=1, J2 --cpus-per-task=1, J3 OMP_WAIT_POLICY=PASSIVE (predictions in the plan + predictions[P8-F-diag]); then fix (likely a wrapper env line or an allocator), redeploy the serve job, re-run the probe",
       "then tick P8-F: record first byte (probe ≤ 144 ms), full turn (EOS default 5.9 s mean, published ~8 s; after the fix, re-measured), 375 px (layout check), no external requests + no EventSource (static tests)"
     ],
-    "P8-D-followup": [
-      "store failure mid-turn (sqlite 'database or disk is full'): today the stream ends with no error/message_stop and the message stays running until the next start, so the page polls forever; fix per .superpowers/sdd/CHAT_UI_PLAN/task-P8-D-followup-rulings.md (error{store_failed} + message_stop emitted unstored with contiguous seq; one in-memory overlay applied by every read; chaos item 8 + e2e) — not started (user stop 2026-10-12)",
-      "P8-D review minors folded into that task: test_app_chaos.py docstring '1 MB image' (is ~103 KB) and 'refused before parsed' unshown; the refused-CLI test promises 'no endpoint file' without passing --endpoint-file; e2e TokenServer.direct_url unused; token file needs os.fchmod(fd, 0o600); 6c test needs a baseline 200 before the rmtree"
-    ],
+    "P8-D-followup": [],
     "P7-E": [
       "drill script merged (4ae8633 + cfc1709, reviewed: R7 traced, waits bounded, requeue at most once). Run it on the cluster AFTER P8-F part 3 is merged and synced, since the requeue restarts the serve job onto that code: venv/bin/python scripts/chat_requeue_drill.py http://localhost:8010 --job <serve job> --token-file <token file>; tell the user when the live server goes down and comes back; read the D22 lines ([server] sqlite journal_mode=..., [server] recovered N running turn(s)) via chat_remote.sh summary logs/chat_server_<job>.log; record node, requeue_s, back_s (includes queue wait + load + tunnel re-attach), turn status; then tick P7-E"
     ]
