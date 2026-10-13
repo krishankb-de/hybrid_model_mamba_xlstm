@@ -502,7 +502,8 @@ class Pipeline:
 
 
 class Worker:
-    """The server's one worker thread (ThreadPoolExecutor, max_workers=1) and its admission count.
+    """The server's one worker thread (ThreadPoolExecutor, max_workers=1) and its admission count. The server builds its engines on that
+    thread too (call), before it attaches the pipeline, so that thread is the only one that runs a torch op (P8-F part 3).
 
     At most `cap` turns are accepted and unfinished at once: reserve() counts a turn in (False means refuse it with
     429), and the worker's finally counts it out once its ending is stored, before done() ends its stream. Each turn
@@ -558,6 +559,13 @@ class Worker:
             raise
         future.add_done_callback(lambda _: self.release())
         return future
+
+    def call(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Run fn(*args, **kwargs) on the worker thread and wait for it: -> what it returned, or what it raised, raised here as it was. Not a
+        turn: it takes no slot. create_app builds the engines this way (P8-F part 3), so that the thread that loaded them runs every turn:
+        libgomp gives each thread that enters a parallel region a pool of its own for the thread's life, and a second pool on the same CPUs
+        makes OpenMP sleep where it would spin."""
+        return self._pool.submit(fn, *args, **kwargs).result()
 
     def _run(self, job: TurnJob, emit: Emit, stop: Stop, done: Callable[[], None]) -> None:
         try:

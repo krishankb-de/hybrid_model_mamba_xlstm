@@ -697,6 +697,9 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     marker, is not there is refused with ModelUnavailable, before the database is opened. An entry marked `eos` whose engine's card does not
     say eos_trained (its run metadata is missing, damaged or lacks the flag) is refused the same way once the engines are built, the store
     closed: it would otherwise be served without its stop.
+
+    The engines are built, and their towers hashed for the gallery, on the worker's thread, the one that runs every turn (P8-F part 3): no
+    other thread of the process runs a torch op. A start refused once the database is open closes it and ends that thread.
     """
     if mode not in ("private", "public"):
         raise ValueError("mode must be 'private' or 'public', got {!r}".format(mode))
@@ -730,18 +733,32 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
                 purged, ", ".join("{} {} d".format(m, d) for m, d in sorted(policy.items()))), flush=True)
 
     sweeper = retention.RetentionSweeper(store, policy, report=report_sweep)   # started with the server, in the lifespan
+    # P8-F part 3: the worker is made before the engines and builds them, so the thread that runs every turn is the one thread of this process
+    # that runs a torch op. libgomp gives each thread that enters a parallel region a pool of its own for the thread's life: engines built on
+    # the main thread gave it a pool beside the worker's, and with twice as many OpenMP threads as CPUs a decode ran about 3 times slower.
+    worker = Worker(None, queue_cap)
+
+    def start_up(given: Optional[Gallery]) -> Tuple[Dict[str, Engine], str, Optional[Gallery], Optional[List[str]]]:
+        """The start's torch work, on the worker thread: the engines are built and loaded, and the gallery's tower check hashes their weights.
+        -> (the engines, the default model, the gallery, the engines it serves)."""
+        built = _engines(engine, models, tiny_step_delay_s, drift_note, device, threads, store.home)
+        _require_eos_entries_marked(built)   # P9-G5a fix 1: inside the start's try below, so that a refusal closes the store
+        default = next(iter(built))
+        wired, served = _wire_gallery(given, gallery_dir, tiny_gallery, store.home, built, default)
+        return built, default, wired, served
+
     try:
-        engines = _engines(engine, models, tiny_step_delay_s, drift_note, device, threads, store.home)
-        _require_eos_entries_marked(engines)   # P9-G5a fix 1: inside this block, so that a refusal closes the store
-        default_model = next(iter(engines))
-        gallery, retrieval_models = _wire_gallery(gallery, gallery_dir, tiny_gallery, store.home, engines, default_model)
+        engines, default_model, gallery, retrieval_models = worker.call(start_up, gallery)
         labeler = _wire_labeler(labeler, labeler_url, tiny_gallery)
         published = _wire_published(published_dirs, gallery)
     except BaseException:
-        store.close()
+        try:
+            worker.shutdown()   # a refused start leaves no thread behind
+        finally:
+            store.close()
         raise
-    worker = Worker(Pipeline(engines, default_model, store, mode, gallery=gallery, labeler=labeler, published=published,
-                             drift_note=drift_note, retrieval_models=retrieval_models), queue_cap)
+    worker.pipeline = Pipeline(engines, default_model, store, mode, gallery=gallery, labeler=labeler, published=published,
+                               drift_note=drift_note, retrieval_models=retrieval_models)
     static_dir = STATIC_DIR
     # Read once, here: the code this process runs is what it imported at the start, whatever the checkout says later (P4-H A2). The card's
     # provenance: the checkout's HEAD, else the .sync_stamp; "-dirty" when that tree had changes its commit does not hold. /healthz needs

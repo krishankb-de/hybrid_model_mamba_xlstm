@@ -9791,6 +9791,64 @@ def test_the_decode_timing_script_ends_a_turn_that_never_ends_at_300_s_reads_the
     assert "ARMS[1:]" in ast.unparse(over) and "ALL_ARMS" not in ast.unparse(over), "the threshold looks at A to F only: A-end is drift, not a part of the path"
 
 
+# ── CHAT_UI_PLAN.md P8-F (part 3): one OpenMP pool per server process ─────────
+# libgomp gives each thread that enters a parallel region a pool of its own, for the life of the thread. So the engines are built on the Worker's
+# one thread, the thread that runs the turns, through its blocking Worker.call, and tests/test_app_worker_thread.py exercises that. These pins hold
+# what an edit could undo with no laptop test failing (the throttle shows on the cluster's libgomp only): a build or a tower hash reached from
+# create_app on the calling thread, a worker made after the engines, a worker with more than one thread.
+
+_SERVER = REPO_ROOT / "app" / "server.py"
+_PIPELINE = REPO_ROOT / "app" / "pipeline.py"
+
+
+def _tree_and_parents(path):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return tree, {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+
+def _calls_named(root, dotted):
+    return [n for n in ast.walk(root) if isinstance(n, ast.Call) and ast.unparse(n.func) == dotted]
+
+
+def test_create_app_reaches_the_engines_and_their_towers_only_through_the_workers_blocking_call():
+    tree, parents = _tree_and_parents(_SERVER)
+    create = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "create_app")
+    blocking = _calls_named(create, "worker.call")
+    assert len(blocking) == 1 and isinstance(blocking[0].args[0], ast.Name), "one blocking call on the worker, with a function of create_app"
+    start = blocking[0].args[0].id
+    nested = [n for n in ast.walk(create) if isinstance(n, ast.FunctionDef) and n.name == start]
+    assert len(nested) == 1 and parents[nested[0]] is create, "the function the worker runs is create_app's own"
+    assert [n for n in ast.walk(create) if isinstance(n, ast.Name) and n.id == start] == [blocking[0].args[0]], "it runs there and nowhere else"
+    for name in ("_engines", "_require_eos_entries_marked", "_wire_gallery"):   # the build, the EOS check of the cards, the tower check
+        assert [_timing_inner(n, parents) for n in _calls_named(tree, name)] == [start], name + " is reached only through the worker"
+    assert {_timing_inner(n, parents) for n in _calls_named(tree, "build_engine")} == {"_engines"}, "the tiny engine and both kinds of real one"
+    hashes = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "tower_sha256"]
+    assert [_timing_inner(n, parents) for n in hashes] == ["_wire_gallery"]
+    workers = _calls_named(create, "Worker")
+    assert [ast.unparse(n) for n in workers] == ["Worker(None, queue_cap)"] and workers[0].lineno < blocking[0].lineno, "the worker comes first"
+    attached = [n for n in ast.walk(create) if isinstance(n, ast.Assign) and [ast.unparse(t) for t in n.targets] == ["worker.pipeline"]]
+    assert len(attached) == 1 and attached[0].lineno > blocking[0].lineno, "its pipeline is attached once the engines are built"
+
+
+def test_the_workers_blocking_call_queues_on_its_one_thread_the_thread_of_the_turns():
+    tree, parents = _tree_and_parents(_PIPELINE)
+    worker = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Worker")
+    methods = {n.name: n for n in worker.body if isinstance(n, ast.FunctionDef)}
+    pools = _calls_named(worker, "ThreadPoolExecutor")
+    assert [_timing_inner(n, parents) for n in pools] == ["__init__"]
+    assert {k.arg: ast.unparse(k.value) for k in pools[0].keywords} == {"max_workers": "1", "thread_name_prefix": "'turn'"}, "one thread"
+    assert [ast.unparse(s) for s in methods["call"].body if not isinstance(s, ast.Expr)] == ["return self._pool.submit(fn, *args, **kwargs).result()"]
+    for name in ("submit", "run_task"):
+        assert _calls_named(methods[name], "self._pool.submit"), name + " queues on the same pool"
+
+
+def test_the_decode_timing_script_says_that_its_worker_arms_measure_the_old_server_shape():
+    """The timing script builds its engine in the main thread on purpose (arms A to C decode there), so the arms that decode on another thread
+    carry a second libgomp pool by construction."""
+    doc = " ".join(ast.get_docstring(_timing_tree()[0]).split())
+    assert "Arms D, E, E-local and F carry the second-pool penalty by construction, so they measure the old server shape" in doc
+
+
 # ── CHAT_UI_PLAN.md P8-D: the chaos checklist ─────────────────────────────────
 # Seven items, run as tests: tests/test_app_chaos.py (the API side: real processes, the labeller, the gallery, the store; part of validate.sh)
 # and tests/e2e/test_chaos_e2e.py (the page side, in a real Chrome; run with -m e2e). Each test is named test_chaos_<item>_... and says its item

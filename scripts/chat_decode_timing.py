@@ -28,7 +28,9 @@ the local directory is on a local disk, and the home on nfs); E to F the HTTP an
 where the live one is on the laptop, so F reads a little high by the client's own wake-ups. E, E-local and F report the turn's total_ms too, but
 the job runs no labeller: the label stage and the CheXbert half of the score stage do not run, so that total is not the live turn's. If every
 arm, A included, is slow, the code path is not the cause: the environment line says what the node gave this job, and A-end and the load readings
-say whether that changed while it ran.
+say whether that changed while it ran. Arms D, E, E-local and F carry the second-pool penalty by construction, so they measure the old server
+shape: arms A to C give the main thread a libgomp pool, which lasts as long as the thread, and the thread that decodes D, E, E-local or F makes a
+second one (P8-F part 3).
 
 The engine is built as the server builds it (app.server._engines, which is what app/cli.py reaches through create_app) on the CPU, with the
 published protocol (app.pipeline.PUBLISHED_PROTOCOL: beam 3, 100 tokens, no stop on repeat, no compile) and cached decode, the server's default.
