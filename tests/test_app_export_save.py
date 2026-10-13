@@ -12,7 +12,6 @@ import os
 import re
 import sqlite3
 import stat
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -199,8 +198,11 @@ def test_an_unknown_session_is_a_404_in_the_envelope_and_writes_nothing(client):
 def test_a_deleted_session_is_a_404_as_it_is_for_the_export_and_writes_nothing(client):
     sid = make_session(client)
     assert client.delete("/v1/sessions/{}".format(sid)).status_code == 204
-    assert client.get("/v1/sessions/{}/export".format(sid)).status_code == 404
-    assert client.post(SAVE.format(sid)).status_code == 404 and not exports_dir(client).exists()
+    gone = client.get("/v1/sessions/{}/export".format(sid))
+    assert gone.status_code == 404 and gone.json()["error"]["message"] == "Session not found."
+    refused = client.post(SAVE.format(sid))
+    assert refused.status_code == 404 and refused.json() == gone.json(), "the session's own refusal, not the 404 of a route that is not there"
+    assert not exports_dir(client).exists()
 
 
 @pytest.mark.parametrize("fmt", ["xml", "pdf", "JSON", "", "json,md", "md "])

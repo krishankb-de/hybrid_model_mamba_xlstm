@@ -8,7 +8,6 @@ Here it runs against a real uvicorn over the tiny engine and the tiny gallery (s
 every text it sends. Nothing in this module connects to port 8000 (the user's dev server) or 8010 (the tunnel to the live server): the socket guard
 below stops it, and the only places that write either number are the guard and the refusal tests that run with a client that cannot connect.
 """
-import ast
 import io
 import json
 import os
