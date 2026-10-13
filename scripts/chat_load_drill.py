@@ -360,10 +360,11 @@ def run_turns(client: httpx.Client, session_id: str, args: argparse.Namespace, o
 
 # ---- the session and the result -------------------------------------------------------------------------------------------------
 
-def create_session(client: httpx.Client) -> str:
-    """-> the new session's id. DrillError, with a code that holds no part of the answer, when there is none."""
+def create_session(client: httpx.Client, title: Optional[str] = None) -> str:
+    """-> the new session's id. DrillError, with a code that holds no part of the answer, when there is none. `title` (P9-C: the demo's session is
+    named) is the session's title; without one the body is empty and the server names the session by its first turn, as it always did."""
     try:
-        response = client.post("/v1/sessions", json={})
+        response = client.post("/v1/sessions", json={} if title is None else {"title": title})
     except httpx.HTTPError as exc:
         raise DrillError("session_create_" + type(exc).__name__) from None
     if response.status_code != 200:

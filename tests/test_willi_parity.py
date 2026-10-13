@@ -10536,3 +10536,225 @@ def test_the_save_route_is_private_only_before_anything_else_and_answers_a_name_
         assert uses and all(isinstance(parents[u], ast.Call) and ast.unparse(parents[u].func) == "type" for u in uses), "the class, never the text"
     assert [ast.unparse(c.args[0]) for c in ast.walk(route) if isinstance(c, ast.Call) and ast.unparse(c.func) == "log.warning"] == ["'could not save an export: %s'"]
     assert [ast.unparse(c.args[1]) for c in ast.walk(route) if isinstance(c, ast.Call) and ast.unparse(c.func) == "HTTPException" and len(c.args) > 1][-1] == "SAVE_EXPORT_FAILED_MSG"
+
+
+# ── CHAT_UI_PLAN.md P9-C, part 3: the demo session driver ─────────────────────
+# Static pins on scripts/chat_demo_session.py, the driver the laptop runs against the cluster's live server through the tunnel: it runs the five
+# test-split turns of the supervisor demo and has the server save the session's export on its own disk, and it prints numbers only because that
+# server streams MIMIC-derived text (R7). Its behaviour (the run against a real tiny server, the line, the exit statuses, the refusals, the fixed
+# codes, the sentinel fake server) is run for real in tests/test_chat_demo_session.py. These pins hold what a later edit could break without a test
+# noticing: what it imports, where its token comes from, that it never deletes the session, the ports it never names, and what can reach its streams.
+
+_DEMO = REPO_ROOT / "scripts" / "chat_demo_session.py"
+_DEMO_TESTS = REPO_ROOT / "tests" / "test_chat_demo_session.py"
+
+
+def _demo_tree():
+    """-> (the script's syntax tree, a map from each node to its parent)."""
+    tree = ast.parse(_DEMO.read_text(encoding="utf-8"))
+    return tree, {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+
+def _demo_calls(tree, dotted):
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == dotted]
+
+
+def _demo_outer(node, parents):
+    """The name of the module-level function a node is in, however deep it sits, or None."""
+    name = None
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            name = node.name
+    return name
+
+
+def test_the_demo_session_imports_httpx_the_standard_library_and_the_drill_and_the_probe_beside_it_and_nothing_else():
+    """Like the probe it runs on the laptop, in the venv, beside the tunnel, with the server's code absent: httpx and the standard library, no other
+    HTTP client, nothing of the app or the model stack, and of its own repository only the load drill and the probe, whose transport and reading
+    helpers it imports (the URL check, the token, the one write, the session call, the turn's reader). No json: the RESULT line is the probe's own
+    result_line. It makes one httpx client, built in main, which goes straight to the URL it was given (no proxy named in the environment, no
+    redirect), because the token and the stream travel on it; httpx's module-level functions build a client of their own with the defaults."""
+    if not hasattr(sys, "stdlib_module_names"):
+        pytest.skip("sys.stdlib_module_names needs Python 3.10")
+    roots, first_party = _imports_of(_DEMO)
+    assert roots <= {"argparse", "os", "re", "sys", "time", "dataclasses", "typing", "httpx", "scripts"}, sorted(roots)
+    assert roots - {"httpx", "scripts"} <= set(sys.stdlib_module_names)
+    assert not first_party and not roots & {"app", "tests", "hybrid_xmamba", "torch", "numpy", "PIL", "json"}, sorted(roots)
+    stdlib_http = {"urllib", "http", "socket", "ssl", "ftplib", "smtplib", "xmlrpc", "asyncio", "selectors", "socketserver", "wsgiref", "subprocess"}
+    assert not roots & stdlib_http, sorted(roots & stdlib_http)
+    tree, parents = _demo_tree()
+    from_scripts = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "scripts"]
+    assert sorted([(a.name, a.asname) for a in n.names][0] for n in from_scripts) == [("chat_load_drill", "drill"), ("chat_realturn_probe", "probe")]
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Import) and any(a.name.split(".")[0] == "scripts" for a in n.names)]
+    clients = _demo_calls(tree, "httpx.Client")
+    assert len(clients) == 1 and _demo_outer(clients[0], parents) == "main", "one client, for everything it sends"
+    settings = {k.arg: getattr(k.value, "value", None) for k in clients[0].keywords}
+    assert settings.get("trust_env") is False and settings.get("follow_redirects") is False, settings
+    functions = {"httpx." + name for name in ("get", "post", "put", "patch", "delete", "head", "options", "request", "stream")}
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) in functions]
+    assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "os"} == {"path"}
+    assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and ast.unparse(n.value) == "os.path"} == {"dirname", "abspath"}
+    assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "sys"} == {
+        "path", "stdout", "stderr", "exit"}
+
+
+def test_the_demo_session_reads_its_token_only_through_the_drills_find_token_from_chat_token_or_a_token_file():
+    """A token on the command line shows in `ps` and in the shell history. The driver reads no environment variable and no argument itself: the one read
+    of the token is the drill's find_token, which takes CHAT_TOKEN or the file named by --token-file (the one option that names a token); the one
+    positional is the URL; the parser is the drill's own and takes no abbreviation (`--token abc` must not become `--token-file abc`); the URL goes
+    through the drill's check (the dev server's port refused) and must be a loopback address; and a token is not sent over plain http to a host that is
+    not loopback: both refusals are raised in main, on exactly those conditions, before the client that would send anything is built."""
+    tree, parents = _demo_tree()
+    plain = {t.id: ast.unparse(n.value) for n in tree.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)}
+    assert plain["CLIENT_ID"] == "'chat-demo-session'" and plain["TITLE"] == "'Supervisor demo'" and plain["SAVE_FORMATS"] == "('json', 'md')"
+    assert plain["DEFAULT_MAX_NEW_TOKENS"] == "probe.DEFAULT_EOS_TOKENS"
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in ("environ", "environb", "getenv", "argv")]
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module in ("os", "sys")]
+    assert not _demo_calls(tree, "drill.read_token")
+    finds = _demo_calls(tree, "drill.find_token")
+    assert len(finds) == 1 and ast.unparse(finds[0].args[0]) == "args.token_file" and _demo_outer(finds[0], parents) == "main"
+    checks = _demo_calls(tree, "drill.check_url")
+    assert len(checks) == 1 and ast.unparse(checks[0].args[0]) == "args.url" and _demo_outer(checks[0], parents) == "main"
+    adds = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "add_argument"]
+    added = [[a.value for a in n.args if isinstance(a, ast.Constant) and isinstance(a.value, str)] for n in adds]
+    assert [names[0] for names in added if not names[0].startswith("-")] == ["url"], "no positional but the URL"
+    assert sorted(name for names in added for name in names if name.startswith("-")) == sorted(
+        ["--rows", "--token-file", "--max-new-tokens", "--timeout", "-h", "--help"]), "the only option that takes a token is --token-file"
+    assert not [k for call in adds for k in call.keywords if k.arg == "dest"], "no option under another name"
+    parsers = _demo_calls(tree, "drill._Parser")
+    assert len(parsers) == 1 and [k.value.value for k in parsers[0].keywords if k.arg == "allow_abbrev"] == [False]
+    clients = _demo_calls(tree, "httpx.Client")
+
+    def guard_of(constant):
+        found = [n for n in _demo_calls(tree, "drill.Refused") if n.args and ast.unparse(n.args[0]) == constant]
+        assert len(found) == 1 and _demo_outer(found[0], parents) == "main", constant
+        assert found[0].lineno < clients[0].lineno, "the refusal comes before the client exists"
+        return parents[parents[found[0]]]            # Refused(...) <- raise <- if
+
+    assert ast.unparse(guard_of("drill.CLEARTEXT_REFUSAL").test) == "token is not None and drill.sends_token_in_clear(base)"
+    assert ast.unparse(guard_of("LOOPBACK_REFUSAL").test) == "not drill.is_loopback(httpx.URL(base).host)"
+    bearers = [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.startswith("Bearer")]
+    assert len(bearers) == 1 and _demo_outer(bearers[0], parents) == "main" and ast.unparse(parents[bearers[0]]) == "'Bearer ' + token"
+    headers = [n for n in ast.walk(tree) if isinstance(n, ast.Dict) and any(isinstance(k, ast.Constant) and k.value == "X-Client-Id" for k in n.keys)]
+    assert len(headers) == 1 and ast.unparse(headers[0]) == "{'X-Client-Id': CLIENT_ID}", "the client id is fixed"
+
+
+def test_the_demo_session_never_deletes_the_session_it_makes_and_sends_exactly_the_requests_it_names():
+    """The session is for the user to open in the page: the driver makes it and keeps it. It calls neither the drill's delete_session nor any delete,
+    get, put, patch, head or generic request on a client. The requests it makes are the drill's one session POST, the probe's turn POSTs (a stream, in
+    run_turn) and its own two save POSTs, from one place."""
+    tree, parents = _demo_tree()
+    source = _DEMO.read_text(encoding="utf-8")
+    assert "delete_session" not in source and "DELETE" not in source and "delete(" not in source
+    verbs = {n.func.attr for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and isinstance(n.func.value, ast.Name) and n.func.value.id == "client"}
+    assert verbs == {"post"}, verbs
+    posts = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == "client.post"]
+    assert [_demo_outer(n, parents) for n in posts] == ["save_export"] and ast.unparse(posts[0].args[0]) == "SAVE_PATH.format(session_id)"
+    assert [ast.unparse(k.value) for k in posts[0].keywords] == ["{'format': fmt}"]
+    assert [[ast.unparse(a) for a in c.args] for c in _demo_calls(tree, "drill.create_session")] == [["client", "TITLE"]], "one session, titled"
+    assert [_demo_outer(n, parents) for n in _demo_calls(tree, "drill.create_session")] == ["run_demo"]
+    assert [_demo_outer(n, parents) for n in _demo_calls(tree, "probe.run_turn")] == ["run_demo"], "every turn is read by the probe's reader"
+    saved = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == "demo.saved.append"]
+    assert [ast.unparse(n.args[0]) for n in saved] == ["name"] and [_demo_outer(n, parents) for n in saved] == ["run_demo"]
+
+
+def test_the_demo_session_never_says_either_of_the_ports_of_the_users_own_servers():
+    """8000 is the dev server's and 8010 the controller's tunnel (app/README.md). The driver is the load drill's own in what it refuses (the URL check
+    refuses the first), and no number or address of either is written anywhere in it: not in a constant, not in a message, not in the docstring."""
+    source = _DEMO.read_text(encoding="utf-8")
+    assert not re.search(r"\b(8000|8010)\b", source)
+    tree, _ = _demo_tree()
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value in (8000, 8010)]
+
+
+def test_the_demo_session_tests_name_the_users_ports_only_where_nothing_can_connect():
+    """8000 is the user's dev server and 8010 the tunnel to the live cluster server. The module's autouse socket guard keeps every test of
+    tests/test_chat_demo_session.py off both, but it works in the test process: a child process is not reached by it. So the numbers are written in the
+    guard's own constant and in the tests that run in this process with a client that cannot connect (the refusal matrix under `offline`, the check_url
+    matrix, the loopback matrix under a client that finds nobody), and nowhere else: not in a test that starts a process, not in a fixture, not in a
+    fake (a docstring aside). Each of those places must still name them, so that the list cannot drift."""
+    tree = ast.parse(_DEMO_TESTS.read_text(encoding="utf-8"))
+    docstrings = _requeue_docstrings(tree)
+    where = {}
+    for top in tree.body:
+        name = top.name if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else type(top).__name__
+        if isinstance(top, ast.Assign):
+            name = ast.unparse(top.targets[0])
+        for node in ast.walk(top):
+            if not isinstance(node, ast.Constant) or node in docstrings:
+                continue
+            if (type(node.value) is int and node.value in (8000, 8010)) or (isinstance(node.value, str) and re.search(r"(?<![0-9])(8000|8010)(?![0-9])", node.value)):
+                where.setdefault(name, []).append(node.value)
+    assert sorted(where) == sorted([
+        "FORBIDDEN_PORTS", "test_the_script_refuses_port_8000_in_one_line_with_exit_2_and_connects_to_nothing",
+        "test_only_port_8000_itself_is_refused_for_being_the_dev_server",
+        "test_a_loopback_address_gets_past_the_checks_to_its_first_request_which_nothing_answers"]), sorted(where)
+
+
+def test_the_demo_session_prints_and_writes_nothing_but_result_lines_help_and_its_fixed_refusals():
+    """R7. No print, no logging, no traceback, no file opened or written: every write is the load drill's one `_write`, and it has three callers in
+    main: the help text, a refusal (`ERROR ` and the text of a Refused, which is fixed) and the RESULT line, made by the probe's result_line out of
+    payload(), a dict of numbers, booleans, fixed words and the names of files the server wrote."""
+    tree, parents = _demo_tree()
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id in ("print", "open", "breakpoint", "exec", "eval", "input", "compile", "__import__")]
+    writers = {"write", "writelines", "write_text", "write_bytes", "dump", "flush", "truncate", "mkdir", "unlink", "rename", "replace", "touch"}
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in writers], "its own writes are the drill's, through one call"
+    sinks = _demo_calls(tree, "drill._write")
+    assert {_demo_outer(s, parents) for s in sinks} == {"main"}
+    assert sorted((ast.unparse(s.args[0]), ast.unparse(s.args[1])) for s in sinks) == sorted((stream, _normalized(shape)) for stream, shape in (
+        ("stderr", '"ERROR " + str(exc)'), ("stdout", 'parser.format_help().rstrip("\\n")'), ("stdout", "probe.result_line(result)")))
+    refusal = next(s for s in sinks if ast.unparse(s.args[1]) == _normalized('"ERROR " + str(exc)'))
+    handler = parents[refusal]
+    while not isinstance(handler, ast.ExceptHandler):
+        handler = parents[handler]
+    assert ast.unparse(handler.type) == "drill.Refused" and handler.name == "exc", "the text of a refusal is that of a Refused"
+    results = [n for n in ast.walk(tree) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "result" for t in n.targets)]
+    assert [ast.unparse(n.value) for n in results] == ["payload(args.rows, demo)"], "the line is payload()'s and nothing else"
+    streams = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "sys"
+               and n.attr in ("stdout", "stderr")]
+    assert {_demo_outer(n, parents) for n in streams} == {"main"} and len(streams) == 2, "the process's own streams are main's defaults"
+
+
+def test_the_demo_session_keeps_nothing_of_a_turn_or_an_answer_but_numbers_booleans_fixed_words_and_a_file_name_of_the_servers_own_shape():
+    """R7. A turn is read by the probe (its Facts hold numbers, booleans and words chosen from fixed lists, pinned with the probe), and this script puts
+    out of it a word chosen here (status_word), one word of the probe's lists, a class name or a literal (error_word) and a count. Of a save's answer it
+    returns one string, and only after it has been matched against the shape of the server's own file names for this session and format and checked to
+    come with a size under the probe's bound; every other end of save_export is a fixed code made here. The text of an exception is never used: every
+    handler but those of Refused and DrillError (whose texts are written in the drill) names the class."""
+    tree, parents = _demo_tree()
+    functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    assert sorted(ast.unparse(r.value) for r in ast.walk(functions["save_export"]) if isinstance(r, ast.Return)) == sorted(
+        _normalized(s) for s in ('(None, "save_" + type(exc).__name__)', '(None, "save_http_{}".format(response.status_code))', '(None, "save_bad_answer")',
+                                 "(name, None)"))
+    body = functions["save_export"].body
+    last_guard = next(i for i, s in enumerate(body) if isinstance(s, ast.If) and ast.unparse(s.test).startswith("not (named and"))
+    assert isinstance(body[-1], ast.Return) and ast.unparse(body[-1].value) == "(name, None)" and last_guard == len(body) - 2, "`name` is returned only past the check"
+    named = next(a for a in ast.walk(functions["save_export"]) if isinstance(a, ast.Assign) and ast.unparse(a.targets[0]) == "named")
+    assert "SAVED_NAME.fullmatch(name)" in ast.unparse(named.value) and "startswith('session-{}-'.format(session_id))" in ast.unparse(named.value)
+    assert "endswith('.' + fmt)" in ast.unparse(named.value)
+    assert ast.unparse(body[last_guard].test) == "not (named and type(size) is int and (0 < size < probe.NUMBER_LIMIT))"
+    assert {_demo_outer(n, parents) for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "json"} == set(), "no answer is parsed here but through the drill"
+    assert [_demo_outer(n, parents) for n in _demo_calls(tree, "drill._json_or_none")] == ["save_export"]
+    status = functions["status_word"]
+    assert sorted(ast.unparse(r.value) for r in ast.walk(status) if isinstance(r, ast.Return)) == sorted(
+        _normalized(s) for s in ('"timeout" if f.error == "timeout" else "failed"', '"refused" if f.status is not None else "failed"',
+                                 'f.final if f.final is not None else "incomplete"'))
+    assert [ast.unparse(r.value) for r in ast.walk(functions["error_word"]) if isinstance(r, ast.Return)] == ["word"]
+    assigned = [ast.unparse(a.value) for a in ast.walk(functions["error_word"]) if isinstance(a, ast.Assign)]
+    assert sorted(assigned) == sorted([_normalized("f.error or f.refusal or f.stream_error"), "'seq_gap'"])
+    handlers = [n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler) and n.name]
+    assert handlers, "the pin looks at something"
+    for handler in handlers:
+        for use in (n for stmt in handler.body for n in ast.walk(stmt) if isinstance(n, ast.Name) and n.id == handler.name):
+            parent = parents[use]
+            if ast.unparse(handler.type) in ("drill.Refused", "drill.DrillError"):
+                assert isinstance(parent, ast.Call) and ast.unparse(parent.func) == "str", ast.unparse(handler)   # fixed sentences and codes of the drill
+            else:   # `type(exc)`: the class, never the text
+                assert isinstance(parent, ast.Call) and ast.unparse(parent.func) == "type", ast.unparse(handler) + " uses " + handler.name
+    keys = [ast.unparse(k) for d in ast.walk(functions["payload"]) if isinstance(d, ast.Dict) for k in d.keys]
+    assert keys == ["'demo'", "'rows'", "'turns'", "'statuses'", "'tokens'", "'session'", "'saved'", "'ok'"], "the plan's keys, in its order"
+    subscripts = [ast.unparse(s.slice) for s in ast.walk(functions["payload"]) if isinstance(s, ast.Subscript) and isinstance(s.ctx, ast.Store)]
+    assert subscripts == ["'errors'", "'error'"], "and the two that are there only when something went wrong"
