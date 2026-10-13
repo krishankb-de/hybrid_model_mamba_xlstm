@@ -10244,3 +10244,231 @@ def test_the_two_refused_ports_are_written_once_and_no_script_of_the_checks_says
     cdp, _ = _chat_ui_tree("chat_ui_cdp")
     [ports] = [n for n in cdp.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "REFUSED_PORTS" for t in n.targets)]
     assert ast.unparse(ports.value) == "(8000, 8010)"
+
+
+# ── CHAT_UI_PLAN.md P9-C, part 1: the demo case picker ────────────────────────
+# Static pins on scripts/chat_demo_cases.py and its CPU wrapper scripts/chat_demo_cases_h100.sh. They pick the test studies for the supervisor demo
+# from the published run's reference labels, which say which test study has which finding: MIMIC-derived, so under rule R7 what they print is row
+# numbers, counts and fixed words (R7). Their behaviour (the draw, the kinds, the refusals, the lines, the wrapper rehearsed in a temp tree, the
+# allowlist run through grep) is exercised for real in tests/test_chat_demo_cases.py. These pins hold what a later edit could break without a test
+# noticing: what the wrapper asks SLURM for, what can reach the two output streams, which keys of the labels file are read, how the draw is made.
+
+_CASES = REPO_ROOT / "scripts" / "chat_demo_cases.py"
+_CASES_SH = REPO_ROOT / "scripts" / "chat_demo_cases_h100.sh"
+
+
+def _cases_tree():
+    """-> (the script's syntax tree, a map from each node to its parent)."""
+    tree = ast.parse(_CASES.read_text(encoding="utf-8"))
+    return tree, {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+
+def _cases_inner(node, parents):
+    """The name of the innermost function a node is in, or None at module level."""
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return node.name
+    return None
+
+
+def _cases_calls(tree, dotted):
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == dotted]
+
+
+def _cases_code():
+    return _gallery_wrapper_code(_CASES_SH.read_text())
+
+
+def test_the_demo_cases_wrapper_asks_slurm_for_a_small_cpu_job_with_the_chat_wrappers_partition_account_qos_and_exclude_list():
+    """The plan's invariants for a CPU job: the renamed partition, account aisc, qos aisc (the CPU-only combination), the three nodes that cannot run
+    it excluded, logs where every other wrapper puts them, the repository's `cd` line, and no --gres or --gpus. One CPU, 4 GB and ten minutes: it
+    reads a JSON file of 2,663 rows. It has no --requeue and no --open-mode: a job of a minute that writes its files once has nothing to resume."""
+    serve, serve_flags = _sbatch_options(_serve_text("serve_chat_h100.sh"))
+    mine, mine_flags = _sbatch_options(_CASES_SH.read_text())
+    for key in ("--partition", "--account", "--qos", "--exclude", "--output", "--error"):
+        assert mine[key] == serve[key], key
+    assert mine == {"--partition": "pot-hpi-aisc-batch", "--account": "aisc", "--qos": "aisc", "--exclude": "ga03,gx17v1,gx13v1",
+                    "--cpus-per-task": "1", "--mem": "4G", "--time": "00:10:00", "--job-name": "chat_demo_cases",
+                    "--output": "logs/%x_%j.log", "--error": "logs/%x_%j.log"}, mine
+    assert mine_flags == [] and "--requeue" not in _CASES_SH.read_text()
+    assert "--gres" not in _CASES_SH.read_text() and "--gpus" not in mine, "a CPU job"
+    assert 'cd "${SLURM_SUBMIT_DIR}/hybrid_model_mamba_xlstm" 2>/dev/null || cd "${SLURM_SUBMIT_DIR:-.}"' in _cases_code()
+
+
+def test_the_demo_cases_wrapper_prepares_like_the_other_chat_wrappers_and_prints_the_sync_line_first():
+    text, code = _CASES_SH.read_text(), "\n".join(_cases_code())
+    for needle in ("set -euo pipefail", 'VENV_ACTIVATE="${VENV_ACTIVATE:-.venv/bin/activate}"', 'CHAT_HOME="${CHAT_HOME:-$HOME/chat_sessions}"',
+                   'GALLERY="${GALLERY:-${CHAT_HOME}/gallery/g13d_m3_v1}"', 'PUBLISHED_MODEL="${PUBLISHED_MODEL:-results/report_gen_m3_test_split_s42}"',
+                   "export PYTHONUNBUFFERED=1", 'source "${VENV_ACTIVATE}"', "mkdir -p logs"):
+        assert needle in code, needle
+    train = _eos_wrapper_text()
+    start = train.index('SYNC="unknown"')
+    snippet = train[start:train.index('echo "=== sync ${SYNC} ==="', start) + len('echo "=== sync ${SYNC} ==="')]
+    assert snippet in text, "the P9-G3 provenance snippet, copied exactly"
+    sync = code.index('echo "=== sync ${SYNC} ==="')
+    assert code.index('echo "') == sync, "something is printed before the sync line"
+    assert code.index("python") > sync and code.index("source ") > sync and ".sync_stamp" in code[:sync]
+    assert code.index("umask 077") < code.index('mkdir -p "${CHAT_HOME}/logs"'), "what the job makes of its own is owner-only"
+    assert code.index('source "${VENV_ACTIVATE}"') < code.index("python scripts/chat_demo_cases.py")
+    assert "PYTHONPATH" not in code and "HF_" not in code, "the script is the standard library and the app's label list: no overlay, no model cache"
+
+
+def test_the_demo_cases_wrapper_validates_every_lever_before_anything_runs_and_no_refusal_echoes_a_value():
+    code_lines = _cases_code()
+    code = "\n".join(code_lines)
+    guards = ('[[ "$(basename "${GALLERY}")" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "GALLERY must end in one plain build name: letters, digits, dot, dash and underscore"',
+              '[[ "${PUBLISHED_MODEL}" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ && "${PUBLISHED_MODEL}" != *..* ]] || fail "PUBLISHED_MODEL must be a plain relative path: '
+              'letters, digits, dot, dash, underscore and slash, none leading and no .."',
+              '[ -d "${CHAT_HOME}" ] || fail "CHAT_HOME does not exist: run chat_cluster_setup_h100.sh first"',
+              '[ -f "${GALLERY}/manifest.json" ] || fail "the gallery has no manifest.json: build it first (P5-B)"',
+              '[ -f "${PUBLISHED_MODEL}/chexbert_labels.json" ] || fail "the published dump has no chexbert_labels.json"',
+              '[ -f "${VENV_ACTIVATE}" ] || fail "the venv\'s activate script is missing: run chat_cluster_setup_h100.sh first"',
+              '[ -f scripts/chat_demo_cases.py ] || fail "chat_demo_cases.py is missing from this tree: run chat_remote.sh sync first"')
+    banner = code.index('echo "=== chat demo cases: job=${JOB} node=$(hostname) gallery=$(basename "${GALLERY}") ==="')
+    for guard in guards:
+        assert guard in code, guard
+        assert code.index(guard) < banner < code.index("python scripts/chat_demo_cases.py"), guard
+    failed = re.findall(r'\bfail "([^"]*)"', code)
+    after_the_run = [m for m in failed if "${RESULTS}" in m or "could not be kept" in m]
+    levers = [m for m in failed if m not in after_the_run]
+    assert len(failed) == 9 and len(levers) == 7 and len(after_the_run) == 2, failed
+    echoed = re.findall(r'echo "([^"]*)"', code)
+    assert not [m for m in levers if "${" in m or "$(" in m], "a refusal quotes no variable"
+    assert all(re.match(r"(=== |ERROR )", m) for m in echoed), echoed
+    paths = ("${CHAT_HOME}", "${GALLERY}", "${OUT}", "${ERR}", "${PUBLISHED_MODEL}", "${SLURM_SUBMIT_DIR}")
+    assert not [m for m in echoed + failed if any(p in m for p in paths)], "a printed message names a path or a lever's value"
+    assert 'echo "ERROR the demo cases script exited with code ${rc} (see the logs under CHAT_HOME)"' in code
+    assert 'fail "the demo cases script printed ${RESULTS} result lines, not 1"' in code and '[ "${RESULTS}" -eq 1 ]' in code
+    notice = [m for m in echoed if m.startswith("=== demo cases:")]
+    assert len(notice) == 1 and "RESULT line" in notice[0] and "shown" in notice[0] and "never" not in notice[0], notice
+
+
+def test_the_demo_cases_wrapper_keeps_the_scripts_raw_output_in_files_and_lets_only_known_shapes_through_the_allowlist():
+    code_lines = _cases_code()
+    code = "\n".join(code_lines)
+    assert 'OUT="${CHAT_HOME}/logs/demo_cases_${JOB}.out"' in code and 'ERR="${CHAT_HOME}/logs/demo_cases_${JOB}.err"' in code
+    runs = [l for l in code_lines if "python scripts/" in l]
+    assert len(runs) == 1 and runs[0] == ('python scripts/chat_demo_cases.py --labels "${PUBLISHED_MODEL}/chexbert_labels.json" --gallery "${GALLERY}" '
+                                          '2> "${ERR}" | tee "${OUT}" | grep --line-buffered -aE "${CASES_SHAPES}"'), runs
+    for line in code_lines:
+        if "${OUT}" in line:
+            assert line.startswith(("OUT=", "python scripts/")) or re.match(r'(WITHHELD=|RESULTS=)', line), line
+        if "${ERR}" in line:
+            assert line.startswith(("ERR=", "python scripts/")), line
+    assert 'WITHHELD="$(grep -avcE "${CASES_SHAPES}" "${OUT}" || true)"' in code
+    assert 'RESULTS="$(grep -aE "${CASES_SHAPES}" "${OUT}" | grep -c \'^RESULT \' || true)"' in code
+    run = code.index(runs[0])
+    assert code.rindex("set +e", 0, run) < run < code.index('STATUSES=("${PIPESTATUS[@]}")') < code.index("set -e", run)
+    assert code.index('STATUSES=("${PIPESTATUS[@]}")') == code.index("\n", run) + 1, "nothing between the pipeline and the read of its statuses"
+    assert 'rc="${STATUSES[0]:-1}"' in code and '[ "${STATUSES[1]:-1}" -eq 0 ] || fail "the demo cases output could not be kept"' in code
+    assert "head -n" not in code, "a head would close the pipe on the script"
+    assert not re.search(r"\b(cat|tail|less|more|sed|awk|cut)\b[^\n]*\$\{(OUT|ERR)\}", code), "the raw files are never shown"
+    assert [l for l in code_lines if re.search(r"\btee\b", l)] == [runs[0]], "tee writes the one file, in the one pipeline, and shows nothing"
+    assert "set -x" not in code and "xtrace" not in code and not re.search(r"(^|[\s;&|(])(printenv|env|date|nvidia-smi)\s*$", code, re.M)
+    shapes = re.search(r"^CASES_SHAPES='(.*?)'$", _CASES_SH.read_text(), re.S | re.M)
+    assert shapes and all(line.startswith("^") and line.endswith("$") for line in shapes.group(1).splitlines()), "anchored, one shape per line"
+    assert len(shapes.group(1).splitlines()) == 3 and "'" not in shapes.group(1)
+
+
+def test_the_demo_cases_wrapper_installs_deletes_and_replaces_nothing_and_starts_no_other_job():
+    code = "\n".join(_cases_code())
+    assert not re.search(r"\b(pip|uv|conda)\b", code), "an installer string"
+    assert not re.search(r"(^|[\s;&|(])(rm|mv|ln|cp|chmod|scancel|sbatch|srun|ssh|git|nohup)(\s|$)", code, re.M), "additive only (R8), and one job"
+    assert code.count("mkdir -p") == 2 and 'mkdir -p "${CHAT_HOME}/logs"' in code, "its own log directory and the repository's logs, nothing else"
+    assert 'trap' not in code and '&' not in re.sub(r"2>|&&|\|\|", "", code.replace('"${CASES_SHAPES}"', "")), "no background process: the one command is waited for"
+
+
+def test_the_demo_cases_wrapper_passes_the_bash_syntax_check():
+    import shutil
+    import subprocess
+    shells = [s for s in ("/bin/bash", shutil.which("bash")) if s and os.path.exists(s)]
+    assert shells
+    for shell in set(shells):
+        done = subprocess.run([shell, "-n", str(_CASES_SH)], capture_output=True, text=True)
+        assert done.returncode == 0, (shell, done.stderr)
+
+
+def test_every_flag_the_demo_cases_wrapper_gives_the_script_is_one_of_its_own():
+    from scripts import chat_demo_cases
+    known = set(chat_demo_cases.build_parser()._option_string_actions)
+    run = next(l for l in _cases_code() if "python scripts/chat_demo_cases.py" in l).split(" 2> ")[0]   # the command, not the pipeline after it
+    given = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]*)", run))
+    assert given == {"--labels", "--gallery"} and given <= known, (given, known)
+
+
+def test_the_demo_cases_script_imports_the_standard_library_and_the_apps_label_list_and_nothing_else():
+    """It runs on a compute node in the serving venv with no overlay on its path (the wrapper sets none): the standard library, and the one
+    first-party module whose own imports are the standard library too, app.labels (the 14 names, in one place). No numpy, no pandas, no httpx, nothing
+    of the model stack: it must start on whatever interpreter the venv has."""
+    if not hasattr(sys, "stdlib_module_names"):
+        pytest.skip("sys.stdlib_module_names needs Python 3.10")
+    roots, first_party = _imports_of(_CASES)
+    assert roots <= {"argparse", "json", "os", "random", "sys", "pathlib", "typing", "app"}, sorted(roots)
+    assert roots - {"app"} <= set(sys.stdlib_module_names) and first_party == {"app.labels"}, (roots, first_party)
+    assert not roots & {"numpy", "pandas", "httpx", "torch", "PIL", "hybrid_xmamba", "scripts", "tests", "subprocess", "socket", "urllib"}
+    app_roots, app_first_party = _imports_of(REPO_ROOT / "app" / "labels.py")
+    assert app_roots <= set(sys.stdlib_module_names) and not app_first_party, "app.labels is the standard library alone"
+
+
+def test_the_demo_cases_script_reads_two_keys_of_the_labels_file_and_the_gallerys_counts_and_never_the_models_own_labels():
+    """The fair draw of the plan decides on the reference labels (y_true) alone: the model's labels (y_pred), its reports (hyps.txt) and the
+    reference text itself are never asked for, and the file's own paths (hyp_file, ref_file) are never read. Outside the docstring, which says what
+    the file holds, no string of the script names any of them."""
+    tree, parents = _cases_tree()
+    docstring = tree.body[0].value
+    strings = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str) and n is not docstring}
+    for key in ("y_pred", "hyp_file", "ref_file", "five_label_indices", "hyps.txt", "refs.txt", "report_texts.txt", "test_meta", "study_id"):
+        assert not [s for s in strings if key in s], key
+    assert {"y_true", "label_names", "manifest.json", "counts", "test", "images", "report_rows"} <= strings
+    reads = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "read_text"]
+    assert sorted(ast.unparse(n.func.value) for n in reads) == ["Path(gallery) / 'manifest.json'", "Path(path)"], "the labels file and the manifest"
+    assert sorted(_cases_inner(n, parents) for n in reads) == ["read_labels", "read_test_count"]
+
+
+def test_the_demo_cases_draw_is_the_seeded_one_the_plan_names_and_uses_only_the_generators_random_numbers():
+    """Seed 42 and five candidates a kind, as the plan's box says, and the three kinds as it names them. The draw is made of random.Random(seed).random()
+    alone: no sample, shuffle, choice or sort of the rows by anything about them, and no numpy generator, so the rows are a function of the labels
+    file for every Python version."""
+    tree, _ = _cases_tree()
+    plain = {t.id: ast.unparse(n.value) for n in tree.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)}
+    assert plain["SEED"] == "42" and plain["PER_CATEGORY"] == "5"
+    assert plain["CATEGORIES"] == "('normal', 'support_devices', 'pneumothorax')"
+    assert plain["EXIT_REFUSED"] == "1" and plain["EXIT_USAGE"] == "64"
+    functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    assert {ast.unparse(c.func) for c in ast.walk(functions["draw"]) if isinstance(c, ast.Call)} == {"random.Random", "rng.random", "sorted"}
+    assert [ast.unparse(r.value) for r in ast.walk(functions["draw"]) if isinstance(r, ast.Return)] == [
+        _normalized("[row for _, row in sorted(((rng.random(), row) for row in rows))[:k]]")]
+    assert {ast.unparse(c.func) for c in ast.walk(tree) if isinstance(c, ast.Call)
+            and ast.unparse(c.func).startswith(("random.", "rng.", "np.", "numpy."))} == {"random.Random", "rng.random"}
+    names = {n.id for n in ast.walk(functions["categories"]) if isinstance(n, ast.Name)}
+    assert names <= {"found", "number", "row", "rows", "enumerate", "sum", "CATEGORIES", "NO_FINDING", "SUPPORT_DEVICES", "PNEUMOTHORAX", "name", "Dict", "List",
+                     "str", "int", "Sequence"}, "the kinds are decided on the labels of a row and nothing else"
+
+
+def test_the_demo_cases_script_prints_and_writes_nothing_but_its_one_line_the_help_and_fixed_refusals():
+    """R7. No print, no logging, no traceback, no file opened or written: every write is `say`, which has four callers, all in main: the help text,
+    the RESULT line (made by result_line out of a payload of counts and row numbers), a refusal's line (a code of ERROR_CODES and whole numbers) and
+    the class name of an unexpected failure. The one stream it writes to is the one main is given, the process's stdout by default; it never writes
+    stderr, and the only text it takes from an exception is the class name."""
+    tree, parents = _cases_tree()
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id in ("print", "open", "breakpoint", "exec", "eval", "input", "compile", "__import__")]
+    writers = {"write", "writelines", "write_text", "write_bytes", "dump", "mkdir", "unlink", "rename", "replace", "touch", "truncate"}
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in writers and _cases_inner(n, parents) != "say"]
+    assert {_cases_inner(n, parents) for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in ("write", "flush")} == {"say"}
+    sinks = _cases_calls(tree, "say")
+    assert sorted((_cases_inner(s, parents), ast.unparse(s.args[0]), ast.unparse(s.args[1])) for s in sinks) == sorted(
+        ("main", stream, _normalized(shape)) for stream, shape in (
+            ("stdout", 'parser.format_help().rstrip("\\n")'), ("stdout", "result_line(payload(len(labels), categories(labels)))"),
+            ("stdout", "exc.line()"), ("stdout", '"ERROR failed " + type(exc).__name__')))
+    streams = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "sys"]
+    assert {n.attr for n in streams} == {"path", "stdout", "exit"} and {_cases_inner(n, parents) for n in streams if n.attr == "stdout"} == {"main"}
+    assert [ast.unparse(r.value) for r in ast.walk({n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}["result_line"])
+            if isinstance(r, ast.Return)] == [_normalized('"RESULT " + json.dumps(content, separators=(",", ":"))')]
+    assert [_cases_inner(n, parents) for n in _cases_calls(tree, "json.dumps")] == ["result_line"]
+    for handler in (n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler) and n.name):
+        for use in (u for stmt in handler.body for u in ast.walk(stmt) if isinstance(u, ast.Name) and u.id == handler.name):
+            parent = parents[use]
+            assert (isinstance(parent, ast.Call) and ast.unparse(parent.func) == "type") or (
+                isinstance(parent, ast.Attribute) and parent.attr in ("line", "code") and ast.unparse(handler.type) == "Refused"), ast.unparse(handler)   # a Refused: its line, or its code (a word of ERROR_CODES, compared)
