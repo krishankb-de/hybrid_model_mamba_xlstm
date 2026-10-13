@@ -27,9 +27,11 @@ engine, which is why this script starts the app the way the dev server does.) It
            opens the whole text, Show less closes it, the focus comes back) is covered by tests/frontend/render.test.mjs, not by a real
            Chrome
   viewer   the viewer opens from every picture of a card (the two of the images row and each similar X-ray, which opens beside the
-           turn's own X-ray), closes to the control that opened it, and on a side-by-side pair zoom (wheel, + and -, the buttons, 1:1),
-           pan (drag, the arrow keys), brightness and contrast (a click on the slider, the arrow keys on it) work, by mouse and by
-           keyboard, each measured on what is drawn (the picture's box and the screenshot's pixels) and not on the page's own bookkeeping
+           turn's own X-ray) and from the upload in the user's own message (P6-G), which opens what the card's "Your X-ray" tile
+           opens: the same picture, name and footer. Each closes to the control that opened it, and on a side-by-side pair zoom
+           (wheel, + and -, the buttons, 1:1), pan (drag, the arrow keys), brightness and contrast (a click on the slider, the arrow
+           keys on it) work, by mouse and by keyboard, each measured on what is drawn (the picture's box and the screenshot's pixels)
+           and not on the page's own bookkeeping
 
 Input that is real: a click on the well (the file chooser Chrome would open is intercepted and answered with a file, which a headless Chrome
 cannot do for itself), a file dropped from disk (Input.dispatchDragEvent), the mouse (clicks, drags and the wheel) and the keyboard.
@@ -100,8 +102,9 @@ MIN_SCALE = 0.25
 MAX_SCALE = 16
 # What the script drives in the page: each must still be in the page's sources (tests/test_chat_ui_features_check.py).
 PAGE_HOOKS = ("image-well", "preview", "preview-name", "dragging", "pick-study", "picker-list", "new-session", "session-list",
-              "picture-button", "data-key", "image-tile", "neighbor-score", "sim-bar", "agreement", "own-rank", "clamp-text",
+              "picture-button", "thumb-button", "data-key", "image-tile", "neighbor-score", "sim-bar", "agreement", "own-rank", "clamp-text",
               "match-score", "viewer-stage", "viewer-pane", "viewer-open", "data-viewer", "data-scale")
+USER_THUMB = "user:thumb"   # the thumbnail in the user's own message (P6-G): no data-key names it, so the viewer item does
 
 EVIDENCE_FILES = ["attach_preview_1280x900_light.png", "attach_refused_1280x900_light.png", "reopened_images_1280x900_light.png",
                   "similar_xrays_1280x900_light.png", "matches_1280x900_light.png", "own_rank_1280x900_light.png",
@@ -202,6 +205,31 @@ def wheel_factor(delta_y: float, delta_mode: int = 0) -> float:
     """viewer.js wheelFactor: the zoom of one turn of the wheel, never more than double or half."""
     pixels = delta_y * (16 if delta_mode == 1 else 400 if delta_mode == 2 else 1)
     return min(2.0, max(0.5, math.exp(-pixels * 0.002)))
+
+
+def expected_viewer(key: str) -> Dict[str, Any]:
+    """What the viewer must say when it is opened from this picture: its name, the footer of each pane (the tiny gallery's pictures are 320 px, the
+    model's input 224 px) and the variant of the first pane's picture. The keys are the data-keys of the card's pictures (image:thumb,
+    image:model_input, neighbor:<rank>) and USER_THUMB, the upload in the user's own message, which opens exactly what the card's "Your X-ray" tile
+    opens (P6-G). A key it does not know is a ValueError, not the neighbour's words."""
+    if key == USER_THUMB or key == "image:thumb":
+        return {"label": "Image viewer: Your X-ray", "footers": ["Your X-ray · 320×320 px"], "variant": "original"}
+    if key == "image:model_input":
+        return {"label": "Image viewer: What the model saw", "footers": ["What the model saw · 224×224 px"], "variant": "model_input"}
+    found = re.fullmatch(r"neighbor:(\d+)", key) if isinstance(key, str) else None
+    if not found:
+        raise ValueError("no picture of the card is called {!r}".format(key))
+    rank = found.group(1)
+    return {"label": "Image viewer: Your X-ray beside Similar X-ray #{}".format(rank), "variant": "original",
+            "footers": ["Your X-ray · 320×320 px", "Similar X-ray #{} · 320×320 px (stored gallery size)".format(rank)]}
+
+
+def variant_of(path: Any) -> Optional[str]:
+    """The variant ("original", "thumb", "model_input") of a picture the server serves for a message, from the path the page shows
+    (/v1/messages/<id>/image?variant=<variant>); None for anything else: a blob, a gallery path, a file of this machine. A fact names the variant
+    and never a path that is only this machine's."""
+    found = re.fullmatch(r"/v1/messages/[\w-]+/image\?variant=(\w+)", path) if isinstance(path, str) else None
+    return found.group(1) if found else None
 
 
 def stages_of(events: Any) -> Dict[str, Any]:
@@ -962,6 +990,18 @@ def check_viewer(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     expected = ["image:thumb", "image:model_input"] + ["neighbor:{}".format(n["rank"]) for n in neighbours]
     expect(keys == expected and len(neighbours) > 0, "the card's pictures that open the viewer are {}, not {}".format(keys, expected))
     bubble = b.evaluate("(%s)()" % BUBBLE_JS)
+    expect(bubble is not None and bubble["thumbIsOpener"] is True, "the upload in the user's own message is not a control that opens the viewer: {}".format(bubble))
+    pictures = [USER_THUMB] + keys   # the upload in the user's own message (P6-G), then the card's pictures
+
+    def selector_of(key: str) -> str:
+        """The control a picture is opened from: the thumbnail in the user's own message, or a picture button of the card by its data-key."""
+        if key == USER_THUMB:
+            return "#conversation article.turn.user button.thumb-button"
+        return '#conversation article.card button.picture-button[data-key="{}"]'.format(key)
+
+    def focus_of(key: str) -> str:
+        """What VIEWER_JS names the control that has the focus once the viewer has closed to it: its data-key, else its class."""
+        return "thumb-button" if key == USER_THUMB else key
 
     def state() -> Dict[str, Any]:
         return b.evaluate("(%s)()" % VIEWER_JS)
@@ -977,7 +1017,7 @@ def check_viewer(ctx: Context) -> Tuple[str, Dict[str, Any]]:
         return b.evaluate("(() => { const r = document.querySelector(%s).getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; })()" % json.dumps(selector))
 
     def open_viewer(key: str, how: str = "click") -> Dict[str, Any]:
-        selector = '#conversation article.card button.picture-button[data-key="{}"]'.format(key)
+        selector = selector_of(key)
         if how == "click":
             b.click(selector)   # a real click on the picture
         else:   # the keyboard: the picture's button has the focus, where Tab would leave it, and Enter presses it
@@ -995,15 +1035,13 @@ def check_viewer(ctx: Context) -> Tuple[str, Dict[str, Any]]:
         closed = state()
         expect(closed["held"] is False and closed["inert"] == [False, False, False] and closed["panes"] == [],
                "after {} the viewer left the page held ({}) or inert ({}) or its panes in place".format(how, closed["held"], closed["inert"]))
-        expect(closed["focus"] == key, "after {} the focus is on {!r}, not on {} that opened the viewer".format(how, closed["focus"], key))
+        expect(closed["focus"] == focus_of(key), "after {} the focus is on {!r}, not on {} that opened the viewer".format(how, closed["focus"], focus_of(key)))
 
     def verify_open(v: Dict[str, Any], key: str) -> Dict[str, Any]:
         side = key.startswith("neighbor:")
         rank = key.split(":")[1] if side else None
-        label = {"image:thumb": "Image viewer: Your X-ray", "image:model_input": "Image viewer: What the model saw"}.get(
-            key, "Image viewer: Your X-ray beside Similar X-ray #{}".format(rank))
-        footers = {"image:thumb": ["Your X-ray · 320×320 px"], "image:model_input": ["What the model saw · 224×224 px"]}.get(
-            key, ["Your X-ray · 320×320 px", "Similar X-ray #{} · 320×320 px (stored gallery size)".format(rank)])
+        want = expected_viewer(key)
+        label, footers = want["label"], want["footers"]
         expect(v["label"] == label, "opened from {} the viewer says {!r}, not {!r}".format(key, v["label"], label))
         expect([p["footer"] for p in v["panes"]] == footers, "opened from {} the footers read {}, not {}".format(key, [p["footer"] for p in v["panes"]], footers))
         expect(v["held"] and v["inert"] == [True, True, True], "opened from {} the page behind is not inert ({}, {})".format(key, v["held"], v["inert"]))
@@ -1015,22 +1053,35 @@ def check_viewer(ctx: Context) -> Tuple[str, Dict[str, Any]]:
                    and (close_to(w, sw, 2) or close_to(h, sh, 2)), "the picture is drawn at {} in a stage {}: not whole and fitted".format(
                        [round(v) for v in pane["box"]], [round(v) for v in pane["stage"]]))
         paths = [p["path"] for p in v["panes"]]
-        wanted = [{"image:thumb": "variant=original", "image:model_input": "variant=model_input"}.get(key, "variant=original")]
-        expect(paths[0].endswith("/image?" + wanted[0]), "the first pane shows {!r}".format(paths[0]))
+        expect(variant_of(paths[0]) == want["variant"], "opened from {} the first pane shows {!r}, not the {} variant of the turn's picture".format(key, paths[0], want["variant"]))
         if side:
             expect(paths[1] == "/v1/gallery/images/{}".format(neighbours[int(rank) - 1]["gallery_row"]), "the neighbour's pane shows {!r}".format(paths[1]))
             left, right = v["panes"][0]["stage"], v["panes"][1]["stage"]
             expect(left[0] + left[2] <= right[0] + 1 and close_to(left[1], right[1], 1), "the panes are not side by side: {} and {}".format(left, right))
         expect(v["focus"] == "viewer-stage", "the keys are not on the picture: the focus is on {!r}".format(v["focus"]))
-        return {"label": v["label"], "footers": [p["footer"] for p in v["panes"]], "panes": len(v["panes"]), "page_behind_inert": True}
+        return {"label": v["label"], "footers": [p["footer"] for p in v["panes"]], "first_picture_variant": variant_of(paths[0]), "panes": len(v["panes"]),
+                "page_behind_inert": True}
 
-    # -- the viewer opens from every picture of the card, closes to the picture that opened it, by Esc and by its close button in turn
+    # -- the viewer opens from the upload in the user's own message and from every picture of the card, closes to the picture that opened it, by Esc
+    # and by its close button in turn; what each says is held to expected_viewer, which is the card's "Your X-ray" tile's for the upload
     opened = {}  # type: Dict[str, Any]
-    for index, key in enumerate(keys):
+    seen = {}  # type: Dict[str, Dict[str, Any]]   # what the viewer said when it had opened from each
+    for index, key in enumerate(pictures):
         how_open, how_close = ("click", "Esc") if index % 2 == 0 else ("Enter", "its close button")   # the mouse and the keyboard in turn, both ways
-        opened[key] = dict(verify_open(open_viewer(key, how_open), key), opened_by="a click on the picture" if how_open == "click" else "Enter on the focused picture",
+        seen[key] = open_viewer(key, how_open)
+        opened[key] = dict(verify_open(seen[key], key), opened_by="a click on the picture" if how_open == "click" else "Enter on the focused picture",
                            closed_by=how_close)
         close_viewer(key, how_close)
+    # the upload in the user's own message opens what the card's "Your X-ray" tile opens: the same picture (its path), name and footer; and the other way
+    # of opening and of closing it (Enter on it, its close button) opens it and gives the focus back to it as well
+    upload, tile = seen[USER_THUMB], seen["image:thumb"]
+    same = [(p["path"], p["alt"], p["footer"]) for p in upload["panes"]] == [(p["path"], p["alt"], p["footer"]) for p in tile["panes"]]
+    expect(same and upload["label"] == tile["label"], "the upload in the user's own message opens {!r} {} where the card's tile opens {!r} {}".format(
+        upload["label"], [(p["alt"], p["footer"]) for p in upload["panes"]], tile["label"], [(p["alt"], p["footer"]) for p in tile["panes"]]))
+    verify_open(open_viewer(USER_THUMB, "Enter"), USER_THUMB)
+    close_viewer(USER_THUMB, "its close button")
+    opened[USER_THUMB]["same_picture_as_the_card_tile"] = {"tile": "image:thumb", "label": upload["label"], "variant": variant_of(upload["panes"][0]["path"])}
+    opened[USER_THUMB]["and_also"] = "opened by Enter on the focused thumbnail and closed by its close button: the focus came back to it too"
     # -- a similar X-ray beside the turn's own: the controls, by mouse and by keyboard, measured on what is drawn
     key = "neighbor:1"
     v0 = open_viewer(key)
@@ -1218,20 +1269,19 @@ def check_viewer(ctx: Context) -> Tuple[str, Dict[str, Any]]:
     ctx.shot("viewer_side_by_side", "viewer_side_by_side", "the same viewer in the dark colour scheme", DESKTOP, "dark")
     b.set_viewport(DESKTOP[0], DESKTOP[1], "light")
     close_viewer(key, "Esc")
-    return ("the viewer opened from all {} pictures of the card (the X-ray, the model input, {} similar X-rays: each closed to the picture that opened it) and, "
+    return ("the viewer opened from all {} pictures (the upload in the user's own message, which opens what the card's X-ray tile opens; the card's X-ray, "
+            "the model input and {} similar X-rays: each closed to the picture that opened it) and, "
             "on a similar X-ray beside the turn's own, zoom (wheel about the cursor, + and -, the buttons, 1:1), pan (drag, arrows), brightness and contrast "
-            "(a click, then the keys) all worked, measured on the pictures drawn and on their pixels".format(len(keys), len(neighbours)),
-            {"opens_from": keys, "user_turn_thumbnail_is_an_opener": bubble["thumbIsOpener"],
-             "user_turn_thumbnail_note": "a picture and no more, ruled at P6 fix 1: the card's 'Your X-ray' tile opens the same picture", "each": opened,
-             "side_by_side_controls": facts})
+            "(a click, then the keys) all worked, measured on the pictures drawn and on their pixels".format(len(pictures), len(neighbours)),
+            {"opens_from": pictures, "user_turn_thumbnail_is_an_opener": bubble["thumbIsOpener"], "each": opened, "side_by_side_controls": facts})
 
 
 CHECKS = [("attach", "click, drag-drop and paste each attach with a preview, and a refused file shows its message", check_attach),
           ("reload", "after a reload, and after reopening the session, the X-ray and the 224×224 model input are both shown", check_reload),
           ("similar", "the similar-X-rays grid shows scores and 'n/14 labels agree'", check_similar),
           ("matches", "the matching-reports list and, for a picked test study, the own-rank badge", check_matches),
-          ("viewer", "the viewer opens from every image, side by side for a neighbour, with zoom, pan, brightness and contrast working by mouse and by keyboard",
-           check_viewer)]
+          ("viewer", "the viewer opens from every image (the user's own upload included), side by side for a neighbour, with zoom, pan, brightness and contrast "
+                     "working by mouse and by keyboard", check_viewer)]
 
 
 def run_all(browser: Browser, base: str, work: str, out_dir: Optional[str]) -> Tuple[List[Dict[str, Any]], Context]:
@@ -1275,7 +1325,6 @@ def environment(browser: Browser, own_app: bool, models: Dict[str, Any], gallery
                       "in the page that holds a File or text, because a headless Chrome has no clipboard of its own and a real Cmd+V would read the user's.",
                       "Brightness and contrast are measured on pixels: a screenshot of the left picture's box, its luma mean (brightness) and spread (contrast). "
                       "Zoom and pan are measured on the picture's drawn box, and compared with the page's own data-scale.",
-                      "The user turn's own thumbnail is a picture and no more, ruled at P6 fix 1 (render.js userCtx has no viewer): the card's images row opens the same X-ray.",
                       "Every screenshot was confirmed by the page itself (a DOM rule per picture, true before and after the capture)."]}
 
 

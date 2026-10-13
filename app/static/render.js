@@ -15,10 +15,11 @@
 // ctx = { loadImage, openViewer, copy, showModels, labelNames, retrieval, ui, turn }. Every member is optional and a missing
 // callback hides its control.
 //   loadImage(path) -> Promise<object URL>   api.js loadImage with the page's auth: a user turn's thumbnail, the card's pictures
-//   openViewer(image)                        a click on the thumbnail; image is what renderUserTurn was given. A click on a picture of
-//                                            the card passes viewer.js's { left, right? } instead, each side { url, label, note, transient },
-//                                            and the button it came from: one picture, or the turn's own X-ray and a similar one side by side
-//                                            (P6-E; without openViewer a picture is not a control)
+//   openViewer(image | spec, opener)         a click on a picture, and the button it came from, for the focus to go back to. A click on the
+//                                            thumbnail gives the image renderUserTurn was given, and the page says which side that is
+//                                            (ownXraySide, the one the card's "Your X-ray" tile opens); a click on a picture of the card gives
+//                                            viewer.js's { left, right? }, each side { url, label, note, transient }: one picture, or the turn's
+//                                            own X-ray and a similar one side by side (P6-E, P6-G; without openViewer a picture is not a control)
 //   copy(text)                               the report's Copy button; a throw or a rejected promise shows "Copy failed"
 //   showModels()                             the provenance link, which opens /v1/models in the drawer
 //   labelNames: [14 names]                   CHEXBERT_14 order, from /v1/models; else the order of view.labels
@@ -531,7 +532,8 @@ function thumbnail(image, cx) {
   const alt = image.source === 'test_split' ? 'Test-split X-ray' : name ? `Uploaded X-ray: ${name}` : 'Uploaded X-ray';
   const img = shown ? el('img', { class: 'thumb', alt, src: image.url }) : loadedImage(image.url, cx, { class: 'thumb', alt });
   if (typeof cx.openViewer !== 'function') return img;
-  return el('button', { type: 'button', class: 'thumb-button', 'aria-label': named('Open X-ray in the viewer', cx), onclick: () => cx.openViewer(image) }, img);
+  return el('button', { type: 'button', class: 'thumb-button', 'aria-label': named('Open X-ray in the viewer', cx),
+                        onclick: (event) => cx.openViewer(image, event.currentTarget) }, img);   // the opener: where the focus goes back to, as for the card's pictures (P6-G)
 }
 
 // ---- pictures of the card ------------------------------------------------------------------------------------------------
@@ -551,6 +553,8 @@ function cardPicture(path, alt, open, spec, cx, key) {
 
 const MODEL_SAW = 'What the model saw (224×224)';
 const GALLERY_NOTE = '(stored gallery size)';   // what the viewer's footer says after a gallery or test-split picture's size: a 320 px JPEG
+const THUMB_NOTE = '(thumbnail)';               // and after the size of a thumbnail it was given for the turn's X-ray, which is not the picture itself
+const xrayName = (study) => (study ? 'Test-split X-ray' : 'Your X-ray');
 
 // The turn's own X-ray: its image URLs, whether it is a test study's, its name, its label ("Your X-ray · 2544×3056 px"), the path the
 // viewer is given, its original where the mode sends one (public mode sends none, app/redact.py), else its thumbnail, and that path as a
@@ -560,12 +564,30 @@ function ownXray(v, cx) {
   const image = isObject(v.image) ? v.image : {};
   const urls = isObject(image.urls) ? image.urls : {};
   const study = image.source === 'test_split';
-  const name = study ? 'Test-split X-ray' : 'Your X-ray';
+  const name = xrayName(study);
   const size = pixelSize(v);
   const original = fetchable(urls.original, cx);
   const full = original ? urls.original : urls.thumb;
-  const note = study ? GALLERY_NOTE : original ? '' : '(thumbnail)';
+  const note = study ? GALLERY_NOTE : original ? '' : THUMB_NOTE;
   return { urls, study, name, label: size ? `${name} · ${size}` : name, full, side: { url: full, label: name, note, transient: original } };
+}
+
+// The side viewer.js is given for the turn's own X-ray from either of its two pictures: the card's "Your X-ray" tile and the thumbnail in the user's own
+// message (P6-G). Once the server has said what it holds for the turn (message_start's urls) it is the tile's side whichever was clicked: the
+// original where the mode sends one, else the thumbnail, a test study at its stored size. With no card to say (a live turn before message_start, or
+// a log whose message_start names no picture this page may fetch) it is what the thumbnail itself shows: the page's own preview of the file as it
+// was attached (no note, and nothing for the viewer to let go of: the page made it), else the server's thumbnail, marked as such. view is the
+// turn's assistant view when it has one, image what renderUserTurn was given. null when there is nothing to show: no image, a URL this page may
+// neither show nor fetch with the token, or a server path and no loader.
+export function ownXraySide(view, image, ctx) {
+  const cx = ctx ?? {};
+  const own = ownXray(whole(view), cx);
+  if (fetchable(own.full, cx)) return own.side;
+  const shown = isObject(image) ? image : {};
+  const preview = usable(shown.url);
+  if (!preview && !fetchable(shown.url, cx)) return null;
+  const study = shown.source === 'test_split';
+  return { url: shown.url, label: xrayName(study), note: study ? GALLERY_NOTE : preview ? '' : THUMB_NOTE, transient: false };
 }
 
 // "2544×3056 px", the size preprocess read (after the EXIF orientation), from its detail; '' when it has none to read.

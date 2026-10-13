@@ -173,13 +173,43 @@ def test_what_the_matches_item_states_of_show_all_is_what_it_held_every_report_t
     assert one_overflows["clicked_show_all_and_show_less"] is True and one_overflows["not_clicked_because"] is None
 
 
-def test_the_features_check_says_no_more_of_show_all_and_of_the_thumbnail_than_it_checks_and_cites_who_ruled():
+def test_the_features_check_says_no_more_of_show_all_than_it_checks_and_no_longer_calls_the_thumbnail_a_picture_and_no_more():
     doc = check.__doc__
     assert "clamped to three lines with Show all" not in doc and "Show all" in doc and "overflow" in doc   # the item checks when it is offered, not a click
     assert "tests/frontend/render.test.mjs" in doc
     assert "Show all opens a clamped report and Show less closes it" in (Path(__file__).resolve().parents[1] / "tests" / "frontend" / "render.test.mjs").read_text(encoding="utf-8")
     source = SCRIPT.read_text(encoding="utf-8")
-    assert "by design" not in source and source.count("ruled at P6 fix 1") == 2   # the viewer item's note and the environment's note
+    # P6-G: the thumbnail in the user's own message opens the viewer, so no line says it is a picture and no more, or cites the P6 fix 1 ruling that kept it one
+    assert "by design" not in source and "ruled at P6 fix 1" not in source and "a picture and no more" not in source
+
+
+def test_the_viewer_item_expects_the_users_thumbnail_to_open_what_the_cards_your_xray_tile_opens():
+    """P6-G. The thumbnail has no data-key, so the item names it (USER_THUMB); what the viewer must say of it is what it says of the card's tile."""
+    assert check.USER_THUMB not in ("image:thumb", "image:model_input") and not check.USER_THUMB.startswith("neighbor:")
+    assert check.expected_viewer(check.USER_THUMB) == check.expected_viewer("image:thumb")
+    assert check.expected_viewer("image:thumb") == {"label": "Image viewer: Your X-ray", "footers": ["Your X-ray · 320×320 px"], "variant": "original"}
+    assert check.expected_viewer("image:model_input") == {"label": "Image viewer: What the model saw", "footers": ["What the model saw · 224×224 px"],
+                                                           "variant": "model_input"}
+    assert check.expected_viewer("neighbor:3") == {"label": "Image viewer: Your X-ray beside Similar X-ray #3", "variant": "original",
+                                                   "footers": ["Your X-ray · 320×320 px", "Similar X-ray #3 · 320×320 px (stored gallery size)"]}
+    for key in ("neighbor:", "neighbor", "", "image:other", "user:other", None):
+        with pytest.raises(ValueError):
+            check.expected_viewer(key)   # a key the item does not know is not given the neighbour's words
+    viewer = _page_source("viewer.js")
+    assert "Image viewer: " in viewer and " beside " in viewer   # the words the expectation is made of
+
+
+def test_the_variant_a_fact_gives_is_read_from_a_servers_picture_path_and_never_from_a_local_one():
+    assert check.variant_of("/v1/messages/m_01-x/image?variant=original") == "original"
+    assert check.variant_of("/v1/messages/m_1/image?variant=model_input") == "model_input"
+    for local in ("blob:http://127.0.0.1:51234/abc-123", "/tmp/chat_ui_features_check_x/xray_a.png", "file:///tmp/x.png", "/v1/gallery/images/7",
+                  "/v1/messages/m_1/image", "", None, 5):
+        assert check.variant_of(local) is None, local
+
+
+def test_the_script_drives_the_thumbnail_button_of_the_user_turn_and_the_page_still_has_it():
+    assert "thumb-button" in check.PAGE_HOOKS
+    assert "thumb-button" in _page_source("render.js")
 
 
 def test_the_features_check_runs_its_items_and_reads_the_console_with_the_browser_checks_own_functions():

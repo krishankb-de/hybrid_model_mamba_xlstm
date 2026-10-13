@@ -28,6 +28,7 @@ const renderNeighbors = builder('renderNeighbors');
 const renderMatches = builder('renderMatches');
 const renderPublished = builder('renderPublished');
 const settleClamps = builder('settleClamps');   // P6 fix 1: the page measures, once a card is in it, which clamped report overflows
+const ownXraySide = builder('ownXraySide');     // P6-G: the viewer's side for the turn's own X-ray, from the card's tile and from the user turn's thumbnail
 
 installDom();   // this file's process only: the other test files never see a document
 
@@ -1333,16 +1334,18 @@ test('a thumbnail that fails to load leaves the turn intact and raises nothing',
   }
 });
 
-test('the thumbnail opens the viewer when the page can; without ctx.openViewer it is a picture only', () => {
+test('the thumbnail opens the viewer when the page can, handing over the image and the button it came from; without ctx.openViewer it is a picture only', () => {
   const image = { url: 'blob:x/1', filename: 'a.png' };
   const opened = [];
-  const withViewer = renderUserTurn({ image }, { openViewer: (i) => opened.push(i) });
+  const withViewer = renderUserTurn({ image }, { openViewer: (i, opener) => opened.push([i, opener]) });
   const open = q(withViewer, 'button.thumb-button');
   assert.ok(open);
   assert.equal(open.getAttribute('aria-label'), 'Open X-ray in the viewer');
   assert.ok(q(open, 'img'));
   open.click();
-  assert.deepEqual(opened, [image]);
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0][0], image);   // what renderUserTurn was given: the page says which side that is (ownXraySide)
+  assert.ok(opened[0][1] === open, 'the second argument is the thumbnail\'s button, not ' + typeof opened[0][1]);   // the control it was opened from, for the focus to go back to, as for the card's pictures (P6-G)
   const plain = renderUserTurn({ image }, {});
   assert.equal(q(plain, 'button'), null);
   assert.ok(q(plain, 'img'));
@@ -1442,6 +1445,59 @@ test('with ctx.openViewer each picture is a button that opens it in viewer.js: y
   const study = renderImages(viewOf([imageStart({ source: 'test_split', filename: null }), stageEnd('preprocess', 1, { input_px: [320, 320] })]), ctx);
   q(study, 'button').click();
   assert.deepEqual(opened[0][0], { left: { url: URLS.original, label: 'Test-split X-ray', note: '(stored gallery size)', transient: true } });   // a 320 px JPEG
+});
+
+// ---- the viewer from the user's own message: the same side as the card's "Your X-ray" tile (P6-G) --------------------------
+
+test('the thumbnail of the user turn and the "Your X-ray" tile of the card are given one side: the original where the mode sends one, else the thumbnail, a test study at its stored size (P6-G)', () => {
+  const { loadImage } = loader();
+  const opened = [];
+  const ctx = { loadImage, openViewer: (spec) => opened.push(spec) };
+  const tileSide = (view) => {   // what a click on the card's tile hands the viewer
+    opened.length = 0;
+    q(renderImages(view, ctx), 'button[data-action="view"]').click();   // the first picture of the row: your X-ray
+    return opened[0].left;
+  };
+  const thumb = { url: URLS.thumb, filename: 'chest.png' };
+  const studyThumb = { url: URLS.thumb, filename: null, source: 'test_split' };
+  const upload = viewOf([imageStart(), PREPROCESSED]);
+  const pub = viewOf([imageStart({ urls: { thumb: URLS.thumb, model_input: URLS.model_input } }, { mode: 'public' }), PREPROCESSED]);
+  const study = viewOf([imageStart({ source: 'test_split', filename: null }), stageEnd('preprocess', 1, { input_px: [320, 320] })]);
+  for (const [view, image] of [[upload, thumb], [pub, thumb], [study, studyThumb]]) {
+    assert.deepEqual(ownXraySide(view, image, ctx), tileSide(view));   // not a copy of the tile's choice: its own answer, held to equal
+  }
+  assert.deepEqual(ownXraySide(upload, thumb, ctx), { url: URLS.original, label: 'Your X-ray', note: '', transient: true });
+  assert.deepEqual(ownXraySide(pub, thumb, ctx), { url: URLS.thumb, label: 'Your X-ray', note: '(thumbnail)', transient: false });   // public mode sends no original
+  assert.deepEqual(ownXraySide(study, studyThumb, ctx), { url: URLS.original, label: 'Test-split X-ray', note: '(stored gallery size)', transient: true });
+  const frozen = deepFreeze(viewOf([imageStart(), PREPROCESSED]));
+  assert.deepEqual(ownXraySide(frozen, deepFreeze({ ...thumb }), ctx), ownXraySide(upload, thumb, ctx));   // it writes to neither the view nor the image
+});
+
+test('with no card to say, the side is what the thumbnail itself shows: the page\'s own preview of the file, else the server\'s thumbnail marked as such (P6-G)', () => {
+  const { loadImage } = loader();
+  const ctx = { loadImage };
+  const preview = { url: 'blob:http://localhost/abc-123', filename: 'chest.png' };
+  const thumb = { url: URLS.thumb, filename: 'chest.png' };
+  const studyThumb = { url: URLS.thumb, filename: null, source: 'test_split' };
+  const noCard = [null, undefined, {}, initialView('m_x'),                                     // a live turn before message_start
+                  viewOf([imageStart({ urls: {} })]),                                          // a log whose message_start names no picture
+                  viewOf([step('message_start', { ...START.data, image: null })]),             // one with no image at all
+                  viewOf([imageStart({ urls: { thumb: 'https://evil.example/x.png', original: '//evil.example/y.png' } })])];   // and none this page may fetch
+  for (const view of noCard) {
+    const named = JSON.stringify(view);
+    assert.deepEqual(ownXraySide(view, preview, ctx), { url: preview.url, label: 'Your X-ray', note: '', transient: false }, named);   // the file as it was attached: no note, nothing for the viewer to let go of
+    assert.deepEqual(ownXraySide(view, thumb, ctx), { url: URLS.thumb, label: 'Your X-ray', note: '(thumbnail)', transient: false }, named);
+    assert.deepEqual(ownXraySide(view, studyThumb, ctx), { url: URLS.thumb, label: 'Test-split X-ray', note: '(stored gallery size)', transient: false }, named);
+  }
+  assert.deepEqual(ownXraySide(null, { url: 'data:image/png;base64,AAAA' }, ctx).url, 'data:image/png;base64,AAAA');   // a data: picture is the page's own too
+  for (const bad of ['https://evil.example/x.png', '//evil.example/x.png', 'javascript:alert(1)', 'data:image/svg+xml;base64,AAAA', 'x.png', '', 42, null, undefined]) {
+    assert.equal(ownXraySide(null, { url: bad }, ctx), null, `url ${JSON.stringify(bad)} was given to the viewer`);   // nothing this page may show or fetch with the token
+  }
+  assert.equal(ownXraySide(null, null, ctx), null);                                          // no image
+  assert.equal(ownXraySide(null, 'x', ctx), null);
+  assert.equal(ownXraySide(null, thumb, {}), null);                                          // a server path needs the page's loader
+  assert.equal(ownXraySide(null, thumb, undefined), null);
+  assert.equal(ownXraySide(null, preview, undefined).url, preview.url);                      // the page's own picture needs none
 });
 
 test('the card shows the images row after the labels when the page can load images, and is the card it always was without a loader', () => {
@@ -2232,6 +2288,8 @@ test('repeated controls have distinct names that contain their visible text, and
   const user = renderUserTurn({ text: 'hi', image: { url: 'blob:x/1', filename: 'a.png' } }, ctxOf(3));
   assert.equal(user.getAttribute('aria-label'), 'Your message, turn 3');
   assert.equal(q(user, 'button.thumb-button').getAttribute('aria-label'), 'Open X-ray in the viewer, turn 3');
+  const tile = q(renderImages(viewOf([imageStart(), PREPROCESSED]), { ...ctxOf(3), loadImage: loader().loadImage }), 'button[data-action="view"]');
+  assert.notEqual(tile.getAttribute('aria-label'), q(user, 'button.thumb-button').getAttribute('aria-label'));   // P6-G: two openers of one X-ray, told apart by name
   const plainUser = renderUserTurn({ text: 'hi', image: { url: 'blob:x/1' } }, ctxOf());
   assert.equal(plainUser.getAttribute('aria-label'), 'Your message');
   assert.equal(q(plainUser, 'button.thumb-button').getAttribute('aria-label'), 'Open X-ray in the viewer');

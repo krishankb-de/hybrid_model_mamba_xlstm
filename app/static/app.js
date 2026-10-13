@@ -14,8 +14,8 @@
 // stream and does not poll: coming back finds the turn running and polls it from its last seq.
 //
 // The image intake (click, drag-drop, paste, the preview) is composer.js's (P6-A): this file attaches it and spends what it holds once the
-// server has accepted the turn it went with. A picture of a card opens viewer.js over the page (P6-E); while it is open it is the topmost
-// layer: Escape closes it and nothing under it, and the focus goes back to the picture's button.
+// server has accepted the turn it went with. A picture of a card, and the upload in the user's own message (P6-G), open viewer.js over the page
+// (P6-E); while it is open it is the topmost layer: Escape closes it and nothing under it, and the focus goes back to the picture's button.
 //
 // The settings drawer is a form that ends in Save (P4-G). A number applies as it is typed while it is a whole number inside its
 // bounds; anything else is left as typed, with a line under the field that says what it takes, and is never clamped, applied or stored.
@@ -29,7 +29,7 @@ import { attachComposer } from './composer.js';
 import { applyEvent, initialView } from './state.js';
 import { openViewer as showViewer } from './viewer.js';
 import {
-  TEST_MODEL, detailTable, el, focusKey, optionChips, renderAssistantCard, renderUserTurn, restoreFocus, scheduleRender, settleClamps,
+  TEST_MODEL, detailTable, el, focusKey, optionChips, ownXraySide, renderAssistantCard, renderUserTurn, restoreFocus, scheduleRender, settleClamps,
   statusText,
 } from './render.js';
 
@@ -601,8 +601,14 @@ export function createApp(env) {
     turn: n,
   });
 
-  // A user turn's own thumbnail is a picture and no more: the card's images row opens the same X-ray at full size (P6-E).
-  const userCtx = (n, model) => ({ ...cardCtx(n, model), openViewer: undefined });
+  // The upload in a user turn opens the viewer on what the card's "Your X-ray" tile opens (P6-G): ownXraySide gives the side from the turn's view as it
+  // is when the thumbnail is clicked (the tile's own choice once message_start has come, the thumbnail's own picture before it), and the focus goes back
+  // to the thumbnail, or to the one that replaced it where the user turn was drawn again under the viewer (message_start does).
+  const thumbOf = (turn) => turn.userEl?.querySelector('button.thumb-button') ?? null;
+  const userCtx = (turn, model) => {
+    const cx = cardCtx(turn.n, model);
+    return { ...cx, openViewer: (image, opener) => openViewer({ left: ownXraySide(turn.view, image, cx) }, opener, () => thumbOf(turn)) };
+  };
 
   function copy(value) {
     const clipboard = win.navigator?.clipboard;
@@ -664,14 +670,16 @@ export function createApp(env) {
 
   // Draws the user turn again from the turn's view: when the server says what it resolved (message_start) and when the generate stage says
   // how the report ended. The options are the server's own, commands included; a turn with no image is a question it answers with no model,
-  // so none were used.
+  // so none were used. The thumbnail is a control (P6-G): one that has the focus hands it to the new one, and nothing else takes it.
   function refreshUserBubble(turn) {
     if (!turn.userEl) return;
     const options = turn.view.image && isObject(turn.view.options) ? turn.view.options : null;
     const next = renderUserTurn({ text: turn.text, image: turn.image, options, outcome: chipsOutcome(turn.view, options?.model) },
-                                userCtx(turn.n, options?.model));
+                                userCtx(turn, options?.model));
+    const held = !!doc.activeElement && turn.userEl.contains(doc.activeElement);
     turn.userEl.replaceWith(next);
     turn.userEl = next;
+    if (held) thumbOf(turn)?.focus({ preventScroll: true });
   }
 
   // A control that is disabled while it has the focus loses it to the page itself (the focus fixup rule), and the keyboard would have to
@@ -870,7 +878,7 @@ export function createApp(env) {
       // A note the server will not run (no file, no command) uses no settings, so its turn shows no chips (P4-H).
       const ran = runsTheModel(note, file) || Number.isInteger(options.test_row);   // a picked study runs whatever the note says
       turn.userEl = renderUserTurn({ text: note, image: turn.image, options: ran ? options : null, outcome: chipsOutcome(null, options.model) },
-                                   userCtx(turn.n, options.model));
+                                   userCtx(turn, options.model));
       session.turns.push(turn);
       ui.conversation.append(turn.userEl);
       scroller.toEnd(turn.userEl);
@@ -1237,7 +1245,7 @@ export function createApp(env) {
         turn.image = shown.image;    // and rebuilds it from these
         turn.testRow = Number.isInteger(u.test_row) ? u.test_row : null;   // a test study: what the re-run hint names (P6-D)
         // how its report ended, and what its model was, from the log (P9-G5b): "ended the report" is the turn's, not the page's today
-        turn.userEl = renderUserTurn({ ...shown, outcome: chipsOutcome(replayed, shown.options?.model) }, userCtx(turn.n, shown.options?.model));
+        turn.userEl = renderUserTurn({ ...shown, outcome: chipsOutcome(replayed, shown.options?.model) }, userCtx(turn, shown.options?.model));
         nodes.push(turn.userEl);
       }
       if (a) {
@@ -1548,10 +1556,12 @@ export function createApp(env) {
 
   // ---- the viewer (P6-E) -------------------------------------------------------------------------------------------------------------
 
-  // A picture of a card opens viewer.js over the page: its pictures come through api.js's loadImage with this page's auth (and its refusals
-  // kept), and the full-size original, which no card shows, is let go of when it closes (api.js forgetImage). Closed, it gives the focus back
-  // to the control that opened it, or, where the card has been drawn again meanwhile (a turn that ran on), to the same control of the new card.
-  function openViewer(spec, opener = null) {
+  // A picture of a card, or the upload in the user's own message (P6-G), opens viewer.js over the page: its pictures come through api.js's loadImage
+  // with this page's auth (and its refusals kept), and the full-size original, which no card shows, is let go of when it closes (api.js forgetImage).
+  // Closed, it gives the focus back to the control that opened it, or, where the card has been drawn again meanwhile (a turn that ran on), to the same
+  // control of the new card; refind, for a control that has no key (the thumbnail of a user turn, which message_start draws again), says where the
+  // new one is.
+  function openViewer(spec, opener = null, refind = null) {
     const from = opener && doc.body.contains(opener) ? opener : doc.activeElement;
     const key = from ? focusKey(from) : null;
     const messageId = from?.closest?.('article.card')?.getAttribute('data-message-id') ?? null;
@@ -1561,15 +1571,20 @@ export function createApp(env) {
       forgetImage: (url) => api.forgetImage?.(url),
       onClose: ({ restore }) => {
         if (state.viewer === handle) state.viewer = null;
-        if (restore) giveFocusBack(from, messageId, key);
+        if (restore) giveFocusBack(from, messageId, key, refind);
       },
     });
     if (handle) state.viewer = handle;   // nothing to show opens nothing, and leaves an open viewer as it is
   }
 
-  function giveFocusBack(from, messageId, key) {
+  function giveFocusBack(from, messageId, key, refind = null) {
     if (from && from !== doc.body && doc.body.contains(from)) {
       from.focus();
+      return;
+    }
+    const again = refind?.();   // the control was drawn again meanwhile: the one that replaced it
+    if (again && doc.body.contains(again)) {
+      again.focus();
       return;
     }
     const card = messageId ? qa(ui.conversation, 'article.card').find((c) => c.getAttribute('data-message-id') === messageId) : null;

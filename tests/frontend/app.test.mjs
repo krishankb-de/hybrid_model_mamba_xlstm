@@ -5897,7 +5897,7 @@ test('every picture of a card opens the viewer: your X-ray at full size, what th
   }
   assert.deepEqual(new Set(h.api.loaded.map(([, auth]) => JSON.stringify(auth))).size, 1);
   assert.equal(typeof h.api.loaded[0][1].clientId, 'string');   // with the page's own auth, as every picture of the page
-  assert.equal(q(q($('conversation'), '.turn.user'), 'button'), null);   // a user turn's thumbnail is a picture: the card's own opens the viewer
+  assert.equal(q(q($('conversation'), '.turn.user'), 'button.thumb-button').getAttribute('aria-label'), 'Open X-ray in the viewer, turn 1');   // P6-G: the upload in the user's own message opens it too (its tests are below)
 });
 
 test('with the viewer open, Esc closes it and nothing under it: the drawer and the study list stay open, and the next Esc is theirs (P6-E)', async () => {
@@ -5982,6 +5982,154 @@ test('a card drawn again while the viewer is open (its turn runs on) gets the fo
   press(document.activeElement, 'Escape');
   assert.equal(document.activeElement, viewerButton('neighbor:1'));
   run.channel.push(stopEv('done', { message_id: 'm_v', report: 'Findings: so far.', display_report: 'Findings: so far.' }));
+  run.channel.end();
+  await turn;
+});
+
+// ---- P6-G: the upload in the user's own message opens the viewer as the card's "Your X-ray" tile does -----------------------------------
+
+const userThumb = () => q($('conversation'), '.turn.user button.thumb-button');
+// The shim has no image decoder: the viewer's pictures are given the size they would have and their load event, so that each footer says what it shows.
+function decodeViewer(width = 320, height = 320) {
+  for (const pane of viewerPanes()) {
+    const img = q(pane, 'img');
+    Object.assign(img, { naturalWidth: width, naturalHeight: height });
+    img.dispatchEvent(new ShimEvent('load'));
+  }
+}
+// What the open viewer says: its name and, for each pane, the picture it shows (a server path, or the source of a picture the page made itself), its name
+// and its footer.
+const viewerSays = () => ({
+  name: $('viewer').getAttribute('aria-label'),
+  panes: viewerPanes().map((pane) => {
+    const img = q(pane, 'img');
+    return { shows: img.getAttribute('data-src') ?? img.getAttribute('src'), alt: img.getAttribute('alt'), footer: q(pane, 'figcaption').textContent };
+  }),
+});
+// A click on the control, what the viewer says once its pictures have decoded, then Esc: -> what it said and what it let go of. The control starts without
+// the focus, and has it again at the end: a focus that comes back is one the page gave back (Safari does not focus a button on a click).
+async function seenFrom(h, control) {
+  document.activeElement.blur();
+  control.click();
+  await flush();
+  assert.equal($('viewer').hidden, false);
+  decodeViewer();
+  const said = viewerSays();
+  press(document.activeElement, 'Escape');
+  assert.equal($('viewer').hidden, true);
+  assert.ok(document.activeElement === control, 'the focus is not back on the control that opened the viewer');
+  return { ...said, forgotten: h.api.forgotten.splice(0) };
+}
+// The picture the thumbnail in the user turn opens is the one the card's "Your X-ray" tile opens: -> what the viewer said after the thumbnail.
+async function sameAsTheTile(h) {
+  const tile = await seenFrom(h, viewerButton('image:thumb'));
+  const thumb = await seenFrom(h, userThumb());
+  assert.deepEqual(thumb, tile);   // its name, its picture, its footer and what the close lets go of
+  return thumb;
+}
+// A chat of one turn that the server stored with this message_start image (and the user message that goes with it): what a reload draws.
+function replayedPicture({ image, user = {}, options = START_DATA.options, mode = 'private' }) {
+  resetEvents();
+  const events = [startEv({ message_id: 'm_v', mode, options, image }), stageStartEv('preprocess', 0),
+                  stageEndEv('preprocess', 2, { input_px: [320, 320], source: image.source }),
+                  stopEv('done', { message_id: 'm_v', report: 'Findings: clear.', display_report: 'Findings: clear.' })];
+  return pictured({
+    'GET /v1/sessions/s_v': { ...sess('s_v', 'chest.png', 1), messages: [{ ...userMsg('u_v', '', 'chest.png'), image_urls: VIEW_URLS, ...user }, botMsg('m_v', 'done', options)] },
+    'GET /v1/messages/m_v': { ...botMsg('m_v'), events: rows(events) },
+  });
+}
+
+test('a click on the upload in the user\'s own message opens the viewer on what the card\'s "Your X-ray" tile opens: the original, which no card shows; Esc gives the focus back to it (P6-G)', async () => {
+  const h = await pictured();
+  const thumb = userThumb();
+  assert.equal(thumb.getAttribute('aria-label'), 'Open X-ray in the viewer, turn 1');
+  assert.equal(thumb.getAttribute('type'), 'button');   // Enter and Space open it as a click does
+  assert.ok(q(thumb, 'img.thumb'), 'the button holds the picture the user turn always showed');
+  assert.deepEqual(await sameAsTheTile(h), { name: 'Image viewer: Your X-ray', panes: [{ shows: VIEW_URLS.original, alt: 'Your X-ray', footer: 'Your X-ray · 320×320 px' }],
+                                             forgotten: [VIEW_URLS.original] });   // let go of at the close, as the card's: nothing keeps the full-size picture
+});
+
+test('in public mode, which sends no original, the same click opens the thumbnail marked as such, and the page never asks for an original (P6-G)', async () => {
+  const urls = { thumb: VIEW_URLS.thumb, model_input: VIEW_URLS.model_input };
+  const h = await replayedPicture({ image: { sha256: SHA, filename: 'chest.png', source: 'upload', urls }, user: { image_urls: urls }, mode: 'public' });
+  assert.deepEqual(await sameAsTheTile(h), { name: 'Image viewer: Your X-ray', panes: [{ shows: VIEW_URLS.thumb, alt: 'Your X-ray', footer: 'Your X-ray · 320×320 px (thumbnail)' }],
+                                             forgotten: [] });   // the thumbnail is a card's picture: kept
+  assert.deepEqual(h.api.loaded.map(([url]) => url).filter((url) => url.includes('variant=original')), []);
+});
+
+test('a test study\'s picture opens at its stored gallery size, with the name of a test-split X-ray, as its card\'s tile does (P6-G)', async () => {
+  const options = { ...START_DATA.options, test_row: 9 };
+  const h = await replayedPicture({ image: { sha256: SHA, filename: null, source: 'test_split', urls: VIEW_URLS }, options,
+                                    user: { image_filename: null, test_row: 9, image_urls: VIEW_URLS } });
+  assert.equal(userThumb().getAttribute('aria-label'), 'Open X-ray in the viewer, turn 1');
+  assert.deepEqual(await sameAsTheTile(h), { name: 'Image viewer: Test-split X-ray',
+                                             panes: [{ shows: VIEW_URLS.original, alt: 'Test-split X-ray', footer: 'Test-split X-ray · 320×320 px (stored gallery size)' }],
+                                             forgotten: [VIEW_URLS.original] });
+});
+
+test('a turn whose card names no picture (a log without URLs, or one that cannot be read) opens what the thumbnail itself shows: the stored thumbnail, marked as such (P6-G)', async () => {
+  const thumbnail = { name: 'Image viewer: Your X-ray', panes: [{ shows: VIEW_URLS.thumb, alt: 'Your X-ray', footer: 'Your X-ray · 320×320 px (thumbnail)' }], forgotten: [] };
+  const bare = await replayedPicture({ image: { sha256: SHA, filename: 'chest.png', source: 'upload', urls: {} } });
+  assert.equal(qa(cardOf(), 'button[data-action="view"]').length, 0);   // no tile to open: the card has nothing to fetch
+  assert.deepEqual(await seenFrom(bare, userThumb()), thumbnail);
+  const unreadable = await pictured({ 'GET /v1/messages/m_v': refused(500, 'The log is broken.', 'internal_error') });
+  assert.equal(q(cardOf(), 'p.error') !== null, true);   // the card is the Retry of a log that could not be read
+  assert.deepEqual(await seenFrom(unreadable, userThumb()), thumbnail);
+});
+
+test('a live turn: before message_start the upload opens the page\'s own preview of the file; a viewer open as message_start draws the user turn again gives the focus to its new thumbnail; then it is the card\'s side (P6-G)', async () => {
+  const h = await ready({ options: { models: GALLERY_MODELS } });
+  h.api.forgotten = [];
+  h.api.forgetImage = (url) => h.api.forgotten.push(url);
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_v');
+  await flush();
+  const first = userThumb();   // the server has told the page nothing of this turn yet: the file is the page's own
+  const preview = q(first, 'img').getAttribute('src');
+  assert.match(preview, /^blob:/);
+  first.click();
+  await flush();
+  decodeViewer();
+  assert.deepEqual(viewerSays(), { name: 'Image viewer: Your X-ray', panes: [{ shows: preview, alt: 'Your X-ray', footer: 'Your X-ray · 320×320 px' }] });   // as attached: no note
+  run.channel.push(...picturedTurn('m_v').slice(0, 5));   // message_start and the stages after it: the user turn is drawn again under the open viewer
+  await flush();
+  nextFrame();
+  assert.equal(document.body.contains(first), false);
+  press(document.activeElement, 'Escape');
+  assert.ok(document.activeElement === userThumb(), 'the focus is not on the new thumbnail');
+  assert.deepEqual(h.api.forgotten, []);   // the preview is the page's own: nothing to let go of
+  assert.deepEqual(await seenFrom(h, userThumb()), { name: 'Image viewer: Your X-ray', panes: [{ shows: VIEW_URLS.original, alt: 'Your X-ray', footer: 'Your X-ray · 320×320 px' }],
+                                                    forgotten: [VIEW_URLS.original] });   // the server has said what it holds: the card's side
+  run.channel.push(stopEv('done', { message_id: 'm_v', report: 'Findings: clear.', display_report: 'Findings: clear.' }));
+  run.channel.end();
+  await turn;
+});
+
+test('a thumbnail that has the focus keeps it when the user turn is drawn again (message_start, the end of generate); a focus elsewhere is left alone (P6-G)', async () => {
+  const h = await ready({ options: { models: GALLERY_MODELS } });
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_v');
+  await flush();
+  const first = userThumb();
+  first.focus();
+  assert.ok(document.activeElement === first, 'the thumbnail takes the focus');
+  run.channel.push(...picturedTurn('m_v').slice(0, 5));   // message_start: the user turn is drawn again
+  await flush();
+  nextFrame();
+  assert.equal(document.body.contains(first), false);
+  assert.ok(document.activeElement === userThumb(), 'the focus went with the old thumbnail');
+  $('prompt').focus();   // the user is typing the next note
+  const second = userThumb();
+  run.channel.push(stageStartEv('generate', 3), stageEndEv('generate', 9));   // the end of generate draws the user turn again
+  await flush();
+  nextFrame();
+  assert.equal(document.body.contains(second), false);
+  assert.ok(document.activeElement === $('prompt'), 'the redraw took the focus from the note field');
+  run.channel.push(stopEv('done', { message_id: 'm_v', report: 'Findings: clear.', display_report: 'Findings: clear.' }));
   run.channel.end();
   await turn;
 });

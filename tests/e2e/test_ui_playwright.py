@@ -1049,11 +1049,31 @@ def test_the_viewer_opens_a_similar_xray_beside_yours_zooms_in_and_escape_gives_
     """P6-E on a tiny_gallery server: a similar X-ray of the card opens the viewer side by side, the turn's own X-ray (its original) on the
     left and the match on the right, each loaded through the page's auth (object URLs, never a server path as a src) and footed with its pixel
     size; the page behind is inert. + zooms both panes (linked), the wheel zooms further at the cursor, and Esc closes the viewer, frees the
-    page and puts the focus back on the button that opened it."""
+    page and puts the focus back on the button that opened it. P6-G: first the upload in the user's own message, live and again after a reload,
+    opens the original in one pane, as the card's "Your X-ray" tile does, and Esc puts the focus back on that thumbnail."""
     page = ui.open()
     card = ui.turn(images["xray_smooth.png"])   # not noise: the viewer fills the page with this picture, and a screenshot of that is over the evidence limit (P6-F fix 1)
     assert card["status"] == "done"
     page.wait_for_function(NEIGHBOURS_LOADED)
+
+    def the_upload_opens_the_original() -> None:
+        thumb = page.locator("#conversation article.turn.user button.thumb-button")
+        assert thumb.count() == 1 and thumb.get_attribute("aria-label") == "Open X-ray in the viewer, turn 1"
+        thumb.click()
+        page.wait_for_function("!document.querySelector('#viewer').hidden && document.querySelectorAll('#viewer img').length === 1"
+                               " && [...document.querySelectorAll('#viewer img')].every((i) => i.complete && i.naturalWidth > 0)")
+        seen = page.evaluate(VIEWER_JS)
+        assert seen["label"] == "Image viewer: Your X-ray" and [p["footer"] for p in seen["panes"]] == ["Your X-ray · 320×320 px"], seen
+        assert seen["panes"][0]["path"].endswith("/image?variant=original") and seen["panes"][0]["src"].startswith("blob:"), seen   # through the page's auth
+        assert seen["held"] and seen["inert"] == [True, True, True]
+        page.keyboard.press("Escape")
+        gone = page.evaluate(VIEWER_JS)
+        assert gone["hidden"] and not gone["held"] and gone["panes"] == [] and gone["focus"] == "thumb-button", gone   # back on the thumbnail
+
+    the_upload_opens_the_original()   # live: the user turn shows the page's own preview of the file
+    ui.reload()                       # replayed: the server's thumbnail in its place
+    page.wait_for_function(NEIGHBOURS_LOADED)
+    the_upload_opens_the_original()
     opener = page.locator("section.neighbors button[data-action='view']").first
     key = opener.get_attribute("data-key")
     assert key == "neighbor:1"
