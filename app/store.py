@@ -22,8 +22,13 @@ to hold_ending, and the store keeps it in memory (_held) until the process ends 
 of a message or of its events applies it, in one place (_held_for, through _message_out and _held_rows), so a read gives
 what the turn's stream gave: the message's final status, and the held events after the last event the database holds,
 numbered on from it. The next start's recover_after_restart closes such a turn on disk, as it closes any turn left running.
+
+Saved exports (P9-C): save_export writes a session's export, the very body export() gives, to <home>/exports/ for a session whose text has to stay
+on the server: owner-only, whole or not at all, a new name each time and never a replaced file. Nothing in the store reads those files again, and
+the retention sweep does not touch them.
 """
 import copy
+import errno
 import json
 import logging
 import os
@@ -31,6 +36,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import stat
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -52,6 +58,8 @@ SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")   # what new_id produces; no dot or
 SHA256 = re.compile(r"[0-9a-f]{64}")
 MAX_TITLE = 80
 MAX_PAGE = 200
+EXPORT_DIR = "exports"        # under the home: where save_export writes (P9-C)
+MAX_SAVES_PER_SECOND = 1000   # the names of one session's exports in one second before save_export gives up
 PRIVATE_OPTION_KEYS = ("reference", "test_row")   # Options fields that exist only in private mode (R1)
 
 DDL = """
@@ -91,6 +99,11 @@ _PURGE_SQL = (   # one session, in foreign-key order
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _stamp() -> str:
+    """The UTC time to the second as a file name carries it, 20261013T181530Z: what a saved export's name adds to the export's own."""
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def _dumps(obj: Any) -> str:
@@ -173,6 +186,7 @@ class Store:
         self._uploads = self.home / "uploads"
         self._lock = threading.Lock()
         self._upload_lock = threading.Lock()   # save_upload puts one copy in place at a time (P8-C)
+        self._export_lock = threading.Lock()   # save_export names and places one file at a time (P9-C)
         self._held: Dict[str, Dict[str, Any]] = {}   # message id -> the ending the database did not take (hold_ending)
         self.home.mkdir(parents=True, exist_ok=True)
         self._uploads.mkdir(mode=0o700, exist_ok=True)
@@ -507,6 +521,44 @@ class Store:
             return "session-{}.json".format(session_id), "application/json", body.encode("utf-8")
         return ("session-{}.md".format(session_id), "text/markdown; charset=utf-8",
                 _markdown(session, docs).encode("utf-8"))
+
+    def save_export(self, session_id: str, fmt: str, client_id: Optional[str]) -> Tuple[str, int]:
+        """Write the session's export under <home>/exports/ and -> (the file's name, its size in bytes) (P9-C: an export that must stay on the
+        server). The body is export()'s own, the one every download gets, so an ending the database did not take (the held ones) is in the file too.
+        KeyError and ValueError are export()'s, raised before the directory or any file is made; any OSError is the caller's.
+
+        The file is session-<id>-<UTC time to the second>.json or .md: a new name each time. One that is taken (a second save in the same second)
+        gets -2, -3 ... before the extension, and no file is ever replaced. It is owner-only (mode 0600, whatever the umask; the directory 0700, made
+        so, and narrowed if somebody made it wider, never widened) and written whole: first to a hidden temporary file of the same directory, then
+        renamed to its name, so that nothing is ever there under a name that is only half written. The temporary file is removed if anything fails."""
+        filename, _, body = self.export(session_id, fmt, client_id)
+        stem, ext = os.path.splitext(filename)
+        directory = self.home / EXPORT_DIR
+        directory.mkdir(mode=0o700, exist_ok=True)
+        mode = stat.S_IMODE(directory.stat().st_mode)
+        if mode & 0o077:
+            os.chmod(str(directory), mode & 0o700)
+        tmp = directory / ".{}.{}.tmp".format(stem, secrets.token_hex(4))
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                os.fchmod(handle.fileno(), 0o600)
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
+            stamp = _stamp()
+            with self._export_lock:   # the first free name is taken by the rename that follows it: one save at a time (this process owns the home)
+                for attempt in range(1, MAX_SAVES_PER_SECOND + 1):
+                    name = "{}-{}{}{}".format(stem, stamp, "" if attempt == 1 else "-{}".format(attempt), ext)
+                    if not os.path.lexists(str(directory / name)):
+                        os.replace(str(tmp), str(directory / name))
+                        return name, len(body)
+            raise FileExistsError(errno.EEXIST, "no free name for an export")
+        finally:
+            try:
+                os.unlink(str(tmp))   # gone already after a rename
+            except OSError:
+                pass
 
     def sweep(self, older_than_days: int, mode: Optional[str] = None) -> int:
         """Purge sessions created more than ``older_than_days`` ago; -> how many.

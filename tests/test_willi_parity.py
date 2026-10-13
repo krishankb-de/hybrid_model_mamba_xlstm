@@ -10472,3 +10472,67 @@ def test_the_demo_cases_script_prints_and_writes_nothing_but_its_one_line_the_he
             parent = parents[use]
             assert (isinstance(parent, ast.Call) and ast.unparse(parent.func) == "type") or (
                 isinstance(parent, ast.Attribute) and parent.attr in ("line", "code") and ast.unparse(handler.type) == "Refused"), ast.unparse(handler)   # a Refused: its line, or its code (a word of ERROR_CODES, compared)
+
+
+# ── CHAT_UI_PLAN.md P9-C, part 2: a session's export saved on the server ──────
+# Static pins on Store.save_export (app/store.py) and the route behind it (app/server.py). Their behaviour (the bytes equal to the download's, the
+# names, the modes, the refusals, the held endings in the file, the fixed 500) is exercised for real in tests/test_app_export_save.py. These pins hold
+# what a later edit could break without a test noticing: that there is one export and the file is that body, that the route is private-only before
+# anything else and answers a name and a size, and that nothing of an exception but its class reaches the log or the answer.
+
+def _app_tree(name):
+    tree = ast.parse((REPO_ROOT / "app" / name).read_text(encoding="utf-8"))
+    return tree, {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+
+def _store_method(name):
+    tree, _ = _app_tree("store.py")
+    store = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Store")
+    return next(n for n in store.body if isinstance(n, ast.FunctionDef) and n.name == name)
+
+
+def test_save_export_takes_its_body_from_the_stores_one_export_and_makes_no_second():
+    """The plan: "the same export path, and so the same P8-D follow-up overlay, as GET .../export. Do not build a second export." The method calls
+    self.export once, takes the body from it, and writes that body and nothing else: it reads no row, applies no held ending and renders no document."""
+    save = _store_method("save_export")
+    calls = [ast.unparse(c.func) for c in ast.walk(save) if isinstance(c, ast.Call)]
+    assert calls.count("self.export") == 1
+    assert not {c for c in calls if c.startswith(("self._con", "self._held", "self._message", "self._session")) or c in ("_markdown", "json.dumps", "json.loads")}, calls
+    bound = [ast.unparse(a.targets[0]) for a in ast.walk(save) if isinstance(a, ast.Assign) and isinstance(a.value, ast.Call)
+             and ast.unparse(a.value.func) == "self.export"]
+    assert bound == ["(filename, _, body)"], "the body is the third thing export() answers"
+    written = [ast.unparse(c.args[0]) for c in ast.walk(save) if isinstance(c, ast.Call) and ast.unparse(c.func) == "handle.write"]
+    assert written == ["body"], "the one thing written is the export's own body"
+    assert [ast.unparse(c.args[0]) for c in ast.walk(save) if isinstance(c, ast.Call) and ast.unparse(c.func) == "os.replace"] == ["str(tmp)"]
+    flags = [ast.unparse(c.args[1]) for c in ast.walk(save) if isinstance(c, ast.Call) and ast.unparse(c.func) == "os.open"]
+    assert flags == ["os.O_WRONLY | os.O_CREAT | os.O_EXCL"], "a temporary file that is made new, never an existing file opened"
+    def node_calls(dotted):
+        return [c for c in ast.walk(save) if isinstance(c, ast.Call) and ast.unparse(c.func) == dotted]
+
+    assert [c.args[2].value for c in node_calls("os.open")] == [0o600], "the file is made owner-only"
+    assert [c.args[1].value for c in node_calls("os.fchmod")] == [0o600], "and, whatever the umask, set so"
+    assert [k.value.value for c in node_calls("directory.mkdir") for k in c.keywords if k.arg == "mode"] == [0o700], "the directory is made owner-only"
+
+
+def test_the_save_route_is_private_only_before_anything_else_and_answers_a_name_and_a_size_and_nothing_else():
+    tree, parents = _app_tree("server.py")
+    route = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "save_export")
+    decorator = route.decorator_list[0]
+    assert ast.unparse(decorator.func) == "app.post" and ast.unparse(decorator.args[0]) == "'/v1/sessions/{session_id}/export/save'"
+    assert {k.arg: ast.unparse(k.value) for k in decorator.keywords}["dependencies"] == "[Depends(private_save)]", "the 403 is a dependency: it runs first"
+    guard = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "private_save")
+    assert [ast.unparse(s) for s in guard.body[1:]] == ["if mode == 'public':\n    raise HTTPException(403, PUBLIC_SAVE_MSG)"]
+    assert [a.arg for a in route.args.args] == ["session_id", "fmt"], "no client id: the route is private-only, so it scopes by nothing"
+    returns = [ast.unparse(r.value) for r in ast.walk(route) if isinstance(r, ast.Return)]
+    assert returns == ["{'saved': saved, 'bytes': size}"], "the file name and its size: never the body"
+    assert "body" not in {n.id for n in ast.walk(route) if isinstance(n, ast.Name)} and not [
+        n for n in ast.walk(route) if isinstance(n, ast.Call) and ast.unparse(n.func) in ("Response", "FileResponse", "JSONResponse", "StreamingResponse")]
+    calls = [c for c in ast.walk(route) if isinstance(c, ast.Call) and ast.unparse(c.func) == "store.save_export"]
+    assert [[ast.unparse(a) for a in c.args] for c in calls] == [["session_id", "fmt", "None"]], "one call, with no client id"
+    handlers = [(ast.unparse(h.type), h.name) for h in ast.walk(route) if isinstance(h, ast.ExceptHandler)]
+    assert handlers == [("KeyError", None), ("ValueError", None), ("(OSError, sqlite3.Error)", "exc")]
+    for handler in (h for h in ast.walk(route) if isinstance(h, ast.ExceptHandler) and h.name):
+        uses = [u for stmt in handler.body for u in ast.walk(stmt) if isinstance(u, ast.Name) and u.id == handler.name]
+        assert uses and all(isinstance(parents[u], ast.Call) and ast.unparse(parents[u].func) == "type" for u in uses), "the class, never the text"
+    assert [ast.unparse(c.args[0]) for c in ast.walk(route) if isinstance(c, ast.Call) and ast.unparse(c.func) == "log.warning"] == ["'could not save an export: %s'"]
+    assert [ast.unparse(c.args[1]) for c in ast.walk(route) if isinstance(c, ast.Call) and ast.unparse(c.func) == "HTTPException" and len(c.args) > 1][-1] == "SAVE_EXPORT_FAILED_MSG"

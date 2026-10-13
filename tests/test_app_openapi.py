@@ -23,6 +23,7 @@ from tests.app_helpers import decide_gate, iter_sse, png_bytes
 MESSAGES = "/v1/sessions/{session_id}/messages"   # the streaming turn
 IMAGE = "/v1/messages/{message_id}/image"          # a turn's image (P6-B)
 GALLERY_IMAGE = "/v1/gallery/images/{row}"         # a similar X-ray's image (P6-C)
+SAVE = "/v1/sessions/{session_id}/export/save"     # a session's export, written on the server (P9-C)
 STREAM_EVENTS = ["message_start", "stage_start", "stage_end", "content_block_start", "content_block_delta",
                  "content_block_stop", "warning", "error", "message_stop"]   # every event name of the stream
 # The Options dict test_curl_walkthrough_options_validate pins: what the README's curl walkthrough sends (P8-E).
@@ -60,7 +61,8 @@ def test_openapi_documents_every_v1_route(client):
                  ("GET", "/v1/messages/{message_id}"), ("POST", "/v1/messages/{message_id}/cancel"),
                  ("POST", "/v1/retrieve"), ("POST", "/v1/label"), ("GET", "/v1/test-studies"),   # P5-E
                  ("GET", "/v1/messages/{message_id}/image"),   # P6-B
-                 ("GET", "/v1/gallery/images/{row}")]:         # P6-C
+                 ("GET", "/v1/gallery/images/{row}"),          # P6-C
+                 ("POST", "/v1/sessions/{session_id}/export/save")]:   # P9-C
         assert want in routes
     for path, ops in spec["paths"].items():
         for op in ops.values():
@@ -408,6 +410,7 @@ REFUSED_BY_THE_ROUTE = {   # what each route declares by itself; 401, 403 and th
     ("POST", MESSAGES): {400, 403, 404, 413, 422, 429, 500},
     ("GET", "/v1/messages/{message_id}"): {404, 422}, ("POST", "/v1/messages/{message_id}/cancel"): {404},
     ("GET", "/v1/sessions/{session_id}/export"): {404, 422},
+    ("POST", "/v1/sessions/{session_id}/export/save"): {403, 404, 422, 500},   # P9-C
     ("GET", "/v1/models"): set(), ("GET", "/healthz"): set(),
     ("POST", "/v1/retrieve"): {413, 422, 429, 500, 503}, ("POST", "/v1/label"): {422, 503},   # P5-E
     ("GET", "/v1/test-studies"): {403, 422, 503},
@@ -456,6 +459,8 @@ def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, m
         ("GET", "/v1/sessions", "/v1/sessions?limit=0", {}, 422),
         ("GET", "/v1/messages/{message_id}", "/v1/messages/m_missing?after=-1", {}, 422),
         ("GET", "/v1/sessions/{session_id}/export", "/v1/sessions/{}/export?format=xml".format(sid), {}, 422),
+        ("POST", SAVE, "/v1/sessions/s_missing/export/save", {}, 404),   # P9-C
+        ("POST", SAVE, "/v1/sessions/{}/export/save?format=xml".format(sid), {}, 422),
         ("POST", MESSAGES, turn, {"files": image, "data": {"options": "[1, 2]"}}, 400),
         ("POST", MESSAGES, turn, {"files": image, "data": {"options": '{"beam_size": 9}'}}, 422),
         ("POST", MESSAGES, turn, {"files": {"image": ("x.png", bytes(MAX_UPLOAD_BYTES + 1), "image/png")}}, 413),
@@ -515,6 +520,9 @@ def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, m
     with monkeypatch.context() as m:   # 500: the image cannot be stored
         m.setattr(client.app.state.store, "save_upload", full_disk)
         check(client.post(turn, files=image), "POST", MESSAGES, 500)
+    with monkeypatch.context() as m:   # 500: the export cannot be written (P9-C)
+        m.setattr(client.app.state.store, "save_export", full_disk)
+        check(client.post("/v1/sessions/{}/export/save".format(sid)), "POST", SAVE, 500)
     public = {"Authorization": "Bearer t", "X-Client-Id": "a"}
     with TestClient(create_app(engine="tiny", home=str(tmp_path / "public"), mode="public", token="t")) as c:
         psid = c.post("/v1/sessions", json={}, headers=public).json()["id"]
@@ -525,6 +533,7 @@ def test_every_refusal_the_server_really_sends_is_documented(client, tmp_path, m
         c.app.state.store._con.execute("UPDATE messages SET test_row = 0 WHERE id = ?", (planted,))   # never stored in public: planted
         check(c.get("/v1/messages/{}/image?variant=thumb".format(planted), headers=public), "GET", IMAGE, 403)   # and its image
         check(c.get("/v1/gallery/images/0", headers=public), "GET", GALLERY_IMAGE, 403)   # P6-C: a gallery image in public mode
+        check(c.post("/v1/sessions/{}/export/save".format(psid), headers=public), "POST", SAVE, 403)   # P9-C: nothing is saved on a public server
 
 
 ROUTE_BODIES = {("POST", "/v1/sessions"): {"json": {}}, ("POST", MESSAGES): {"data": {"options": "{}"}}}   # to parse

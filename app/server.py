@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 from contextlib import asynccontextmanager, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,6 +104,8 @@ NO_TURN_IMAGE_MSG = "This turn has no image."
 IMAGE_GONE_MSG = "This turn's image is no longer stored."
 PUBLIC_ORIGINAL_MSG = "Public mode serves an upload's thumbnail and model input, not its original."
 PUBLIC_GALLERY_MSG = "Gallery images are not available in public mode."
+PUBLIC_SAVE_MSG = "Saving an export on the server is not available in public mode."   # P9-C
+SAVE_EXPORT_FAILED_MSG = "Could not save the export."   # all a 500 of the save route says: no path, no exception text (the log has the class)
 NO_GALLERY_ROW_MSG = "No such gallery image."
 GALLERY_IMAGE_MSG = "Could not read the gallery image."
 UPLOAD_CACHE = {"Cache-Control": "private, max-age=3600"}   # a user's own upload, back to that user: a reload need not fetch it again
@@ -197,14 +200,14 @@ OPTIONS_DOC = ("The turn's options as a JSON object with the keys " + ", ".join(
 REFUSALS = {   # what a status means in the reference; a route that can answer it declares it with _refusals()
     400: "The request is malformed: `options` is not a JSON object, or in public mode `X-Client-Id` is missing or "
          "invalid.",
-    403: "A test-split study, a gallery image or an upload's original was asked for in public mode.",
+    403: "A test-split study, a gallery image or an upload's original was asked for in public mode, or an export was to be saved on the server.",
     404: "The session, message, image or gallery row does not exist or was deleted, or in public mode it belongs to another client.",
     413: "The image is over the {} MB upload limit, or the whole request is over {} MB, which is refused before it is read.".format(
         UPLOAD_MB, REQUEST_MB),
     422: "The request failed validation: a parameter, an option, the model or the image cannot be used, or there is "
          "no image to run.",
     429: "The server is busy: its queue of accepted turns is full.",
-    500: "The server could not store the image, read a test-split or gallery image, or run the retrieval.",
+    500: "The server could not store the image, read a test-split or gallery image, run the retrieval, or save an export.",
     503: "What the route needs is not on this server or does not answer: the retrieval gallery or the CheXbert labeller.",
 }
 STREAM_RESPONSE = {200: {   # the turn is Server-Sent Events, not JSON
@@ -230,6 +233,12 @@ EXPORT_RESPONSE = {200: {   # JSON is FastAPI's default; Markdown is the other f
     "headers": {"Content-Disposition": {"description": "An attachment named session-<id>.json or session-<id>.md.",
                                         "schema": {"type": "string"}}},
     "content": {"text/markdown": {"schema": {"type": "string"}}}}}
+# POST /v1/sessions/{id}/export/save as /docs shows it (P9-C; test_app_export_save pins its keys to the real answer): the file the export was written to,
+# and never the export.
+SAVE_EXPORT_EXAMPLE = {"saved": "session-s_0198a4f1c2b3d4e5f60718-20261013T181530Z.json", "bytes": 48213}
+SAVE_EXPORT_RESPONSE = {200: {
+    "description": "The file the export was written to, under exports/ in the server's home: its name, which the server chose, and its size in bytes.",
+    "content": {"application/json": {"example": SAVE_EXPORT_EXAMPLE}}}}
 
 
 def _refusals(messages: Dict[int, str], token: bool = True, client_id: bool = True) -> Dict[Any, Dict[str, Any]]:
@@ -1227,6 +1236,35 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
         if gallery is None:
             raise HTTPException(503, NO_GALLERY_MSG)
         return {"studies": gallery.list_test_studies(q, limit)}
+
+    # ---- P9-C: a session's export, written where it stays ---------------------------------------------------------------
+
+    def private_save() -> None:
+        """An export of a private session holds MIMIC-derived text, and this route puts it on the server's disk: private mode only (R1). 403 in
+        public mode, before anything else about the request, so before a client id is asked for, and whoever the session is."""
+        if mode == "public":
+            raise HTTPException(403, PUBLIC_SAVE_MSG)
+
+    @app.post("/v1/sessions/{session_id}/export/save", summary="Save a session's export on the server", dependencies=[Depends(private_save)],
+              responses={**SAVE_EXPORT_RESPONSE, **_refusals({403: PUBLIC_SAVE_MSG, 404: "Session not found.", 422: "format must be json or md.",
+                                                              500: SAVE_EXPORT_FAILED_MSG}, client_id=False)},
+              description="Writes the session's export, the body `GET /v1/sessions/{session_id}/export` sends (`format=json`, the default, or `md`), to "
+                          "`exports/` under the server's home as `session-<id>-<UTC time>.json` or `.md`, a new file each time, never replacing one and "
+                          "readable by its owner only, and answers its file name and size, never the export itself: for a session whose text must stay "
+                          "on the server, in private mode only. Answers 403 in public mode (before anything else), 404 for an unknown or deleted "
+                          "session, 422 for any other `format` and 500 when the export cannot be read or the file cannot be written, with a message "
+                          "that names no path.")
+    def save_export(session_id: str, fmt: str = Query("json", alias="format")):
+        try:
+            saved, size = store.save_export(session_id, fmt, None)   # private mode scopes by nothing: every session
+        except KeyError:
+            raise HTTPException(404, "Session not found.") from None
+        except ValueError:
+            raise HTTPException(422, "format must be json or md.") from None
+        except (OSError, sqlite3.Error) as exc:   # a full disk, a path that cannot be made, a failing database: its class in the log, nothing of it in the answer
+            log.warning("could not save an export: %s", type(exc).__name__)
+            raise HTTPException(500, SAVE_EXPORT_FAILED_MSG) from None
+        return {"saved": saved, "bytes": size}
 
     return app
 
