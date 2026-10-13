@@ -139,7 +139,8 @@
     "P9-G3": "preflight code eos_flag true + module_in_cwd true; recipe ok with changed = the 6 root-derived keys (checkpoint_dir, experiment_name, log_dir, output_dir, trainer.default_root_dir, wandb.name), added = [dataset.report_eos_target], removed = [] (80%); wall 1.1-1.8 h for 12,000 steps on 4 H100 (published ~1.3 h); final val/lm_loss within 0.03 of the published run's last value, slightly higher more likely (one more target per report); DONE written with steps 12000",
     "P7-A": "all 3 probes pass in ~1 min (85%); fastapi >= 0.115 (overlay), transformers 4.x < 5 (.venv_chexbert); chexbert label order true with f1chexbert 0.0.2 (92%)",
     "P8-F-timing": "A ≈ 3.0 s per report (P1-C's ~30 ms per step, 100 tokens, beam 3); B and C within 10% of A. The mean first exceeds 1.5× A at D (the worker thread) 45%; at E or E-local (the store/emit path) 25%; at F (HTTP + event loop) 10%; at no arm 20% (then the probe's 77-88 ms per step was node load at that time). A-end within 10% of A (no drift over the run) 80%. fs_home a network filesystem (nfs, gpfs, lustre or beegfs) 90%; fs_local node-local (tmpfs, xfs or ext4) 85%.",
-    "P8-F-diag": "J1 MALLOC_ARENA_MAX=1: D/A ≤ 1.3 55%. J2 one CPU: A 6-12 s per report; D/A ≤ 1.3 45% (≈1 points at the OpenMP team or TLB shootdowns; ≥1.5 points at per-thread allocation or thread-local state). J3 OMP_WAIT_POLICY=PASSIVE: A within ±25% of 2.96 s 70%; D/A ≤ 1.3 20%."
+    "P8-F-diag": "J1 MALLOC_ARENA_MAX=1: D/A ≤ 1.3 55%. J2 one CPU: A 6-12 s per report; D/A ≤ 1.3 45% (≈1 points at the OpenMP team or TLB shootdowns; ≥1.5 points at per-thread allocation or thread-local state). J3 OMP_WAIT_POLICY=PASSIVE: A within ±25% of 2.96 s 70%; D/A ≤ 1.3 20%.",
+    "P8-F-part3": "published model (m3, 100 tokens) generate 2.9-3.5 s per report (80%), where it was 7.44-7.83 s; full published turn 3.2-4.2 s; EOS default model turns about 2.5x faster than the 4.35-8.21 s of probe run 2; published equality 5/5 and EOS stops 6/6 unchanged (95%); first byte unchanged (<= 300 ms)"
   },
   "decisions": {
     "branch": "chat_ui, cut from h100_efficiency @ 5c45527 (has cached decode, E6/E7 decode verification, ISBI neighbour code, partition rename)",
@@ -640,7 +641,8 @@
         "p8f_diag_J1": "2649955 MALLOC_ARENA_MAX=1: A 3083 ms, D 3.19x (not the cause; prediction wrong)",
         "p8f_diag_J2": "2649956 one CPU: A 9235 ms, D 0.98x, all arms ~1.0 (prediction right)",
         "p8f_diag_J3": "2649957 OMP_WAIT_POLICY=PASSIVE: A 9521 ms, D 0.98x (spinning is what makes A fast)",
-        "p8f_root_cause": "two libgomp pools (main thread from engine load + worker) -> managed 16 > 8 CPUs -> spin throttled to 100 -> passive -> 8 threads as slow as 1"
+        "p8f_root_cause": "two libgomp pools (main thread from engine load + worker) -> managed 16 > 8 CPUs -> spin throttled to 100 -> passive -> 8 threads as slow as 1",
+        "p8f_part3_merge": "9680fe6 (pick of 7c194ff; review approved, minors carried); tree == the gated 7c194ff (validate 5228 passed, e2e 36, layout 366/0, browser 10/0)"
       },
       "verdict": null
     },
@@ -819,9 +821,10 @@
     "P6-F: the five image features checked end to end on the tiny stack (scripts/chat_ui_features_check.py, evidence docs/chat_ui/evidence/p6f/), browser-check hardening, --url refusals in all three checks; merged 62250fd..606fc6b; gates green on 606fc6b",
     "P6-F ticked: features check (5 items) + browser-check hardening merged (62250fd..606fc6b); --url in all three checks refuses 8000/8010, other hosts and non-tiny servers and needs --no-evidence (review finding: a tunnel could have written MIMIC evidence labelled synthetic). P7-E drill script merged (4ae8633, cfc1709); its box waits for the drill. Stopped per the user.",
     "P9-G6: length-normalised beam search measured at α = 1.5 and 2.0 — no effect under top-hypothesis stopping (44.6 / 44.9 words vs 44.2); gate fails at both; decision rule keeps α = 1.0; EOS-step lever offered to the user",
-    "User 2026-10-13: 'Resume the process'; the user-turn thumbnail opens the viewer (new box P6-G); merged agent worktrees deleted (21). Cluster: P9-G6 alpha 2.0 chain completed (ticked: no effect, keep alpha 1.0); serve 2647167 ended at its 24 h limit (TIMEOUT); the restart (sync + submit) was refused by the auto-mode classifier as a production deploy, so it waits for the user."
+    "User 2026-10-13: 'Resume the process'; the user-turn thumbnail opens the viewer (new box P6-G); merged agent worktrees deleted (21). Cluster: P9-G6 alpha 2.0 chain completed (ticked: no effect, keep alpha 1.0); serve 2647167 ended at its 24 h limit (TIMEOUT); the restart (sync + submit) was refused by the auto-mode classifier as a production deploy, so it waits for the user.",
+    "P8-F part 3 merged (9680fe6); acceptance prediction recorded (R4) before the serve job runs it"
   ],
-  "last_updated": "2026-10-13T16:00:08+02:00",
+  "last_updated": "2026-10-13T17:14:49+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -903,7 +906,8 @@
       "P8-D's page fix (app.js token notice, 9705d60) is not on the cluster yet: the live serve job serves app/static from CLUSTER_REPO, so sync it together with the next planned serve restart",
       "P6-F (found by its fix round, predates it): at 320x568 on a gallery (private-mode) server the composer's nowrap button row gains 'Test-split study' (app/static/app.js:2021-2027, styles.css:501), wraps, and Send sits ~33 px below the composer's fold with a preview attached (6 layout-check lines, drawer open/closed, light/dark); the gate's app has no gallery, so the gate never sees it",
       "P6-F minors: tests/chat_ui_url_cases.py:93 type comment uses List without importing it; chat_ui_cdp.py:72 and the flags-test docstring say \"Chrome's default flags (10 of 30)\" where the baseline arm was the four earlier flags; the tiny-only proof reads model cards only",
-      "P7-E minors: tests/test_chat_requeue_drill.py duplicates sibling helpers (the_result, offline, no_ambient_token, sse) and re-runs the load drill's refusal matrices (one case per refusal would prove the wiring); the ports pin is name-keyed and does not assert its 4 allowed tests stay process-free; a silent stream's 'timeout' could in theory be relabelled 'reset' (give TurnReader._read's two handlers stream.end = stream.end or ...)"
+      "P7-E minors: tests/test_chat_requeue_drill.py duplicates sibling helpers (the_result, offline, no_ambient_token, sse) and re-runs the load drill's refusal matrices (one case per refusal would prove the wiring); the ports pin is name-keyed and does not assert its 4 allowed tests stay process-free; a silent stream's 'timeout' could in theory be relabelled 'reset' (give TurnReader._read's two handlers stream.end = stream.end or ...)",
+      "P8-F part 3 minors: app/cli.py:19-22 docstring drift (SIGINT during loading now waits for start_up on the worker, then exits 130); latent gc-timing flake in older thread-count tests (tests/test_chat_decode_timing.py:882-886/893-898/1059-1063, tests/test_app_retention.py:116-122: compare by identity or gc.collect() first); Worker.call would deadlock if called from the worker thread or block if called from async code (docstring clause); the pins match ast.Call only (check every ast.Name load of _engines/_require_eos_entries_marked/_wire_gallery); nits: the libgomp rationale written 4x, test helper release duplicates cli._release, pins reuse _timing_inner"
     ],
     "P9-G5": [],
     "P5-D": [

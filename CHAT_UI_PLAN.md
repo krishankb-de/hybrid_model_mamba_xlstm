@@ -4061,6 +4061,12 @@ The aim is to find where the live per-step cost (77-88 ms against P1-C's ~30 ms)
     - `OMP_NUM_THREADS` set to half the CPUs: brittle, and slower;
     - 16 CPUs for 8 threads: it wastes a reservation;
     - `GOMP_SPINCOUNT`: it does not lift the throttle.
+- **Part 3 merged (2026-10-13): 9680fe6** (pick of 7c194ff; task review approved).
+  - `create_app` builds `Worker(None, …)` first, then runs `_engines`, the EOS check and `_wire_gallery` through `worker.call`, on the turn thread. Only after that does it attach the Pipeline.
+  - A refusal shuts the worker down and closes the store.
+  - On the laptop, a TorchDispatchMode count on `create_app`'s calling thread went from 237 ops to 0.
+  - Gates on the same tree: validate passed (5228), e2e 36, layout 366/0, browser 10/0.
+- **Prediction (R4, recorded 2026-10-13, before any serve job runs part 3), read by the R7-safe probe (`scripts/chat_realturn_probe.py`):** published model (m3, 100 tokens) generate 2.9-3.5 s per report (80%), where it was 7.44-7.83 s; full published turn 3.2-4.2 s; EOS default model turns about 2.5x faster than the 4.35-8.21 s of probe run 2; published equality 5/5 and EOS stops 6/6 unchanged (95%); first byte unchanged (<= 300 ms).
 
 
 ### P9 — Demo and close
