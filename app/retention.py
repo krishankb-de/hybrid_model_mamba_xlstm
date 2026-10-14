@@ -9,6 +9,11 @@ else keeps the server from starting, with one message, and 0 above all (it would
 the sessions of a past public demo are gone after 7 days whatever mode the server runs in now, and a private server started with RETENTION_DAYS=60
 still keeps nothing public for longer than 7 days.
 
+**Saved exports (P9-C follow-up, user 2026-10-14: "delete them after 45 days").** The files the save route wrote under <home>/exports/ go after the
+private days too: the sweep calls Store.sweep_exports with the policy's private days, so the server's own days when it is private (RETENTION_DAYS or
+retention_days included) and the default 45 on a public one, which saves no export but may be started over a home that holds some. An export is old
+by the time in its name, not by its session: it can outlive the session it came from, and it goes 45 days after it was saved.
+
 **The thread.** RetentionSweeper sweeps once when the server starts, after the recovery of the turns that a restart left running (so the session of a
 turn that died with the last server can go too), and every 24 hours after that. It is a daemon thread that waits on an Event, so stop() wakes it at
 once and a shutdown never sleeps through the interval. It sweeps through Store.sweep, which takes the store's own lock a session at a time and never
@@ -59,25 +64,38 @@ def retention_policy(mode: str, days: int) -> Dict[str, int]:
 
 class RetentionSweeper:
     """Store.sweep for each mode of `days_by_mode`, once when start() is called and then every `interval_s` seconds (a test sets a short one) on a
-    daemon thread. `report(purged, first)` is called after every sweep, from that thread (create_app prints the server's counts line with it)."""
+    daemon thread. `report(purged, first)` is called after every sweep, from that thread (create_app prints the server's counts line with it).
+
+    With `export_days` (create_app gives the private days, whatever the server's mode) every sweep also calls Store.sweep_exports with it, after the
+    sessions: the exports the save route wrote go after the same days as a private session. `exports_purged` is how many files that removed in the
+    sweep that finished last (0 without `export_days`), which `report` reads: `purged` stays the sessions."""
 
     def __init__(self, store, days_by_mode: Dict[str, int], interval_s: float = SWEEP_INTERVAL_S,
-                 report: Optional[Callable[[int, bool], None]] = None):
+                 report: Optional[Callable[[int, bool], None]] = None, export_days: Optional[int] = None):
         self.store, self.days_by_mode, self.interval_s, self.report = store, dict(days_by_mode), interval_s, report
+        self.export_days = export_days   # None: the saved exports are not swept
+        self.exports_purged = 0          # the files the last sweep removed from the exports directory
         self.sweeps = 0   # sweeps finished, failed ones included
         self._stop = threading.Event()
         self._first_done = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
     def sweep_once(self) -> int:
-        """One sweep of every mode; -> the sessions purged. It never raises: a failure is one log line (the mode, the exception's class) and the
-        other mode is swept anyway."""
+        """One sweep of every mode, then of the saved exports when `export_days` is set; -> the sessions purged (exports_purged has the files).
+        It never raises: a failure is one log line (the mode or the exports, the exception's class) and the rest is swept anyway."""
         purged = 0
         for mode, days in self.days_by_mode.items():
             try:
                 purged += self.store.sweep(days, mode)
             except Exception as exc:
                 log.warning("retention sweep of %s sessions failed (%s); it is tried again at the next sweep", mode, type(exc).__name__)
+        exports = 0
+        if self.export_days is not None:
+            try:
+                exports = self.store.sweep_exports(self.export_days)
+            except Exception as exc:
+                log.warning("retention sweep of saved exports failed (%s); it is tried again at the next sweep", type(exc).__name__)
+        self.exports_purged = exports
         return purged
 
     def start(self) -> None:

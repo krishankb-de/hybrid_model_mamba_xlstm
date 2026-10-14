@@ -10583,6 +10583,113 @@ def test_the_save_route_is_private_only_before_anything_else_and_answers_a_name_
     assert [ast.unparse(c.args[1]) for c in ast.walk(route) if isinstance(c, ast.Call) and ast.unparse(c.func) == "HTTPException" and len(c.args) > 1][-1] == "SAVE_EXPORT_FAILED_MSG"
 
 
+# ── CHAT_UI_PLAN.md P9-C follow-up: the saved exports follow the private retention ──
+# Static pins on Store.sweep_exports (app/store.py), the sweeper that calls it (app/retention.py) and the server's wiring of both (app/server.py). The
+# behaviour (the 45 days, the boundary, the names, the links, the failures, the line of the log) is exercised for real in tests/test_app_retention.py. These
+# pins hold what a later edit could break without a test noticing: that the sweep removes only the names of the save route, one regular file at a time, by
+# unlinking it, never a tree and never through a link; that the sweeper reaches it only with days and in a try of its own; that the server gives it the private
+# days; and that nothing of an exception but its class, and nothing of a file but a count, reaches the log.
+
+def _store_constant(name):
+    tree, _ = _app_tree("store.py")
+    return next(n.value for n in tree.body if isinstance(n, ast.Assign) and [ast.unparse(t) for t in n.targets] == [name])
+
+
+def _ancestors(node, parents, stop):
+    """The nodes from `node`'s parent up to, and not including, `stop`."""
+    chain = []
+    while node in parents and parents[node] is not stop:
+        node = parents[node]
+        chain.append(node)
+    return chain
+
+
+def test_the_export_sweep_removes_only_the_save_routes_names_never_a_tree_and_never_through_a_link():
+    sweep = _store_method("sweep_exports")
+    calls = [c for c in ast.walk(sweep) if isinstance(c, ast.Call)]
+    names = [ast.unparse(c.func) for c in calls]
+    # what it can remove: the one call, unlinking the path of an entry that the one listing gave it
+    changers = [n for n in names if n.split(".")[-1] in {"unlink", "remove", "rmdir", "removedirs", "rmtree", "rename", "renames", "replace", "truncate",
+                                                        "chmod", "chown", "symlink", "link", "write", "write_text", "write_bytes", "mkdir", "makedirs"}]
+    assert changers == ["os.unlink"], changers
+    assert [ast.unparse(c.args[0]) for c in calls if ast.unparse(c.func) == "os.unlink"] == ["entry.path"], "a path the listing gave: none is built"
+    assert "shutil" not in {n.id for n in ast.walk(sweep) if isinstance(n, ast.Name)}, "no rmtree, and no other shutil"
+    assert [ast.unparse(c.args[0]) for c in calls if ast.unparse(c.func) == "os.scandir"] == ["str(directory)"], "one listing: of exports/ and of nothing under it"
+    assert not [n for n in names if n.split(".")[-1] in {"walk", "glob", "rglob", "iterdir", "listdir", "fwalk"}], "no recursion, no other listing"
+    assert not [n for n in names if n in {"os.stat", "os.path.getmtime", "os.path.isfile", "os.path.exists", "os.path.isdir", "os.path.getsize",
+                                         "Path.stat", "directory.stat", "directory.exists", "directory.is_dir", "directory.is_file"}], "each of these follows a link"
+    # the name: whole, against the save's two patterns, and by nothing else
+    assert sorted(n for n in names if n.endswith((".fullmatch", ".match", ".search", ".startswith", ".endswith", ".glob", ".split", ".find"))) == [
+        "EXPORT_NAME.fullmatch", "EXPORT_TEMP.fullmatch"]
+    assert [ast.unparse(c.args[0]) for c in calls if ast.unparse(c.func).endswith(".fullmatch")] == ["entry.name", "entry.name"]
+    assert {name: ast.literal_eval(_store_constant(name).args[0]) for name in ("EXPORT_NAME", "EXPORT_TEMP")} == {
+        "EXPORT_NAME": r"session-s_[0-9a-f]{22}-(?P<stamp>[0-9]{8}T[0-9]{6}Z)(?:-[0-9]+)?\.(?:json|md)",
+        "EXPORT_TEMP": r"\.session-s_[0-9a-f]{22}\.[0-9a-f]{8}\.tmp"}, "the patterns are save_export's names, as it makes them"
+    # a link: not followed, not removed, not even the directory
+    is_file = [c for c in calls if ast.unparse(c.func) == "entry.is_file"]
+    assert len(is_file) == 1 and {k.arg: ast.unparse(k.value) for k in is_file[0].keywords} == {"follow_symlinks": "False"}
+    stats = [c for c in calls if isinstance(c.func, ast.Attribute) and c.func.attr == "stat"]
+    assert stats and all(ast.unparse(c.func) == "entry.stat" and {k.arg: ast.unparse(k.value) for k in c.keywords} == {"follow_symlinks": "False"} for c in stats)
+    lines = {name: [c.lineno for c in calls if ast.unparse(c.func) == name] for name in ("directory.is_symlink", "os.scandir")}
+    assert len(lines["directory.is_symlink"]) == 1 and lines["directory.is_symlink"][0] < lines["os.scandir"][0], "a link in the directory's place is refused first"
+    # the order in the loop: the name, then the kind of file, and only then the removal
+    loop = next(n for n in ast.walk(sweep) if isinstance(n, ast.For) and ast.unparse(n.target) == "entry")
+    assert ast.unparse(loop.iter) == "entries"
+    first, second, attempt = loop.body
+    assert ast.unparse(first) == "export = EXPORT_NAME.fullmatch(entry.name)"
+    assert ast.unparse(second.test) == "export is None and EXPORT_TEMP.fullmatch(entry.name) is None" and [ast.unparse(s) for s in second.body] == ["continue"]
+    assert isinstance(attempt, ast.Try) and ast.unparse(attempt.body[0].test) == "not entry.is_file(follow_symlinks=False)"
+    assert [ast.unparse(s) for s in attempt.body[0].body] == ["continue"], "anything that is not a regular file is passed over"
+    assert not [n for n in ast.walk(attempt.body[0]) if isinstance(n, ast.Call) and ast.unparse(n.func) == "os.unlink"]
+    assert len([n for s in attempt.body[1:] for n in ast.walk(s) if isinstance(n, ast.Call) and ast.unparse(n.func) == "os.unlink"]) == 1, "removed after both"
+
+
+def test_the_export_sweep_logs_the_class_of_an_exception_and_nothing_of_a_file_or_a_path():
+    sweep = _store_method("sweep_exports")
+    warnings = [c for c in ast.walk(sweep) if isinstance(c, ast.Call) and ast.unparse(c.func) == "log.warning"]
+    assert len(warnings) == 3
+    for call in warnings:
+        assert [ast.unparse(a) for a in call.args[1:]] in ([], ["type(exc).__name__"]) and not call.keywords, ast.unparse(call)
+    parents = {child: node for node in ast.walk(sweep) for child in ast.iter_child_nodes(node)}
+    for handler in (h for h in ast.walk(sweep) if isinstance(h, ast.ExceptHandler) and h.name):
+        uses = [u for stmt in handler.body for u in ast.walk(stmt) if isinstance(u, ast.Name) and u.id == handler.name]
+        assert uses and all(isinstance(parents[u], ast.Call) and ast.unparse(parents[u].func) == "type" for u in uses), "the class, never the text"
+    assert sorted(ast.unparse(h.type) for h in ast.walk(sweep) if isinstance(h, ast.ExceptHandler)) == sorted(
+        ["OverflowError", "FileNotFoundError", "OSError", "FileNotFoundError", "OSError"]), "no handler of Exception or a bare except that would take more than a file's failure"
+    assert not [n for n in ast.walk(sweep) if isinstance(n, ast.Name) and n.id in ("print", "open", "exec", "eval")]
+
+
+def test_the_sweeper_sweeps_the_exports_only_when_it_is_given_days_in_a_try_of_its_own_and_logs_only_the_class():
+    tree, parents = _app_tree("retention.py")
+    sweeper = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "RetentionSweeper")
+    once = next(n for n in sweeper.body if isinstance(n, ast.FunctionDef) and n.name == "sweep_once")
+    calls = [c for c in ast.walk(once) if isinstance(c, ast.Call) and ast.unparse(c.func) == "self.store.sweep_exports"]
+    assert [[ast.unparse(a) for a in c.args] for c in calls] == [["self.export_days"]], "the one call, with the days the sweeper was given"
+    chain = _ancestors(calls[0], parents, once)
+    gate, attempt = next(n for n in chain if isinstance(n, ast.If)), next(n for n in chain if isinstance(n, ast.Try))
+    assert ast.unparse(gate.test) == "self.export_days is not None" and chain.index(attempt) < chain.index(gate), "no days, no call, and the try is inside"
+    handler, = attempt.handlers
+    assert ast.unparse(handler.type) == "Exception" and handler.name == "exc"
+    assert [ast.unparse(a) for c in ast.walk(handler) if isinstance(c, ast.Call) for a in c.args[1:]] == ["type(exc).__name__"]
+    sessions = [c for c in ast.walk(once) if isinstance(c, ast.Call) and ast.unparse(c.func) == "self.store.sweep"]
+    assert len(sessions) == 1 and sessions[0].lineno < calls[0].lineno, "the sessions are swept first, each mode in a try of its own"
+
+
+def test_create_app_gives_the_sweeper_the_private_days_of_the_policy_and_prints_counts_and_days_only():
+    tree, _ = _app_tree("server.py")
+    create = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "create_app")
+    made = [c for c in ast.walk(create) if isinstance(c, ast.Call) and ast.unparse(c.func) == "retention.RetentionSweeper"]
+    assert len(made) == 1 and {k.arg: ast.unparse(k.value) for k in made[0].keywords}["export_days"] == "policy['private']", "whatever the server's mode"
+    report = next(n for n in ast.walk(create) if isinstance(n, ast.FunctionDef) and n.name == "report_sweep")
+    prints = [c for c in ast.walk(report) if isinstance(c, ast.Call) and ast.unparse(c.func) == "print"]
+    assert len(prints) == 1
+    line = prints[0].args[0]
+    assert ast.unparse(line.func.value) == "'[server] retention: purged {} session(s), {} saved file(s) ({})'" and line.func.attr == "format"
+    assert [ast.unparse(a) for a in line.args[:2]] == ["purged", "exports"] and ast.unparse(line.args[2].func) == "', '.join" and len(line.args) == 3
+    assert {n.id for n in ast.walk(report) if isinstance(n, ast.Name)} <= {"purged", "first", "exports", "sweeper", "policy", "m", "d", "print", "sorted",
+                                                                           "int", "bool"}, "counts and the days of the policy, and nothing else, are in the line"
+
+
 # ── CHAT_UI_PLAN.md P9-C, part 3: the demo session driver ─────────────────────
 # Static pins on scripts/chat_demo_session.py, the driver the laptop runs against the cluster's live server through the tunnel: it runs the five
 # test-split turns of the supervisor demo and has the server save the session's export on its own disk, and it prints numbers only because that

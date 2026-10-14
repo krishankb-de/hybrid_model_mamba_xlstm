@@ -691,7 +691,8 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     Sessions are deleted `retention_days` days after they were created (P8-B, app/retention.py): that argument, else RETENTION_DAYS from the
     environment, else 45 days in private mode and 7 in public. Only a whole number from 1 to 3650 will do: anything else, 0 included (it would
     delete every session at start-up), is a ValueError before anything is opened. A thread sweeps once when the server starts serving, after
-    the restart recovery below, and every 24 hours, for both modes: this mode's days for its own sessions, the default days for the other's.
+    the restart recovery below, and every 24 hours, for both modes: this mode's days for its own sessions, the default days for the other's. The
+    exports that the save route wrote (P9-C) go in the same sweep, after the private days: this server's own when it is private, else 45.
 
     The retrieve, label and score stages (P5-E) get their gallery from `gallery` (an opened Gallery), else from gallery_dir
     (opened against the default engine's tower hash), and their labeller from `labeler` (anything with label and healthy),
@@ -736,12 +737,16 @@ def create_app(engine: str = "tiny", mode: str = "private", home: Optional[str] 
     print("[server] recovered {} running turn(s)".format(store.recover_after_restart()), flush=True)
 
     def report_sweep(purged: int, first: bool) -> None:
-        """The job log's line for a sweep (R7: counts and days only): the first one always, the daily ones when they purged something."""
-        if first or purged:
-            print("[server] retention: purged {} session(s) ({})".format(
-                purged, ", ".join("{} {} d".format(m, d) for m, d in sorted(policy.items()))), flush=True)
+        """The job log's line for a sweep (R7: counts and days only, no name and no path): the first one always, the daily ones when they purged a
+        session or removed a saved export. The export count is the sweeper's, of the sweep this is called for. The line says "saved file(s)" and not
+        "export(s)": the timing job's log holds this line, and its leak check (tests/test_chat_decode_timing.py) takes that word for a mount path."""
+        exports = sweeper.exports_purged
+        if first or purged or exports:
+            print("[server] retention: purged {} session(s), {} saved file(s) ({})".format(
+                purged, exports, ", ".join("{} {} d".format(m, d) for m, d in sorted(policy.items()))), flush=True)
 
-    sweeper = retention.RetentionSweeper(store, policy, report=report_sweep)   # started with the server, in the lifespan
+    # The saved exports (P9-C) are private-mode data and go after the private days of the policy, whatever this server's mode (a public one saves none).
+    sweeper = retention.RetentionSweeper(store, policy, report=report_sweep, export_days=policy["private"])   # started with the server, in the lifespan
     # P8-F part 3: the worker is made before the engines and builds them, so the thread that runs every turn is the one thread of this process
     # that runs a torch op. libgomp gives each thread that enters a parallel region a pool of its own for the thread's life: engines built on
     # the main thread gave it a pool beside the worker's, and with twice as many OpenMP threads as CPUs a decode ran about 3 times slower.

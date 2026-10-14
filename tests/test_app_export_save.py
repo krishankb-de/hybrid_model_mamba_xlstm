@@ -349,16 +349,27 @@ def test_the_store_raises_what_export_raises_before_it_makes_a_directory_or_a_fi
         store.close()
 
 
-def test_retention_does_not_touch_the_saved_exports(tmp_path):
-    """The sweep purges sessions and their uploads after their days; an export that was saved is a file of its own that nothing deletes."""
+def test_retention_deletes_a_saved_export_after_the_private_days_by_its_own_time_and_not_with_its_session(tmp_path, monkeypatch):
+    """P9-C follow-up (user, 2026-10-14: "delete them after 45 days"), which this test first pinned the other way: that nothing deletes a saved export.
+    The server's retention sweep removes an export 45 days after it was saved, by the time in its name. Store.sweep, the sweep of the sessions, does
+    not, and a session that is purged leaves the exports it was saved as, until their own days are over."""
+    from datetime import datetime, timedelta, timezone
+    from app import store as store_module
     store = Store(tmp_path)
     try:
         sid = store.create_session("private", None, "x")["id"]
-        name, _ = store.save_export(sid, "json", None)
-        assert store.sweep(0) == 1 and store.get_session(sid, None) is None
-        assert (tmp_path / "exports" / name).is_file()
+        with monkeypatch.context() as patched:   # one export is saved 46 days ago, one now
+            patched.setattr(store_module, "_stamp", lambda: (datetime.now(timezone.utc) - timedelta(days=46)).strftime("%Y%m%dT%H%M%SZ"))
+            old, _ = store.save_export(sid, "json", None)
+        young, _ = store.save_export(sid, "json", None)
+        assert store.sweep(0) == 1 and store.get_session(sid, None) is None, "the session is purged ..."
+        assert (tmp_path / "exports" / old).is_file() and (tmp_path / "exports" / young).is_file(), "... and the sweep of the sessions leaves its exports"
     finally:
         store.close()
+    with TestClient(create_app(engine="tiny", home=str(tmp_path))):   # the server's own sweep, run as it starts
+        pass
+    assert not (tmp_path / "exports" / old).exists(), "the export of 46 days ago is deleted"
+    assert (tmp_path / "exports" / young).is_file(), "the one saved now is kept"
 
 
 # ---- the reference ----------------------------------------------------------------------------------------------------------------
