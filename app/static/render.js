@@ -320,33 +320,47 @@ export function splitSentences(text) {
 
 // The words that say a sentence is about an earlier X-ray, which the model never saw: what it writes there is the way reports are written, not
 // something it observed. A short list of words and phrases on purpose, so that a sentence is not flagged on a guess: "no pneumothorax", "no acute ...",
-// "new" and "increased opacity" with no word of time are not. "Again" counts only as the first word of a sentence.
-const EARLIER_WORDS = ['compar(?:ed|ison)', 'prior', 'previous(?:ly)?', 'since\\s+(?:the|prior)', 'interval', 'unchanged', 'stable',
+// "new" and "increased opacity" with no word of time are not. "Again" counts only as the first word of a sentence. "Previously" always counts;
+// "prior" and "previous" only where they name a study ("the prior chest radiograph", "as on the previous one") or end a clause ("similar to
+// prior."): before any other word they are the patient's history ("prior surgery", "prior to intubation"), not a comparison.
+const STUDY_WORD = 'stud(?:y|ies)|exam(?:ination)?s?|radiographs?|films?|images?|imaging|x-?rays?|ct|comparison|one';
+const EARLIER_WORDS = ['compar(?:ed|ison)', 'previously',
+                       `(?:prior|previous)(?=\\s+(?:chest\\s+)?(?:${STUDY_WORD})\\b|\\s*(?:[.,;:)]|$))`,
+                       'since\\s+(?:the|prior)', 'interval', 'unchanged', 'stable',
                        'no\\s+(?:significant\\s+)?change', 'little\\s+(?:overall\\s+)?change', 'persistent', 'persists', 're-?demonstrated',
                        'as\\s+before', 'improved', 'improving', 'worsened', 'worsening', 'has\\s+(?:increased|decreased)'];
 const EARLIER = new RegExp(`\\b(?:${EARLIER_WORDS.join('|')})\\b|^\\s*again\\b`, 'i');
 export const refersToEarlier = (sentence) => typeof sentence === 'string' && EARLIER.test(sentence);
 
-// The glossary as the page looks words up in it: each way a row is said -> the index of its row, and one pattern for all of them. The longest
-// is tried first, so that "lung opacity" is not "opacity", and "picc line" not "picc"; a space is any run of white space; the match is on word
-// boundaries and ignores case ("nodules" holds the term "nodule" and is not one).
+// The glossary as the page looks words up in it: each way a row is said -> the index of its row (ROW_OF), and one pattern for all of them
+// (termPattern, from rows of { terms }). A term is text and not a pattern: its characters are escaped, so a "(" or a "+" in one is that character
+// and cannot stop the page at load. The longest is tried first, so that "lung opacity" is not "opacity", and "picc line" not "picc"; a space is
+// any run of white space; the match is on word boundaries and ignores case ("nodulectomy" holds the term "nodule" and is not one).
 const ROW_OF = new Map(GLOSSARY.flatMap((row, i) => row.terms.map((term) => [term, i])));
-const TERM_PATTERN = new RegExp(`\\b(?:${[...ROW_OF.keys()].sort((a, b) => b.length - a.length).map((term) => term.replace(/ /g, '\\s+')).join('|')})\\b`, 'gi');
+export function termPattern(rows) {
+  const terms = rows.flatMap((row) => row.terms).sort((a, b) => b.length - a.length);
+  if (!terms.length) return /(?!)/gi;   // no word to find: a pattern that matches nothing, and not the empty text at every boundary
+  const escaped = terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+'));   // a "(" or a "+" of a term is that character
+  return new RegExp(`\\b(?:${escaped.join('|')})\\b`, 'gi');
+}
+const TERM_PATTERN = termPattern(GLOSSARY);
 const spelled = (found) => found.toLowerCase().replace(/\s+/g, ' ');   // a match as the glossary spells it
 
 const NO_FINDING = 'The report mentions no abnormal finding.';
 const known = (value) => isOn(value) || value === 0 || value === false;
+const DEVICES = new Map(SUMMARY_LABELS).get('Support Devices');   // what the summary says of the devices
 
-// What the report says, in plain words, from its CheXbert labels and nothing else: each positive label as its plain phrase of the glossary and then
-// its term, in the fixed order of SUMMARY_LABELS. No finding, or no positive label, is said as no abnormal finding. null when the labels name none
-// of the 14 with a 1 or a 0: nothing is said that the labels do not say.
+// What the report says, in plain words, from its CheXbert labels and nothing else: each positive label as the words of SUMMARY_LABELS (a plain
+// phrase of the glossary and then its term), in their fixed order. No finding, or no positive label, is said as no abnormal finding; with
+// Support Devices positive as well, the devices are said after it: the labeller's No Finding stands beside them, and the chip shows them positive.
+// null when the labels name none of the 14 with a 1 or a 0: nothing is said that the labels do not say.
 export function summaryText(labels) {
   if (!isObject(labels)) return null;
   const given = (name) => Object.hasOwn(labels, name) && known(labels[name]);
   if (![...SUMMARY_LABELS.map(([name]) => name), 'No Finding'].some(given)) return null;
-  if (given('No Finding') && isOn(labels['No Finding'])) return NO_FINDING;
-  const positives = SUMMARY_LABELS.filter(([name]) => given(name) && isOn(labels[name]))
-    .map(([, term]) => `${GLOSSARY[ROW_OF.get(term)].explanation} (${term})`);
+  const on = (name) => given(name) && isOn(labels[name]);
+  if (on('No Finding')) return on('Support Devices') ? `${NO_FINDING} It mentions: ${DEVICES}.` : NO_FINDING;
+  const positives = SUMMARY_LABELS.filter(([name]) => on(name)).map(([, phrase]) => phrase);
   return positives.length ? `The report mentions: ${positives.join('; ')}.` : NO_FINDING;
 }
 
@@ -365,7 +379,7 @@ function summaryBox(v) {
   const text = !v.provisional && isObject(v.labels) ? summaryText(v.labels) : null;
   if (!text) return null;
   return el('div', { class: 'report-summary' },
-    el('div', { class: 'summary-box' }, el('h4', {}, SUMMARY_TITLE), el('p', {}, text)),
+    el('div', { class: 'summary-box' }, el('h3', {}, SUMMARY_TITLE), el('p', {}, text)),
     el('p', { class: 'summary-note' }, SUMMARY_NOTE));
 }
 
@@ -408,7 +422,7 @@ function sentenceItem(sentence, used) {
 
 // The terms of the card, once each, in the order of their numbers in the text: the numbers are the ones an ordered list gives its lines.
 function termsBlock(terms) {
-  return el('div', { class: 'report-terms' }, el('h4', {}, 'Terms'),
+  return el('div', { class: 'report-terms' }, el('h3', {}, 'Terms'),
     el('ol', { class: 'term-list' }, ...terms.map(({ name, explanation }) => el('li', {}, `${name}: ${explanation}`))));
 }
 

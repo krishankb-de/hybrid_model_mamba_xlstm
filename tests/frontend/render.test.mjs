@@ -32,6 +32,7 @@ const ownXraySide = builder('ownXraySide');     // P6-G: the viewer's side for t
 const splitSentences = builder('splitSentences');       // P6-H: the report card a person can read: a report's sentences, one to a line
 const refersToEarlier = builder('refersToEarlier');     // P6-H: whether a sentence writes about an earlier X-ray
 const summaryText = builder('summaryText');             // P6-H: the plain-language summary, from the labels and the glossary only
+const termPattern = builder('termPattern');             // P6-H fix 1: the one pattern for the words of a glossary, built from rows of { terms }
 
 installDom();   // this file's process only: the other test files never see a document
 
@@ -649,10 +650,33 @@ const GLOSSARY_TABLE = [   // the plain explanations as the user was given them:
   ['chronic', 'long-standing'],
 ];
 
-test('the glossary is the table of plain explanations as given, word for word, the 14 labels first (P6-H)', async () => {
+// The rows that fix 1 (B) gave plural forms, keyed by the first term of the row: the forms come after the table's own terms of the row, and the
+// explanation of a row does not change with them.
+const PLURALS = {
+  'lung opacity': ['lung opacities', 'opacities'],
+  'lung lesion': ['lung lesions', 'lesions'],
+  'consolidation': ['consolidations'],
+  'pneumothorax': ['pneumothoraces'],
+  'pleural effusion': ['pleural effusions', 'effusions'],
+  'fracture': ['fractures'],
+  'support devices': ['devices'],
+  'costophrenic angle': ['costophrenic angles'],
+  'nodule': ['nodules'],
+  'granuloma': ['granulomas'],
+  'hemidiaphragm': ['hemidiaphragms'],
+  'picc': ['picc lines'],
+};
+
+test('the glossary is the table of plain explanations as given, word for word, the 14 labels first; the terms added since are the plural forms listed here (P6-H)', async () => {
   const { GLOSSARY } = await import('../../app/static/glossary.js');
-  assert.deepEqual(GLOSSARY.map((row) => [row.terms.join(' / '), row.explanation]), GLOSSARY_TABLE);
   assert.equal(GLOSSARY.length, 35);
+  assert.deepEqual(GLOSSARY.map((row) => row.explanation), GLOSSARY_TABLE.map(([, explanation]) => explanation));   // what each row says, word for word
+  GLOSSARY_TABLE.forEach(([terms], i) => {
+    const given = terms.split(' / ');
+    assert.deepEqual(GLOSSARY[i].terms, [...given, ...(PLURALS[given[0]] ?? [])], given[0]);   // the table's terms first, then only the plural forms above
+  });
+  const firsts = GLOSSARY_TABLE.map(([terms]) => terms.split(' / ')[0]);
+  assert.deepEqual(Object.keys(PLURALS).filter((first) => !firsts.includes(first)), []);   // none is listed for a row that is not there
   assert.ok(Object.isFrozen(GLOSSARY) && GLOSSARY.every((row) => Object.isFrozen(row) && Object.isFrozen(row.terms)), 'static data nobody can edit');
 });
 
@@ -695,7 +719,8 @@ test('splitSentences does not split inside a decimal or after an abbreviation: D
 test('a sentence that compares with an earlier study is told by a short list of words, each pinned (P6-H)', () => {
   const flagged = [
     'Compared with the image from ___, the lungs are clear.', 'Comparison: none.',
-    'There is a prior sternotomy.', 'Previous studies are not available.', 'The tube was previously removed.',
+    'Previous studies are not available.', 'The tube was previously removed.', 'Previously, a tube was seen.',
+    'Similar to prior.', 'As on the previous radiograph, the heart is enlarged.', 'Similar to the prior chest radiograph.', 'Similar to the previous one.',
     'Since the last film a tube was placed.', 'Since prior, the lungs have cleared.',
     'Interval development of a tube.', 'Interval change is noted.',
     'Unchanged heart size.', 'No change in the heart size.', 'No significant change in the lungs.', 'Little change in the lungs.', 'Little overall change in the lungs.',
@@ -715,11 +740,37 @@ test('a sentence that compares with an earlier study is told by a short list of 
     'The patient is unstable.', 'Priority is given to the left side.', 'The lungs are persistently clear.',   // a word that only holds another
     'There is again a small left tube.',   // "again" counts only where a sentence begins with it
     'Nothing has changed color.', 'A change in the chart.', 'The heart size is increased.',   // no temporal word: not a comparison
+    'There is a prior sternotomy.',   // was a positive in P6-H: a bare "prior sternotomy" is the patient's history, not a comparison (fix 1, C)
+    'Sternotomy wires from prior surgery.', 'Status post prior sternotomy.', 'Previous surgery noted.', 'Calcified granuloma from prior infection.',
+    'Prior to intubation the lungs were clear.', 'Healed fracture from previous trauma.',
     '', 'Findings:',
   ];
   for (const sentence of plain) assert.equal(refersToEarlier(sentence), false, sentence);
   assert.equal(refersToEarlier(null), false);
   assert.equal(refersToEarlier(undefined), false);
+});
+
+test('"prior" and "previous" tell of an earlier study only before a word for a study or at the end of a clause; "previously" always does (P6-H fix 1, C)', () => {
+  const STUDY_WORDS = ['study', 'studies', 'exam', 'exams', 'examination', 'examinations', 'radiograph', 'radiographs', 'film', 'films', 'image', 'images',
+                       'imaging', 'x-ray', 'x-rays', 'xray', 'xrays', 'ct', 'comparison', 'one'];
+  for (const word of ['prior', 'previous', 'Prior', 'PREVIOUS']) {
+    for (const study of STUDY_WORDS) {
+      assert.equal(refersToEarlier(`Similar to the ${word} ${study}.`), true, `${word} ${study}`);
+      assert.equal(refersToEarlier(`Similar to the ${word} chest ${study}.`), true, `${word} chest ${study}`);   // "chest" may stand between
+      assert.equal(refersToEarlier(`Similar to the ${word}  ${study}`), true, `${word}  ${study}`);              // any white space, and no full stop yet
+    }
+    for (const end of ['.', ',', ';', ':', ')', '', ' .', ' ,']) {   // the word closes its clause, or its sentence
+      assert.equal(refersToEarlier(`Similar to ${word}${end}`), true, `${word}${end}`);
+    }
+    for (const other of ['surgery', 'sternotomy', 'infection', 'trauma', 'fracture', 'to', 'history', 'ones', 'cardiac', 'chest wall']) {
+      assert.equal(refersToEarlier(`Seen with ${word} ${other} noted.`), false, `${word} ${other}`);   // history, or a thing that is not a study
+    }
+  }
+  assert.equal(refersToEarlier('The effusion was previously drained.'), true);   // "previously" needs nothing after it
+  assert.equal(refersToEarlier('Previously noted rib fracture.'), true);
+  assert.equal(refersToEarlier('Similar to the priorities.'), false);           // a word that only holds "prior"
+  assert.equal(refersToEarlier('Since the exam a tube was placed.'), true);     // "since the" and "since prior" are as they were
+  assert.equal(refersToEarlier('Since prior surgery the lungs have cleared.'), true);
 });
 
 test('the summary is made of the labels and the glossary only: positives in a fixed order, each as its plain phrase and its term (P6-H)', () => {
@@ -735,7 +786,7 @@ test('the summary is made of the labels and the glossary only: positives in a fi
     ['Atelectasis', 'part of a lung is partly collapsed or not fully inflated (atelectasis)'],
     ['Pneumothorax', 'air between the lung and the chest wall, which can make the lung collapse (pneumothorax)'],
     ['Pleural Effusion', 'fluid between the lung and the chest wall (pleural effusion)'],
-    ['Pleural Other', 'a thickened lining around the lung (pleural thickening)'],
+    ['Pleural Other', 'a change in the lining around the lung other than fluid (other pleural finding)'],   // its own phrase (fix 1, A), not the row "pleural thickening"
     ['Fracture', 'a broken bone, for example a rib (fracture)'],
     ['Support Devices', 'tubes, lines, wires or devices placed in the body (support devices)'],
   ];
@@ -756,6 +807,40 @@ test('the summary is made of the labels and the glossary only: positives in a fi
     assert.equal(summaryText(unknown), null, JSON.stringify(unknown));   // nothing to say: it says nothing
   }
   assert.equal(summaryText({ Edema: 1, Unheard: 1 }), 'The report mentions: fluid in the lung tissue (edema).');   // a name it has no phrase for is left out
+});
+
+test('"Pleural Other" has a phrase of its own in the summary: it also covers scarring and calcification, so it is not "pleural thickening" (P6-H fix 1, A)', async () => {
+  assert.equal(summaryText({ 'Pleural Other': 1 }),
+               'The report mentions: a change in the lining around the lung other than fluid (other pleural finding).');
+  assert.equal(summaryText(labelled(['Pleural Other', 'Pleural Effusion'])),   // in its place in the fixed order, after the effusion
+               'The report mentions: fluid between the lung and the chest wall (pleural effusion); '
+               + 'a change in the lining around the lung other than fluid (other pleural finding).');
+  assert.ok(!summaryText(labelled(['Pleural Other'])).includes('thick'));
+  // the row "pleural thickening" is as it was: it still marks that term in the text of a report, and says what the table says of it
+  const report = reportOf('Findings: Pleural thickening is seen.');
+  assert.deepEqual(qa(report, '.term').map(bare), ['Pleural thickening']);
+  assert.deepEqual(termsOf(report), ['pleural thickening: a thickened lining around the lung']);
+  const { GLOSSARY } = await import('../../app/static/glossary.js');
+  assert.deepEqual(GLOSSARY.filter((row) => row.terms.includes('pleural thickening')).map((row) => row.explanation), ['a thickened lining around the lung']);
+});
+
+test('No Finding with Support Devices says both: no abnormal finding, and what the devices are; every other case is as it was (P6-H fix 1, D)', () => {
+  const said = (...positives) => summaryText(labelled(positives));
+  const BOTH = 'The report mentions no abnormal finding. It mentions: tubes, lines, wires or devices placed in the body (support devices).';
+  assert.equal(said('No Finding', 'Support Devices'), BOTH);                           // the chip for Support Devices shows positive: the summary says so
+  assert.equal(said('No Finding', 'Support Devices', 'Edema'), BOTH);                  // No Finding is what the labeller says of the chest, so the Edema is not said
+  assert.equal(summaryText({ 'No Finding': true, 'Support Devices': true }), BOTH);    // true counts as 1
+  // unchanged
+  assert.equal(said(), 'The report mentions no abnormal finding.');                    // no positive label at all
+  assert.equal(said('No Finding'), 'The report mentions no abnormal finding.');
+  assert.equal(said('Support Devices'),                                                // devices alone: the list form
+               'The report mentions: tubes, lines, wires or devices placed in the body (support devices).');
+  assert.equal(said('Support Devices', 'Edema'),
+               'The report mentions: fluid in the lung tissue (edema); tubes, lines, wires or devices placed in the body (support devices).');
+  assert.equal(summaryText({ 'No Finding': 0, 'Support Devices': 1 }), 'The report mentions: tubes, lines, wires or devices placed in the body (support devices).');
+  assert.equal(summaryText({ 'No Finding': 1, 'Support Devices': 0 }), 'The report mentions no abnormal finding.');
+  // and on the card
+  assert.equal(q(reportOf('Findings: Nothing else.', { labels: labelled(['No Finding', 'Support Devices']) }), '.summary-box p').textContent, BOTH);
 });
 
 test('a finished report is a list under each heading, one sentence to a line, in the text as the clean display has it (P6-H)', () => {
@@ -836,7 +921,7 @@ test('terms get a dotted-underline hook, a number and a title; each is numbered 
   const first = qa(report, '.report-section li')[0];
   assert.deepEqual(first.childNodes.map((n) => (n.nodeType === 3 ? n.data : n.getAttribute('class'))), ['Moderate left ', 'term', ' with ', 'term', ' ', 'term', '.']);   // the text round a term is untouched
   const list = q(report, '.report-terms');
-  assert.equal(q(list, 'h4').textContent, 'Terms');
+  assert.equal(q(list, 'h3').textContent, 'Terms');   // a heading of the same level as the sections' (P6-H fix 1, E)
   assert.deepEqual(termsOf(report), [
     'pleural effusion: fluid between the lung and the chest wall', 'basilar: the lower parts of the lungs',
     'atelectasis: part of a lung is partly collapsed or not fully inflated',
@@ -850,8 +935,8 @@ test('a term is found whatever its case, on word boundaries only, and a longer t
   const upper = reportOf('Findings: PLEURAL EFFUSION and Pneumonia.');
   assert.deepEqual(qa(upper, '.term').map(bare), ['PLEURAL EFFUSION', 'Pneumonia']);   // the text as written
   assert.deepEqual(termsOf(upper), ['pleural effusion: fluid between the lung and the chest wall', 'pneumonia: a lung infection']);   // the table's own lower case
-  const inside = reportOf('Findings: Two nodules, a subacute change, a unifocal area, a baseline film and lung basal fullness. The lungs are clear.');
-  assert.equal(qa(inside, '.term').length, 0);          // nodules, subacute, unifocal, baseline: each holds a term and is not one
+  const inside = reportOf('Findings: A nodulectomy scar, a subacute change, a unifocal area, a baseline film and lung basal fullness. The lungs are clear.');
+  assert.equal(qa(inside, '.term').length, 0);          // nodulectomy, subacute, unifocal, baseline: each holds a term and is not one
   assert.equal(q(inside, '.report-terms'), null);
   assert.deepEqual(qa(reportOf('Findings: The lung Bases are clear. Wide base. Chronic and focal and bilateral.'), '.term').map(bare),
                    ['Bases', 'Chronic', 'focal', 'bilateral']);   // base is the same term as bases: the second one has its number
@@ -868,6 +953,57 @@ test('a term is found whatever its case, on word boundaries only, and a longer t
   assert.deepEqual(qa(reportOf('Findings: Pleural  effusion\nat the base.'), '.term').map(bare), ['Pleural  effusion', 'base']);   // a term may span a space or a line break
 });
 
+test('the plural forms of a term are the same term: marked with the number and the explanation of their row, and numbered once per row (P6-H fix 1, B)', () => {
+  const opacities = reportOf('Findings: Bilateral opacities.');
+  assert.deepEqual(qa(opacities, '.term').map(bare), ['Bilateral', 'opacities']);
+  assert.deepEqual(qa(opacities, '.term').map((t) => [q(t, 'sup').textContent, t.getAttribute('title')]),
+                   [['1', '1: on both sides'], ['2', '2: an area of the lung that looks whiter, or denser, than normal']]);   // the lung opacity row's own number and words
+  assert.deepEqual(termsOf(opacities), ['bilateral: on both sides', 'opacities: an area of the lung that looks whiter, or denser, than normal']);
+  const effusions = reportOf('Findings: Small bilateral pleural effusions.');
+  assert.deepEqual(qa(effusions, '.term').map(bare), ['bilateral', 'pleural effusions']);   // one term, the longest match: not "pleural" and "effusions" apart
+  assert.deepEqual(termsOf(effusions), ['bilateral: on both sides', 'pleural effusions: fluid between the lung and the chest wall']);
+  assert.deepEqual(qa(reportOf('Findings: Effusions are small.'), '.term').map(bare), ['Effusions']);   // "effusions" alone is marked
+  assert.deepEqual(termsOf(reportOf('Findings: Effusions are small.')), ['effusions: fluid between the lung and the chest wall']);
+  for (const [first, forms] of Object.entries(PLURALS)) {   // every form that was added is found, and is its row's
+    const explanation = GLOSSARY_TABLE.find(([terms]) => terms.split(' / ')[0] === first)[1];
+    for (const form of forms) {
+      const report = reportOf(`Findings: A mild ${form} appears.`);
+      assert.deepEqual(qa(report, '.term').map(bare), [form], form);
+      assert.deepEqual(qa(report, '.term').map((t) => t.getAttribute('title')), [`1: ${explanation}`], form);
+      assert.deepEqual(termsOf(report), [`${form}: ${explanation}`], form);
+    }
+  }
+  const once = reportOf('Findings: A small opacity. Other opacities. A lung opacity. Lung opacities too. Nodules and a nodule.');
+  assert.deepEqual(qa(once, '.term').map(bare), ['opacity', 'Nodules']);   // one number a row, whichever of its forms comes first
+  assert.deepEqual(qa(once, '.term').map((t) => q(t, 'sup').textContent), ['1', '2']);
+  assert.deepEqual(termsOf(once), ['opacity: an area of the lung that looks whiter, or denser, than normal', 'nodules: a small round spot']);
+  assert.equal(qa(reportOf('Findings: The nodulectomy and the radiopacities are not terms.'), '.term').length, 0);   // a plural is a word of its own: boundaries still hold
+});
+
+test('termPattern escapes the words it is given: a term made of regular-expression characters matches only itself, and never throws (P6-H fix 1, H)', () => {
+  const odd = ['a.b', 'x+y', 'p(q', 'm*n', 'u?v', 'a|b', 'e[f', 'g\\h', 'i{j', 'k}l', 'n)o', 'r^s', 't$u'];   // each begins and ends with a letter, as the page's terms do
+  let pattern = null;
+  assert.doesNotThrow(() => { pattern = termPattern([{ terms: odd }]); });   // an unescaped "p(q" is an unterminated group: it would stop the page at load
+  const found = (text) => [...text.matchAll(pattern)].map((m) => m[0]);
+  for (const term of odd) assert.deepEqual(found(`see ${term} here`), [term], term);   // each one, as itself
+  assert.deepEqual(found('aXb a b'), []);        // the dot is a dot
+  assert.deepEqual(found('xxy xy x y'), []);     // the plus repeats nothing
+  assert.deepEqual(found('uv v u v'), []);       // the question mark makes nothing optional
+  assert.deepEqual(found('mmn n mn'), []);       // the star repeats nothing
+  assert.deepEqual(found('a b'), []);            // the bar is not "or"
+  assert.deepEqual(found('rs t'), []);           // nor the caret an anchor, nor the dollar one
+  assert.deepEqual(found('Seen A.B and X+Y.'), ['A.B', 'X+Y']);   // the case is ignored, as for every term
+  // what a glossary row needs of it is as it was: the longest first, a space is any white space, whole words, case ignored
+  const rows = [{ terms: ['lung opacity', 'opacity'] }, { terms: ['picc', 'picc line'] }];
+  const found2 = (text) => [...text.matchAll(termPattern(rows))].map((m) => m[0]);
+  assert.deepEqual(found2('A Lung\n  Opacity and opacity, a PICC line and a picc.'), ['Lung\n  Opacity', 'opacity', 'PICC line', 'picc']);
+  assert.deepEqual(found2('radiopacity opacities piccolo'), []);
+  // no terms: matches nothing, and not the empty string at every boundary
+  assert.deepEqual([...'anything at all'.matchAll(termPattern([]))], []);
+  assert.deepEqual([...'anything at all'.matchAll(termPattern([{ terms: [] }]))], []);
+  assert.deepEqual(rows, [{ terms: ['lung opacity', 'opacity'] }, { terms: ['picc', 'picc line'] }]);   // the rows are only read
+});
+
 test('a [removed] and a ⚠ and a term can share a sentence: each is drawn, and the text round it is the display copy (P6-H)', () => {
   const report = reportOf('Findings: Compared with ___, the pleural effusion is stable at the base. Impression: Nothing else.');
   const [first] = qa(report, '.report-section li');
@@ -881,7 +1017,7 @@ test('the summary comes above the report once the labels are known: a box, its p
   const report = reportOf('Findings: A pleural effusion. Impression: Nothing else.', { labels: labelled(['Pleural Effusion', 'Atelectasis']) });
   const summary = q(report, '.report-summary');
   assert.deepEqual(classes([...summary.children]), ['summary-box', 'summary-note']);   // the box, and under it the note
-  assert.equal(q(summary, '.summary-box h4').textContent, SUMMARY_TITLE);
+  assert.equal(q(summary, '.summary-box h3').textContent, SUMMARY_TITLE);   // an h3 as the sections' headings are (P6-H fix 1, E)
   assert.equal(q(summary, '.summary-box p').textContent,
                'The report mentions: part of a lung is partly collapsed or not fully inflated (atelectasis); fluid between the lung and the chest wall (pleural effusion).');
   assert.equal(q(summary, '.summary-note').textContent, SUMMARY_NOTE);
@@ -916,6 +1052,9 @@ test('a finished report reads in this order: the summary, the sentences, the sto
   assert.deepEqual(classes([...q(report, '.report-extras').children]), ['report-key', 'report-key', 'report-terms']);
   assert.deepEqual(notesOf(report), [REMOVED_NOTE, EARLIER_NOTE]);
   assert.deepEqual(texts(qa(report, '.report .note')), ['Report stopped at the token budget mid-sentence']);   // the stop note is still the report's one `.note`
+  // every heading of the card is an h3, as those of the card's other sections are: the summary's, the report's two, and the Terms (P6-H fix 1, E)
+  assert.deepEqual(qa(report, 'h1, h2, h3, h4, h5, h6').map((h) => [h.localName, h.textContent]),
+                   [['h3', SUMMARY_TITLE], ['h3', 'Findings'], ['h3', 'Impression'], ['h3', 'Terms']]);
 });
 
 test('Show raw swaps the whole card text for the original, notes and terms with it, and Copy never carries a mark (P6-H)', () => {

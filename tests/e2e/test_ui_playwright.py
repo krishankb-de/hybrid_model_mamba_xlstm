@@ -1328,8 +1328,9 @@ REPORT_CARD_JS = """() => {
   const earlier = r.querySelector('li.earlier');
   return {
     parts: [...r.children].map((n) => n.getAttribute('class')),
-    summary: { title: text(r.querySelector('.summary-box h4')), text: text(r.querySelector('.summary-box p')), note: text(r.querySelector('.summary-note')) },
+    summary: { title: text(r.querySelector('.summary-box h3')), text: text(r.querySelector('.summary-box p')), note: text(r.querySelector('.summary-note')) },
     headings: [...r.querySelectorAll('.report-section h3')].map(text),
+    levels: [...r.querySelectorAll('h1, h2, h3, h4, h5, h6')].map((n) => n.localName),
     lines: [...r.querySelectorAll('.report-section li')].map(bare),
     paragraphs: r.querySelectorAll('.report-section p').length,
     earlier: [...r.querySelectorAll('li.earlier')].map(bare),
@@ -1338,7 +1339,7 @@ REPORT_CARD_JS = """() => {
     notes: [...r.querySelectorAll('.report-key')].map(text),
     marked: [...r.querySelectorAll('.term')].map((n) => ({ text: bare(n), n: n.querySelector('sup').textContent, title: n.getAttribute('title') })),
     list: [...r.querySelectorAll('.report-terms ol > li')].map(text),
-    listHeading: text(r.querySelector('.report-terms h4')),
+    listHeading: text(r.querySelector('.report-terms h3')),
     underline: term ? [getComputedStyle(term).textDecorationLine, getComputedStyle(term).textDecorationStyle] : null,
     muted: { earlier: earlier ? getComputedStyle(earlier).color === muted : null, plain: plain ? getComputedStyle(plain).color === muted : null },
     controls: [...r.querySelectorAll('a[href], button, input, select, textarea, [tabindex]')].map((n) => [n.localName, n.getAttribute('data-action')]),
@@ -1358,9 +1359,9 @@ REPORT_COLOURS_JS = """() => {
     if (c && c !== 'transparent' && !/rgba\\([^)]*,\\s*0\\)$/.test(c)) return c; } return 'rgb(255, 255, 255)'; };
   const pair = (sel) => { const e = document.querySelector('#conversation article.card ' + sel);
     return e ? { color: getComputedStyle(e).color, background: background(e) } : null; };
-  return { summary: pair('.summary-box p'), summary_title: pair('.summary-box h4'), caption: pair('.summary-note'), sentence: pair('.report-section li'),
+  return { summary: pair('.summary-box p'), summary_title: pair('.summary-box h3'), caption: pair('.summary-note'), sentence: pair('.report-section li'),
            earlier: pair('li.earlier'), removed: pair('.removed'), number: pair('.term sup'), note: pair('.report-key'),
-           terms_heading: pair('.report-terms h4'), terms: pair('.term-list li') };
+           terms_heading: pair('.report-terms h3'), terms: pair('.term-list li') };
 }"""
 
 
@@ -1382,6 +1383,7 @@ def test_the_report_card_is_a_plain_summary_one_sentence_to_a_line_the_notes_and
     assert shown["summary"] == {"title": "What this means (plain language)", "text": CARD_SUMMARY,
                                 "note": "A plain-language summary of the findings detected in the model's report. It is not a diagnosis."}
     assert shown["headings"] == ["Findings", "Impression"] and shown["paragraphs"] == 0
+    assert shown["levels"] == ["h3", "h3", "h3", "h3"]                                         # the summary's, the two sections', the Terms': one level (fix 1, E)
     assert shown["lines"] == CARD_LINES                                                        # one sentence to a line, 1.5 cm in one piece
     assert shown["earlier"] == [CARD_LINES[2]] and shown["flags"] == [["⚠", "img", "refers to an earlier X-ray"]]
     assert shown["removed"] == ["[removed]"] and shown["notes"] == [REMOVED_NOTE, EARLIER_NOTE]

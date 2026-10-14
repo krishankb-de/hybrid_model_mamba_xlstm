@@ -469,6 +469,17 @@ def test_the_settled_pictures_ask_for_a_turn_run_with_the_pages_own_settings():
     assert "#chips span" in rule and ".turn.user .options .chip" in rule   # in the composer and in the user's own turn
 
 
+def test_the_stream_recorder_counts_a_snapshot_only_while_the_report_is_still_being_written():   # P6-H fix 1 (F)
+    """The snapshots the stream check counts are the texts the card showed while its report grew. When the block closes the card draws the
+    report as a list of sentences, another string for the same report: counted, it would be one more 'snapshot' and the last of them, which
+    is none, and `len(texts) >= 3` would be satisfied by one fewer. So the recorder adds to its texts only a frame whose `.report` is still
+    `.provisional` (the card's own word for a report that is being written, render.js renderReport)."""
+    adds = [line for line in check.RECORD_JS.splitlines() if "rec.texts.add" in line]
+    assert len(adds) == 1 and ".report.provisional" in adds[0], adds
+    render = (Path(__file__).resolve().parents[1] / "app" / "static" / "render.js").read_text(encoding="utf-8")
+    assert "'report provisional'" in render   # the class the recorder reads is the page's own
+
+
 def test_the_stop_off_script_writes_the_one_setting_and_nothing_else():
     assert "stop_on_repeat" in check.STOP_OFF_JS and "cxrchat.settings" in check.STOP_OFF_JS
     assert "try" in check.STOP_OFF_JS and "catch" in check.STOP_OFF_JS   # a browser that blocks storage must not break the page

@@ -132,7 +132,10 @@ SAID_JS = """(c) => [...c.querySelectorAll('.report-body .report-section')].map(
 }).join(' ')"""
 
 # Watches the page's own DOM, so that no render between two polls is missed: every distinct state of the newest card, and every
-# thing the status region says. The recorder lives in the page and goes with it.
+# thing the status region says. The recorder lives in the page and goes with it. `texts` are the snapshots: the report's text in a frame whose
+# `.report` is still `.provisional`, the card's word for a report that is being written. When the block closes the card draws the report as a
+# list of sentences (P6-H), another string for the same report, which is no snapshot and would count as one more, and as the last (P6-H fix 1).
+# `shown` (the said text, one string for either drawing) needs no such filter.
 RECORD_JS = """() => {
   const rec = { t0: performance.now(), frames: [], said: [], texts: new Set(), shown: new Set(), busy: [] };
   window.__rec = rec;
@@ -150,7 +153,7 @@ RECORD_JS = """() => {
     if (k === key) return;
     key = k;
     rec.frames.push(frame);
-    if (frame.status === 'running' && frame.report) rec.texts.add(frame.report);
+    if (frame.status === 'running' && frame.report && c.querySelector('.report.provisional')) rec.texts.add(frame.report);
     if (frame.status === 'running' && frame.shown) rec.shown.add(frame.shown);
   }).observe(document.querySelector('#conversation'), { subtree: true, childList: true, attributes: true, characterData: true });
   new MutationObserver(() => rec.busy.push({ t: Math.round(performance.now() - rec.t0),
