@@ -517,6 +517,10 @@
         "P6-G": {
           "done": true,
           "desc": "The user-turn thumbnail opens the viewer (user, 2026-10-13: \"Yes\", overriding the P6 fix 1 ruling that kept it a plain picture; CHAT_UI_SPEC.md:310). A click..."
+        },
+        "P6-H": {
+          "done": false,
+          "desc": "A report card a person can read: plain-language summary from the detected findings + structured report, [removed] placeholder, earlier-study sentences flagged, term explanations (user, 2026-10-14; display only)."
         }
       },
       "evidence": {
@@ -846,7 +850,7 @@
     "Serve 2662859 RUNNING on gx08 since 2026-10-13T23:48:52Z (code ad134ea: part 3 + P6-G + P8-D follow-up); tunnel re-attached; probe for the P8-F part 3 acceptance started. User: exports deleted after 45 days.",
     "P8-F: non-functional targets measured after part 3 — first byte <= 140 ms, published turn <= 4.1 s and EOS turn <= 3.7 s (target 8 s), 375 px layout, no external requests, no EventSource"
   ],
-  "last_updated": "2026-10-14T09:03:41+02:00",
+  "last_updated": "2026-10-14T09:05:36+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",

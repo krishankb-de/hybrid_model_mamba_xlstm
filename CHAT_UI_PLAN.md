@@ -3717,6 +3717,8 @@ Run `venv/bin/python -m app.server --engine tiny --gallery <tiny gallery dir> --
 
 - [x] **P6-G** The user-turn thumbnail opens the viewer (user, 2026-10-13: "Yes", overriding the P6 fix 1 ruling that kept it a plain picture; CHAT_UI_SPEC.md:310). A click on the upload in the user's own message opens the viewer exactly as the card's "Your X-ray" tile does: the original where the mode sends one, else the thumbnail marked as such; a test study with its stored-gallery-size note. Focus returns to the thumbnail on close. Node, e2e and features-check coverage; evidence regenerated.
 
+- [ ] **P6-H** A report card a person can read. Requested by the user on 2026-10-14 from the live check on real data, choosing "Both": a plain-language summary built from the detected findings (not a diagnosis), then a structured report with one sentence per line. The "___" de-identification mark shows as [removed] with a note; sentences that compare with an earlier study are flagged, because the model never sees one; medical terms get plain explanations. Display only: the stored report, Copy, exports and published numbers are unchanged.
+
 ### P7 — Cluster serving
 
 Gate: from the laptop, a real test study chosen in the picker decodes through the tunnel; its report equals the P2-E CPU golden line for that study (same node type; otherwise within the P1-C drift, which the card states); the five image features work on real data in private mode; the preemption drill passes.
