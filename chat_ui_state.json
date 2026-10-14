@@ -594,7 +594,7 @@
     },
     "P8": {
       "title": "Hardening",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "P8-A": {
           "done": true,
@@ -617,7 +617,7 @@
           "desc": "app/README.md runbook (start, tunnel, public demo, stop, retention, what is stored, the DUA rules); allow-listed in .gitignore."
         },
         "P8-F": {
-          "done": false,
+          "done": true,
           "desc": "Non-functional targets measured: first byte ≤ 300 ms, full turn (P1-D target), 375 px, no external requests from the page, no EventSource in static/."
         }
       },
@@ -650,7 +650,12 @@
         "p8f_diag_J3": "2649957 OMP_WAIT_POLICY=PASSIVE: A 9521 ms, D 0.98x (spinning is what makes A fast)",
         "p8f_root_cause": "two libgomp pools (main thread from engine load + worker) -> managed 16 > 8 CPUs -> spin throttled to 100 -> passive -> 8 threads as slow as 1",
         "p8f_part3_merge": "9680fe6 (pick of 7c194ff; review approved, minors carried); tree == the gated 7c194ff (validate 5228 passed, e2e 36, layout 366/0, browser 10/0)",
-        "p8d_followup": "merged (picks of 47d39d0, 6f297f4; review approved): store failure mid-turn ends error/store_failed; Store._held overlay applied by get_message, events_after, get_session, export; gates on the identical tree: validate 5243 passed, e2e 40, layout 366/0, browser 10/0"
+        "p8d_followup": "merged (picks of 47d39d0, 6f297f4; review approved): store failure mid-turn ends error/store_failed; Store._held overlay applied by get_message, events_after, get_session, export; gates on the identical tree: validate 5243 passed, e2e 40, layout 366/0, browser 10/0",
+        "p8f_part3_acceptance": "probe on serve 2662859 (gx08, ad134ea): published generate 3.30-3.49 s/100 tok (was 7.44-7.83; prediction 2.9-3.5 RIGHT); turn 3.57-4.11 s; EOS turns mean 2.83 s (was 6.16; 2.2x); published_equal 5/5, eos_stops 6/6 (tokens identical to run 2); gate ok",
+        "p8f_first_byte": "max 140.2 ms (target <= 300 ms)",
+        "p8f_full_turn": "published max 4.11 s, EOS max 3.71 s (P1-D target 8 s)",
+        "p8f_375px": "layout check 366/0 (375 px cases) on every gate since 1bd5b92",
+        "p8f_static": "tests/test_app_static.py: no external requests, no EventSource (validate green)"
       },
       "verdict": null
     },
@@ -749,7 +754,8 @@
         "p9g6_lp200_jobs": "2638782 decode (31.5 min, gx14) / 2638783 CheXbert (15 min) / 2638784 compare (11 min), sync d283b69 clean, all COMPLETED 0:0",
         "p9g6_lp200_metrics": "EOS 2662/2663, 44.9 words (69.4 tok); ROUGE-L 0.1952, BLEU-1 0.1960, BLEU-4 0.0474, CheXbert-14 micro 0.4489, macro 0.2635, 5-micro 0.5155, 5-macro 0.4149",
         "p9g6_lp200_gate": "fail: worse bleu_1, bleu_4, chexbert_14_micro/macro, chexbert_5_micro/macro; ROUGE-L better +0.0033 [0.0008, 0.0057]; revised prediction (44.5-46 words, >=2660 EOS, gate fails, ROUGE-L 0.194-0.196) right on all four",
-        "p9g6_decision": "keep alpha 1.0 (no alpha passes); EOS-step lever (EOS log-prob penalty or min-new-tokens) offered to the user"
+        "p9g6_decision": "keep alpha 1.0 (no alpha passes); EOS-step lever (EOS log-prob penalty or min-new-tokens) offered to the user",
+        "p9c_cases": "job 2675105: binding passed; counts normal 82, support_devices 1192, pneumothorax 84; demo rows 657, 61, 1619, 1295, 2588 (prediction: normal count WRONG, rest right)"
       },
       "verdict": null
     }
@@ -834,9 +840,10 @@
     "P6-G: the user-turn thumbnail opens the viewer exactly as the card's 'Your X-ray' tile does (ownXraySide shared in render.js; opener passed; focus kept across the message_start redraw); merged 1bd5b92; gates green on 1bd5b92",
     "P8-D follow-up merged: a store failure mid-turn ends the turn as error/store_failed (live stream and every read agree; polling stops)",
     "P9-C tooling merged (case picker CPU job, server-side export save, demo driver); the demo itself waits for the live server",
-    "Serve 2662859 RUNNING on gx08 since 2026-10-13T23:48:52Z (code ad134ea: part 3 + P6-G + P8-D follow-up); tunnel re-attached; probe for the P8-F part 3 acceptance started. User: exports deleted after 45 days."
+    "Serve 2662859 RUNNING on gx08 since 2026-10-13T23:48:52Z (code ad134ea: part 3 + P6-G + P8-D follow-up); tunnel re-attached; probe for the P8-F part 3 acceptance started. User: exports deleted after 45 days.",
+    "P8-F: non-functional targets measured after part 3 — first byte <= 140 ms, published turn <= 4.1 s and EOS turn <= 3.7 s (target 8 s), 375 px layout, no external requests, no EventSource"
   ],
-  "last_updated": "2026-10-14T08:27:00+02:00",
+  "last_updated": "2026-10-14T08:28:48+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -943,13 +950,7 @@
       "/healthz must answer within 5 s under CPU-bound generation, or the demo watchdog closes the link",
       "free notes are unlimited per client but each holds a queue slot briefly and writes rows: add a separate generous note cap before a public demo (P9-G5b/P8f review)"
     ],
-    "P8-F": [
-      "LOCATED (timing job 2647689, gx14): the live generate's ~3x over P1-C is the worker thread itself — D (generate on a ThreadPoolExecutor thread) 3.11x A, while store/NFS/emit/HTTP add nothing (E 3.04x, E-local 3.10x, F 2.81x); store commits were already ruled out (WAL exclusive, 0.007 ms)",
-      "ROOT CAUSE (J1-J3): two libgomp pools throttle spin-waiting; fix = one pool: build, load and warm every engine on the worker thread, no torch op on the main thread (P8-F part 3), then acceptance by the probe (~30 ms/step) and a worker-only timing mode",
-      "the EOS (default) model's turn time: probe pass 3 records it from the P7-D follow-up on (eos_turn_ms_max)",
-      "part 2 (proposed, on the user's go-ahead): diagnose the worker-thread 3x with the same job, no code change — J1 MALLOC_ARENA_MAX=1, J2 --cpus-per-task=1, J3 OMP_WAIT_POLICY=PASSIVE (predictions in the plan + predictions[P8-F-diag]); then fix (likely a wrapper env line or an allocator), redeploy the serve job, re-run the probe",
-      "then tick P8-F: record first byte (probe ≤ 144 ms), full turn (EOS default 5.9 s mean, published ~8 s; after the fix, re-measured), 375 px (layout check), no external requests + no EventSource (static tests)"
-    ],
+    "P8-F": [],
     "P8-D-followup": [],
     "P7-E": [
       "drill script merged (4ae8633 + cfc1709, reviewed: R7 traced, waits bounded, requeue at most once). Run it on the cluster AFTER P8-F part 3 is merged and synced, since the requeue restarts the serve job onto that code: venv/bin/python scripts/chat_requeue_drill.py http://localhost:8010 --job <serve job> --token-file <token file>; tell the user when the live server goes down and comes back; read the D22 lines ([server] sqlite journal_mode=..., [server] recovered N running turn(s)) via chat_remote.sh summary logs/chat_server_<job>.log; record node, requeue_s, back_s (includes queue wait + load + tunnel re-attach), turn status; then tick P7-E"

@@ -4016,7 +4016,7 @@ Each item with its expected behaviour, run and recorded: kill → turn `error/se
 
 Commit `"P8-E: runbook"`.
 
-- [ ] **P8-F** Non-functional targets measured: first byte ≤ 300 ms, full turn (P1-D target), 375 px, no external requests from the page, no `EventSource` in `static/`.
+- [x] **P8-F** Non-functional targets measured: first byte ≤ 300 ms, full turn (P1-D target), 375 px, no external requests from the page, no `EventSource` in `static/`.
 
 Record the numbers from P7-D and a laptop tiny run; the static checks already exist as tests (P4-A). Commit `"P8-F: targets measured"`.
 
@@ -4067,6 +4067,14 @@ The aim is to find where the live per-step cost (77-88 ms against P1-C's ~30 ms)
   - On the laptop, a TorchDispatchMode count on `create_app`'s calling thread went from 237 ops to 0.
   - Gates on the same tree: validate passed (5228), e2e 36, layout 366/0, browser 10/0.
 - **Prediction (R4, recorded 2026-10-13, before any serve job runs part 3), read by the R7-safe probe (`scripts/chat_realturn_probe.py`):** published model (m3, 100 tokens) generate 2.9-3.5 s per report (80%), where it was 7.44-7.83 s; full published turn 3.2-4.2 s; EOS default model turns about 2.5x faster than the 4.35-8.21 s of probe run 2; published equality 5/5 and EOS stops 6/6 unchanged (95%); first byte unchanged (<= 300 ms).
+- **Part 3 acceptance (2026-10-14; R7-safe probe on serve job 2662859, gx08, code ad134ea): the prediction held.**
+  - Published generate: 3.30–3.49 s per 100 tokens, where it was 7.44–7.83 s. This is inside the predicted 2.9–3.5 s, about 2.3× faster.
+  - Full published turn: 3.57–4.11 s, against the predicted 3.2–4.2 s.
+  - EOS model turns: 1.93–3.71 s, a mean of 2.83 s against 6.16 s in probe run 2. That is 2.2× faster, against the predicted "about 2.5×".
+  - Published equality 5/5. EOS stops 6/6, with token counts identical to run 2 (102/68/65/33/73, upload 49).
+  - First byte at most 140 ms.
+  - 200-token published turns: about 6.0 s, where they were about 13.3 s.
+  - Gate: ok.
 
 
 ### P9 — Demo and close
@@ -4110,6 +4118,13 @@ Only if the user wants it. The drawer already has "API base URL"; `create_app(co
   - `scripts/chat_demo_session.py`: R7-safe. It keeps the session.
 - **User (2026-10-14): saved exports are deleted after 45 days, like private sessions.** This is a follow-up task in the retention sweep.
 - **Prediction (R4, recorded 2026-10-14, before the case job is submitted):** the job's binding check passes (labels_check final, reference report_gen_m3_test_split_s42, n_test 2663, mismatches 0) 85%; among the 2663 test studies, normal (No Finding only) 150-600, support devices 600-1400, pneumothorax 40-250 (70% each); 5 candidates per kind.
+- **Case job 2675105 (2026-10-14, gx08, sync 4bbfcc4):**
+  - The binding check passed: no ERROR, and 0 lines withheld.
+  - Counts among 2663 test studies: normal 82, support devices 1192, pneumothorax 84.
+  - Candidates (row indices): normal [657, 61, 467, 428, 2225]; support devices [1619, 1295, 178, 2074, 286]; pneumothorax [2588, 225, 1937, 207, 963].
+  - Against the prediction: binding right; support devices and pneumothorax right; normal **wrong**, because "No Finding only" is rarer than predicted (82, against 150-600).
+  - **Demo rows: 657, 61 (normal), 1619, 1295 (support devices), 2588 (pneumothorax).**
+  - The demo session and its export need the P9-C save route on the live server, which means the next serve start.
 
 - [ ] **P9-D** (deferred: a later stage, only on the user's word, U3) Public quick-tunnel smoke: POST streaming through trycloudflare measured; the tunnel stopped afterwards.
 
