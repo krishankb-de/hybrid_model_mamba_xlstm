@@ -935,7 +935,7 @@ test('Send streams a turn: Send is off and Stop is on while it runs, the card fi
   await turn;
   assert.equal(h.fetch.to('GET', '/v1/sessions?').length, listed + 1);   // its title and count changed: the sidebar asks again, once
   assert.equal(cardOf().getAttribute('data-status'), 'done');   // drawn at once when the turn ends, not on the next frame
-  assert.deepEqual([q(cardOf(), '.report-section h3').textContent, q(cardOf(), '.report-section p').textContent], ['Findings', 'clear.']);
+  assert.deepEqual([q(cardOf(), '.report-section h3').textContent, q(cardOf(), '.report-section li').textContent], ['Findings', 'clear.']);   // a list of sentences (P6-H)
   assert.equal($('status').textContent, 'Report ready');
   assert.equal($('send').disabled, false);
   assert.equal($('stop').hidden, true);
@@ -944,6 +944,44 @@ test('Send streams a turn: Send is off and Stop is on while it runs, the card fi
   nextFrame();
   assert.equal(cardOf().getAttribute('data-status'), 'done');   // a frame that was still queued changes nothing
   assert.equal($('conversation').hasAttribute('aria-busy'), false);   // and that frame is the one that takes aria-busy off
+});
+
+test('the settled card reads as the plain summary, the report one sentence to a line, then its notes and terms; a card still streaming shows the plain text (P6-H)', async () => {
+  const h = await ready();
+  const turn = h.app.send();
+  await flush();
+  const run = h.api.streams[0];
+  run.accept('m_a');
+  await flush();
+  resetEvents();
+  // neutral text made up for the test (R7), with a [removed], a sentence about an earlier study, and two terms
+  const REPORT = 'Findings: Compared with the image from ___, a small pleural effusion is seen. The heart size is normal. Impression: Nothing else to report.';
+  const NAMES = ['Enlarged Cardiomediastinum', 'Cardiomegaly', 'Lung Opacity', 'Lung Lesion', 'Edema', 'Consolidation', 'Pneumonia', 'Atelectasis',
+                 'Pneumothorax', 'Pleural Effusion', 'Pleural Other', 'Fracture', 'Support Devices', 'No Finding'];
+  run.channel.push(startEv(), stageStartEv('generate', 3), ev('content_block_start', { index: 0, content_block: { type: 'report', text: '' } }), snapEv(REPORT));
+  await flush();
+  nextFrame();
+  let report = q(cardOf(), '.report');
+  assert.ok(report.classList.contains('provisional'));   // still streaming: today's plain text, a paragraph a section
+  assert.deepEqual(texts(qa(report, '.report-section p')), ['Compared with the image from ___, a small pleural effusion is seen. The heart size is normal.', 'Nothing else to report.']);
+  for (const selector of ['li', '.report-summary', '.report-extras', '.removed', '.term', '.flag']) assert.equal(q(report, selector), null, selector);
+
+  run.channel.push(ev('content_block_stop', { index: 0 }), stageEndEv('generate', 9), stageStartEv('label', 4),
+                   stageEndEv('label', 3, { chexbert_14: Object.fromEntries(NAMES.map((n) => [n, n === 'Pleural Effusion' ? 1 : 0])) }),
+                   skipEv('score', 'no_reference'), stopEv('done', { report: REPORT, display_report: REPORT }));
+  run.channel.end();
+  await turn;
+  report = q(cardOf(), '.report');
+  assert.equal(report.classList.contains('provisional'), false);
+  assert.deepEqual([...report.children].map((c) => c.getAttribute('class')), ['report-summary', 'report-body', 'report-extras', 'report-actions']);   // the order on the page
+  assert.equal(q(report, '.summary-box p').textContent, 'The report mentions: fluid between the lung and the chest wall (pleural effusion).');
+  assert.deepEqual(qa(report, '.report-section li').map((li) => li.textContent.replace(/[⚠\d]/g, '')),   // the sentences, one to a line, less their marks
+                   ['Compared with the image from [removed], a small pleural effusion is seen.', 'The heart size is normal.', 'Nothing else to report.']);
+  assert.deepEqual([...q(report, '.report-extras').children].map((c) => c.getAttribute('class')), ['report-key', 'report-key', 'report-terms']);   // the notes, then the terms
+  assert.equal(texts(qa(report, '.report-terms li')).join('|'), 'pleural effusion: fluid between the lung and the chest wall');
+  assert.deepEqual(texts(qa(report, '.report-actions button')), ['Copy', 'Show raw']);   // the same two buttons
+  nextFrame();
+  assert.deepEqual([...q(cardOf(), '.report').children].map((c) => c.getAttribute('class')), ['report-summary', 'report-body', 'report-extras', 'report-actions']);   // and a later frame draws the same
 });
 
 test('the status region says a thing only when it changes', async () => {
@@ -1653,7 +1691,7 @@ test('3 s without an event drops the stream and polls from the last seq until th
   h.api.polls[0].channel.end();
   await turn;
   assert.equal(cardOf().getAttribute('data-status'), 'done');
-  assert.equal(q(cardOf(), '.report-section p').textContent, 'clear.');
+  assert.equal(q(cardOf(), '.report-section li').textContent, 'clear.');
   assert.equal($('send').disabled, false);
   assert.equal(h.api.polls.length, 1);
 });
@@ -1896,7 +1934,7 @@ test('a question turn and a turn stopped before its content block closed both re
   assert.equal(q(u1, '.user-text').textContent, 'what is this?');
   assert.equal(c1.getAttribute('data-status'), 'done');
   assert.equal(q(c2, '.note.stopped').textContent, 'Turn stopped');
-  assert.equal(q(c2, '.report-section p').textContent, 'part');
+  assert.equal(q(c2, '.report-section li').textContent, 'part');
   assert.equal(qa(c2, '[data-state="running"]').length, 0);   // nothing is left spinning
   assert.equal(h.api.polls.length, 0);   // both are over: nothing to follow
   assert.equal($('send').disabled, false);

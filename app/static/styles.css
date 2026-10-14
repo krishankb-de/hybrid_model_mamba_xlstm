@@ -351,6 +351,24 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .report-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .report-actions button[aria-pressed="true"] { border-color: var(--accent); background: var(--soft); }
 
+/* the report card a person can read (render.js, P6-H): a plain summary on top, the sentences one to a line, the notes and the terms under them */
+.report-summary { margin-bottom: 12px; }
+.summary-box { padding: 10px 12px; border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 10px; background: var(--soft); }
+.summary-box h4 { margin: 0 0 2px; color: var(--muted); font-size: 0.8125rem; font-weight: 600; }
+.summary-box p { margin: 0; }
+.summary-note { margin: 4px 0 0; color: var(--muted); font-size: 0.75rem; }
+.report-list { margin: 0; padding-left: 1.25rem; }
+.report-list li + li { margin-top: 4px; }
+.report-list li.earlier { color: var(--muted); }   /* a sentence about an earlier X-ray: the model never saw one, so it reads quieter */
+.flag { margin-right: 0.35em; font-size: 0.875em; }
+.removed { padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); font-size: 0.8125em; white-space: nowrap; }
+.term { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }   /* a word the Terms below explain; its title says it too */
+.term sup { display: inline-block; margin-left: 1px; color: var(--muted); font-size: 0.7em; line-height: 0; }   /* inline-block: the underline stops short of the number */
+.report-extras { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.report-key { margin: 0; color: var(--muted); font-size: 0.8125rem; }
+.report-terms h4 { margin: 0 0 2px; color: var(--muted); font-size: 0.8125rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.term-list { margin: 0; padding-left: 1.5rem; color: var(--muted); font-size: 0.8125rem; }
+
 .labels { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 16px; }
 .label-chips { display: flex; flex: 1 1 18rem; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; list-style: none; }
 .chip.positive { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; }   /* filled */

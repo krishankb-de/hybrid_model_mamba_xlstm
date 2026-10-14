@@ -29,6 +29,9 @@ const renderMatches = builder('renderMatches');
 const renderPublished = builder('renderPublished');
 const settleClamps = builder('settleClamps');   // P6 fix 1: the page measures, once a card is in it, which clamped report overflows
 const ownXraySide = builder('ownXraySide');     // P6-G: the viewer's side for the turn's own X-ray, from the card's tile and from the user turn's thumbnail
+const splitSentences = builder('splitSentences');       // P6-H: the report card a person can read: a report's sentences, one to a line
+const refersToEarlier = builder('refersToEarlier');     // P6-H: whether a sentence writes about an earlier X-ray
+const summaryText = builder('summaryText');             // P6-H: the plain-language summary, from the labels and the glossary only
 
 installDom();   // this file's process only: the other test files never see a document
 
@@ -436,7 +439,7 @@ test('a very deep detail stops nesting and shows the rest as JSON text', () => {
 test('a report splits on the literal Findings: and Impression: headers into two sections', () => {
   const report = renderReport(finished({ report: 'Findings: The lungs are clear. Impression: No acute disease.' }));
   const sections = qa(report, '.report-section');
-  assert.deepEqual(sections.map((s) => [q(s, 'h3').textContent, q(s, 'p').textContent]),
+  assert.deepEqual(sections.map((s) => [q(s, 'h3').textContent, bare(q(s, 'li'))]),   // P6-H: a list of sentences, no longer a paragraph
                    [['Findings', 'The lungs are clear.'], ['Impression', 'No acute disease.']]);
 });
 
@@ -456,7 +459,7 @@ test('a report with no headers is one section without a heading', () => {
   const report = renderReport(finished({ report: 'The lungs are clear.' }));
   assert.equal(qa(report, '.report-section').length, 1);
   assert.equal(q(report, 'h3'), null);
-  assert.equal(q(report, '.report-section p').textContent, 'The lungs are clear.');
+  assert.deepEqual(lines(report), ['The lungs are clear.']);
 });
 
 test('the report is provisional exactly while view.provisional', () => {
@@ -526,7 +529,7 @@ test('an EOS stop has no note: the model ended the report itself, so nothing was
   assert.deepEqual(notes(finished({ generate: { stopped: 'repeat', tokens: 21 } })), ['Stopped when the model began repeating itself.']);
   assert.deepEqual(notes(finished({ ...cutOff, truncated: true, generate: { stopped: 'budget', tokens: 87 } })), ['Report stopped at the token budget mid-sentence']);
   // the turn's report is still the card's body: only the note is absent
-  assert.equal(q(renderReport(finished({ generate: eos })), '.report-body p').textContent, 'The lungs are clear.');
+  assert.equal(bare(q(renderReport(finished({ generate: eos })), '.report-body li')), 'The lungs are clear.');
 });
 
 test('with the repair on, the budget note says what is hidden only when the card does hide something: no complete sentence is kept as it is (P4-G fix 1)', () => {
@@ -553,7 +556,7 @@ test('Show raw swaps the display copy for the raw report and back; the button sa
   const view = finished({ report: 'Findings: a lung  clear Impression: none and', display: 'Findings: A lung is clear. Impression: None.' });
   const card = renderAssistantCard(view, { copy() {} });
   const report = q(card, '.report');
-  assert.deepEqual(texts(qa(report, '.report-section p')), ['A lung is clear.', 'None.']);   // the display copy, in sections
+  assert.deepEqual(lines(report), ['A lung is clear.', 'None.']);   // the display copy, in sections, a sentence to a line
   assert.equal(q(report, 'pre'), null);
   const raw = button(report, 'Show raw');
   assert.equal(raw.getAttribute('aria-pressed'), 'false');
@@ -563,7 +566,7 @@ test('Show raw swaps the display copy for the raw report and back; the button sa
   assert.equal(raw.getAttribute('aria-pressed'), 'true');
   assert.equal(raw.textContent, 'Show raw');   // the label stays; aria-pressed carries the state
   raw.click();
-  assert.deepEqual(texts(qa(report, '.report-section p')), ['A lung is clear.', 'None.']);
+  assert.deepEqual(lines(report), ['A lung is clear.', 'None.']);
   assert.equal(q(report, 'pre'), null);
   assert.equal(raw.getAttribute('aria-pressed'), 'false');
 });
@@ -585,6 +588,376 @@ test('there is no report block, and no button, before the first snapshot', () =>
   const report = renderReport(viewOf([START]));
   assert.ok(report.hasAttribute('hidden'));
   assert.equal(qa(report, 'button').length, 0);
+});
+
+// ---- the report card a person can read (P6-H) ----------------------------------------------------------------------
+//
+// A finished report reads as a plain summary of its labels, then its sentences one to a line, then what explains them: a note for a [removed], a
+// note for a ⚠ sentence, and the Terms. All of it is drawn from the display copy as it is: the text of a sentence is the clean display's own,
+// apart from the [removed] that stands for a run of underscores, the ⚠ in front of a sentence about an earlier X-ray, and the number after a term.
+// Every sentence here is neutral and made up for the test (R7): no line of a real report.
+
+const REMOVED_NOTE = '[removed] marks text the training reports hid for privacy, usually a date or a name. The model copies the pattern, so nothing is missing from your image.';
+const EARLIER_NOTE = '⚠ marks a sentence that refers to an earlier X-ray. The model never saw one; it writes the way reports are written.';
+const SUMMARY_TITLE = 'What this means (plain language)';
+const SUMMARY_NOTE = "A plain-language summary of the findings detected in the model's report. It is not a diagnosis.";
+
+// A sentence as the clean display has it: without the ⚠ and the number of a term, which are drawn on it (a [removed] is text, and stays).
+const bare = (node) => (node.nodeType === 3 ? node.data
+  : node.localName === 'sup' || node.classList.contains('flag') ? '' : node.childNodes.map(bare).join(''));
+const lines = (report) => qa(report, '.report-section li').map(bare);                       // the sentences of the card, in order
+const notesOf = (report) => texts(qa(report, '.report-key'));                               // the notes under the sentences
+const termsOf = (report) => texts(qa(report, '.report-terms ol > li'));                     // the Terms list
+const reportOf = (text, extra = {}, ctx = {}) => renderReport(finished({ report: text, ...extra }), ctx);
+const classes = (nodes) => nodes.map((n) => n.getAttribute('class'));
+
+const GLOSSARY_TABLE = [   // the plain explanations as the user was given them: each row is its terms, then what it says
+  ['no finding', 'no abnormality is reported'],
+  ['enlarged cardiomediastinum', 'the heart and the central chest look wider than normal'],
+  ['cardiomegaly', 'an enlarged heart'],
+  ['lung opacity / opacity', 'an area of the lung that looks whiter, or denser, than normal'],
+  ['lung lesion / lesion', 'a spot or mass in the lung'],
+  ['edema', 'fluid in the lung tissue'],
+  ['consolidation', 'part of the lung filled with fluid or inflammation instead of air'],
+  ['pneumonia', 'a lung infection'],
+  ['atelectasis', 'part of a lung is partly collapsed or not fully inflated'],
+  ['pneumothorax', 'air between the lung and the chest wall, which can make the lung collapse'],
+  ['pleural effusion / effusion', 'fluid between the lung and the chest wall'],
+  ['pleural thickening', 'a thickened lining around the lung'],
+  ['fracture', 'a broken bone, for example a rib'],
+  ['support devices / device', 'tubes, lines, wires or devices placed in the body'],
+  ['vascular congestion', 'the blood vessels in the lungs look fuller than normal'],
+  ['hilar / hila', 'around the roots of the lungs, where vessels and airways enter'],
+  ['basilar / base / bases', 'the lower parts of the lungs'],
+  ['costophrenic angle', 'the lower outer corner of the lung on the image'],
+  ['mediastinum / mediastinal', 'the central chest between the lungs'],
+  ['interstitial', 'in the tissue between the air sacs'],
+  ['nodule', 'a small round spot'],
+  ['granuloma', 'a small healed spot, often from an old infection'],
+  ['hemidiaphragm', 'one half of the breathing muscle under the lungs'],
+  ['emphysema', 'damaged air sacs that trap air'],
+  ['sternotomy wires', 'wires that close the breastbone after chest surgery'],
+  ['endotracheal tube', 'a breathing tube in the windpipe'],
+  ['nasogastric tube', 'a tube through the nose into the stomach'],
+  ['picc / picc line', 'a thin tube in an arm vein that reaches near the heart'],
+  ['pacemaker', 'a device that helps the heart keep a regular beat'],
+  ['scoliosis', 'a sideways curve of the spine'],
+  ['osseous', 'about the bones'],
+  ['focal', 'in one small area'],
+  ['bilateral', 'on both sides'],
+  ['acute', 'new or sudden'],
+  ['chronic', 'long-standing'],
+];
+
+test('the glossary is the table of plain explanations as given, word for word, the 14 labels first (P6-H)', async () => {
+  const { GLOSSARY } = await import('../../app/static/glossary.js');
+  assert.deepEqual(GLOSSARY.map((row) => [row.terms.join(' / '), row.explanation]), GLOSSARY_TABLE);
+  assert.equal(GLOSSARY.length, 35);
+  assert.ok(Object.isFrozen(GLOSSARY) && GLOSSARY.every((row) => Object.isFrozen(row) && Object.isFrozen(row.terms)), 'static data nobody can edit');
+});
+
+test('splitSentences cuts after . ? ! and keeps every sentence as it was written, its spacing included (P6-H)', () => {
+  assert.deepEqual(splitSentences('Moderate left pleural effusion. Heart size is normal. No pneumothorax.'),
+                   ['Moderate left pleural effusion.', 'Heart size is normal.', 'No pneumothorax.']);
+  assert.deepEqual(splitSentences('Is it clear? Yes! It is.'), ['Is it clear?', 'Yes!', 'It is.']);
+  assert.deepEqual(splitSentences('Heart  size is   normal.\n  No pneumothorax.'), ['Heart  size is   normal.', 'No pneumothorax.']);
+  assert.deepEqual(splitSentences('  One.   Two.  '), ['One.', 'Two.']);
+  assert.deepEqual(splitSentences('The heart size is normal'), ['The heart size is normal']);   // no full stop: still one line
+  assert.deepEqual(splitSentences('A whole sentence. and a fragment'), ['A whole sentence.', 'and a fragment']);
+  for (const nothing of ['', '   ', '\n', null, undefined, 7, {}]) assert.deepEqual(splitSentences(nothing), [], String(nothing));
+  const text = 'Heart size is normal. No pneumothorax.  Left vs. right. Seen at 3 p.m. today.';
+  assert.equal(splitSentences(text).join(' '), text.replace(/\s+/g, ' '));   // nothing is lost, nothing is added
+});
+
+test('splitSentences does not split inside a decimal or after an abbreviation: Dr. e.g. i.e. vs. approx. No. before a digit, St. a.m. p.m. (P6-H)', () => {
+  const whole = (text) => assert.deepEqual(splitSentences(text), [text], text);
+  whole('The nodule measures 1.5 cm in the left upper lobe.');
+  whole('It grew from 0.8 to 1.25 cm.');
+  whole('Reviewed by Dr. Lee today.');
+  whole('A small finding, e.g. a rib fracture.');
+  whole('The left lower lobe, i.e. the base.');
+  whole('Left vs. right is not told apart.');
+  whole('The lesion is approx. 3 cm wide.');
+  whole('The tube is No. 3 in the series.');
+  whole('Seen at St. Mary clinic.');
+  whole('Taken at 3 a.m. today and again at 4 p.m. today.');
+  whole('Seen by Mr. Lee and Mrs. Day and Ms. Fox and Prof. Ray.');   // the other titles, which no sentence ends on
+  whole('Tubes, lines, etc. are in place.');
+  whole('See Fig. 2 and cf. the film.');
+  assert.deepEqual(splitSentences('The nodule measures 1.5 cm. It is small. Dr. Lee agrees.'), ['The nodule measures 1.5 cm.', 'It is small.', 'Dr. Lee agrees.']);
+  assert.deepEqual(splitSentences('Pneumothorax: No. Effusion: small.'), ['Pneumothorax: No.', 'Effusion: small.']);   // "No." is guarded before a digit, and only there
+  assert.deepEqual(splitSentences('Tube No. 3 is in place. No. 4 is not.'), ['Tube No. 3 is in place.', 'No. 4 is not.']);   // before a digit it is a number, wherever it stands
+  assert.deepEqual(splitSentences('1. Small effusion. 2. Normal heart size.'), ['1. Small effusion.', '2. Normal heart size.']);   // a list number is no stop
+  assert.deepEqual(splitSentences('Compared with the image from ___. The lungs are clear.'), ['Compared with the image from ___.', 'The lungs are clear.']);
+  assert.deepEqual(splitSentences('Wait ... then more.'), ['Wait ... then more.']);   // dots with nothing before them end nothing
+});
+
+test('a sentence that compares with an earlier study is told by a short list of words, each pinned (P6-H)', () => {
+  const flagged = [
+    'Compared with the image from ___, the lungs are clear.', 'Comparison: none.',
+    'There is a prior sternotomy.', 'Previous studies are not available.', 'The tube was previously removed.',
+    'Since the last film a tube was placed.', 'Since prior, the lungs have cleared.',
+    'Interval development of a tube.', 'Interval change is noted.',
+    'Unchanged heart size.', 'No change in the heart size.', 'No significant change in the lungs.', 'Little change in the lungs.', 'Little overall change in the lungs.',
+    'Stable position of the tube.',
+    'Again, a left tube is seen.', 'Again seen is a left tube.',
+    'Persistent left tube.', 'The tube persists.',
+    'A rib is redemonstrated.', 'A rib is re-demonstrated.',
+    'The tube is in the same place as before.',
+    'The lungs have improved.', 'The lungs are improving.', 'The lungs have worsened.', 'Worsening of the lungs.',
+    'The heart has increased in size.', 'The heart has decreased in size.',
+  ];
+  for (const sentence of flagged) assert.equal(refersToEarlier(sentence), true, sentence);
+  assert.equal(refersToEarlier('COMPARED WITH THE STUDY OF ___.'), true);   // case does not matter
+  const plain = [
+    'No pneumothorax.', 'No acute abnormality in the upper zones.', 'There is a new left tube.', 'Increased opacity at the left base.',
+    'Heart size is normal.', 'The lungs are clear.', 'The two lungs are comparable in size.',   // comparable is not compared
+    'The patient is unstable.', 'Priority is given to the left side.', 'The lungs are persistently clear.',   // a word that only holds another
+    'There is again a small left tube.',   // "again" counts only where a sentence begins with it
+    'Nothing has changed color.', 'A change in the chart.', 'The heart size is increased.',   // no temporal word: not a comparison
+    '', 'Findings:',
+  ];
+  for (const sentence of plain) assert.equal(refersToEarlier(sentence), false, sentence);
+  assert.equal(refersToEarlier(null), false);
+  assert.equal(refersToEarlier(undefined), false);
+});
+
+test('the summary is made of the labels and the glossary only: positives in a fixed order, each as its plain phrase and its term (P6-H)', () => {
+  const said = (...positives) => summaryText(labelled(positives));
+  const PHRASES = [
+    ['Enlarged Cardiomediastinum', 'the heart and the central chest look wider than normal (enlarged cardiomediastinum)'],
+    ['Cardiomegaly', 'an enlarged heart (cardiomegaly)'],
+    ['Lung Opacity', 'an area of the lung that looks whiter, or denser, than normal (lung opacity)'],
+    ['Lung Lesion', 'a spot or mass in the lung (lung lesion)'],
+    ['Edema', 'fluid in the lung tissue (edema)'],
+    ['Consolidation', 'part of the lung filled with fluid or inflammation instead of air (consolidation)'],
+    ['Pneumonia', 'a lung infection (pneumonia)'],
+    ['Atelectasis', 'part of a lung is partly collapsed or not fully inflated (atelectasis)'],
+    ['Pneumothorax', 'air between the lung and the chest wall, which can make the lung collapse (pneumothorax)'],
+    ['Pleural Effusion', 'fluid between the lung and the chest wall (pleural effusion)'],
+    ['Pleural Other', 'a thickened lining around the lung (pleural thickening)'],
+    ['Fracture', 'a broken bone, for example a rib (fracture)'],
+    ['Support Devices', 'tubes, lines, wires or devices placed in the body (support devices)'],
+  ];
+  for (const [name, phrase] of PHRASES) assert.equal(said(name), `The report mentions: ${phrase}.`, name);
+  assert.equal(said('Pleural Effusion', 'Atelectasis'),   // CHEXBERT_14 order, whatever order the labels came in
+                   'The report mentions: part of a lung is partly collapsed or not fully inflated (atelectasis); fluid between the lung and the chest wall (pleural effusion).');
+  const every = PHRASES.map(([name]) => name);
+  const all = `The report mentions: ${PHRASES.map(([, phrase]) => phrase).join('; ')}.`;
+  assert.equal(summaryText(Object.fromEntries([...every].reverse().map((n) => [n, 1]).concat([['No Finding', 0]]))), all);   // the last in, the last said
+  assert.ok(all.endsWith('(support devices).'), 'Support Devices comes last');
+  assert.equal(summaryText(Object.fromEntries([['Support Devices', true], ['Edema', true], ['Cardiomegaly', 0]])),   // true counts as 1
+               'The report mentions: fluid in the lung tissue (edema); tubes, lines, wires or devices placed in the body (support devices).');
+  const NONE = 'The report mentions no abnormal finding.';
+  assert.equal(said(), NONE);                                       // no positive label
+  assert.equal(said('No Finding'), NONE);                           // No Finding positive
+  assert.equal(said('No Finding', 'Edema', 'Cardiomegaly'), NONE);  // it is what the labeller says of the whole report
+  for (const unknown of [null, undefined, {}, [], 'Edema', 7, { Edema: null }, { Unheard: 1 }, { Unheard: 0, Other: null }]) {
+    assert.equal(summaryText(unknown), null, JSON.stringify(unknown));   // nothing to say: it says nothing
+  }
+  assert.equal(summaryText({ Edema: 1, Unheard: 1 }), 'The report mentions: fluid in the lung tissue (edema).');   // a name it has no phrase for is left out
+});
+
+test('a finished report is a list under each heading, one sentence to a line, in the text as the clean display has it (P6-H)', () => {
+  const report = reportOf('Findings: The lungs are clear.  The heart size is normal. Impression: Nothing else to report.');
+  const sections = qa(report, '.report-section');
+  assert.deepEqual(sections.map((s) => q(s, 'h3').textContent), ['Findings', 'Impression']);
+  assert.deepEqual(sections.map((s) => qa(s, 'li').map((li) => li.textContent)), [['The lungs are clear.', 'The heart size is normal.'], ['Nothing else to report.']]);
+  assert.ok(sections.every((s) => q(s, 'ul') !== null && q(s, 'p') === null), 'a list, and no paragraph');
+  assert.equal(q(report, '.report-body').children.length, 2);
+  assert.deepEqual(notesOf(report), []);                         // nothing to explain: no note,
+  assert.equal(q(report, '.report-terms'), null);                // no Terms,
+  assert.equal(q(report, '.report-summary'), null);              // and, with no labels, no summary: the card is what it was but for the list
+  assert.deepEqual(classes([...report.children]), ['report-body', 'report-actions']);
+  const untitled = reportOf('The lungs are clear. Nothing else to report.');   // untitled text shows without a heading
+  assert.equal(q(untitled, 'h3'), null);
+  assert.deepEqual(lines(untitled), ['The lungs are clear.', 'Nothing else to report.']);
+  assert.deepEqual(lines(reportOf('Findings:')), []);   // a header whose text has not come yet: its heading, and no list
+  assert.equal(q(reportOf('Findings:'), 'ul'), null);
+});
+
+test('while the report is provisional the plain display stays: a paragraph a section, no list, no summary, no notes, no terms (P6-H)', () => {
+  const live = viewOf([START, stageStart('generate', 3), snapshot('Findings: Compared with the image from ___, a pleural effusion. Impression: Stable.')]);
+  const report = renderReport(live, { copy() {} });
+  assert.ok(report.classList.contains('provisional'));
+  assert.deepEqual(texts(qa(report, '.report-section p')), ['Compared with the image from ___, a pleural effusion.', 'Stable.']);   // the text as it is, underscores and all
+  for (const selector of ['li', 'ul', '.report-summary', '.report-extras', '.report-key', '.report-terms', '.removed', '.term', '.flag']) {
+    assert.equal(q(report, selector), null, selector);
+  }
+  const odd = renderReport({ ...finished({ labels: labelled(['Edema']), report: 'Findings: A pleural effusion.' }), provisional: true });   // labels that came before the block closed
+  assert.equal(q(odd, '.report-summary'), null);
+  assert.equal(qa(odd, 'li').length, 0);
+});
+
+test('a run of three or more underscores is shown as a small [removed], and a note says why, once and only when there is one (P6-H)', () => {
+  const report = reportOf('Findings: The date was ___. The name is _____ and the code ________. Two underscores __ stay. Impression: Nothing else.');
+  assert.deepEqual(texts(qa(report, '.removed')), ['[removed]', '[removed]', '[removed]']);
+  assert.ok(qa(report, '.removed').every((n) => n.localName === 'span' && n.parentNode.localName === 'li'), 'inline, inside its sentence');
+  assert.deepEqual(lines(report), ['The date was [removed].', 'The name is [removed] and the code [removed].', 'Two underscores __ stay.', 'Nothing else.']);
+  assert.ok(!qa(report, '.report-section').map((s) => s.textContent).join('').includes('___'), 'no run of underscores is left on the card');
+  assert.deepEqual(notesOf(report), [REMOVED_NOTE]);   // once, however many there are
+  assert.equal(q(report, '.report-key').getAttribute('data-note'), 'removed');
+  assert.deepEqual(notesOf(reportOf('Findings: Two underscores __ stay. A single _ too.')), []);   // none to hide: none to explain
+  assert.deepEqual(notesOf(reportOf('Findings: The lungs are clear.')), []);
+  assert.deepEqual(notesOf(reportOf('Findings: The date was ___. Impression: Nothing else.', {}, { copy() {} })), [REMOVED_NOTE]);
+});
+
+test('a sentence about an earlier study gets a quiet ⚠ and a muted look, and a note says what ⚠ means, once and only then (P6-H)', () => {
+  const report = reportOf('Findings: Compared with the image from ___, the lungs are clear. The heart size is normal. Impression: Stable. Nothing else to report.');
+  const flagged = qa(report, '.report-section li.earlier');
+  assert.deepEqual(flagged.map(bare), ['Compared with the image from [removed], the lungs are clear.', 'Stable.']);
+  assert.deepEqual(flagged.map((li) => texts(qa(li, '.flag'))), [['⚠'], ['⚠']]);
+  assert.equal(qa(report, '.flag').length, 2);   // not on the others
+  assert.equal(qa(report, '.report-section li').length, 4);
+  const flag = q(flagged[0], '.flag');
+  assert.equal(flag.getAttribute('role'), 'img');                                    // a shape that is also said in words
+  assert.equal(flag.getAttribute('aria-label'), 'refers to an earlier X-ray');
+  assert.equal(flag.getAttribute('title'), 'This sentence refers to an earlier X-ray. The model never saw one.');
+  assert.equal(flagged[0].childNodes[0], flag, 'in front of its sentence');
+  assert.deepEqual(notesOf(report), [REMOVED_NOTE, EARLIER_NOTE]);                   // the ⚠ is told once, after the [removed]
+  assert.deepEqual(classes(qa(report, '.report-key')), ['report-key', 'report-key']);
+  assert.deepEqual(qa(report, '.report-key').map((n) => n.getAttribute('data-note')), ['removed', 'earlier']);
+  const alone = reportOf('Findings: The lungs are clear. Stable position of the tube. No change in the heart size.');
+  assert.deepEqual(notesOf(alone), [EARLIER_NOTE]);                                  // told once for two sentences
+  assert.equal(qa(alone, '.flag').length, 2);
+  assert.deepEqual(notesOf(reportOf('Findings: No pneumothorax. There is a new left tube. Increased opacity at the base.')), []);   // none flagged: no note
+});
+
+test('terms get a dotted-underline hook, a number and a title; each is numbered once, in the order it is first used, and explained once in the Terms list (P6-H)', () => {
+  const report = reportOf('Findings: Moderate left pleural effusion with basilar atelectasis. The heart size is normal. No pneumothorax. Impression: Left pleural effusion.');
+  assert.deepEqual(lines(report), ['Moderate left pleural effusion with basilar atelectasis.', 'The heart size is normal.', 'No pneumothorax.', 'Left pleural effusion.']);
+  const marked = qa(report, '.term');
+  assert.deepEqual(marked.map(bare), ['pleural effusion', 'basilar', 'atelectasis', 'pneumothorax']);   // the second "pleural effusion" has its number already
+  assert.deepEqual(marked.map((t) => q(t, 'sup').textContent), ['1', '2', '3', '4']);
+  assert.deepEqual(marked.map((t) => t.getAttribute('title')), [
+    '1: fluid between the lung and the chest wall', '2: the lower parts of the lungs', '3: part of a lung is partly collapsed or not fully inflated',
+    '4: air between the lung and the chest wall, which can make the lung collapse']);
+  assert.ok(marked.every((t) => t.localName === 'span' && t.parentNode.localName === 'li'), 'inline, in its sentence');
+  const first = qa(report, '.report-section li')[0];
+  assert.deepEqual(first.childNodes.map((n) => (n.nodeType === 3 ? n.data : n.getAttribute('class'))), ['Moderate left ', 'term', ' with ', 'term', ' ', 'term', '.']);   // the text round a term is untouched
+  const list = q(report, '.report-terms');
+  assert.equal(q(list, 'h4').textContent, 'Terms');
+  assert.deepEqual(termsOf(report), [
+    'pleural effusion: fluid between the lung and the chest wall', 'basilar: the lower parts of the lungs',
+    'atelectasis: part of a lung is partly collapsed or not fully inflated',
+    'pneumothorax: air between the lung and the chest wall, which can make the lung collapse']);
+  assert.equal(q(list, 'ol') !== null && q(list, 'ol').parentNode === list, true);   // an ordered list: its own numbers are the numbers in the text
+  // nothing in it can be tabbed to: spans with a title, and a list
+  assert.deepEqual(tabStops(reportOf('Findings: A pleural effusion. Stable.', {}, { copy() {} })).map((n) => n.getAttribute('data-action')), ['copy', 'raw']);
+});
+
+test('a term is found whatever its case, on word boundaries only, and a longer term wins over a shorter one inside it (P6-H)', () => {
+  const upper = reportOf('Findings: PLEURAL EFFUSION and Pneumonia.');
+  assert.deepEqual(qa(upper, '.term').map(bare), ['PLEURAL EFFUSION', 'Pneumonia']);   // the text as written
+  assert.deepEqual(termsOf(upper), ['pleural effusion: fluid between the lung and the chest wall', 'pneumonia: a lung infection']);   // the table's own lower case
+  const inside = reportOf('Findings: Two nodules, a subacute change, a unifocal area, a baseline film and lung basal fullness. The lungs are clear.');
+  assert.equal(qa(inside, '.term').length, 0);          // nodules, subacute, unifocal, baseline: each holds a term and is not one
+  assert.equal(q(inside, '.report-terms'), null);
+  assert.deepEqual(qa(reportOf('Findings: The lung Bases are clear. Wide base. Chronic and focal and bilateral.'), '.term').map(bare),
+                   ['Bases', 'Chronic', 'focal', 'bilateral']);   // base is the same term as bases: the second one has its number
+  const longest = reportOf('Findings: A left lung opacity and a small opacity.');
+  assert.deepEqual(qa(longest, '.term').map(bare), ['lung opacity']);   // not "lung" and "opacity" apart; the same row once
+  assert.deepEqual(termsOf(longest), ['lung opacity: an area of the lung that looks whiter, or denser, than normal']);
+  assert.deepEqual(termsOf(reportOf('Findings: A PICC line is in place.')), ['picc line: a thin tube in an arm vein that reaches near the heart']);   // not "picc"
+  assert.deepEqual(termsOf(reportOf('Findings: An endotracheal tube, a nasogastric tube and sternotomy wires are in place.')), [
+    'endotracheal tube: a breathing tube in the windpipe', 'nasogastric tube: a tube through the nose into the stomach',
+    'sternotomy wires: wires that close the breastbone after chest surgery']);
+  assert.deepEqual(termsOf(reportOf('Findings: A small effusion. Another pleural effusion.')), ['effusion: fluid between the lung and the chest wall']);   // one row: its first words
+  assert.deepEqual(qa(reportOf('Findings: A small effusion. Another pleural effusion.'), '.term').map(bare), ['effusion']);
+  assert.deepEqual(qa(reportOf('Findings: Costophrenic angle and vascular congestion at the hila.'), '.term').map((t) => q(t, 'sup').textContent), ['1', '2', '3']);
+  assert.deepEqual(qa(reportOf('Findings: Pleural  effusion\nat the base.'), '.term').map(bare), ['Pleural  effusion', 'base']);   // a term may span a space or a line break
+});
+
+test('a [removed] and a ⚠ and a term can share a sentence: each is drawn, and the text round it is the display copy (P6-H)', () => {
+  const report = reportOf('Findings: Compared with ___, the pleural effusion is stable at the base. Impression: Nothing else.');
+  const [first] = qa(report, '.report-section li');
+  assert.equal(bare(first), 'Compared with [removed], the pleural effusion is stable at the base.');
+  assert.ok(first.classList.contains('earlier') && q(first, '.flag') && q(first, '.removed') && qa(first, '.term').length === 2);
+  assert.equal(visibleText(first), '⚠Compared with [removed], the pleural effusion1 is stable at the base2.');
+  assert.deepEqual(termsOf(report), ['pleural effusion: fluid between the lung and the chest wall', 'base: the lower parts of the lungs']);
+});
+
+test('the summary comes above the report once the labels are known: a box, its plain sentence, and under it what it is and is not (P6-H)', () => {
+  const report = reportOf('Findings: A pleural effusion. Impression: Nothing else.', { labels: labelled(['Pleural Effusion', 'Atelectasis']) });
+  const summary = q(report, '.report-summary');
+  assert.deepEqual(classes([...summary.children]), ['summary-box', 'summary-note']);   // the box, and under it the note
+  assert.equal(q(summary, '.summary-box h4').textContent, SUMMARY_TITLE);
+  assert.equal(q(summary, '.summary-box p').textContent,
+               'The report mentions: part of a lung is partly collapsed or not fully inflated (atelectasis); fluid between the lung and the chest wall (pleural effusion).');
+  assert.equal(q(summary, '.summary-note').textContent, SUMMARY_NOTE);
+  assert.deepEqual(classes([...report.children]), ['report-summary', 'report-body', 'report-extras', 'report-actions']);   // above the sentences
+  assert.equal(q(reportOf('Findings: Nothing else.', { labels: labelled([]) }), '.summary-box p').textContent, 'The report mentions no abnormal finding.');
+  assert.equal(q(reportOf('Findings: Nothing else.', { labels: labelled(['No Finding']) }), '.summary-box p').textContent, 'The report mentions no abnormal finding.');
+  assert.equal(q(reportOf('Findings: Nothing else.', { labels: labelled(['No Finding', 'Edema']) }), '.summary-box p').textContent, 'The report mentions no abnormal finding.');
+  const box = q(renderReport(finished({ labels: labelled(['Edema']) }), { copy() {} }), '.report-summary');
+  assert.deepEqual(tabStops(box), []);   // a box to read, not a control
+});
+
+test('there is no summary while the labels are pending, when there are none, while the report is provisional; public mode has it as private does (P6-H)', () => {
+  const closed = [START, stageStart('generate', 3), snapshot('Findings: The lungs are clear.'), step('content_block_stop', { index: 0 }), stageEnd('generate', 9, GENERATE)];
+  const pending = renderReport(viewOf([...closed, stageStart('label', 4)]));   // the report is final, its labels are on their way
+  assert.equal(q(pending, '.report-summary'), null);
+  assert.deepEqual(lines(pending), ['The lungs are clear.']);                   // the sentences come as soon as the block closes
+  assert.equal(q(renderReport(viewOf([...closed, skipped('label', 'labeler_unavailable')])), '.report-summary'), null);   // no labeller: the card is as it was
+  assert.equal(q(reportOf('Findings: The lungs are clear.'), '.report-summary'), null);   // the label stage skipped
+  assert.equal(q(reportOf('Findings: The lungs are clear.', { options: { label: false } }), '.report-summary'), null);   // the user's own setting
+  const labelsOnly = viewOf([...closed, stageEnd('label', 4, { chexbert_14: labelled(['Edema']) })]);   // labelled, the turn still scoring
+  assert.equal(q(renderReport(labelsOnly), '.report-summary .summary-box p').textContent, 'The report mentions: fluid in the lung tissue (edema).');
+  assert.equal(q(renderReport({ ...labelsOnly, provisional: true }), '.report-summary'), null);
+  const publicTurn = { ...finished({ labels: labelled(['Edema']), report: 'Findings: The lungs are clear.' }), mode: 'public' };
+  assert.equal(q(renderReport(publicTurn), '.report-summary .summary-box p').textContent, 'The report mentions: fluid in the lung tissue (edema).');
+  assert.equal(q(renderReport({ ...publicTurn, labels: {} }), '.report-summary'), null);   // labels with nothing in them say nothing
+});
+
+test('a finished report reads in this order: the summary, the sentences, the stop note, the notes, the terms, then its buttons (P6-H)', () => {
+  const text = 'Findings: Compared with the image from ___, a small pleural effusion is seen. The heart size is normal. Impression: Nothing else.';
+  const report = reportOf(text, { labels: labelled(['Pleural Effusion']), truncated: true }, { copy() {} });
+  assert.deepEqual(classes([...report.children]), ['report-summary', 'report-body', 'note truncated', 'report-extras', 'report-actions']);
+  assert.deepEqual(classes([...q(report, '.report-extras').children]), ['report-key', 'report-key', 'report-terms']);
+  assert.deepEqual(notesOf(report), [REMOVED_NOTE, EARLIER_NOTE]);
+  assert.deepEqual(texts(qa(report, '.report .note')), ['Report stopped at the token budget mid-sentence']);   // the stop note is still the report's one `.note`
+});
+
+test('Show raw swaps the whole card text for the original, notes and terms with it, and Copy never carries a mark (P6-H)', () => {
+  const text = 'Findings: Compared with the image from ___, a pleural effusion is stable.  Impression: Nothing else.';
+  const copied = [];
+  const report = reportOf(text, { labels: labelled(['Pleural Effusion']) }, { copy: (t) => copied.push(t) });
+  assert.deepEqual(notesOf(report), [REMOVED_NOTE, EARLIER_NOTE]);
+  assert.equal(q(report, '.report-terms') !== null, true);
+  button(report, 'Copy').click();
+  button(report, 'Show raw').click();
+  assert.equal(q(report, 'pre').textContent, text);                               // the original, byte for byte: underscores, spacing, all
+  assert.equal(q(report, '.report-body'), null);
+  assert.deepEqual(notesOf(report), []);                                          // nothing in view for them to explain
+  assert.equal(q(report, '.report-terms'), null);
+  assert.equal(q(report, '.term') === null && q(report, '.removed') === null && q(report, '.flag') === null, true);
+  assert.equal(q(report, '.report-summary .summary-box p').textContent, 'The report mentions: fluid between the lung and the chest wall (pleural effusion).');   // it is about the report, whichever way it is read
+  assert.equal(button(report, 'Show raw').getAttribute('aria-pressed'), 'true');
+  button(report, 'Copy').click();
+  button(report, 'Show raw').click();                                             // and back
+  assert.equal(q(report, 'pre'), null);
+  assert.deepEqual(lines(report), ['Compared with the image from [removed], a pleural effusion is stable.', 'Nothing else.']);
+  assert.deepEqual(notesOf(report), [REMOVED_NOTE, EARLIER_NOTE]);
+  assert.equal(termsOf(report).length, 1);
+  assert.deepEqual(copied, [text, text]);                                         // the clean text (this turn's display copy is its report), with no marker, number or note
+  assert.ok(copied.every((t) => !/\[removed\]|⚠|Terms/.test(t)));
+});
+
+test('a card drawn anew while Show raw is on keeps the original in place of the notes and terms, and the next click brings them back (P6-H)', () => {
+  const view = finished({ report: 'Findings: A pleural effusion. Stable position of the tube.' });
+  const ui = new Map();
+  const ctx = { ui, copy() {} };
+  button(renderReport(view, ctx), 'Show raw').click();
+  const again = renderReport(view, ctx);                                          // the next throttled frame rebuilds the whole card
+  assert.equal(q(again, 'pre').textContent, 'Findings: A pleural effusion. Stable position of the tube.');
+  assert.equal(button(again, 'Show raw').getAttribute('aria-pressed'), 'true');
+  assert.equal(q(again, '.report-body'), null);
+  assert.equal(q(again, '.report-extras').hasAttribute('hidden'), true);          // nothing in view for the notes and terms to explain
+  assert.deepEqual([notesOf(again), termsOf(again), qa(again, '.term, .flag').length], [[], [], 0]);
+  button(again, 'Show raw').click();
+  assert.deepEqual(lines(again), ['A pleural effusion.', 'Stable position of the tube.']);
+  assert.equal(q(again, '.report-extras').hasAttribute('hidden'), false);
+  assert.deepEqual([notesOf(again), termsOf(again)], [[EARLIER_NOTE], ['pleural effusion: fluid between the lung and the chest wall']]);
 });
 
 // ---- labels --------------------------------------------------------------------------------------------------------
@@ -1023,7 +1396,7 @@ test('the card of the recorded turn: timeline, report with its note, labels unav
     ['preprocess', 'done', 'preprocess · 2 ms'], ['encode', 'done', 'encode · 0 ms'], ['retrieve', 'skipped', 'retrieve · skipped'],
     ['generate', 'done', 'generate · 14 ms'], ['label', 'skipped', 'label · skipped'], ['score', 'skipped', 'score · skipped'],
   ]);
-  assert.equal(q(card, '.report-section p').textContent, view.report);
+  assert.equal(lines(card).join(' '), view.report);   // its sentences, one to a line, are the report
   assert.equal(q(card, '.report .note').textContent, 'Report stopped at the token budget mid-sentence');
   assert.equal(q(card, '.labels').textContent, 'labels unavailable (labeler_unavailable)');
   assert.equal(q(card, '.provenance p').textContent.startsWith('tiny · scan legacy/tfla exact · prefix_k 4'), true);
@@ -1067,7 +1440,7 @@ test('a failed turn shows its error message; a stopped one says so', () => {
                          step('error', { type: 'error', error: { type: 'model_error', message: 'Internal error (RuntimeError)' } }), stopOf('error')]);
   const card = renderAssistantCard(failed, {});
   assert.equal(q(card, '.note.error').textContent, 'Error: Internal error (RuntimeError)');
-  assert.equal(q(card, '.report-section p').textContent, 'part');   // what had been generated stays
+  assert.deepEqual(lines(card), ['part']);   // what had been generated stays
   const failing = viewOf([START, stageStart('generate', 3),
                           step('error', { type: 'error', error: { type: 'model_error', message: 'Out of memory' } })]);
   assert.equal(failing.status, 'running');   // the error is known before message_stop ends the turn

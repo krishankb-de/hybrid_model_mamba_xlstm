@@ -122,17 +122,22 @@ CARD_JS = """() => {
   };
 }"""
 
+# The report as the card says it, a function of the card: each section's header and body joined back into the text the server sent. A body is
+# a paragraph while the report streams, and a list of its sentences (a line each) once the block has closed (P6-H); what is only drawn on a
+# sentence, the number of a term and the ⚠ of a sentence about an earlier study, is not part of the text and is left out.
+SAID_JS = """(c) => [...c.querySelectorAll('.report-body .report-section')].map((s) => {
+  const h = s.querySelector('h3'), p = s.querySelector('p');
+  const line = (li) => { const x = li.cloneNode(true); x.querySelectorAll('sup, .flag').forEach((n) => n.remove()); return x.textContent; };
+  return (h ? h.textContent + ': ' : '') + (p ? p.textContent : [...s.querySelectorAll('li')].map(line).join(' '));
+}).join(' ')"""
+
 # Watches the page's own DOM, so that no render between two polls is missed: every distinct state of the newest card, and every
 # thing the status region says. The recorder lives in the page and goes with it.
 RECORD_JS = """() => {
   const rec = { t0: performance.now(), frames: [], said: [], texts: new Set(), shown: new Set(), busy: [] };
   window.__rec = rec;
   const last = () => { const all = document.querySelectorAll('#conversation article.card'); return all[all.length - 1] || null; };
-  // the report as the card says it: each section's header and body joined back into the text the server sent
-  const said = (c) => [...c.querySelectorAll('.report-body .report-section')].map((s) => {
-    const h = s.querySelector('h3'), p = s.querySelector('p');
-    return (h ? h.textContent + ': ' : '') + (p ? p.textContent : '');
-  }).join(' ');
+  const said = __SAID__;
   let key = null;
   new MutationObserver(() => {
     const c = last();
@@ -154,7 +159,7 @@ RECORD_JS = """() => {
   new MutationObserver(() => rec.said.push({ t: Math.round(performance.now() - rec.t0), text: document.querySelector('#status').textContent }))
     .observe(document.querySelector('#status'), { subtree: true, childList: true, characterData: true });
   return true;
-}"""
+}""".replace("__SAID__", SAID_JS)
 
 PROGRESS_JS = """() => {
   const r = window.__rec, f = r.frames[r.frames.length - 1];
@@ -262,17 +267,14 @@ SHOWN_JS = """() => {
   const cards = [...document.querySelectorAll('#conversation article.card')];
   const c = cards[cards.length - 1];
   if (!c) return null;
-  const shown = [...c.querySelectorAll('.report-body .report-section')].map((s) => {
-    const h = s.querySelector('h3'), p = s.querySelector('p');
-    return (h ? h.textContent + ': ' : '') + (p ? p.textContent : '');
-  }).join(' ');
+  const shown = (__SAID__)(c);
   const raw = c.querySelector('.report-raw');
   const toggle = c.querySelector('[data-action="raw"]');
   const prov = c.querySelector('.provenance');
   return { shown, raw: raw ? raw.textContent : null, pressed: toggle ? toggle.getAttribute('aria-pressed') : null,
            truncated: !!c.querySelector('.note.truncated'), notes: [...c.querySelectorAll('.report .note')].map((n) => n.textContent),
            repeatNote: !!c.querySelector('.report .note[data-stopped="repeat"]'), footer: prov ? prov.textContent : '' };
-}"""
+}""".replace("__SAID__", SAID_JS)
 
 # A message as the server stored it: what it was asked, the image it used, every snapshot streamed, and the two reports.
 LOG_JS = """async (id) => {

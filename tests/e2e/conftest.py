@@ -5,7 +5,8 @@ Each test gets a tiny server of its own and pages of its own in one headless Goo
     loopback port with a temporary CHAT_HOME; a test that parametrizes `ui` with {"tiny_gallery": True} gets one with the synthetic
     gallery and the keyword labeller too (P5-E), so every stage runs, and one that adds "public_token": "t" gets a public-mode server
     with that token (P6-C), whose pages load PUBLIC_SETUP_JS first (TinyServer.setup_script); {"eos": True} gives it a card that says it was
-    trained to end its reports, and a report that ends at its first full stop (P9-G5b). It runs from this checkout with PYTHONPATH set to it, because the venv's editable
+    trained to end its reports, and a report that ends at its first full stop (P9-G5b); {"report": "<text>"} makes every report it writes that
+    text, so that what a card draws of a report is known (P6-H). It runs from this checkout with PYTHONPATH set to it, because the venv's editable
     install maps `scripts` and `hybrid_xmamba` to wherever it was installed from, and in a process group of its own, so that
     stopping it reaches everything it started. A test can kill it (SIGKILL: a crash) and start it again on the same port and home.
   * The browser is Playwright's chromium with channel="chrome": the Google Chrome installed on the machine, nothing downloaded. One
@@ -56,8 +57,8 @@ PUBLIC_SETUP_JS = ("try { localStorage.setItem('cxrchat.settings', JSON.stringif
 # planted, and only here: a turn whose budget is FAULT_TOKENS raises ImportError inside the engine, the class the stale dev server of
 # 2026-10-09 raised at every turn, so that the card for an internal error is seen end to end. The server must send the class name and
 # never the exception's text, which goes to its log. argv: home, step delay in seconds, port, then the flags: "tiny_gallery" for the P5-E
-# stages, "public:<token>" for a public-mode server with that token (P6-C: what public mode shows, and never asks for), and "eos" for the
-# tiny engine as a model trained to end its reports (P9-G5b).
+# stages, "public:<token>" for a public-mode server with that token (P6-C: what public mode shows, and never asks for), "eos" for the
+# tiny engine as a model trained to end its reports (P9-G5b), and "report:<text>" for an engine whose every report is that text (P6-H).
 LAUNCH = """\
 import sys
 import uvicorn
@@ -91,6 +92,12 @@ if "eos" in flags:
         self.eos_token_id = TINY_VOCAB.index(".")
 
     engine.TinyEngine.__init__ = init
+fixed = [flag.split(":", 1)[1] for flag in flags if flag.startswith("report:")]
+if fixed:
+    # P6-H, test-only: the words of the tiny model are random, so a card's summary, its sentences, its notes and its terms could not be known.
+    # Every text the engine decodes is this one instead: its stages, its labels (the keyword labeller reads this text), its stops and its
+    # stream are the engine's own, and the report it ends on is this text, as written.
+    engine.Engine._decode_text = lambda self, ids: " ".join(fixed[0].split())
 public = [flag.split(":", 1)[1] for flag in flags if flag.startswith("public:")]
 uvicorn.run(server.create_app(engine="tiny", home=sys.argv[1], tiny_step_delay_s=float(sys.argv[2]),
                               tiny_gallery="tiny_gallery" in flags, mode="public" if public else "private",
@@ -99,19 +106,21 @@ uvicorn.run(server.create_app(engine="tiny", home=sys.argv[1], tiny_step_delay_s
 """ % FAULT_TOKENS
 
 # The newest card as the user sees it. `shown` is the report put back together from the card's sections ("Findings: ..."), the way the
-# browser check reads it; `raw` is the Show raw text when that is on.
+# browser check reads it: a section's paragraph while the report streams, its sentences (a line each) once it has closed, without what is only
+# drawn on a sentence, the number of a term and the ⚠ of a sentence about an earlier study (P6-H); `raw` is the Show raw text when that is on.
 CARD_JS = """() => {
   const cards = [...document.querySelectorAll('#conversation article.card')];
   const c = cards[cards.length - 1];
   if (!c) return null;
   const body = c.querySelector('.report-body'), raw = c.querySelector('pre.report-raw'), prov = c.querySelector('.provenance p');
+  const line = (li) => { const x = li.cloneNode(true); x.querySelectorAll('sup, .flag').forEach((n) => n.remove()); return x.textContent; };
   return {
     n: cards.length, id: c.getAttribute('data-message-id'), status: c.getAttribute('data-status'),
     stages: Object.fromEntries([...c.querySelectorAll('.timeline > li')].map((l) => [l.getAttribute('data-stage'), l.getAttribute('data-state')])),
     stage_text: Object.fromEntries([...c.querySelectorAll('.timeline > li')].map((l) => [l.getAttribute('data-stage'), l.textContent])),
     shown: body ? [...body.querySelectorAll('.report-section')].map((s) => {
       const h = s.querySelector('h3'), p = s.querySelector('p');
-      return (h ? h.textContent + ': ' : '') + (p ? p.textContent : '');
+      return (h ? h.textContent + ': ' : '') + (p ? p.textContent : [...s.querySelectorAll('li')].map(line).join(' '));
     }).join(' ') : '',
     raw: raw ? raw.textContent : null,
     notes: [...c.querySelectorAll('.notes .note')].map((n) => n.textContent),          // warnings, the error and its hint, a stop
@@ -238,10 +247,11 @@ class TinyServer:
     home, and stopped (SIGTERM, then SIGKILL for what is left)."""
 
     def __init__(self, home: str, step_delay_s: float = STEP_DELAY_S, tiny_gallery: bool = False,
-                 public_token: Optional[str] = None, eos: bool = False) -> None:
+                 public_token: Optional[str] = None, eos: bool = False, report: Optional[str] = None) -> None:
         self.home, self.step_delay_s, self.tiny_gallery = home, float(step_delay_s), bool(tiny_gallery)
         self.public_token = public_token   # a public-mode server with this token (P6-C); None: private, no token
         self.eos = bool(eos)               # the tiny engine as a model trained to end its reports (P9-G5b, LAUNCH's "eos")
+        self.report = report               # an engine whose every report is this text (P6-H, LAUNCH's "report:<text>"); None: the tiny model's own words
         self.port = free_port()
         self.url = "http://127.0.0.1:{}/".format(self.port)
         self.log_path = os.path.join(home, "server.log")
@@ -253,7 +263,7 @@ class TinyServer:
             self.proc = subprocess.Popen(
                 [sys.executable, "-c", LAUNCH, self.home, repr(self.step_delay_s), str(self.port)]
                 + (["tiny_gallery"] if self.tiny_gallery else []) + (["public:" + self.public_token] if self.public_token else [])
-                + (["eos"] if self.eos else []),
+                + (["eos"] if self.eos else []) + (["report:" + self.report] if self.report else []),
                 cwd=REPO_ROOT,
                 env=dict(os.environ, PYTHONPATH=REPO_ROOT), stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         deadline = time.time() + timeout

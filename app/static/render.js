@@ -35,6 +35,7 @@
 // (clamp), which takes the focus its Show less had, so the page can give focus back to the same element after the replace: focusKey before it,
 // restoreFocus after.
 import { isSameOriginPath } from './api.js';
+import { GLOSSARY, SUMMARY_LABELS } from './glossary.js';
 import { STAGES, initialView, labelsPending, stageState } from './state.js';
 
 export { STAGES };
@@ -279,6 +280,163 @@ function reportNote(v) {
   return el('p', { class: 'note truncated' }, `Reached the ${budget}; the unfinished last sentence is hidden (Show raw shows it).`);
 }
 
+// ---- the report card a person can read (P6-H) ----------------------------------------------------------------------------
+//
+// A finished report is drawn as a plain-language summary (made of its labels and the glossary only: never of its text), its sentences one to a
+// line, and what explains them: a note for each kind of mark on the card, and the terms. The text of a sentence is the display copy's own. What is
+// drawn on it is a [removed] for a run of underscores (the mark that the training reports hid text with, which the model copies), a ⚠ before a
+// sentence that refers to an earlier X-ray (the model never saw one), and a number after the first use of a term that the glossary explains.
+// A report that is still being written keeps the plain display, since its earlier text can still change. Show raw and Copy keep the text as it is.
+
+// Words that end in a full stop without ending a sentence. "No." is one only before a digit, and is dealt with where it stands (endsSentence).
+const ABBREVIATIONS = new Set(['dr', 'mr', 'mrs', 'ms', 'prof', 'st', 'vs', 'etc', 'cf', 'fig', 'approx', 'e.g', 'i.e', 'a.m', 'p.m']);
+
+// Does this word of a text end a sentence, given the word that follows it? It does when it ends in ? or !, and when it ends in a full stop that is
+// not an abbreviation's, a list number's ("1."), an initial's ("J."), the "No." of "No. 3", or an ellipsis on its own. A decimal ("1.5") is one word.
+function endsSentence(word, next) {
+  const closed = word.replace(/["')\]}]+$/, '');   // a quote or a bracket after the stop belongs to the sentence
+  if (!/[.?!]$/.test(closed)) return false;
+  if (!closed.endsWith('.')) return true;
+  const stem = closed.replace(/[.?!]+$/, '').replace(/^["'([{]+/, '').toLowerCase();   // "(e.g." -> "e.g", "1." -> "1", "___." -> "___", "..." -> ""
+  if (!stem || /^\d+$/.test(stem) || (stem.length === 1 && /[a-z]/.test(stem)) || ABBREVIATIONS.has(stem)) return false;
+  return !(stem === 'no' && /^\d/.test(next));
+}
+
+// A text as its sentences, each exactly as it was written (its own spacing too), without the space between two. A text with no full stop yet is
+// one sentence; a text that is not a string, or has no word, is none.
+export function splitSentences(text) {
+  const t = typeof text === 'string' ? text : '';
+  const words = [...t.matchAll(/\S+/g)];
+  const sentences = [];
+  let first = 0;
+  words.forEach((m, i) => {
+    if (!endsSentence(m[0], words[i + 1]?.[0] ?? '')) return;
+    sentences.push(t.slice(words[first].index, m.index + m[0].length));
+    first = i + 1;
+  });
+  if (first < words.length) sentences.push(t.slice(words[first].index, words.at(-1).index + words.at(-1)[0].length));
+  return sentences;
+}
+
+// The words that say a sentence is about an earlier X-ray, which the model never saw: what it writes there is the way reports are written, not
+// something it observed. A short list of words and phrases on purpose, so that a sentence is not flagged on a guess: "no pneumothorax", "no acute ...",
+// "new" and "increased opacity" with no word of time are not. "Again" counts only as the first word of a sentence.
+const EARLIER_WORDS = ['compar(?:ed|ison)', 'prior', 'previous(?:ly)?', 'since\\s+(?:the|prior)', 'interval', 'unchanged', 'stable',
+                       'no\\s+(?:significant\\s+)?change', 'little\\s+(?:overall\\s+)?change', 'persistent', 'persists', 're-?demonstrated',
+                       'as\\s+before', 'improved', 'improving', 'worsened', 'worsening', 'has\\s+(?:increased|decreased)'];
+const EARLIER = new RegExp(`\\b(?:${EARLIER_WORDS.join('|')})\\b|^\\s*again\\b`, 'i');
+export const refersToEarlier = (sentence) => typeof sentence === 'string' && EARLIER.test(sentence);
+
+// The glossary as the page looks words up in it: each way a row is said -> the index of its row, and one pattern for all of them. The longest
+// is tried first, so that "lung opacity" is not "opacity", and "picc line" not "picc"; a space is any run of white space; the match is on word
+// boundaries and ignores case ("nodules" holds the term "nodule" and is not one).
+const ROW_OF = new Map(GLOSSARY.flatMap((row, i) => row.terms.map((term) => [term, i])));
+const TERM_PATTERN = new RegExp(`\\b(?:${[...ROW_OF.keys()].sort((a, b) => b.length - a.length).map((term) => term.replace(/ /g, '\\s+')).join('|')})\\b`, 'gi');
+const spelled = (found) => found.toLowerCase().replace(/\s+/g, ' ');   // a match as the glossary spells it
+
+const NO_FINDING = 'The report mentions no abnormal finding.';
+const known = (value) => isOn(value) || value === 0 || value === false;
+
+// What the report says, in plain words, from its CheXbert labels and nothing else: each positive label as its plain phrase of the glossary and then
+// its term, in the fixed order of SUMMARY_LABELS. No finding, or no positive label, is said as no abnormal finding. null when the labels name none
+// of the 14 with a 1 or a 0: nothing is said that the labels do not say.
+export function summaryText(labels) {
+  if (!isObject(labels)) return null;
+  const given = (name) => Object.hasOwn(labels, name) && known(labels[name]);
+  if (![...SUMMARY_LABELS.map(([name]) => name), 'No Finding'].some(given)) return null;
+  if (given('No Finding') && isOn(labels['No Finding'])) return NO_FINDING;
+  const positives = SUMMARY_LABELS.filter(([name]) => given(name) && isOn(labels[name]))
+    .map(([, term]) => `${GLOSSARY[ROW_OF.get(term)].explanation} (${term})`);
+  return positives.length ? `The report mentions: ${positives.join('; ')}.` : NO_FINDING;
+}
+
+const SUMMARY_TITLE = 'What this means (plain language)';
+const SUMMARY_NOTE = "A plain-language summary of the findings detected in the model's report. It is not a diagnosis.";
+const REMOVED = '[removed]';
+const REMOVED_NOTE = `${REMOVED} marks text the training reports hid for privacy, usually a date or a name. The model copies the pattern, so nothing is missing from your image.`;
+const EARLIER_NOTE = '⚠ marks a sentence that refers to an earlier X-ray. The model never saw one; it writes the way reports are written.';
+const EARLIER_LABEL = 'refers to an earlier X-ray';
+const EARLIER_HINT = 'This sentence refers to an earlier X-ray. The model never saw one.';
+const PLACEHOLDER = /_{3,}/g;
+
+// The box at the top of a finished report, with what it is under it. Left out while the report is still being written, while its labels are on
+// their way, and when there are none to say (a server with no labeller, a stage that was skipped): the card is then what it was.
+function summaryBox(v) {
+  const text = !v.provisional && isObject(v.labels) ? summaryText(v.labels) : null;
+  if (!text) return null;
+  return el('div', { class: 'report-summary' },
+    el('div', { class: 'summary-box' }, el('h4', {}, SUMMARY_TITLE), el('p', {}, text)),
+    el('p', { class: 'summary-note' }, SUMMARY_NOTE));
+}
+
+// A sentence as nodes: its own text, with a small [removed] where it has a run of underscores and a numbered term where it has one that has no
+// number yet. `used` is the report's own account, kept across its sentences: the number of each row of the glossary used (by its index, so that
+// "effusion" and "pleural effusion" are one term, numbered once, at its first use) and the terms in the order of their numbers.
+function sentenceNodes(sentence, used) {
+  const marks = [];   // what replaces a stretch of the sentence: { at, to, node }
+  for (const run of sentence.matchAll(PLACEHOLDER)) marks.push({ at: run.index, to: run.index + run[0].length, node: el('span', { class: 'removed' }, REMOVED) });
+  const masked = sentence.replace(PLACEHOLDER, (run) => '#'.repeat(run.length));   // no term reaches into a placeholder, or across one
+  for (const found of masked.matchAll(TERM_PATTERN)) {
+    const name = spelled(found[0]);
+    const row = ROW_OF.get(name);
+    if (used.numbers.has(row)) continue;   // it was numbered where it was first used
+    const n = used.numbers.size + 1;
+    used.numbers.set(row, n);
+    used.terms.push({ name, explanation: GLOSSARY[row].explanation });
+    marks.push({ at: found.index, to: found.index + found[0].length,
+                 node: el('span', { class: 'term', title: `${n}: ${GLOSSARY[row].explanation}` }, found[0], el('sup', {}, String(n))) });
+  }
+  marks.sort((a, b) => a.at - b.at);
+  const nodes = [];
+  let from = 0;
+  for (const mark of marks) {
+    if (mark.at > from) nodes.push(sentence.slice(from, mark.at));
+    nodes.push(mark.node);
+    from = mark.to;
+  }
+  if (from < sentence.length) nodes.push(sentence.slice(from));
+  return nodes;
+}
+
+// One sentence of the card: a line of the list. One that refers to an earlier X-ray has a ⚠ before it and is muted (styles.css); the ⚠ is a shape
+// that is also said in words.
+function sentenceItem(sentence, used) {
+  const earlier = refersToEarlier(sentence);
+  const flag = earlier ? el('span', { class: 'flag', role: 'img', 'aria-label': EARLIER_LABEL, title: EARLIER_HINT }, '⚠') : null;
+  return el('li', { class: earlier ? 'earlier' : null }, flag, ...sentenceNodes(sentence, used));
+}
+
+// The terms of the card, once each, in the order of their numbers in the text: the numbers are the ones an ordered list gives its lines.
+function termsBlock(terms) {
+  return el('div', { class: 'report-terms' }, el('h4', {}, 'Terms'),
+    el('ol', { class: 'term-list' }, ...terms.map(({ name, explanation }) => el('li', {}, `${name}: ${explanation}`))));
+}
+
+// A finished report as the card draws it: -> { body: the sections, each a heading and a list of its sentences, extras: [the notes for the marks
+// that are on the card, then the terms] }. Nothing that is not on the card is explained: a note only where its mark is, the terms only if there are some.
+function structuredReport(text) {
+  const used = { numbers: new Map(), terms: [] };
+  let removed = false;
+  let earlier = false;
+  const sections = splitReport(text).map(({ title, body }) => {
+    const sentences = splitSentences(body);
+    removed = removed || sentences.some((s) => s.includes('___'));   // a run of three or more underscores holds three
+    earlier = earlier || sentences.some(refersToEarlier);
+    const items = sentences.map((s) => sentenceItem(s, used));
+    return el('section', { class: 'report-section' }, title ? el('h3', {}, title) : null, items.length ? el('ul', { class: 'report-list' }, ...items) : null);
+  });
+  const extras = [
+    removed ? el('p', { class: 'report-key', 'data-note': 'removed' }, REMOVED_NOTE) : null,
+    earlier ? el('p', { class: 'report-key', 'data-note': 'earlier' }, EARLIER_NOTE) : null,
+    used.terms.length ? termsBlock(used.terms) : null,
+  ].filter(Boolean);
+  return { body: el('div', { class: 'report-body' }, ...sections), extras };
+}
+
+// The plain display: each section's text as one paragraph, as the card showed every report before P6-H, and still shows one that is being written.
+const plainBody = (text) => el('div', { class: 'report-body' }, ...splitReport(text).map(({ title, body }) => el('section', { class: 'report-section' },
+  title ? el('h3', {}, title) : null, body ? el('p', {}, body) : null)));
+
 export function renderReport(view, ctx) {
   const v = whole(view);
   const cx = ctx ?? {};
@@ -286,11 +444,11 @@ export function renderReport(view, ctx) {
   const raw = str(v.report) || str(v.displayReport);
   const shown = str(v.displayReport) || raw;   // the stream has only the raw snapshot until message_stop brings the copy
   if (!raw) return el('div', { class: 'report', hidden: true });
-  const bodyOf = () => (ui.raw
-    ? el('pre', { class: 'report-raw' }, raw)
-    : el('div', { class: 'report-body' }, ...splitReport(shown).map(({ title, body }) => el('section', { class: 'report-section' },
-      title ? el('h3', {}, title) : null, body ? el('p', {}, body) : null))));
+  const drawn = v.provisional ? null : structuredReport(shown);   // a report still being written keeps the plain display
+  const bodyOf = () => (ui.raw ? el('pre', { class: 'report-raw' }, raw) : drawn ? drawn.body : plainBody(shown));
+  const explained = () => (drawn && !ui.raw ? drawn.extras : []);   // the notes and the terms explain the drawn text, which Show raw replaces
   let body = bodyOf();
+  const extras = drawn && drawn.extras.length ? el('div', { class: 'report-extras', hidden: ui.raw }, ...explained()) : null;
   const toggle = el('button', { type: 'button', 'data-action': 'raw', 'aria-pressed': String(ui.raw), 'aria-label': named('Show raw report', cx) }, 'Show raw');
   toggle.addEventListener('click', () => {
     ui.raw = !ui.raw;
@@ -298,10 +456,16 @@ export function renderReport(view, ctx) {
     const next = bodyOf();
     body.replaceWith(next);
     body = next;
+    if (extras) {
+      extras.hidden = ui.raw;
+      extras.replaceChildren(...explained());
+    }
   });
   return el('div', { class: v.provisional ? 'report provisional' : 'report' },
+    summaryBox(v),
     body,
     reportNote(v),
+    extras,
     el('div', { class: 'report-actions' }, typeof cx.copy === 'function' && !v.provisional ? copyButton(cx, () => (ui.raw ? raw : shown)) : null, toggle));
 }
 

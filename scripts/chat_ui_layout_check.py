@@ -24,7 +24,9 @@ page); six chips and a 140-character unbroken word are injected, and Stop is sho
      nothing overflows the page horizontally, with the drawer closed and open. The clamp is proven at both ends with the drawer closed: at
      375 px and narrower a ~170-character report has Show all, and at 1024 px and wider no report that short has one. P9-G5b: the card
      is the tiny engine's, as every card of this app is, so it carries the notice above its report (NOTICE), held to the same: there, inside
-     the card's width and not wider inside than it is
+     the card's width and not wider inside than it is. P6-H: so is the report card a person can read (REPORT_PARTS), drawn from CARD_REPORT: the
+     summary box (the turn's one positive label), the sentences one to a line (one with a [removed] in it, one about an earlier study, terms,
+     and a 140-character word that a line must wrap), the first note under them and the Terms
   j  (P6 fix 1, one more case for every viewport in every scheme) the test-split picker open, its list full: the page does not overflow
      horizontally, the button and the list are rendered inside the viewport's width, and the transcript's last card header, scrolled
      into view, is not covered (a point just inside its top hits the card, not the composer, the picker or the banner)
@@ -98,11 +100,18 @@ REPORT_TEXT = ("The lungs are clear. There is no focal consolidation, pleural ef
 # The card's own sections (check i): P6-B's images row, P6-C's similar X-rays, P6-D's published lines and matching reports.
 SECTIONS = ["section.images", "section.neighbors", "section.published", "section.matches"]
 NOTICE = "p.test-notice"   # P9-G5b: the tiny engine's notice above the report (render.js renderTestNotice): the synthetic turn's card is the tiny engine's
-CARD_PARTS = SECTIONS + [NOTICE]   # what check i measures in the card
+# P6-H: the report card a person can read (render.js renderReport): the plain summary above the sentences, the list of sentences, the first of its notes
+# (the one for a [removed]) and the Terms under them. The synthetic turn's report has every one of them (CARD_REPORT).
+REPORT_PARTS = [".report-summary", ".report-body", ".report-key", ".report-terms"]
+CARD_PARTS = SECTIONS + [NOTICE] + REPORT_PARTS   # what check i measures in the card
 # P6 fix 1: the clamp's proof. Three lines of a matching report hold about 130 characters at 375 px and about 280 on a wide page.
 MID_REPORT = ("Findings: The heart is normal in size. The lungs are clear, with no focal consolidation, pleural effusion or pneumothorax. "
               "Impression: No acute cardiopulmonary process.")   # 168 characters: over three lines at phone width, two lines on a wide page
 SHORT_REPORT = "Findings: No acute process."
+# P6-H: the report of the synthetic turn's card. A [removed] (the run of underscores), a sentence about an earlier study (so the ⚠ and its note), terms
+# (so the Terms), and the longest word a sentence must take (it wraps, as a matching report's does): neutral sentences made up for the check (R7).
+CARD_REPORT = ("Findings: Compared with the image from ___, a small pleural effusion with basilar atelectasis is stable. The heart size is normal. "
+               + LONG_WORD + " is the longest word. Impression: No acute abnormality in the upper zones.")
 PROOF_CHARS = (150, 190)   # what check i takes for the ~170-character report
 PICKER_STUDIES = 60        # check j's list: more studies than the list shows, so that it scrolls inside its own box
 # Check k (P6-A, carried from P4): the composer's rows at the widths where its column is narrowest. From 801 px the page has its sidebar and,
@@ -163,14 +172,14 @@ def section_events() -> List[Dict[str, Any]]:
             "image_neighbors": neighbours, "report_matches": matches,
             "true_report_rank": {"rank": 3, "of": 2663, "rank_dedup": 2, "n_tied": 1, "hit_at_10": True, "protocol": "i2t, official test split"},
             "gallery": {"build_id": "layout", "images": 200, "report_rows": 240, "report_groups": 78, "towers_identical": True}}}),
-        ("content_block_delta", {"index": 0, "delta": {"type": "beam_snapshot", "step": 0, "text": REPORT_TEXT}}),
+        ("content_block_delta", {"index": 0, "delta": {"type": "beam_snapshot", "step": 0, "text": CARD_REPORT}}),
         ("stage_end", {"stage": "generate", "ms": 9.0, "detail": {"decode": "beam", "beam_size": 3, "tokens": 100, "stopped": "budget"}}),
         ("stage_end", {"stage": "label", "ms": 2.0, "detail": {"chexbert_14": labels("Cardiomegaly"), "positives": ["Cardiomegaly"],
                                                               "neighbor_agreement": agreement}}),
         ("stage_end", {"stage": "score", "ms": 1.0, "detail": {
             "rouge_l": 0.2, "bleu_1": 0.3, "bleu_4": 0.1, "reference_source": "test_split",
             "published": {"model_report": REPORT_TEXT, "floor_report": LONG_WORD + " " + REPORT_TEXT, "live_equals_published": False}}}),
-        ("message_stop", {"message_id": "m_layout", "status": "done", "total_ms": 30.0, "report": REPORT_TEXT, "display_report": REPORT_TEXT,
+        ("message_stop", {"message_id": "m_layout", "status": "done", "total_ms": 30.0, "report": CARD_REPORT, "display_report": CARD_REPORT,
                           "truncated_mid_sentence": False}),
     ]
     return [{"event": event, "data": dict(data, seq=i)} for i, (event, data) in enumerate(steps, start=1)]

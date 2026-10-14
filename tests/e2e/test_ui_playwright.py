@@ -87,7 +87,7 @@ COLOURS_JS = """() => {
   const background = (e) => { for (; e; e = e.parentElement) { const c = getComputedStyle(e).backgroundColor;
     if (c && c !== 'transparent' && !/rgba\\([^)]*,\\s*0\\)$/.test(c)) return c; } return 'rgb(255, 255, 255)'; };
   const pair = (sel) => { const e = document.querySelector(sel); return e ? { color: getComputedStyle(e).color, background: background(e) } : null; };
-  return { body: pair('body'), card: pair('#conversation article.card'), report: pair('#conversation article.card .report-body p'),
+  return { body: pair('body'), card: pair('#conversation article.card'), report: pair('#conversation article.card .report-body li'),   // a sentence (P6-H)
            note: pair('#conversation article.card .note'), provenance: pair('#conversation article.card .provenance p'),
            banner: pair('.banner .disclaimer'), prompt: pair('#prompt'), chip: pair('#chips span'), send: pair('#send'),
            hint: pair('#rerun-hint'), session: pair('#session-list .session-title'),
@@ -1289,6 +1289,129 @@ def test_a_phone_keeps_cancel_upload_in_sight_when_a_save_comes_before_the_send_
         page.wait_for_timeout(20)
     held[0].continue_()   # let the upload through: the turn runs and ends as any turn does
     assert ui.wait_settled(0, page)["status"] == "done"
+    ui.assert_clean()
+
+
+# ---- P6-H: the report card a person can read ---------------------------------------------------------------------------------------
+
+# Neutral sentences made up for this test (R7), run through a server whose every report is this text (the harness's report flag) and whose keyword
+# labeller (the tiny_gallery server) marks the words "nodule", "atelectasis" and "effusion": the summary has three positive labels. The text has
+# a [removed] (the underscores), a sentence about an earlier study, a term said two ways, a decimal, and a repeat of a term already numbered.
+CARD_REPORT = ("Findings: Moderate left pleural effusion with basilar atelectasis. The heart size is normal. "
+               "Compared with the image from ___, the effusion is stable. The nodule measures 1.5 cm. "
+               "Impression: Left pleural effusion. No acute abnormality in the upper zones.")
+CARD_LINES = ["Moderate left pleural effusion with basilar atelectasis.", "The heart size is normal.",
+              "Compared with the image from [removed], the effusion is stable.", "The nodule measures 1.5 cm.",
+              "Left pleural effusion.", "No acute abnormality in the upper zones."]
+CARD_TERMS = [("pleural effusion", "fluid between the lung and the chest wall"), ("basilar", "the lower parts of the lungs"),
+              ("atelectasis", "part of a lung is partly collapsed or not fully inflated"), ("nodule", "a small round spot"), ("acute", "new or sudden")]
+CARD_SUMMARY = ("The report mentions: a spot or mass in the lung (lung lesion); part of a lung is partly collapsed or not fully inflated (atelectasis); "
+                "fluid between the lung and the chest wall (pleural effusion).")
+REMOVED_NOTE = ("[removed] marks text the training reports hid for privacy, usually a date or a name. The model copies the pattern, "
+                "so nothing is missing from your image.")
+EARLIER_NOTE = "⚠ marks a sentence that refers to an earlier X-ray. The model never saw one; it writes the way reports are written."
+
+# The newest card's report as it is drawn: its parts in order, the summary, the sentences (without what is only drawn on them), the marks, the notes,
+# the terms with their numbers and titles, how a term is underlined, the controls in it, and what Show raw has put in its place.
+REPORT_CARD_JS = """() => {
+  const c = [...document.querySelectorAll('#conversation article.card')].pop();
+  const r = c.querySelector('.report');
+  const text = (n) => (n ? n.textContent : null);
+  const bare = (n) => { const x = n.cloneNode(true); x.querySelectorAll('sup, .flag').forEach((y) => y.remove()); return x.textContent; };
+  const term = r.querySelector('.term');
+  const probe = document.createElement('span');
+  probe.style.color = 'var(--muted)';
+  document.body.append(probe);
+  const muted = getComputedStyle(probe).color;
+  probe.remove();
+  const plain = [...r.querySelectorAll('.report-section li:not(.earlier)')][0];
+  const earlier = r.querySelector('li.earlier');
+  return {
+    parts: [...r.children].map((n) => n.getAttribute('class')),
+    summary: { title: text(r.querySelector('.summary-box h4')), text: text(r.querySelector('.summary-box p')), note: text(r.querySelector('.summary-note')) },
+    headings: [...r.querySelectorAll('.report-section h3')].map(text),
+    lines: [...r.querySelectorAll('.report-section li')].map(bare),
+    paragraphs: r.querySelectorAll('.report-section p').length,
+    earlier: [...r.querySelectorAll('li.earlier')].map(bare),
+    flags: [...r.querySelectorAll('.flag')].map((n) => [n.textContent, n.getAttribute('role'), n.getAttribute('aria-label')]),
+    removed: [...r.querySelectorAll('.removed')].map(text),
+    notes: [...r.querySelectorAll('.report-key')].map(text),
+    marked: [...r.querySelectorAll('.term')].map((n) => ({ text: bare(n), n: n.querySelector('sup').textContent, title: n.getAttribute('title') })),
+    list: [...r.querySelectorAll('.report-terms ol > li')].map(text),
+    listHeading: text(r.querySelector('.report-terms h4')),
+    underline: term ? [getComputedStyle(term).textDecorationLine, getComputedStyle(term).textDecorationStyle] : null,
+    muted: { earlier: earlier ? getComputedStyle(earlier).color === muted : null, plain: plain ? getComputedStyle(plain).color === muted : null },
+    controls: [...r.querySelectorAll('a[href], button, input, select, textarea, [tabindex]')].map((n) => [n.localName, n.getAttribute('data-action')]),
+    raw: text(r.querySelector('pre.report-raw')),
+    extras: r.querySelector('.report-extras') ? r.querySelector('.report-extras').getClientRects().length > 0 : null,
+  };
+}"""
+
+# The report of the newest card at the top of the conversation, for a picture of it (a card with a gallery is taller than the pane).
+REPORT_TO_TOP_JS = ("() => { const pane = document.querySelector('#conversation');"
+                    " const report = [...pane.querySelectorAll('article.card')].pop().querySelector('.report');"
+                    " pane.scrollTop += report.getBoundingClientRect().top - pane.getBoundingClientRect().top - 8; }")   # the pane only: the page stays
+
+# Every text colour the report card adds, with the background it is read on (the first ancestor that has one).
+REPORT_COLOURS_JS = """() => {
+  const background = (e) => { for (; e; e = e.parentElement) { const c = getComputedStyle(e).backgroundColor;
+    if (c && c !== 'transparent' && !/rgba\\([^)]*,\\s*0\\)$/.test(c)) return c; } return 'rgb(255, 255, 255)'; };
+  const pair = (sel) => { const e = document.querySelector('#conversation article.card ' + sel);
+    return e ? { color: getComputedStyle(e).color, background: background(e) } : null; };
+  return { summary: pair('.summary-box p'), summary_title: pair('.summary-box h4'), caption: pair('.summary-note'), sentence: pair('.report-section li'),
+           earlier: pair('li.earlier'), removed: pair('.removed'), number: pair('.term sup'), note: pair('.report-key'),
+           terms_heading: pair('.report-terms h4'), terms: pair('.term-list li') };
+}"""
+
+
+@pytest.mark.parametrize("ui", [{"tiny_gallery": True, "report": CARD_REPORT}], indirect=True, ids=["fixed-report"])
+def test_the_report_card_is_a_plain_summary_one_sentence_to_a_line_the_notes_and_numbered_terms(ui, images):
+    """P6-H in a real Chrome: a finished report reads as a plain summary of its labels, its sentences a line each (a [removed] for the underscores, a
+    muted ⚠ before the sentence about an earlier study, each term dotted-underlined and numbered once, in order), the two notes, the Terms, then
+    its buttons; nothing in it takes a Tab; Show raw puts the original text in its place, with no note or term; the replayed card is the same;
+    and every text it adds is readable in both schemes."""
+    page = ui.open()
+    ui.apply_settings(max_new_tokens=16)
+    card = ui.turn(images["xray_a.png"])
+    assert card["status"] == "done" and card["report_notes"] == [] and card["labels"] == []
+    assert squeezed(card["shown"]) == squeezed(CARD_REPORT).replace("___", "[removed]")   # the sentences, put back together, are the report as written
+    [message] = assistants(ui, ui.session_id())
+    assert message["report"] == squeezed(CARD_REPORT) and message["display_report"] == squeezed(CARD_REPORT)   # the stored texts are untouched
+    shown = page.evaluate(REPORT_CARD_JS)
+    assert shown["parts"] == ["report-summary", "report-body", "report-extras", "report-actions"]   # the summary, the sentences, the notes and terms, the buttons
+    assert shown["summary"] == {"title": "What this means (plain language)", "text": CARD_SUMMARY,
+                                "note": "A plain-language summary of the findings detected in the model's report. It is not a diagnosis."}
+    assert shown["headings"] == ["Findings", "Impression"] and shown["paragraphs"] == 0
+    assert shown["lines"] == CARD_LINES                                                        # one sentence to a line, 1.5 cm in one piece
+    assert shown["earlier"] == [CARD_LINES[2]] and shown["flags"] == [["⚠", "img", "refers to an earlier X-ray"]]
+    assert shown["removed"] == ["[removed]"] and shown["notes"] == [REMOVED_NOTE, EARLIER_NOTE]
+    assert [(m["text"], m["n"]) for m in shown["marked"]] == [(name, str(i)) for i, (name, _) in enumerate(CARD_TERMS, start=1)]   # once each, in order
+    assert [m["title"] for m in shown["marked"]] == ["{}: {}".format(i, why) for i, (_, why) in enumerate(CARD_TERMS, start=1)]
+    assert shown["listHeading"] == "Terms" and shown["list"] == ["{}: {}".format(name, why) for name, why in CARD_TERMS]
+    assert shown["underline"] == ["underline", "dotted"]                                       # the CSS is in force, not only the class
+    assert shown["muted"] == {"earlier": True, "plain": False}                                 # the ⚠ sentence reads quieter than the others
+    assert shown["controls"] == [["button", "copy"], ["button", "raw"]]                        # nothing the card adds is a stop of Tab
+    assert shown["raw"] is None and shown["extras"] is True
+    page.evaluate(REPORT_TO_TOP_JS)   # the picture is of the report, not of the end of the card
+    ui.shot("report_card_1280x900_light.png")
+
+    page.click("#conversation article.card button[data-action=raw]")                          # Show raw: the original in place of all of it
+    raw = page.evaluate(REPORT_CARD_JS)
+    assert raw["raw"] == squeezed(CARD_REPORT) and "___" in raw["raw"] and raw["lines"] == [] and raw["notes"] == [] and raw["list"] == []
+    assert raw["extras"] is False and raw["summary"]["text"] == CARD_SUMMARY                   # the summary is about the report, however it is read
+    page.click("#conversation article.card button[data-action=raw]")
+    assert page.evaluate(REPORT_CARD_JS) == shown                                              # and back, as it was
+
+    ui.reload()                                                                                # the card, replayed from the stored log, is the same
+    assert page.evaluate(REPORT_CARD_JS) == shown
+    dark = ui.new_page(viewport=DESKTOP, scheme="dark")
+    ui.open(dark, "#/s/" + ui.session_id())
+    for scheme, target in (("light", page), ("dark", dark)):
+        for part, pair in target.evaluate(REPORT_COLOURS_JS).items():
+            assert pair is not None, (scheme, part)
+            assert contrast(pair["color"], pair["background"]) >= 4.5, (scheme, part, pair, round(contrast(pair["color"], pair["background"]), 2))
+    dark.evaluate(REPORT_TO_TOP_JS)
+    ui.shot("report_card_1280x900_dark.png", dark)
     ui.assert_clean()
 
 

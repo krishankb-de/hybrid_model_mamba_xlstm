@@ -1097,7 +1097,7 @@ def test_card_sections_in_order_have_no_failures():
 def test_the_card_check_holds_the_tiny_engines_notice_to_what_it_holds_the_sections_to():   # P9-G5b
     """The synthetic turn is the tiny engine's, so its card carries the notice above the report: it must be there at every viewport, inside the
     card's width, and not wider inside than it is. The sections' own list (and what it pins) is as it was."""
-    assert layout.NOTICE == "p.test-notice" and layout.CARD_PARTS == layout.SECTIONS + [layout.NOTICE]
+    assert layout.NOTICE == "p.test-notice" and layout.CARD_PARTS[:len(layout.SECTIONS) + 1] == layout.SECTIONS + [layout.NOTICE]
     assert layout.check_sections(_sections(320, layout.CARD_PARTS), 320, layout.CARD_PARTS) == []
     gone = _sections(1280, layout.CARD_PARTS)
     gone["sections"][layout.NOTICE] = None
@@ -1108,6 +1108,38 @@ def test_the_card_check_holds_the_tiny_engines_notice_to_what_it_holds_the_secti
     over = _sections(375, layout.CARD_PARTS)
     over["sections"][layout.NOTICE].update(sw=420, cw=300)
     assert any(f.startswith("p.test-notice overflows inside") for f in layout.check_sections(over, 375, layout.CARD_PARTS))
+
+
+def test_the_card_check_holds_the_report_card_to_what_it_holds_the_sections_to():   # P6-H
+    """The report card a person can read: its summary box, its list of sentences, its notes and its Terms are drawn in the page by render.js from
+    the synthetic turn, and held at every viewport (375 and 1280 px among them, in both schemes, the drawer closed and open) to what the sections
+    are: there, inside the card's width, and not wider inside than it is."""
+    assert layout.REPORT_PARTS == [".report-summary", ".report-body", ".report-key", ".report-terms"]
+    assert layout.CARD_PARTS == layout.SECTIONS + [layout.NOTICE] + layout.REPORT_PARTS
+    assert layout.check_sections(_sections(375, layout.CARD_PARTS), 375, layout.CARD_PARTS) == []
+    for part in layout.REPORT_PARTS:
+        gone = _sections(1280, layout.CARD_PARTS)
+        gone["sections"][part] = None
+        assert layout.check_sections(gone, 1280, layout.CARD_PARTS) == [part + " is not in the card"], part
+        out = _sections(375, layout.CARD_PARTS)
+        out["sections"][part]["box"] = [8.0, 300.0, 390.0, 340.0]   # wider than the card
+        assert any(f.startswith(part + " leaves the card") for f in layout.check_sections(out, 375, layout.CARD_PARTS)), part
+        over = _sections(375, layout.CARD_PARTS)
+        over["sections"][part].update(sw=420, cw=300)   # a word that does not wrap
+        assert any(f.startswith(part + " overflows inside") for f in layout.check_sections(over, 375, layout.CARD_PARTS)), part
+
+
+def test_the_synthetic_turn_draws_every_part_of_the_report_card():   # P6-H
+    """The card of the synthetic turn must have what the parts above stand for: a labelled report (the summary), a sentence about an earlier study
+    with a run of underscores in it (the notes), a term (the Terms), and a word as long as the widest a sentence must take."""
+    events = layout.section_events()
+    stop = next(e["data"] for e in events if e["event"] == "message_stop")
+    snapshot = next(e["data"]["delta"]["text"] for e in events if e["event"] == "content_block_delta")
+    label = next(e["data"]["detail"] for e in events if e["event"] == "stage_end" and e["data"]["stage"] == "label")
+    assert stop["report"] == stop["display_report"] == snapshot == layout.CARD_REPORT
+    assert "___" in layout.CARD_REPORT and "Compared with" in layout.CARD_REPORT and "pleural effusion" in layout.CARD_REPORT
+    assert layout.LONG_WORD in layout.CARD_REPORT and "Findings:" in layout.CARD_REPORT and "Impression:" in layout.CARD_REPORT
+    assert any(label["chexbert_14"].values())   # a positive label: the summary names it
 
 
 def test_a_clamp_that_shows_more_than_three_lines_or_hides_nothing_fails():   # P6-D

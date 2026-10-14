@@ -157,6 +157,20 @@ def test_static_files_are_self_contained():
                 assert not re.search(pattern, text), (p.name, pattern)
 
 
+def test_every_module_a_script_imports_is_a_file_of_the_page_and_the_server_serves_it(client):   # P6-H: render.js imports glossary.js
+    """A script that imports a module the server does not have takes the whole page down (the browser refuses the module graph), and the page is
+    served from a checkout that is synced file by file: so every `from './x.js'` of every script is a file of app/static, and it is served."""
+    imported = {}
+    for script in sorted(STATIC.glob("*.js")):
+        for name in re.findall(r"""from\s+['"]\./([\w-]+\.js)['"]""", script.read_text(encoding="utf-8")):
+            imported.setdefault(name, []).append(script.name)
+    assert imported["glossary.js"] == ["render.js"], imported   # the plain explanations of the report card
+    for name, importers in imported.items():
+        assert (STATIC / name).is_file(), (name, importers)
+        response = client.get("/static/" + name)
+        assert response.status_code == 200 and "javascript" in response.headers["content-type"], (name, response.status_code)
+
+
 def test_every_element_id_the_scripts_use_is_there_exactly_once():
     ids = Counter(a["id"] for _, a in _tags() if "id" in a)
     assert {i: ids[i] for i in IDS if ids[i] != 1} == {}
