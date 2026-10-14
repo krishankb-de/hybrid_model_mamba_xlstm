@@ -66,7 +66,7 @@ A normal start-up summary looks like this:
 [server] sqlite journal_mode=wal
 [server] recovered 0 running turn(s)
 [server] gallery: 191462 images, 194125 report rows, labels done
-[server] retention: purged 0 session(s) (private 45 d, public 7 d)
+[server] retention: purged 0 session(s), 0 saved file(s) (private 45 d, public 7 d)
 [server] serving: retrieval=on labels=on published=on
 ```
 
@@ -88,7 +88,8 @@ For a GPU server, use `scripts/serve_chat_gpu_h100.sh`. It is the same job on on
 
 **Retention at every start.** Every start runs the retention sweep (section 7). It deletes:
 - sessions older than their mode's retention days (7 for public, 45 for private, counted from creation), whether or not they were deleted in the page;
-- upload directories that no live session owns.
+- upload directories that no live session owns;
+- saved exports in `exports/` older than the private retention days, counted from the time in their file name.
 
 ## 3. Reach it from the laptop (tunnel)
 
@@ -174,6 +175,7 @@ How public mode works:
 - Each sweep uses the server's own days for its own mode and the default for the other mode. So a public demo's sessions are gone after 7 days, whatever the server runs now.
 - A session with a running turn waits for the next sweep.
 - **Deleting a session in the page** hides it and removes its uploaded images at once. Its stored rows stay until the session reaches its retention age. On a private server, those rows include the event log with the report text.
+- **A saved export** (`exports/`, written by `POST /v1/sessions/{id}/export/save`, private mode only) is deleted once the time in its file name is older than the private retention days: 45 by default, or the server's own `RETENTION_DAYS` on a private server. Its session's age does not matter. A leftover temporary file from an interrupted save is deleted after 1 day. The sweep removes only file names the save route writes: it never follows a symbolic link and never enters a subdirectory.
 
 ## 8. What is stored (all on the cluster, under `CHAT_HOME`)
 
@@ -181,6 +183,7 @@ How public mode works:
 |---|---|
 | `chat.db` | SQLite (WAL, exclusive locking, which is safe on NFS). It holds sessions, messages and every streamed event, in the order they were sent. The event log is the source of truth for replay, resume and export. |
 | `uploads/<session>/<sha256>/` | An uploaded image and its model input, stored per session by content: turns of a session that send the same bytes share them. Removed when the session is deleted. |
+| `exports/` | Session exports saved on the server (`POST /v1/sessions/{id}/export/save`, private mode only): `session-<id>-<UTC time>.json` or `.md`, mode 0600, in a 0700 directory. Deleted after the private retention days (section 7). |
 | `logs/` | `server_<jobid>.log` (the API's stderr: the uvicorn log and tracebacks) and `labeler_<jobid>.log`. |
 | `endpoint` | One JSON line, `{host, port, mode, pid, started_at}`, present while a server is serving. |
 | `app_token` | The token: needed for public mode or a non-loopback bind, and required in every mode once it exists. Mode 0600, never printed. |
