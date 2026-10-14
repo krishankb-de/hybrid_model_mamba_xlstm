@@ -4118,7 +4118,7 @@ Tests: a temporary git repo with a staged `x.npy` → exit 1; a staged `.py` →
 
 Only if the user wants it. The drawer already has "API base URL"; `create_app(cors_origins=[...])` adds the origin. Commit `"P9-B: Pages build"`.
 
-- [ ] **P9-C** Supervisor demo: five test studies (two normal, two with support devices, one pneumothorax) chosen from the published labels; generated vs reference vs floor; the session exported (it stays on the cluster).
+- [x] **P9-C** Supervisor demo: five test studies (two normal, two with support devices, one pneumothorax) chosen from the published labels; generated vs reference vs floor; the session exported (it stays on the cluster).
 
 `scripts/chat_demo_cases.py` (CPU job) lists candidate test rows by `y_true` in the published `chexbert_labels.json`. Run the five through the UI in private mode; export the session as JSON and Markdown into `CHAT_HOME/exports/`; record the rows and the export paths.
 
@@ -4135,6 +4135,11 @@ Only if the user wants it. The drawer already has "API base URL"; `create_app(co
   - Against the prediction: binding right; support devices and pneumothorax right; normal **wrong**, because "No Finding only" is rarer than predicted (82, against 150-600).
   - **Demo rows: 657, 61 (normal), 1619, 1295 (support devices), 2588 (pneumothorax).**
   - The demo session and its export need the P9-C save route on the live server, which means the next serve start.
+- **Demo run (2026-10-14; `scripts/chat_demo_session.py` on the live server, code 4bbfcc4, default model = the EOS model).**
+  - Five turns done: 43, 63, 69, 67 and 60 tokens, every one stopped at EOS (`eos_trained` true).
+  - Session `s_01a1393e0ed800000c3f27`, titled "Supervisor demo". It is kept, and the user opens it in the UI.
+  - Exports saved on the cluster under `CHAT_HOME/exports/`: `session-s_01a1393e0ed800000c3f27-20261014T070904Z.json` and `.md`. They are deleted after 45 days, by the user's decision, once the retention follow-up is deployed.
+  - Each test-study card shows the generated report against the reference and the floor (the published lines, D18).
 
 - [ ] **P9-D** (deferred: a later stage, only on the user's word, U3) Public quick-tunnel smoke: POST streaming through trycloudflare measured; the tunnel stopped afterwards.
 

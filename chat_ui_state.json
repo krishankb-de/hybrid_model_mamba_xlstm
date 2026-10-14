@@ -682,7 +682,7 @@
           "desc": "(optional) GitHub Pages copy of app/static/ with a configurable API base; the CORS allow-list gains the Pages origin."
         },
         "P9-C": {
-          "done": false,
+          "done": true,
           "desc": "Supervisor demo: five test studies (two normal, two with support devices, one pneumothorax) chosen from the published labels; generated vs reference vs floor..."
         },
         "P9-D": {
@@ -765,7 +765,9 @@
         "p9g6_lp200_metrics": "EOS 2662/2663, 44.9 words (69.4 tok); ROUGE-L 0.1952, BLEU-1 0.1960, BLEU-4 0.0474, CheXbert-14 micro 0.4489, macro 0.2635, 5-micro 0.5155, 5-macro 0.4149",
         "p9g6_lp200_gate": "fail: worse bleu_1, bleu_4, chexbert_14_micro/macro, chexbert_5_micro/macro; ROUGE-L better +0.0033 [0.0008, 0.0057]; revised prediction (44.5-46 words, >=2660 EOS, gate fails, ROUGE-L 0.194-0.196) right on all four",
         "p9g6_decision": "keep alpha 1.0 (no alpha passes); EOS-step lever (EOS log-prob penalty or min-new-tokens) offered to the user",
-        "p9c_cases": "job 2675105: binding passed; counts normal 82, support_devices 1192, pneumothorax 84; demo rows 657, 61, 1619, 1295, 2588 (prediction: normal count WRONG, rest right)"
+        "p9c_cases": "job 2675105: binding passed; counts normal 82, support_devices 1192, pneumothorax 84; demo rows 657, 61, 1619, 1295, 2588 (prediction: normal count WRONG, rest right)",
+        "p9c_demo": "rows 657, 61 (normal), 1619, 1295 (support devices), 2588 (pneumothorax); 5/5 done, EOS stops (43/63/69/67/60 tokens); session s_01a1393e0ed800000c3f27 'Supervisor demo' kept",
+        "p9c_exports": "CHAT_HOME/exports/session-s_01a1393e0ed800000c3f27-20261014T070904Z.json + .md (cluster only; 45-day deletion once the retention follow-up is deployed)"
       },
       "verdict": null
     }
@@ -852,9 +854,10 @@
     "P9-C tooling merged (case picker CPU job, server-side export save, demo driver); the demo itself waits for the live server",
     "Serve 2662859 RUNNING on gx08 since 2026-10-13T23:48:52Z (code ad134ea: part 3 + P6-G + P8-D follow-up); tunnel re-attached; probe for the P8-F part 3 acceptance started. User: exports deleted after 45 days.",
     "P8-F: non-functional targets measured after part 3 — first byte <= 140 ms, published turn <= 4.1 s and EOS turn <= 3.7 s (target 8 s), 375 px layout, no external requests, no EventSource",
-    "P7-E: requeue drill on the live server — turn stored error/server_restart, job back in 256 s, tunnel re-attached unattended, SQLite WAL opened cleanly (D22)"
+    "P7-E: requeue drill on the live server — turn stored error/server_restart, job back in 256 s, tunnel re-attached unattended, SQLite WAL opened cleanly (D22)",
+    "P9-C: supervisor demo run on the live server — 5 test studies chosen from the published labels (2 normal, 2 support devices, 1 pneumothorax), all done with EOS stops; session kept; JSON + Markdown exports saved on the cluster"
   ],
-  "last_updated": "2026-10-14T09:08:45+02:00",
+  "last_updated": "2026-10-14T09:09:24+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -964,8 +967,6 @@
     "P8-F": [],
     "P8-D-followup": [],
     "P7-E": [],
-    "P9-C": [
-      "tooling merged (4326625..23fe7d3; review approved after fix 1). To run: chat_remote.sh sync; submit scripts/chat_demo_cases_h100.sh (CPU, 10 min) and read its RESULT via chat_remote.sh summary logs/chat_demo_cases_<job>.log (it refuses unless the gallery's labels_check.json binds to report_gen_m3_test_split_s42 with n_test 2663 and 0 mismatches); take the first 2/2/1 candidate rows (normal, support devices, pneumothorax), skipping repeats; run venv/bin/python scripts/chat_demo_session.py http://localhost:8010 --rows A,B,C,D,E on the live server (needs the P9-C code, so a serve start after the sync); record rows + saved export names; tick P9-C. User decided 2026-10-14: exports deleted after 45 days (follow-up task dispatched)."
-    ]
+    "P9-C": []
   }
 }
