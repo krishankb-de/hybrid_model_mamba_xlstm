@@ -550,7 +550,7 @@
     },
     "P7": {
       "title": "Cluster serving",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "P7-A": {
           "done": true,
@@ -565,7 +565,7 @@
           "desc": "app/tunnel/tunnel.sh (a forward loop that re-discovers the node) and app/tunnel/public_demo.sh (cloudflared, public mode only)."
         },
         "P7-D": {
-          "done": false,
+          "done": true,
           "desc": "Real-turn gate from the laptop, and the five image features on real data (private); timings against the targets."
         },
         "P7-E": {
@@ -598,7 +598,9 @@
         "p7c_rereview": "clean",
         "p7e_drill": "serve 2662859 (gx08): requeue_s 0.5, first_refused_s 5.6, back_s 256, stream_end error_event (server_restart), stored turn error/server_restart (message_stop, 36 events), session deleted, ok; prediction RIGHT on all counts",
         "p7e_d22": "new start: [server] sqlite journal_mode=wal, [server] recovered 0 running turn(s) (graceful shutdown stored the turn); no lock, no fallback",
-        "p7e_tunnel": "tunnel.sh re-attached unattended at 07:08:08Z, 6 s after the server's start (07:08:02Z); node_after gx08"
+        "p7e_tunnel": "tunnel.sh re-attached unattended at 07:08:08Z, 6 s after the server's start (07:08:02Z); node_after gx08",
+        "p7d_user_visual_check": "user, 2026-10-14: \"P7-D simple check is done from my side, its good\" (live UI on localhost:8010, real data, private mode; feedback on report readability became P6-H)",
+        "p7d_probe_gate": "probe on serve 2662859 (2026-10-14): published_equal 5/5, features_ok, eos_stops 6/6, first byte <= 140 ms, published turn <= 4.1 s, EOS turn <= 3.7 s; gate ok"
       },
       "verdict": null
     },
@@ -855,9 +857,10 @@
     "Serve 2662859 RUNNING on gx08 since 2026-10-13T23:48:52Z (code ad134ea: part 3 + P6-G + P8-D follow-up); tunnel re-attached; probe for the P8-F part 3 acceptance started. User: exports deleted after 45 days.",
     "P8-F: non-functional targets measured after part 3 — first byte <= 140 ms, published turn <= 4.1 s and EOS turn <= 3.7 s (target 8 s), 375 px layout, no external requests, no EventSource",
     "P7-E: requeue drill on the live server — turn stored error/server_restart, job back in 256 s, tunnel re-attached unattended, SQLite WAL opened cleanly (D22)",
-    "P9-C: supervisor demo run on the live server — 5 test studies chosen from the published labels (2 normal, 2 support devices, 1 pneumothorax), all done with EOS stops; session kept; JSON + Markdown exports saved on the cluster"
+    "P9-C: supervisor demo run on the live server — 5 test studies chosen from the published labels (2 normal, 2 support devices, 1 pneumothorax), all done with EOS stops; session kept; JSON + Markdown exports saved on the cluster",
+    "P7-D: real-turn gate passed (probe: published equality 5/5, features ok, timings within targets) and the user's visual check of the five image features on real data is done (2026-10-14: good)"
   ],
-  "last_updated": "2026-10-14T09:09:24+02:00",
+  "last_updated": "2026-10-14T09:17:59+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -891,9 +894,7 @@
       "parked: PUBLISHED_MODEL defaults to the m3 dump whatever MODELS says (server shows model_report only for m3)",
       "track: transient InterruptedError at interpreter start in tests/test_report_eos_job.py under load (seen once in a P7-B gate run)"
     ],
-    "P7-D": [
-      "the visual half (the five image features on real data, screenshots) is the user's: R7 keeps report text out of every agent's context; the numeric gate passed (probe run 1, 2026-10-12)"
-    ],
+    "P7-D": [],
     "P8-A": [
       "timeouts on cancel/poll/request fetches (a half-open tunnel can hang Stop at 'Stopping...'); document 413 on all routes",
       "optional raw field in snapshots so Show raw is raw on a stopped card",

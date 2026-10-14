@@ -3857,7 +3857,7 @@ done
 
 `public_demo.sh` refuses to run unless `curl -s localhost:8000/healthz` reports `"mode":"public"`, then runs `cloudflared tunnel --url http://localhost:8000` and prints a reminder to stop it after the demo. Parity tests: `tunnel.sh` reads `chat_sessions/endpoint` and supports both paths; `public_demo.sh` checks the mode first. Commit `"P7-C: tunnel loop + public demo wrapper"`.
 
-- [ ] **P7-D** Real-turn gate from the laptop, and the five image features on real data (private); timings against the targets.
+- [x] **P7-D** Real-turn gate from the laptop, and the five image features on real data (private); timings against the targets.
 
 1. On lx01: `sbatch scripts/serve_chat_h100.sh`. 2. Laptop: `bash app/tunnel/tunnel.sh` (`VIA` from P1-B). 3. Open `http://localhost:8000`; pick test rows 0–4 with the picker. 4. For each, the live report must equal line *i* of the P2-E CPU golden `hyps.txt` (same node type) — record it; the card's published-vs-live line must match the P1-C result for that row. 5. Repeat the P6-F checklist on real data. 6. Record per-stage ms, first-byte time and total turn time against the targets (first byte ≤ 300 ms; total within the P1-D decision). Tick with job id, screenshots, timings.
 
