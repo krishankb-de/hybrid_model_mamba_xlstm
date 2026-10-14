@@ -3870,6 +3870,8 @@ done
 
 - [ ] **P7-E** Requeue drill: `scontrol requeue <job>` mid-turn → the turn is stored `error` with `server_restart`; the job comes back; the tunnel re-attaches unattended.
 
+- **Drill prediction (R4, recorded 2026-10-14, before the drill; user: restart now, 298 jobs queued):** graceful SIGTERM path: stream_end error_event with server_restart 70% (else reset/closed); stored turn error/server_restart 90%; requeue_s < 5 s; the restart's [server] lines say journal_mode=wal and recovered 0 (graceful) 80%; back_s is dominated by the queue (298 pending): back within the 7000 s wait 35%.
+
 Record: the requeue time, the new node, the time until `tunnel.sh` re-attached, the stored status of the interrupted turn, and that the SQLite file opened cleanly on the new node (D22). If the database is reported locked after the move, record it and switch the DB to `journal_mode=DELETE` (rollback journal) as the documented fallback.
 
 - [x] **P7-F** Parity tests for the new wrappers: partition, account and qos, ga03 exclusion, no `--gres`, requeue and append, HF offline, loopback labeller, token required for a non-loopback bind or public mode.

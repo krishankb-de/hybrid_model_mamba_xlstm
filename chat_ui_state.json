@@ -141,7 +141,8 @@
     "P8-F-timing": "A ≈ 3.0 s per report (P1-C's ~30 ms per step, 100 tokens, beam 3); B and C within 10% of A. The mean first exceeds 1.5× A at D (the worker thread) 45%; at E or E-local (the store/emit path) 25%; at F (HTTP + event loop) 10%; at no arm 20% (then the probe's 77-88 ms per step was node load at that time). A-end within 10% of A (no drift over the run) 80%. fs_home a network filesystem (nfs, gpfs, lustre or beegfs) 90%; fs_local node-local (tmpfs, xfs or ext4) 85%.",
     "P8-F-diag": "J1 MALLOC_ARENA_MAX=1: D/A ≤ 1.3 55%. J2 one CPU: A 6-12 s per report; D/A ≤ 1.3 45% (≈1 points at the OpenMP team or TLB shootdowns; ≥1.5 points at per-thread allocation or thread-local state). J3 OMP_WAIT_POLICY=PASSIVE: A within ±25% of 2.96 s 70%; D/A ≤ 1.3 20%.",
     "P8-F-part3": "published model (m3, 100 tokens) generate 2.9-3.5 s per report (80%), where it was 7.44-7.83 s; full published turn 3.2-4.2 s; EOS default model turns about 2.5x faster than the 4.35-8.21 s of probe run 2; published equality 5/5 and EOS stops 6/6 unchanged (95%); first byte unchanged (<= 300 ms)",
-    "P9-C-cases": "the job's binding check passes (labels_check final, reference report_gen_m3_test_split_s42, n_test 2663, mismatches 0) 85%; among the 2663 test studies, normal (No Finding only) 150-600, support devices 600-1400, pneumothorax 40-250 (70% each); 5 candidates per kind"
+    "P9-C-cases": "the job's binding check passes (labels_check final, reference report_gen_m3_test_split_s42, n_test 2663, mismatches 0) 85%; among the 2663 test studies, normal (No Finding only) 150-600, support devices 600-1400, pneumothorax 40-250 (70% each); 5 candidates per kind",
+    "P7-E-drill": "graceful SIGTERM path: stream_end error_event with server_restart 70% (else reset/closed); stored turn error/server_restart 90%; requeue_s < 5 s; the restart's [server] lines say journal_mode=wal and recovered 0 (graceful) 80%; back_s is dominated by the queue (298 pending): back within the 7000 s wait 35%"
   },
   "decisions": {
     "branch": "chat_ui, cut from h100_efficiency @ 5c45527 (has cached decode, E6/E7 decode verification, ISBI neighbour code, partition rename)",
@@ -166,7 +167,9 @@
     "U10_stop_condition": "2026-10-09 user approved the learned stop condition (P9-G1..G5), scheduled right after P4-G. User priority: every turn delivers the similar X-rays and a generated report that ends at its own natural end, then stops.",
     "P6-G": "2026-10-13 (user): the user-turn thumbnail opens the viewer, as CHAT_UI_SPEC.md:310 says (overrides the P6 fix 1 'accepted as built' ruling) -> P6-G",
     "P8-D-followup-public": "2026-10-13: store_failed is an authored error kind (public mode keeps its fixed message); accepted from the P8-D follow-up",
-    "P9-C-exports-retention": "2026-10-14 (user): saved exports are deleted after 45 days, like private sessions -> follow-up task (retention sweep)"
+    "P9-C-exports-retention": "2026-10-14 (user): saved exports are deleted after 45 days, like private sessions -> follow-up task (retention sweep)",
+    "P7-E-restart-now": "2026-10-14 (user): run the requeue drill now, accepting that the live server may be down for hours",
+    "P6-H-report-view": "2026-10-14 (user, from the live check): the report card is refined for reading: structured report + plain-language summary (option 'Both')"
   },
   "open_questions": [],
   "phase_order": [
@@ -843,7 +846,7 @@
     "Serve 2662859 RUNNING on gx08 since 2026-10-13T23:48:52Z (code ad134ea: part 3 + P6-G + P8-D follow-up); tunnel re-attached; probe for the P8-F part 3 acceptance started. User: exports deleted after 45 days.",
     "P8-F: non-functional targets measured after part 3 — first byte <= 140 ms, published turn <= 4.1 s and EOS turn <= 3.7 s (target 8 s), 375 px layout, no external requests, no EventSource"
   ],
-  "last_updated": "2026-10-14T08:28:48+02:00",
+  "last_updated": "2026-10-14T09:03:41+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
