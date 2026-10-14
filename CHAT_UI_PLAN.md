@@ -3870,9 +3870,15 @@ done
 
   Record these beside the timings.
 
-- [ ] **P7-E** Requeue drill: `scontrol requeue <job>` mid-turn → the turn is stored `error` with `server_restart`; the job comes back; the tunnel re-attaches unattended.
+- [x] **P7-E** Requeue drill: `scontrol requeue <job>` mid-turn → the turn is stored `error` with `server_restart`; the job comes back; the tunnel re-attaches unattended.
 
 - **Drill prediction (R4, recorded 2026-10-14, before the drill; user: restart now, 298 jobs queued):** graceful SIGTERM path: stream_end error_event with server_restart 70% (else reset/closed); stored turn error/server_restart 90%; requeue_s < 5 s; the restart's [server] lines say journal_mode=wal and recovered 0 (graceful) 80%; back_s is dominated by the queue (298 pending): back within the 7000 s wait 35%.
+- **Drill result (2026-10-14; serve job 2662859; `scripts/chat_requeue_drill.py`; the prediction held on every count).**
+  - RESULT: node gx08 before and after; requeue after 3 deltas; `requeue_s` 0.5; first refused 5.6 s; `back_s` 256 s; stream ended `error_event` with `server_restart`; stored turn `error`/`server_restart` ending in `message_stop` (36 events); session deleted; ok.
+  - The graceful path ran: `=== signal received: stopping ===`, `[server] stopping`, `[server] stopped`.
+  - The new start says `[server] sqlite journal_mode=wal` and `[server] recovered 0 running turn(s)`, because the shutdown had already stored the turn. SQLite opened cleanly (D22); no lock, so no fallback was needed.
+  - `tunnel.sh` re-attached unattended 6 s after the server started (07:08:02Z → 07:08:08Z).
+  - The restart also deployed 4bbfcc4, which brings the P9-C save route.
 
 Record: the requeue time, the new node, the time until `tunnel.sh` re-attached, the stored status of the interrupted turn, and that the SQLite file opened cleanly on the new node (D22). If the database is reported locked after the move, record it and switch the DB to `journal_mode=DELETE` (rollback journal) as the documented fallback.
 

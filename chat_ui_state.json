@@ -488,7 +488,7 @@
     },
     "P6": {
       "title": "Image experience (the user's five additions)",
-      "status": "complete",
+      "status": "in_progress",
       "checkboxes": {
         "P6-A": {
           "done": true,
@@ -520,7 +520,7 @@
         },
         "P6-H": {
           "done": false,
-          "desc": "A report card a person can read: plain-language summary from the detected findings + structured report, [removed] placeholder, earlier-study sentences flagged, term explanations (user, 2026-10-14; display only)."
+          "desc": "A report card a person can read. Requested by the user on 2026-10-14 from the live check on real data, choosing \"Both\": a plain-language summary built from t..."
         }
       },
       "evidence": {
@@ -569,7 +569,7 @@
           "desc": "Real-turn gate from the laptop, and the five image features on real data (private); timings against the targets."
         },
         "P7-E": {
-          "done": false,
+          "done": true,
           "desc": "Requeue drill: scontrol requeue <job> mid-turn → the turn is stored error with server_restart; the job comes back; the tunnel re-attaches unattended."
         },
         "P7-F": {
@@ -595,7 +595,10 @@
         "p7f_tests": "5_passed",
         "p7f_head": "a0afdb2",
         "p7c_commits": "86af48d,98c596c",
-        "p7c_rereview": "clean"
+        "p7c_rereview": "clean",
+        "p7e_drill": "serve 2662859 (gx08): requeue_s 0.5, first_refused_s 5.6, back_s 256, stream_end error_event (server_restart), stored turn error/server_restart (message_stop, 36 events), session deleted, ok; prediction RIGHT on all counts",
+        "p7e_d22": "new start: [server] sqlite journal_mode=wal, [server] recovered 0 running turn(s) (graceful shutdown stored the turn); no lock, no fallback",
+        "p7e_tunnel": "tunnel.sh re-attached unattended at 07:08:08Z, 6 s after the server's start (07:08:02Z); node_after gx08"
       },
       "verdict": null
     },
@@ -848,9 +851,10 @@
     "P8-D follow-up merged: a store failure mid-turn ends the turn as error/store_failed (live stream and every read agree; polling stops)",
     "P9-C tooling merged (case picker CPU job, server-side export save, demo driver); the demo itself waits for the live server",
     "Serve 2662859 RUNNING on gx08 since 2026-10-13T23:48:52Z (code ad134ea: part 3 + P6-G + P8-D follow-up); tunnel re-attached; probe for the P8-F part 3 acceptance started. User: exports deleted after 45 days.",
-    "P8-F: non-functional targets measured after part 3 — first byte <= 140 ms, published turn <= 4.1 s and EOS turn <= 3.7 s (target 8 s), 375 px layout, no external requests, no EventSource"
+    "P8-F: non-functional targets measured after part 3 — first byte <= 140 ms, published turn <= 4.1 s and EOS turn <= 3.7 s (target 8 s), 375 px layout, no external requests, no EventSource",
+    "P7-E: requeue drill on the live server — turn stored error/server_restart, job back in 256 s, tunnel re-attached unattended, SQLite WAL opened cleanly (D22)"
   ],
-  "last_updated": "2026-10-14T09:05:36+02:00",
+  "last_updated": "2026-10-14T09:08:45+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -959,9 +963,7 @@
     ],
     "P8-F": [],
     "P8-D-followup": [],
-    "P7-E": [
-      "drill script merged (4ae8633 + cfc1709, reviewed: R7 traced, waits bounded, requeue at most once). Run it on the cluster AFTER P8-F part 3 is merged and synced, since the requeue restarts the serve job onto that code: venv/bin/python scripts/chat_requeue_drill.py http://localhost:8010 --job <serve job> --token-file <token file>; tell the user when the live server goes down and comes back; read the D22 lines ([server] sqlite journal_mode=..., [server] recovered N running turn(s)) via chat_remote.sh summary logs/chat_server_<job>.log; record node, requeue_s, back_s (includes queue wait + load + tunnel re-attach), turn status; then tick P7-E"
-    ],
+    "P7-E": [],
     "P9-C": [
       "tooling merged (4326625..23fe7d3; review approved after fix 1). To run: chat_remote.sh sync; submit scripts/chat_demo_cases_h100.sh (CPU, 10 min) and read its RESULT via chat_remote.sh summary logs/chat_demo_cases_<job>.log (it refuses unless the gallery's labels_check.json binds to report_gen_m3_test_split_s42 with n_test 2663 and 0 mismatches); take the first 2/2/1 candidate rows (normal, support devices, pneumothorax), skipping repeats; run venv/bin/python scripts/chat_demo_session.py http://localhost:8010 --rows A,B,C,D,E on the live server (needs the P9-C code, so a serve start after the sync); record rows + saved export names; tick P9-C. User decided 2026-10-14: exports deleted after 45 days (follow-up task dispatched)."
     ]
