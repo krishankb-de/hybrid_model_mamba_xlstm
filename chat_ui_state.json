@@ -140,7 +140,8 @@
     "P7-A": "all 3 probes pass in ~1 min (85%); fastapi >= 0.115 (overlay), transformers 4.x < 5 (.venv_chexbert); chexbert label order true with f1chexbert 0.0.2 (92%)",
     "P8-F-timing": "A ≈ 3.0 s per report (P1-C's ~30 ms per step, 100 tokens, beam 3); B and C within 10% of A. The mean first exceeds 1.5× A at D (the worker thread) 45%; at E or E-local (the store/emit path) 25%; at F (HTTP + event loop) 10%; at no arm 20% (then the probe's 77-88 ms per step was node load at that time). A-end within 10% of A (no drift over the run) 80%. fs_home a network filesystem (nfs, gpfs, lustre or beegfs) 90%; fs_local node-local (tmpfs, xfs or ext4) 85%.",
     "P8-F-diag": "J1 MALLOC_ARENA_MAX=1: D/A ≤ 1.3 55%. J2 one CPU: A 6-12 s per report; D/A ≤ 1.3 45% (≈1 points at the OpenMP team or TLB shootdowns; ≥1.5 points at per-thread allocation or thread-local state). J3 OMP_WAIT_POLICY=PASSIVE: A within ±25% of 2.96 s 70%; D/A ≤ 1.3 20%.",
-    "P8-F-part3": "published model (m3, 100 tokens) generate 2.9-3.5 s per report (80%), where it was 7.44-7.83 s; full published turn 3.2-4.2 s; EOS default model turns about 2.5x faster than the 4.35-8.21 s of probe run 2; published equality 5/5 and EOS stops 6/6 unchanged (95%); first byte unchanged (<= 300 ms)"
+    "P8-F-part3": "published model (m3, 100 tokens) generate 2.9-3.5 s per report (80%), where it was 7.44-7.83 s; full published turn 3.2-4.2 s; EOS default model turns about 2.5x faster than the 4.35-8.21 s of probe run 2; published equality 5/5 and EOS stops 6/6 unchanged (95%); first byte unchanged (<= 300 ms)",
+    "P9-C-cases": "the job's binding check passes (labels_check final, reference report_gen_m3_test_split_s42, n_test 2663, mismatches 0) 85%; among the 2663 test studies, normal (No Finding only) 150-600, support devices 600-1400, pneumothorax 40-250 (70% each); 5 candidates per kind"
   },
   "decisions": {
     "branch": "chat_ui, cut from h100_efficiency @ 5c45527 (has cached decode, E6/E7 decode verification, ISBI neighbour code, partition rename)",
@@ -164,7 +165,8 @@
     "workspace": "work in place on branch chat_ui (user-declared branch; venv/ and the editable install live in this checkout)",
     "U10_stop_condition": "2026-10-09 user approved the learned stop condition (P9-G1..G5), scheduled right after P4-G. User priority: every turn delivers the similar X-rays and a generated report that ends at its own natural end, then stops.",
     "P6-G": "2026-10-13 (user): the user-turn thumbnail opens the viewer, as CHAT_UI_SPEC.md:310 says (overrides the P6 fix 1 'accepted as built' ruling) -> P6-G",
-    "P8-D-followup-public": "2026-10-13: store_failed is an authored error kind (public mode keeps its fixed message); accepted from the P8-D follow-up"
+    "P8-D-followup-public": "2026-10-13: store_failed is an authored error kind (public mode keeps its fixed message); accepted from the P8-D follow-up",
+    "P9-C-exports-retention": "2026-10-14 (user): saved exports are deleted after 45 days, like private sessions -> follow-up task (retention sweep)"
   },
   "open_questions": [],
   "phase_order": [
@@ -831,9 +833,10 @@
     "P8-F part 3 merged (9680fe6); acceptance prediction recorded (R4) before the serve job runs it",
     "P6-G: the user-turn thumbnail opens the viewer exactly as the card's 'Your X-ray' tile does (ownXraySide shared in render.js; opener passed; focus kept across the message_start redraw); merged 1bd5b92; gates green on 1bd5b92",
     "P8-D follow-up merged: a store failure mid-turn ends the turn as error/store_failed (live stream and every read agree; polling stops)",
-    "P9-C tooling merged (case picker CPU job, server-side export save, demo driver); the demo itself waits for the live server"
+    "P9-C tooling merged (case picker CPU job, server-side export save, demo driver); the demo itself waits for the live server",
+    "Serve 2662859 RUNNING on gx08 since 2026-10-13T23:48:52Z (code ad134ea: part 3 + P6-G + P8-D follow-up); tunnel re-attached; probe for the P8-F part 3 acceptance started. User: exports deleted after 45 days."
   ],
-  "last_updated": "2026-10-13T23:13:35+02:00",
+  "last_updated": "2026-10-14T08:27:00+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -952,7 +955,7 @@
       "drill script merged (4ae8633 + cfc1709, reviewed: R7 traced, waits bounded, requeue at most once). Run it on the cluster AFTER P8-F part 3 is merged and synced, since the requeue restarts the serve job onto that code: venv/bin/python scripts/chat_requeue_drill.py http://localhost:8010 --job <serve job> --token-file <token file>; tell the user when the live server goes down and comes back; read the D22 lines ([server] sqlite journal_mode=..., [server] recovered N running turn(s)) via chat_remote.sh summary logs/chat_server_<job>.log; record node, requeue_s, back_s (includes queue wait + load + tunnel re-attach), turn status; then tick P7-E"
     ],
     "P9-C": [
-      "tooling merged (4326625..23fe7d3; review approved after fix 1). To run: chat_remote.sh sync; submit scripts/chat_demo_cases_h100.sh (CPU, 10 min) and read its RESULT via chat_remote.sh summary logs/chat_demo_cases_<job>.log (it refuses unless the gallery's labels_check.json binds to report_gen_m3_test_split_s42 with n_test 2663 and 0 mismatches); take the first 2/2/1 candidate rows (normal, support devices, pneumothorax), skipping repeats; run venv/bin/python scripts/chat_demo_session.py http://localhost:8010 --rows A,B,C,D,E on the live server (needs the P9-C code, so a serve start after the sync); record rows + saved export names; tick P9-C. Open user decision: keep saved exports permanently or sweep them with the 45-day private retention."
+      "tooling merged (4326625..23fe7d3; review approved after fix 1). To run: chat_remote.sh sync; submit scripts/chat_demo_cases_h100.sh (CPU, 10 min) and read its RESULT via chat_remote.sh summary logs/chat_demo_cases_<job>.log (it refuses unless the gallery's labels_check.json binds to report_gen_m3_test_split_s42 with n_test 2663 and 0 mismatches); take the first 2/2/1 candidate rows (normal, support devices, pneumothorax), skipping repeats; run venv/bin/python scripts/chat_demo_session.py http://localhost:8010 --rows A,B,C,D,E on the live server (needs the P9-C code, so a serve start after the sync); record rows + saved export names; tick P9-C. User decided 2026-10-14: exports deleted after 45 days (follow-up task dispatched)."
     ]
   }
 }

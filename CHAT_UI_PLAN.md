@@ -4104,6 +4104,13 @@ Only if the user wants it. The drawer already has "API base URL"; `create_app(co
 
 `scripts/chat_demo_cases.py` (CPU job) lists candidate test rows by `y_true` in the published `chexbert_labels.json`. Run the five through the UI in private mode; export the session as JSON and Markdown into `CHAT_HOME/exports/`; record the rows and the export paths.
 
+- **Tooling merged (2026-10-13): 4326625..23fe7d3**, review approved after fix 1.
+  - `scripts/chat_demo_cases.py` with `scripts/chat_demo_cases_h100.sh`: a CPU job. It reads only `y_true`, refuses unless the gallery's `labels_check.json` binds to the dump, uses one seed per kind (42, 43, 44), and its log passes allowlisted lines only.
+  - `POST /v1/sessions/{id}/export/save`: private mode only. It writes under `CHAT_HOME/exports/` and answers with the file name only.
+  - `scripts/chat_demo_session.py`: R7-safe. It keeps the session.
+- **User (2026-10-14): saved exports are deleted after 45 days, like private sessions.** This is a follow-up task in the retention sweep.
+- **Prediction (R4, recorded 2026-10-14, before the case job is submitted):** the job's binding check passes (labels_check final, reference report_gen_m3_test_split_s42, n_test 2663, mismatches 0) 85%; among the 2663 test studies, normal (No Finding only) 150-600, support devices 600-1400, pneumothorax 40-250 (70% each); 5 candidates per kind.
+
 - [ ] **P9-D** (deferred: a later stage, only on the user's word, U3) Public quick-tunnel smoke: POST streaming through trycloudflare measured; the tunnel stopped afterwards.
 
 Measure first-byte and frame gaps through the quick tunnel with `probe_client.py`-style timing against the real server; confirm the polling fallback completes a turn when streaming stalls. Stop `cloudflared` and record that it was stopped.
