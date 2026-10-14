@@ -3717,7 +3717,24 @@ Run `venv/bin/python -m app.server --engine tiny --gallery <tiny gallery dir> --
 
 - [x] **P6-G** The user-turn thumbnail opens the viewer (user, 2026-10-13: "Yes", overriding the P6 fix 1 ruling that kept it a plain picture; CHAT_UI_SPEC.md:310). A click on the upload in the user's own message opens the viewer exactly as the card's "Your X-ray" tile does: the original where the mode sends one, else the thumbnail marked as such; a test study with its stored-gallery-size note. Focus returns to the thumbnail on close. Node, e2e and features-check coverage; evidence regenerated.
 
-- [ ] **P6-H** A report card a person can read. Requested by the user on 2026-10-14 from the live check on real data, choosing "Both": a plain-language summary built from the detected findings (not a diagnosis), then a structured report with one sentence per line. The "___" de-identification mark shows as [removed] with a note; sentences that compare with an earlier study are flagged, because the model never sees one; medical terms get plain explanations. Display only: the stored report, Copy, exports and published numbers are unchanged.
+- [x] **P6-H** A report card a person can read. Requested by the user on 2026-10-14 from the live check on real data, choosing "Both": a plain-language summary built from the detected findings (not a diagnosis), then a structured report with one sentence per line. The "___" de-identification mark shows as [removed] with a note; sentences that compare with an earlier study are flagged, because the model never sees one; medical terms get plain explanations. Display only: the stored report, Copy, exports and published numbers are unchanged.
+
+- **Merged (2026-10-14): e5ab954, 623ffc1** (picks of b033576, 2db5c7c). The task review approved it; fix round 1 was approved on re-review.
+  - `app/static/glossary.js` holds the user's 35-row table verbatim, plus plural forms.
+  - `render.js` builds a final card in this order:
+    - a "What this means" box built from the CheXbert labels only, marked "not a diagnosis";
+    - the report, one sentence per line;
+    - `[removed]` for "___", with its note;
+    - ⚠ on a sentence about an earlier X-ray, with its note;
+    - numbered plain explanations of terms, and a Terms list.
+  - A streaming card, Show raw, Copy, the label chips and the banner are unchanged.
+  - Fix-round rulings:
+    - "Pleural Other" has its own phrase.
+    - No Finding with Support Devices names the devices.
+    - "prior"/"previous" flag a sentence only before a study word or at a clause end, so "prior sternotomy" is not flagged.
+  - Gates on the merged tip (tree 5e819b87): validate 5717 passed (node 505), e2e 41, layout 366/0, browser 10/0, features 5/0.
+  - Display only (R2): the stored report, the events, the exports and the Copy text are unchanged.
+  - Live on the cluster after the next `chat_remote.sh sync` (static files). Not synced yet: the user said no new tasks.
 
 ### P7 — Cluster serving
 
@@ -4127,6 +4144,12 @@ Only if the user wants it. The drawer already has "API base URL"; `create_app(co
   - `POST /v1/sessions/{id}/export/save`: private mode only. It writes under `CHAT_HOME/exports/` and answers with the file name only.
   - `scripts/chat_demo_session.py`: R7-safe. It keeps the session.
 - **User (2026-10-14): saved exports are deleted after 45 days, like private sessions.** This is a follow-up task in the retention sweep.
+- **Retention follow-up merged (2026-10-14): 56f5ae5, 1a2c46d** (+ app/README.md 7371d90). The review approved it; fix round 1 was approved on re-review.
+  - **When.** At start-up and then daily, the retention sweep deletes the files the save route wrote in `CHAT_HOME/exports/`, once the time in the name is older than the private days. That is 45 by default, or the server's own `RETENTION_DAYS` on a private server.
+  - **Temp files.** It also deletes a leftover temp file after 1 day.
+  - **Safety.** It opens the directory once, never following a link, and removes only names that match the save route's pattern. It follows no link and enters no directory.
+  - **Log.** The start-up line now reads `retention: purged N session(s), M saved file(s) (private 45 d, public 7 d)`.
+  - **Deploy.** It deploys at the next serve start. The demo's exports below fall due on 2026-11-28.
 - **Prediction (R4, recorded 2026-10-14, before the case job is submitted):** the job's binding check passes (labels_check final, reference report_gen_m3_test_split_s42, n_test 2663, mismatches 0) 85%; among the 2663 test studies, normal (No Finding only) 150-600, support devices 600-1400, pneumothorax 40-250 (70% each); 5 candidates per kind.
 - **Case job 2675105 (2026-10-14, gx08, sync 4bbfcc4):**
   - The binding check passed: no ERROR, and 0 lines withheld.

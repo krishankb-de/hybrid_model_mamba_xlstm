@@ -4,9 +4,9 @@
   "branch": "chat_ui",
   "base": "h100_efficiency @ 5c45527 (2026-09-30, 'SLURM: partition aisc-batch renamed to pot-hpi-aisc-batch')",
   "helper": "venv/bin/python scripts/mamba3_state.py --plan chat_ui show|tick|note|phase|sync",
-  "current_phase": "P5",
-  "status": "P0-P3 complete; P4 7/8 (P4-H Playwright e2e added 2026-10-09). P9-G1/G2 done; P9-G3 job 2632173 submitted (EOS training). Parallel worktrees off a8e7efe: P9-G4 laptop part, P5-A, P5-B, P4-H.",
-  "next_action": "STOPPED by the user 2026-10-13 night after merging and pushing P9-C. Nothing in flight. On the user's go-ahead: (1) serve job 2662859 is PENDING (Priority) — the user decides whether to resubmit with --time=08:00:00; then chat_remote.sh sync (the cluster checkout is ad134ea, without P9-C) before it starts or restart it after; (2) the R7-safe probe against the P8-F part 3 prediction (predictions[P8-F-part3]) → tick P8-F; (3) the P7-E requeue drill (carried_items.P7-E) → tick P7-E; (4) the P9-C demo run (carried_items.P9-C) → tick P9-C; (5) P7-D waits for the user's visual check on localhost:8010; (6) P9-B, P9-F (user: last); (7) final review (carried_items.final_review); (8) P9-E. Push only when the user asks.",
+  "current_phase": "P9",
+  "status": "P0-P8 complete (P6-H merged 2026-10-14). P9 8/12: open P9-B, P9-F (optional, user: last) and P9-E (close); P9-D deferred until the user says so.",
+  "next_action": "STOPPED by the user 2026-10-14 after the exports-retention follow-up and P6-H were reviewed, merged, gated and pushed (chat_ui tip = this state commit). Nothing in flight; no agent running. LIVE (2026-10-14 ~12:50 CEST): serve 2662859 RUNNING on gx08, code 4bbfcc4 (requeued by the P7-E drill at 07:08Z; 24 h limit, so it ends ~2026-10-15 07:08Z); tunnel localhost:8010 -> gx08 (laptop pid 16071; after any restart re-run `LOCAL_PORT=8010 bash app/tunnel/tunnel.sh`); cluster checkout 4bbfcc4, so P6-H and the exports retention are NOT on the cluster yet. Dev server 127.0.0.1:8000 (tiny engine, home /tmp/cxrchat_dev) restarted on 623ffc1. ON THE USER'S GO-AHEAD: (1) deploy (carried_items.deploy): `bash scripts/chat_remote.sh sync` makes P6-H live; the retention deploys at the next serve start (resubmit when 2662859 ends, then tunnel + scripts/chat_realturn_probe.py http://localhost:8010); (2) P9-B (optional GitHub Pages copy) and P9-F (optional compare mode): the user said these go last; (3) the final whole-branch review over carried_items.final_review (SDD: one fix dispatch, one scoped re-review); (4) P9-E close (state COMPLETE, final notes, CLAUDE.md paragraph). P9-D stays deferred until the user says so. Housekeeping: two locked merged worktrees (final_review list). Push only when the user asks.",
   "resume_protocol": [
     "git branch --show-current must print chat_ui",
     "venv/bin/python scripts/mamba3_state.py --plan chat_ui show  -> progress per phase + the next unticked box",
@@ -488,7 +488,7 @@
     },
     "P6": {
       "title": "Image experience (the user's five additions)",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "P6-A": {
           "done": true,
@@ -519,7 +519,7 @@
           "desc": "The user-turn thumbnail opens the viewer (user, 2026-10-13: \"Yes\", overriding the P6 fix 1 ruling that kept it a plain picture; CHAT_UI_SPEC.md:310). A click..."
         },
         "P6-H": {
-          "done": false,
+          "done": true,
           "desc": "A report card a person can read. Requested by the user on 2026-10-14 from the live check on real data, choosing \"Both\": a plain-language summary built from t..."
         }
       },
@@ -544,7 +544,9 @@
         "p6g_commit": "1bd5b92 (pick of 1631a09); review (sonnet) approved, minors carried",
         "p6g_tests": "node 474->482 (render +2, app +6); features check viewer item opens from 7 pictures (thumbnail == card tile: label 'Your X-ray', variant original in private mode; public mode never requests the original); e2e viewer test extended (live + after reload, Esc returns focus to .thumb-button)",
         "p6g_gates": "1bd5b92: validate All gates passed (5231 passed), e2e 36, layout 366/0, browser 10/0 (keyboard walk 32 stops), features 5/0",
-        "p6g_evidence": "p6f checklist + PNGs and p4e checklist + PNGs regenerated (<= 334,867 B; no paths; tiny content)"
+        "p6g_evidence": "p6f checklist + PNGs and p4e checklist + PNGs regenerated (<= 334,867 B; no paths; tiny content)",
+        "p6h_merge": "e5ab954, 623ffc1 (picks of b033576, 2db5c7c); task review (opus) approved; fix 1 items A-H re-review (sonnet) all addressed",
+        "p6h_gates": "tree 5e819b87 (== chat_ui 623ffc1): validate All gates passed (5717 passed; node 505), e2e 41, layout 366/0, browser 10/0, features 5/0"
       },
       "verdict": null
     },
@@ -769,7 +771,8 @@
         "p9g6_decision": "keep alpha 1.0 (no alpha passes); EOS-step lever (EOS log-prob penalty or min-new-tokens) offered to the user",
         "p9c_cases": "job 2675105: binding passed; counts normal 82, support_devices 1192, pneumothorax 84; demo rows 657, 61, 1619, 1295, 2588 (prediction: normal count WRONG, rest right)",
         "p9c_demo": "rows 657, 61 (normal), 1619, 1295 (support devices), 2588 (pneumothorax); 5/5 done, EOS stops (43/63/69/67/60 tokens); session s_01a1393e0ed800000c3f27 'Supervisor demo' kept",
-        "p9c_exports": "CHAT_HOME/exports/session-s_01a1393e0ed800000c3f27-20261014T070904Z.json + .md (cluster only; 45-day deletion once the retention follow-up is deployed)"
+        "p9c_exports": "CHAT_HOME/exports/session-s_01a1393e0ed800000c3f27-20261014T070904Z.json + .md (cluster only; 45-day deletion once the retention follow-up is deployed)",
+        "p9c_retention": "56f5ae5, 1a2c46d (picks of 68283e6, bf5ac66) + app/README.md 7371d90; task review (opus) approved; fix 1 (one O_NOFOLLOW directory fd, race-free test files, STAMP_FORMAT, future-stamp pin) re-review (sonnet) all addressed; gates green on tree 5e819b87 with P6-H; not deployed (next serve start)"
       },
       "verdict": null
     }
@@ -858,9 +861,12 @@
     "P8-F: non-functional targets measured after part 3 — first byte <= 140 ms, published turn <= 4.1 s and EOS turn <= 3.7 s (target 8 s), 375 px layout, no external requests, no EventSource",
     "P7-E: requeue drill on the live server — turn stored error/server_restart, job back in 256 s, tunnel re-attached unattended, SQLite WAL opened cleanly (D22)",
     "P9-C: supervisor demo run on the live server — 5 test studies chosen from the published labels (2 normal, 2 support devices, 1 pneumothorax), all done with EOS stops; session kept; JSON + Markdown exports saved on the cluster",
-    "P7-D: real-turn gate passed (probe: published equality 5/5, features ok, timings within targets) and the user's visual check of the five image features on real data is done (2026-10-14: good)"
+    "P7-D: real-turn gate passed (probe: published equality 5/5, features ok, timings within targets) and the user's visual check of the five image features on real data is done (2026-10-14: good)",
+    "P6-H merged (e5ab954, 623ffc1; review approved after fix 1): summary from labels, one sentence per line, [removed], earlier-study flags, numbered terms; gates green on tree 5e819b87",
+    "2026-10-14: current_phase -> P9",
+    "2026-10-14: 2026-10-14: exports retention (56f5ae5, 1a2c46d, README 7371d90) and P6-H (e5ab954, 623ffc1) merged after task reviews + fix rounds + scoped re-reviews; gates on tree 5e819b87: validate 5717 (node 505), e2e 41, layout 366/0, browser 10/0, features 5/0. Not synced or deployed (user: no new tasks). Dev server on 623ffc1. 4 merged agent worktrees removed; 2 harness-locked left."
   ],
-  "last_updated": "2026-10-14T09:17:59+02:00",
+  "last_updated": "2026-10-14T12:46:58+02:00",
   "carried_items": {
     "P5-E": [
       "emit score.reference_chexbert_14 {name: 0|1} (private only) for per-label agree/disagree marks on the label chips",
@@ -937,14 +943,16 @@
       "P8-D minors: near-duplicate test helpers (free_port, kill_group, FakeLabeler, closed_port_url) → hoist to tests/app_helpers.py; the API chaos file has no SIGTERM→teardown guard; the e2e ui fixture builds the server before its try",
       "pre-existing: pytest.ini uses [tool:pytest], which pytest ignores in a pytest.ini, so --strict-markers/--disable-warnings are likely inactive — check what pytest loads",
       "P8-F timing minors: worker.shutdown() waits without bound after turn_deadline; http_turn deadline up to one ping (15 s) late, a silent stream ends as ReadTimeout at 120 s; the mount-table sentinel does not assert absence of every SECRET-* string; the deadline's nested wait_for was tested only on py3.14 (cluster 3.11)",
-      "P8-D's page fix (app.js token notice, 9705d60) is not on the cluster yet: the live serve job serves app/static from CLUSTER_REPO, so sync it together with the next planned serve restart",
       "P6-F (found by its fix round, predates it): at 320x568 on a gallery (private-mode) server the composer's nowrap button row gains 'Test-split study' (app/static/app.js:2021-2027, styles.css:501), wraps, and Send sits ~33 px below the composer's fold with a preview attached (6 layout-check lines, drawer open/closed, light/dark); the gate's app has no gallery, so the gate never sees it",
       "P6-F minors: tests/chat_ui_url_cases.py:93 type comment uses List without importing it; chat_ui_cdp.py:72 and the flags-test docstring say \"Chrome's default flags (10 of 30)\" where the baseline arm was the four earlier flags; the tiny-only proof reads model cards only",
       "P7-E minors: tests/test_chat_requeue_drill.py duplicates sibling helpers (the_result, offline, no_ambient_token, sse) and re-runs the load drill's refusal matrices (one case per refusal would prove the wiring); the ports pin is name-keyed and does not assert its 4 allowed tests stay process-free; a silent stream's 'timeout' could in theory be relabelled 'reset' (give TurnReader._read's two handlers stream.end = stream.end or ...)",
       "P8-F part 3 minors: app/cli.py:19-22 docstring drift (SIGINT during loading now waits for start_up on the worker, then exits 130); latent gc-timing flake in older thread-count tests (tests/test_chat_decode_timing.py:882-886/893-898/1059-1063, tests/test_app_retention.py:116-122: compare by identity or gc.collect() first); Worker.call would deadlock if called from the worker thread or block if called from async code (docstring clause); the pins match ast.Call only (check every ast.Name load of _engines/_require_eos_entries_marked/_wire_gallery); nits: the libgomp rationale written 4x, test helper release duplicates cli._release, pins reuse _timing_inner",
       "P6-G minors: renderNeighbors (render.js:688) could reuse ownXraySide; refuse() after a pre-accept preview with the viewer open leaves focus on body (app.js:965-973); the features check's open/close alternation shifted by one picture (artifact); ~3 MB of PNG churn from regenerated evidence; the live redraw under an open viewer is covered by the node shim only",
       "P8-D follow-up minors (review approved): a landed-then-failed ending write repeats the ending in reads (two message_stops; _held_rows could skip held events once a message_stop is stored); a one-off failure on the ending itself is held, never retried (row stays running until restart); the retention sweep skips a held turn's session until restart (exclude held ids in _EXPIRED/_purge, drop the entry on purge); log wording 'could not store an event' also for failed reads (message_visible/upload_path); the store-file read at pipeline.py:327 bypasses _store (EIO ends model_error with a traceback naming the upload path); session reads/exports decode JSON under Store._lock; no test injects OSError or a one-off finish_turn failure; STORE_FAILED_MSG names two different sentences in the tests; the umask test sits under e2e marks so validate never runs it; a held message_stop after a stored error gets a second error (server_restart) at the next start (plan-mandated)",
-      "P9-C minors: cross-process no-overwrite (os.link); test duplication in the demo tests; wrapper :70 comment says no value is named though the banner prints the gallery build id; confirm chat_remote.sh summary keeps the ERROR check_* lines; a partial Refused key set would be withheld (fail-closed)"
+      "P9-C minors: cross-process no-overwrite (os.link); test duplication in the demo tests; wrapper :70 comment says no value is named though the banner prints the gallery build id; confirm chat_remote.sh summary keeps the ERROR check_* lines; a partial Refused key set would be withheld (fail-closed)",
+      "P9-C retention minors: app/store.py sweep_exports comment says 'ELOOP, or ENOTDIR on Linux' (macOS also gives ENOTDIR); tests/test_app_retention.py:590 utimes two directories inside exports/ (no sweeper thread; harmless); the log's saved-file count includes leftover temp files; the export name patterns are tied to new_id('s') (guarded by the real-writer test)",
+      "P6-H minors: move the text logic (splitSentences, refersToEarlier, summaryText, termPattern) into app/static/report_text.js; the 'said' reader exists 3x (chat_ui_browser_check.py SAID_JS, tests/e2e/conftest.py CARD_JS, tests/e2e/test_ui_playwright.py REPORT_CARD_JS); tests/e2e/conftest.py RECORD_JS still counts the post-close list render (the browser check's recorder was fixed; theoretical); termPattern's \\b cannot match a term edged by a non-word character; 'similar to prior ones' is not flagged (study list has 'one'); the 'comparison' loop cases in render.test.mjs cannot fail; p4e/p6f evidence fully re-rendered (binary churn)",
+      "housekeeping: worktrees agent-a2004b44c5b999a22 (P8-F part 3) and agent-a434a37f4ae1bba0f (P8-D follow-up) are git-locked by a live Claude process; both fully merged by patch-id: remove (worktree + branch) once unlocked"
     ],
     "P9-G5": [],
     "P5-D": [
@@ -968,6 +976,12 @@
     "P8-F": [],
     "P8-D-followup": [],
     "P7-E": [],
-    "P9-C": []
+    "P9-C": [],
+    "P6-H": [],
+    "P9-C-retention": [],
+    "deploy": [
+      "P6-H is static (app/static): `bash scripts/chat_remote.sh sync` makes it live at the next page load (the serve job serves app/static from CLUSTER_REPO)",
+      "the exports retention is server Python: it deploys only at the next serve start (resubmit scripts/serve_chat_h100.sh with MODELS=m3eos,m3 and 'DRIFT_NOTE=CPU decode; matched the published GPU decode on 20/20 probe studies', then LOCAL_PORT=8010 bash app/tunnel/tunnel.sh and the R7-safe probe); the demo exports (saved 2026-10-14T07:09Z) fall due 2026-11-28"
+    ]
   }
 }
