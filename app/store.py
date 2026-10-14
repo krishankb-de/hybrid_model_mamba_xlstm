@@ -64,6 +64,7 @@ MAX_SAVES_PER_SECOND = 1000   # the names of one session's exports in one second
 EXPORT_NAME = re.compile(r"session-s_[0-9a-f]{22}-(?P<stamp>[0-9]{8}T[0-9]{6}Z)(?:-[0-9]+)?\.(?:json|md)")   # a file save_export names: session-<id>-<time>[-n].<ext>
 EXPORT_TEMP = re.compile(r"\.session-s_[0-9a-f]{22}\.[0-9a-f]{8}\.tmp")   # the hidden file it writes first: .session-<id>.<8 hex>.tmp
 EXPORT_TEMP_DAYS = 1          # a temporary file older than this is what a save that died left, and sweep_exports removes it
+STAMP_FORMAT = "%Y%m%dT%H%M%SZ"   # the UTC time to the second that a saved export's name carries: _stamp writes it and _stamp_time reads it back
 PRIVATE_OPTION_KEYS = ("reference", "test_row")   # Options fields that exist only in private mode (R1)
 
 DDL = """
@@ -107,13 +108,13 @@ def _now() -> str:
 
 def _stamp() -> str:
     """The UTC time to the second as a file name carries it, 20261013T181530Z: what a saved export's name adds to the export's own."""
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return datetime.now(timezone.utc).strftime(STAMP_FORMAT)
 
 
 def _stamp_time(stamp: str) -> Optional[datetime]:
     """The UTC time a saved export's name carries (_stamp's format read back); None when the digits are no time, such as month 99."""
     try:
-        return datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        return datetime.strptime(stamp, STAMP_FORMAT).replace(tzinfo=timezone.utc)
     except ValueError:
         return None
 
@@ -579,11 +580,18 @@ class Store:
         what is ours: save_export's own (EXPORT_NAME) or its temporary one (EXPORT_TEMP). A temporary name has no time in it, so that file goes when
         its own modification time is more than EXPORT_TEMP_DAYS old, as does a file of the first kind whose digits are no time (month 99).
 
-        Of those names only a regular file is removed, unlinked: a symbolic link is never followed or removed (nor is the directory itself, if it
-        is one), a directory is never entered, and no other name is touched. Nothing is raised for a file or the directory, only for a negative
-        number of days: a file that cannot be removed is skipped and logged with the class of its exception and nothing else (the text of an OSError
-        names a path), and the next sweep tries it again; a missing directory has nothing to sweep. ``now``, a datetime with a time zone, is the
-        clock (a test gives one). The count is of the files removed, a leftover temporary file among them."""
+        The directory is opened once, with O_NOFOLLOW, and everything after the open goes through that one handle: the listing (scandir of the
+        handle), the look at each entry (never through a link) and each removal (unlink of the bare name, relative to the handle). So a link in the
+        directory's place is refused at the open (one line of the log, in words, with no path), and an exports/ that is swapped for a link after the
+        open changes nothing: the sweep goes on in the directory it opened. Of the names that are ours only a regular file is removed: a link that
+        the listing shows is passed over, a directory is never entered, and no other name is touched. What no call can close is an entry that
+        becomes a link after it was listed; unlink never follows a link, so what such a link points to is never touched (at most the link itself
+        goes, a name of ours).
+
+        Nothing is raised for a file or the directory, only for a negative number of days: a file that cannot be removed is skipped and logged with
+        the class of its exception and nothing else (the text of an OSError names a path), and the next sweep tries it again; a missing directory
+        has nothing to sweep. ``now``, a datetime with a time zone, is the clock (a test gives one). The count is of the files removed, a leftover
+        temporary file among them."""
         if older_than_days < 0:
             raise ValueError("older_than_days must not be negative")
         now = datetime.now(timezone.utc) if now is None else now
@@ -592,41 +600,49 @@ class Store:
         except OverflowError:   # nothing is that old
             cutoff = None
         temp_cutoff = (now - timedelta(days=EXPORT_TEMP_DAYS)).timestamp()
-        directory = self.home / EXPORT_DIR
-        try:
-            if directory.is_symlink():   # a link is followed nowhere, and that includes the directory
-                log.warning("sweep: the exports directory is a symbolic link, so it is not swept")
-                return 0
-            with os.scandir(str(directory)) as scan:
-                entries = list(scan)   # listed whole before anything is removed
+        directory = str(self.home / EXPORT_DIR)
+        try:   # the one look at the path: a link in the directory's place is refused here (ELOOP, or ENOTDIR on Linux), and nothing below uses the path
+            fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except FileNotFoundError:
             return 0
         except OSError as exc:
-            log.warning("sweep: could not list the saved exports (%s); the next sweep retries", type(exc).__name__)
+            if os.path.islink(directory):   # only to say why: it picks the line of the log and decides nothing
+                log.warning("sweep: the exports directory is a symbolic link, so it is not swept")
+            else:
+                log.warning("sweep: could not open the saved exports (%s); the next sweep retries", type(exc).__name__)
             return 0
         removed = 0
-        for entry in entries:
-            export = EXPORT_NAME.fullmatch(entry.name)
-            if export is None and EXPORT_TEMP.fullmatch(entry.name) is None:
-                continue   # a name that save_export does not make: not ours
+        try:
             try:
-                if not entry.is_file(follow_symlinks=False):
-                    continue   # a link, a directory, anything but a regular file: not followed, not entered, not removed
-                if export is None:   # a temporary file: its own time
-                    expired = entry.stat(follow_symlinks=False).st_mtime < temp_cutoff
-                else:
-                    stamped = _stamp_time(export.group("stamp"))
-                    if stamped is not None:
-                        expired = cutoff is not None and stamped < cutoff
-                    else:   # the name of a save, with digits that are no time: the file's own
-                        expired = cutoff is not None and entry.stat(follow_symlinks=False).st_mtime < cutoff.timestamp()
-                if expired:
-                    os.unlink(entry.path)
-                    removed += 1
-            except FileNotFoundError:
-                continue   # gone already
+                with os.scandir(fd) as scan:   # the directory the handle is, listed whole before anything is removed
+                    entries = list(scan)
             except OSError as exc:
-                log.warning("sweep: could not remove a saved export (%s); the next sweep retries", type(exc).__name__)
+                log.warning("sweep: could not list the saved exports (%s); the next sweep retries", type(exc).__name__)
+                return 0
+            for entry in entries:   # scandir(fd) gives bare names: every call below goes through the handle, none through a path
+                export = EXPORT_NAME.fullmatch(entry.name)
+                if export is None and EXPORT_TEMP.fullmatch(entry.name) is None:
+                    continue   # a name that save_export does not make: not ours
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue   # a link, a directory, anything but a regular file: passed over, never entered
+                    if export is None:   # a temporary file: its own time
+                        expired = entry.stat(follow_symlinks=False).st_mtime < temp_cutoff
+                    else:
+                        stamped = _stamp_time(export.group("stamp"))
+                        if stamped is not None:
+                            expired = cutoff is not None and stamped < cutoff
+                        else:   # the name of a save, with digits that are no time: the file's own
+                            expired = cutoff is not None and entry.stat(follow_symlinks=False).st_mtime < cutoff.timestamp()
+                    if expired:
+                        os.unlink(entry.name, dir_fd=fd)   # a name in the opened directory: unlink never follows a link
+                        removed += 1
+                except FileNotFoundError:
+                    continue   # gone already
+                except OSError as exc:
+                    log.warning("sweep: could not remove a saved export (%s); the next sweep retries", type(exc).__name__)
+        finally:
+            os.close(fd)
         return removed
 
     def sweep(self, older_than_days: int, mode: Optional[str] = None) -> int:

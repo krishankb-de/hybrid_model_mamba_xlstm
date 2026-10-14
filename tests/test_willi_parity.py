@@ -10587,8 +10587,9 @@ def test_the_save_route_is_private_only_before_anything_else_and_answers_a_name_
 # Static pins on Store.sweep_exports (app/store.py), the sweeper that calls it (app/retention.py) and the server's wiring of both (app/server.py). The
 # behaviour (the 45 days, the boundary, the names, the links, the failures, the line of the log) is exercised for real in tests/test_app_retention.py. These
 # pins hold what a later edit could break without a test noticing: that the sweep removes only the names of the save route, one regular file at a time, by
-# unlinking it, never a tree and never through a link; that the sweeper reaches it only with days and in a try of its own; that the server gives it the private
-# days; and that nothing of an exception but its class, and nothing of a file but a count, reaches the log.
+# unlinking its name from the one directory it opened (a handle that refuses a link, never the path again), never a tree and never through a link; that the
+# sweeper reaches it only with days and in a try of its own; that the server gives it the private days; and that nothing of an exception but its class, and
+# nothing of a file but a count, reaches the log.
 
 def _store_constant(name):
     tree, _ = _app_tree("store.py")
@@ -10606,16 +10607,39 @@ def _ancestors(node, parents, stop):
 
 def test_the_export_sweep_removes_only_the_save_routes_names_never_a_tree_and_never_through_a_link():
     sweep = _store_method("sweep_exports")
+    parents = {child: node for node in ast.walk(sweep) for child in ast.iter_child_nodes(node)}
     calls = [c for c in ast.walk(sweep) if isinstance(c, ast.Call)]
     names = [ast.unparse(c.func) for c in calls]
-    # what it can remove: the one call, unlinking the path of an entry that the one listing gave it
+
+    def called(dotted):
+        return [c for c in calls if ast.unparse(c.func) == dotted]
+
+    # what it can remove: the one call, unlinking a name of the one listing, relative to the one directory it opened
     changers = [n for n in names if n.split(".")[-1] in {"unlink", "remove", "rmdir", "removedirs", "rmtree", "rename", "renames", "replace", "truncate",
                                                         "chmod", "chown", "symlink", "link", "write", "write_text", "write_bytes", "mkdir", "makedirs"}]
     assert changers == ["os.unlink"], changers
-    assert [ast.unparse(c.args[0]) for c in calls if ast.unparse(c.func) == "os.unlink"] == ["entry.path"], "a path the listing gave: none is built"
+    (unlink,) = called("os.unlink")
+    assert [ast.unparse(a) for a in unlink.args] == ["entry.name"] and {k.arg: ast.unparse(k.value) for k in unlink.keywords} == {"dir_fd": "fd"}, \
+        "a name of the listing, relative to the opened directory: no path is built"
+    assert not [n for n in ast.walk(sweep) if isinstance(n, ast.Attribute) and n.attr == "path" and ast.unparse(n.value) == "entry"], \
+        "with scandir(fd) entry.path is the bare name, which a call that takes a path would look for in the working directory"
     assert "shutil" not in {n.id for n in ast.walk(sweep) if isinstance(n, ast.Name)}, "no rmtree, and no other shutil"
-    assert [ast.unparse(c.args[0]) for c in calls if ast.unparse(c.func) == "os.scandir"] == ["str(directory)"], "one listing: of exports/ and of nothing under it"
     assert not [n for n in names if n.split(".")[-1] in {"walk", "glob", "rglob", "iterdir", "listdir", "fwalk"}], "no recursion, no other listing"
+    # the one directory: opened once, refusing a link, and every step after the open goes through the handle and not through the path again
+    (opened,) = called("os.open")
+    assert [ast.unparse(a) for a in opened.args] == ["directory", "os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW"] and not opened.keywords
+    (listing,) = called("os.scandir")
+    assert [ast.unparse(a) for a in listing.args] == ["fd"] and not listing.keywords and opened.lineno < listing.lineno, \
+        "one listing, of the directory that was opened, through its handle"
+    assert sorted(ast.unparse(c.func) for c in calls if any(ast.unparse(a) == "directory" for a in c.args)) == ["os.open", "os.path.islink"], \
+        "the path is used to open the directory and, when that was refused, to say in the log why"
+    (islink,) = called("os.path.islink")
+    assert any(isinstance(n, ast.ExceptHandler) for n in _ancestors(islink, parents, sweep)), "only in the handler of a refusal: it picks a line of the log"
+    (closing,) = called("os.close")
+    assert [ast.unparse(a) for a in closing.args] == ["fd"]
+    (guard,) = [n for n in ast.walk(sweep) if isinstance(n, ast.Try) and any(c is closing for s in n.finalbody for c in ast.walk(s))]
+    in_body = {id(c) for s in guard.body for c in ast.walk(s)}
+    assert id(listing) in in_body and id(unlink) in in_body, "the handle is open for the listing and every removal, and closed in a finally whatever happens"
     assert not [n for n in names if n in {"os.stat", "os.path.getmtime", "os.path.isfile", "os.path.exists", "os.path.isdir", "os.path.getsize",
                                          "Path.stat", "directory.stat", "directory.exists", "directory.is_dir", "directory.is_file"}], "each of these follows a link"
     # the name: whole, against the save's two patterns, and by nothing else
@@ -10625,13 +10649,11 @@ def test_the_export_sweep_removes_only_the_save_routes_names_never_a_tree_and_ne
     assert {name: ast.literal_eval(_store_constant(name).args[0]) for name in ("EXPORT_NAME", "EXPORT_TEMP")} == {
         "EXPORT_NAME": r"session-s_[0-9a-f]{22}-(?P<stamp>[0-9]{8}T[0-9]{6}Z)(?:-[0-9]+)?\.(?:json|md)",
         "EXPORT_TEMP": r"\.session-s_[0-9a-f]{22}\.[0-9a-f]{8}\.tmp"}, "the patterns are save_export's names, as it makes them"
-    # a link: not followed, not removed, not even the directory
+    # a link: no look at an entry follows it (a link seen at the listing is passed over)
     is_file = [c for c in calls if ast.unparse(c.func) == "entry.is_file"]
     assert len(is_file) == 1 and {k.arg: ast.unparse(k.value) for k in is_file[0].keywords} == {"follow_symlinks": "False"}
     stats = [c for c in calls if isinstance(c.func, ast.Attribute) and c.func.attr == "stat"]
     assert stats and all(ast.unparse(c.func) == "entry.stat" and {k.arg: ast.unparse(k.value) for k in c.keywords} == {"follow_symlinks": "False"} for c in stats)
-    lines = {name: [c.lineno for c in calls if ast.unparse(c.func) == name] for name in ("directory.is_symlink", "os.scandir")}
-    assert len(lines["directory.is_symlink"]) == 1 and lines["directory.is_symlink"][0] < lines["os.scandir"][0], "a link in the directory's place is refused first"
     # the order in the loop: the name, then the kind of file, and only then the removal
     loop = next(n for n in ast.walk(sweep) if isinstance(n, ast.For) and ast.unparse(n.target) == "entry")
     assert ast.unparse(loop.iter) == "entries"
@@ -10647,7 +10669,7 @@ def test_the_export_sweep_removes_only_the_save_routes_names_never_a_tree_and_ne
 def test_the_export_sweep_logs_the_class_of_an_exception_and_nothing_of_a_file_or_a_path():
     sweep = _store_method("sweep_exports")
     warnings = [c for c in ast.walk(sweep) if isinstance(c, ast.Call) and ast.unparse(c.func) == "log.warning"]
-    assert len(warnings) == 3
+    assert len(warnings) == 4, "a link in the directory's place (fixed words), the open, the listing and a file"
     for call in warnings:
         assert [ast.unparse(a) for a in call.args[1:]] in ([], ["type(exc).__name__"]) and not call.keywords, ast.unparse(call)
     parents = {child: node for node in ast.walk(sweep) for child in ast.iter_child_nodes(node)}
@@ -10655,7 +10677,7 @@ def test_the_export_sweep_logs_the_class_of_an_exception_and_nothing_of_a_file_o
         uses = [u for stmt in handler.body for u in ast.walk(stmt) if isinstance(u, ast.Name) and u.id == handler.name]
         assert uses and all(isinstance(parents[u], ast.Call) and ast.unparse(parents[u].func) == "type" for u in uses), "the class, never the text"
     assert sorted(ast.unparse(h.type) for h in ast.walk(sweep) if isinstance(h, ast.ExceptHandler)) == sorted(
-        ["OverflowError", "FileNotFoundError", "OSError", "FileNotFoundError", "OSError"]), "no handler of Exception or a bare except that would take more than a file's failure"
+        ["OverflowError", "FileNotFoundError", "OSError", "OSError", "FileNotFoundError", "OSError"]), "no handler of Exception or a bare except that would take more than a file's failure"
     assert not [n for n in ast.walk(sweep) if isinstance(n, ast.Name) and n.id in ("print", "open", "exec", "eval")]
 
 

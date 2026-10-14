@@ -11,6 +11,7 @@ Store.sweep_exports (names, times, links, failures), the sweeper's export_days a
 """
 import logging
 import os
+import secrets
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -448,14 +449,18 @@ def _export_name(days, ext="json", suffix="", now=None):
     return "session-{}-{}{}.{}".format(SID, when.strftime("%Y%m%dT%H%M%SZ"), suffix, ext)
 
 
-def _put(home, name, age_days=0.0):
-    """A file `name` under exports/ of `home` (the directory made 0700, as the save makes it), its own time `age_days` days old: -> its path."""
+def _put(home, name, age_days=0.0, mtime=None):
+    """A file `name` under exports/ of `home` (the directory made 0700, as the save makes it), its own time `age_days` days old, or `mtime` (seconds
+    since the epoch) when that is given: -> its path. It is built, time and all, beside exports/ and put in with one rename, so that it is never in
+    exports/ without its time: a sweep that runs at any moment, as the thread of a test with a short interval does, finds none or the whole file."""
     directory = Path(home) / "exports"
     directory.mkdir(mode=0o700, exist_ok=True)
+    staged = Path(home) / ".put-{}".format(secrets.token_hex(4))   # beside exports/, so on its filesystem: the rename below is one step
+    staged.write_text("body of " + name)
+    then = time.time() - age_days * 86400 if mtime is None else mtime
+    os.utime(str(staged), (then, then))
     path = directory / name
-    path.write_text("body of " + name)
-    then = time.time() - age_days * 86400
-    os.utime(str(path), (then, then))
+    os.replace(str(staged), str(path))
     return path
 
 
@@ -466,6 +471,25 @@ def export_store(tmp_path):
         yield store
     finally:
         store.close()
+
+
+def test_the_helper_that_puts_a_file_into_exports_makes_it_appear_whole_a_sweep_between_its_steps_finds_none_to_take(export_store, tmp_path, monkeypatch):
+    """The test with a thread that sweeps every 20 ms puts an old-stamped file into a live exports/. Written there and given its time afterwards, the
+    file could be swept in between, and os.utime then fails on a file that is gone. _put builds it, time and all, beside exports/ and puts it in with
+    one rename. Here a sweep runs at the moment between the steps, which is when the helper's first form was caught."""
+    real_utime = os.utime
+    swept = []
+
+    def sweep_then_utime(path, *args, **kwargs):
+        swept.append(export_store.sweep_exports(45))   # a sweep, between the file's write and its time
+        return real_utime(path, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "utime", sweep_then_utime)
+        put = _put(tmp_path, _export_name(60))
+    assert swept == [0], "no file was in exports/ for that sweep to find"
+    assert put.is_file() and put.read_text() == "body of " + put.name
+    assert export_store.sweep_exports(45) == 1 and not put.exists(), "and it is there, whole, for the next sweep"
 
 
 def test_an_export_stamped_46_days_ago_is_removed_and_one_stamped_44_days_ago_is_kept(export_store, tmp_path):
@@ -496,11 +520,8 @@ def test_a_leftover_temporary_file_older_than_a_day_is_removed_and_a_fresh_one_i
 
 def test_a_temporary_file_is_a_day_old_when_it_is_older_than_a_day_exactly_a_day_stays(export_store, tmp_path):
     now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=timezone.utc)
-    on_the_line = _put(tmp_path, ".session-{}.0a1b2c3d.tmp".format(SID))
-    a_second_over = _put(tmp_path, ".session-{}.4e5f6a7b.tmp".format(SID))
-    for path, seconds in ((on_the_line, 86400), (a_second_over, 86401)):
-        stamp = now.timestamp() - seconds
-        os.utime(str(path), (stamp, stamp))
+    on_the_line = _put(tmp_path, ".session-{}.0a1b2c3d.tmp".format(SID), mtime=now.timestamp() - 86400)
+    a_second_over = _put(tmp_path, ".session-{}.4e5f6a7b.tmp".format(SID), mtime=now.timestamp() - 86401)
     assert export_store.sweep_exports(45, now=now) == 1
     assert on_the_line.is_file() and not a_second_over.exists()
 
@@ -510,6 +531,18 @@ def test_the_time_in_the_name_decides_not_the_time_of_the_file(export_store, tmp
     written_now = _put(tmp_path, _export_name(46, "md"), age_days=0)           # its own time is now, its name 46 days old
     assert export_store.sweep_exports(45) == 1
     assert copied_long_ago.is_file() and not written_now.exists()
+
+
+def test_a_name_stamped_in_the_future_is_kept_until_its_stamp_is_the_days_behind(export_store, tmp_path):
+    """The time in the name decides, so a stamp that is ahead of the clock (a clock that ran ahead when the file was saved, a copy brought from
+    elsewhere) keeps the file until the stamp is more than the days behind, whatever the file's own time says."""
+    now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=timezone.utc)
+    ahead = _put(tmp_path, _export_name(-10, "json", now=now), mtime=now.timestamp() - 400 * 86400)   # stamped 10 days ahead; its own time is 400 days old
+    assert ahead.name.endswith("20261024T120000Z.json")
+    assert export_store.sweep_exports(45, now=now) == 0 and ahead.is_file()
+    on_the_line = now + timedelta(days=55)   # the stamp plus the 45 days, to the second
+    assert export_store.sweep_exports(45, now=on_the_line) == 0 and ahead.is_file()
+    assert export_store.sweep_exports(45, now=on_the_line + timedelta(seconds=1)) == 1 and not ahead.exists()
 
 
 def test_a_name_of_the_right_shape_with_a_time_that_is_no_time_goes_by_the_time_of_the_file(export_store, tmp_path):
@@ -599,6 +632,36 @@ def test_an_exports_directory_that_is_a_link_is_not_followed(export_store, tmp_p
     assert len(lines) == 1 and str(tmp_path) not in lines[0] and "elsewhere" not in lines[0], lines
 
 
+def test_an_exports_directory_swapped_for_a_link_after_the_check_is_not_followed_the_sweep_goes_on_in_the_one_it_opened(export_store, tmp_path, monkeypatch):
+    """The check that exports/ is no link and the listing used to be two looks at the path, so an exports/ swapped for a link between them was listed
+    through the link and the files of its target were removed. The directory is opened once, and the listing, the look at each entry and every removal
+    go through that one handle. The swap is made at the moment the listing is asked for."""
+    exports = tmp_path / "exports"
+    own = _put(tmp_path, _export_name(60, "json"))   # an old export of the directory itself
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    victims = [target / _export_name(61, "json"), target / _export_name(62, "md")]
+    for victim in victims:
+        victim.write_text("an old export of some other directory")
+    moved = tmp_path / "exports-moved"
+    real_scandir = os.scandir
+    swapped = []
+
+    def swap_then_list(where, *args, **kwargs):
+        if not swapped:   # between the check and the listing: exports/ becomes a link to the directory that holds the victims
+            os.rename(str(exports), str(moved))
+            os.symlink(str(target), str(exports), target_is_directory=True)
+            swapped.append(True)
+        return real_scandir(where, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "scandir", swap_then_list)
+        removed = export_store.sweep_exports(45)
+    assert swapped == [True] and exports.is_symlink()
+    assert all(victim.is_file() for victim in victims), "what the link points to is never touched"
+    assert removed == 1 and not (moved / own.name).exists(), "the sweep went on in the directory it had checked"
+
+
 def test_a_file_that_cannot_be_removed_is_skipped_with_its_class_logged_and_the_others_go(export_store, tmp_path, monkeypatch, caplog):
     paths = [_put(tmp_path, _export_name(60 + n, ext)) for n, ext in enumerate(("json", "md", "json"))]
     stuck = paths[1]
@@ -622,8 +685,8 @@ def test_a_file_that_cannot_be_removed_is_skipped_with_its_class_logged_and_the_
     assert export_store.sweep_exports(45) == 1 and not stuck.exists(), "the next sweep tries it again"
 
 
-@pytest.mark.parametrize("owner, name", [(os, "scandir"), (Path, "is_symlink")], ids=["the listing", "the look at the directory"])
-def test_a_directory_that_cannot_be_looked_at_or_listed_is_one_log_line_with_the_class_and_no_removals(export_store, tmp_path, monkeypatch, caplog, owner, name):
+@pytest.mark.parametrize("owner, name", [(os, "open"), (os, "scandir")], ids=["the open", "the listing"])
+def test_a_directory_that_cannot_be_opened_or_listed_is_one_log_line_with_the_class_and_no_removals(export_store, tmp_path, monkeypatch, caplog, owner, name):
     kept = _put(tmp_path, _export_name(60))
 
     def refuse(*args, **kwargs):
