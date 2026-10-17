@@ -1,0 +1,97 @@
+# TEXTENC_PLAN.md T1-A -- attention-free report encoder with the mLMamba layout.
+#
+# The Stage-1 text encoder of the published pipeline is hybrid_150m_v2 (Mamba-1 selective scan +
+# mLSTM) with an AttentionPooling head, i.e. one attention module. This encoder is the mLMamba
+# backbone instead (Mamba-3/SSD at layers 1-4 and 8-12, mLSTM at 5-7), initialised from the
+# PubMed-pretrained Stage-0 mLMamba checkpoint, and pools by a masked mean, so it contains no
+# attention at all (tests/test_textenc.py walks the module tree). Everything else is
+# hybrid_150m_m3.yaml unchanged; a parity test pins the backbone keys against
+# hybrid_150m_m3_rrg.yaml, the published decoder that reads the same Stage-0 checkpoint.
+model_type: "hybrid_lm"
+
+# Architecture
+vocab_size: 50257
+dim: 768
+num_layers: 12
+layer_pattern: ["mamba3", "mamba3", "mamba3", "mamba3", "mlstm", "mlstm", "mlstm", "mamba3", "mamba3", "mamba3", "mamba3", "mamba3"]
+
+# Mamba-1 parameters — retained so this config still resolves against HybridConfig, but unused:
+# no `mamba` layers remain in the pattern above.
+state_size: 16
+conv_size: 4
+expand_factor: 2
+dt_rank: null
+use_fast_path: true
+
+# Operator selection (MAMBA3_PLAN_V2.md V1-E). Declared explicitly in every model yaml so no
+# config inherits the dataclass default silently: "legacy" reproduces every checkpoint trained
+# before 2026-09 byte-for-byte (including the divide-and-clamp defect, analysis/scan_error_bound.md);
+# "exact" is the division-free fix (M1-E / M1-H). The M7 screen and every published number ran legacy.
+scan_impl: "legacy"
+tfla_impl: "exact"   # the operator the Stage-0 mLMamba checkpoint was trained with (argv model.tfla_impl=exact)
+
+# Mamba-3 parameters. Every flag here is the Mamba-2 reduction; the ablation arms override them.
+mamba3_d_state: 128        # 8x the Mamba-1 setting, +1.4% params (B/C shared across heads)
+mamba3_head_dim: 64        # -> nheads = 1536 / 64 = 24
+mamba3_ngroups: 1          # multi-value attention: one B/C for all heads
+mamba3_chunk_size: 64
+mamba3_use_conv: true      # dropped as an arm at M5, not by default
+mamba3_conv_size: 4
+mamba3_use_trapezoid: false   # M3 arm
+mamba3_use_rope: false        # M4 arm
+mamba3_rope_fraction: 0.5
+mamba3_theta_max: 1.0      # per-token angular rate cap; see the M7-B rope collapse
+mamba3_dt_min: 1.0e-3      # Delta ~ logU[dt_min, dt_max] at init
+mamba3_dt_max: 1.0e-1
+mamba3_dt_init_floor: 1.0e-4
+mamba3_bc_bias: "none"        # M5 arm ("one_init" is the paper's setting)
+mamba3_mimo_rank: 1           # plumbed, never run (decision 3)
+mamba3_a_mode: "static"       # "data_dependent" is Mamba-3's own default
+mamba3_a_floor: 1.0e-4
+mamba3_dt_limit: 1.0          # replaces the RMSNorm that used to bound Delta by accident
+mamba3_use_outproj_norm: false
+
+# mLSTM parameters
+head_dim: 64           # keep 64 (matrix state ∝ head_dim²); num_heads scales instead
+num_heads: 12          # 768 / 64 = 12
+use_tfla: true
+proj_factor: 2
+
+# sLSTM parameters (unused by this pattern; kept for config completeness)
+slstm_hidden_dim: 768
+slstm_num_heads: 4
+use_exponential_gate: true
+
+# Shared parameters
+norm_type: "rms"
+use_mlp: true
+mlp_ratio: 4.0
+
+# Training parameters
+max_position_embeddings: 1024
+dropout: 0.1
+initializer_range: 0.02
+
+# Generation parameters
+use_cache: true
+tie_word_embeddings: false
+
+use_gradient_checkpointing: false
+proj_head_dropout: 0.1
+norm_topology: hybrid
+pooling_strategy: mean   # attention-free: masked mean over report tokens (TEXTENC_PLAN.md R3)
+bidirectional_encode: false   # thesis arm only
+
+# Optimization
+# LR √-width-scaled from the 70M's 6e-4 (sqrt(512/768)≈0.82 → ~4.9e-4). Start
+# conservative at 4.0e-4 (fresh 150M pretrain + mLSTM gate sensitivity); bump to
+# 5e-4 if the Stage-0 loss curve descends slowly. warmup_steps 1000→2000 for the
+# larger model. max_steps here is a fallback; the Phase-5 SLURM script sets the
+# real 150M Chinchilla target via trainer.max_steps (~90-120K, ~3B tokens).
+learning_rate: 4.0e-4
+weight_decay: 0.1
+warmup_steps: 2000
+max_steps: 90000
+gradient_clip_val: 1.0
+
+distill: null

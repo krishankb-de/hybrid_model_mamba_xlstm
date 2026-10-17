@@ -1,0 +1,204 @@
+{
+  "plan": "TEXTENC_PLAN.md",
+  "branch": "isbi_textenc",
+  "status": "plan written, awaiting user approval (T0-B)",
+  "current_phase": "T2",
+  "next_action": "Wait for chain 2680042->2680072 on cluster ~/hybrid_textenc (squeue -u $USER). Then: T2-B retrieval check of E-m3 vs published tower; T3-B bootstrap textenc floors vs BiomedCLIP floor; T5-A health gate on seed 42 (train logs: RAG line, finite loss, val loss); if healthy submit seeds 43/44 (same commands, SEED=43/44); T5-C bootstraps M-rag vs results/report_gen_m3_test_split_s42 etc.",
+  "decisions": {
+    "2026-10-14 encoder": "Text encoder (not image encoder) with mLMamba layout (Mamba-3/SSD + mLSTM), init from Stage-0 mLMamba; attention-free (mean pooling).",
+    "2026-10-14 use": "Retrieval-augmented generation: re-rank retrieved reports with the text encoder, feed top-k to the decoder.",
+    "2026-10-14 target": "ISBI first (minimal), extend in thesis.",
+    "2026-10-14 isolation": "New branch + worktree + separate cluster dir; must not touch published work, results or running jobs."
+  },
+  "pending_jobs": [
+    "2680042 Stage1 E-m3",
+    "2680062 index",
+    "2680063/64 floor CheXbert",
+    "2680065-68 m3 s42 train/eval[0-3]/merge/chexbert",
+    "2680069-72 transformer s42 train/eval[0-3]/merge/chexbert"
+  ],
+  "verified_facts": {
+    "published_text_encoder": "Old hybrid hybrid_150m_v2 (Mamba-1 selective scan + mLSTM) with AttentionPooling (configs/model/hybrid_150m_v2.yaml:62 pooling_strategy: attention); used only in Stage 1 (V10-2 paper lines 517-522).",
+    "mean_pooling_exists": "HybridTextEncoder supports pooling_strategy mean (hybrid_xmamba/models/hybrid_lm.py:672-676, 790-793); AttentionPooling only built when strategy == attention.",
+    "stage1_wrapper_hardcodes_model": "scripts/train_biomedclip_kd_150m_h100.sh exports MODEL_CONFIG=hybrid_150m_v2 -> a new wrapper is needed, published one stays untouched.",
+    "published_tower": "13D tower outputs/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt (vit_lr 3e-6).",
+    "stage0_m3": "~/hybrid_mamba_xlstm/outputs/h100_stage0_150m_m3/checkpoints/last.ckpt (exists, checked 2026-10-14).",
+    "prefill": "HybridLanguageModel.prefill is token-by-token (hybrid_lm.py:411); chunked scan does not return state (M6 follow-up).",
+    "cached_eval": "inspect_report_generation_h100.sh CACHED_DECODE=true -> --cached-decode, token-identical to uncached by test.",
+    "lit_check": "Mamba Retriever (arXiv 2408.08066), M2-BERT (ICML 2024), Hydra (arXiv 2407.09941), CLIMP (arXiv 2601.06891) exist; no Mamba/SSM radiology report encoder found; R2Gen-Mamba (ISBI 2025) uses Mamba encoder + Transformer decoder."
+  },
+  "notes": [
+    "2026-10-14 plan written on new branch isbi_textenc (worktree ../isbi_textenc_wt) after reviewer critique of the text encoder.",
+    "User approved plan 2026-10-14; also asked to run published-model benchmark in parallel on isbi_baselines (B10).",
+    "T1 done: configs/model/hybrid_150m_m3_textenc.yaml (mLMamba layout, tfla exact, mean pooling), scripts/textenc_stage1_h100.sh (13D tower recipe, TEXTENC_ROOT guard), tests/test_textenc.py 17 pass; validate.sh exit 0. Cluster ~/hybrid_textenc worktree (branch isbi_textenc, real outputs/results/logs dirs). Files synced by rsync (no commits). T2-A submitted: job 2680042.",
+    "T3/T4 code done (no shared-code edits): scripts/textenc_rag_index.py (+_h100.sh), hybrid_xmamba/training/rag_report_generation.py, scripts/textenc_train_rag.py (swaps module+loader, runs published main), scripts/textenc_eval_rag.py (sharded, cached beam, uncached check), textenc_rag_train_h100.sh runs a copy of the published wrapper with only the entrypoint line swapped, textenc_guard.sh. Decision: RAG decoders read the PUBLISHED 13D tower; the new Stage-1 tower+text encoder is used only for retrieval, so M-rag vs M-pub isolates the retrieved context. tests/test_textenc.py 34 pass (incl. RAG loss with empty context == published loss; cached==uncached with context prompt for mamba3+mlstm and attention). validate.sh exit 0.",
+    "2026-10-14: Chain submitted from ~/hybrid_textenc: Stage1 2680042 -> index 2680062 -> floors CheXbert 2680063/64; m3 s42 2680065 train, 2680066 eval array, 2680067 merge, 2680068 CheXbert; transformer s42 2680069-72.",
+    "T2: Stage1 2680042 done 1h56, 6000 steps, text-encoder init missing 0. Val retrieval (in-training protocol, N=1433) final: E-m3 i2t R@10 .305 t2i .299 vs published 13D tower (old hybrid + attention pooling, job 2502673) .316 / .307: within ~1pp (SE ~1.2pp) -> attention-free encoder matches. T3: index 2680062 (missing 0/0), rerank changes top-1 for 97.5% of test. Floors CheXbert (2680063/64): image-only (new tower) 14mi .4648 14ma .3227 5mi .5242 5ma .4639; re-ranked .5115/.3599/.5687/.5103 (XrayCLIP floor .5095/.3631/.5549/.4921). Bootstraps 2707990-96 submitted (analysis/ in ~/hybrid_textenc).",
+    "2026-10-17: T3-B bootstraps 2707990-96: F-rr vs floor_ii wins all CheXbert (+.037..+.047) + text; vs XrayCLIP floor tie except 5-macro/BLEU-1 win; vs MedSigLIP floor wins text+3 CheXbert, 14-macro tie; vs mLMamba s42-44 CheXbert win 3/3, ROUGE-L/BLEU-4 loss 3/3. BiomedCLIP-floor CheXbert rerun 2708015 (first run used a dir without labels). analysis/textenc/FINDINGS.md written."
+  ],
+  "phases": {
+    "T0": {
+      "title": "Plan, isolation, approval",
+      "status": "complete",
+      "checkboxes": {
+        "T0-A": {
+          "done": true,
+          "desc": "Plan + textenc_state.json on branch isbi_textenc (own worktree); textenc registered in scripts/mamba3_state.py PLAN_SETS."
+        },
+        "T0-B": {
+          "done": true,
+          "desc": "User approves the plan (gate: nothing below runs before this)."
+        },
+        "T0-C": {
+          "done": true,
+          "desc": "Cluster isolation: ~/hybrid_textenc git worktree on isbi_textenc, real outputs/ results/ analysis/ dirs, .venv/.venv_chexbert symlinks (environments only); a..."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "T1": {
+      "title": "Attention-free mLMamba text encoder (code, CPU-tested)",
+      "status": "complete",
+      "checkboxes": {
+        "T1-A": {
+          "done": true,
+          "desc": "configs/model/hybrid_150m_m3_textenc.yaml: mLMamba layout, tfla_impl: exact, pooling_strategy: mean; parity test that its backbone matches hybrid_150m_m3_rrg..."
+        },
+        "T1-B": {
+          "done": true,
+          "desc": "Init from the Stage-0 mLMamba checkpoint: only the projection head is missing on load (test with a tiny checkpoint)."
+        },
+        "T1-C": {
+          "done": true,
+          "desc": "R3 test: no attention module or SDPA call anywhere in the text encoder; CPU forward/backward; mean pooling ignores padding (same embedding with extra pads)."
+        },
+        "T1-D": {
+          "done": true,
+          "desc": "New Stage-1 wrapper scripts/textenc_stage1_h100.sh (published wrapper untouched; refuses to run without TEXTENC_ROOT), recipe identical to the 13D tower exce..."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "T2": {
+      "title": "Stage 1 with E-m3 + retrieval check",
+      "status": "in_progress",
+      "checkboxes": {
+        "T2-A": {
+          "done": true,
+          "desc": "Train Stage 1 (1 GPU, ~4-7 h). Evidence: job id, loss curves, no NaN."
+        },
+        "T2-B": {
+          "done": true,
+          "desc": "Retrieval on the published held-out protocol: i2t/t2i R@1/5/10 for E-m3 vs the published tower (same script, same studies)."
+        },
+        "T2-C": {
+          "done": false,
+          "desc": "(if queue allows before ISBI) ABL-T: same Stage 1 with the matched Transformer text encoder; retrieval only."
+        },
+        "T2-D": {
+          "done": false,
+          "desc": "(thesis) ABL-P: fine-tuned PubMedBERT text encoder; needs a text-tower option in Stage 1."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "T3": {
+      "title": "Retrieval-augmented data + the re-rank floor",
+      "status": "in_progress",
+      "checkboxes": {
+        "T3-A": {
+          "done": true,
+          "desc": "scripts/textenc_rag_index.py: top-50 by image, re-rank by image-text with E-m3, keep top-k ids per study for train (same-patient excluded), val, test. Stored..."
+        },
+        "T3-B": {
+          "done": false,
+          "desc": "F-rr: copy the top-1 re-ranked report, score text + CheXbert on the test split; bootstrap vs the BiomedCLIP floor."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "T4": {
+      "title": "RAG decoder (code, CPU-tested)",
+      "status": "complete",
+      "checkboxes": {
+        "T4-A": {
+          "done": true,
+          "desc": "Dataset path that inserts the k retrieved reports after the image prefix, loss masked to the target; default rag_k=0 is the published path bit-for-bit (parit..."
+        },
+        "T4-B": {
+          "done": true,
+          "desc": "Evaluation path with the same context (uncached beam, or cached with token-by-token prefill); test that both give identical tokens on a toy model."
+        },
+        "T4-C": {
+          "done": true,
+          "desc": "Wrapper scripts/textenc_rag_train_h100.sh / eval wrapper, TEXTENC_ROOT enforced."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "T5": {
+      "title": "Train + evaluate M-rag and T-rag",
+      "status": "pending",
+      "checkboxes": {
+        "T5-A": {
+          "done": false,
+          "desc": "Seed 42 for M-rag and T-rag (Stage 3 recipe unchanged: 12k steps, 4 GPUs). Health gate: finite loss, val loss in range."
+        },
+        "T5-B": {
+          "done": false,
+          "desc": "Seeds 43/44 for both."
+        },
+        "T5-C": {
+          "done": false,
+          "desc": "Beam-3 test decode, CheXbert, paired bootstraps: M-rag vs M-pub (same seed), M-rag vs T-rag, M-rag vs floors; per-label F1; error analysis (B9 script)."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "T6": {
+      "title": "Efficiency in the real RAG pipeline",
+      "status": "pending",
+      "checkboxes": {
+        "T6-A": {
+          "done": false,
+          "desc": "Decode latency and memory for both decoders at the real RAG context (k=3) and at k=10/30 (B7 bench), with the prefill caveat stated."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    },
+    "T7": {
+      "title": "Write-up",
+      "status": "pending",
+      "checkboxes": {
+        "T7-A": {
+          "done": false,
+          "desc": "analysis/textenc/FINDINGS.md with every arm, win or lose."
+        },
+        "T7-B": {
+          "done": false,
+          "desc": "Paper text only on the user's request; claim wording per the lit check (no \"nobody has implemented Mamba encoders\")."
+        }
+      },
+      "evidence": {},
+      "verdict": null
+    }
+  },
+  "phase_order": [
+    "T0",
+    "T1",
+    "T2",
+    "T3",
+    "T4",
+    "T5",
+    "T6",
+    "T7"
+  ],
+  "last_updated": "2026-10-17T09:37:01+02:00"
+}

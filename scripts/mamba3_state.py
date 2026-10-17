@@ -36,6 +36,7 @@ PLAN_SETS = {
     "mamba3": ("MAMBA3_PLAN_V2.md", "mamba3_v2_state.json"),
     "efficiency": ("EFFICIENCY_PLAN.md", "efficiency_state.json"),
     "isbi": ("ISBI_BASELINES_PLAN.md", "isbi_baselines_state.json"),
+    "textenc": ("TEXTENC_PLAN.md", "textenc_state.json"),
 }
 DEFAULT_PLAN_SET = "mamba3"
 
