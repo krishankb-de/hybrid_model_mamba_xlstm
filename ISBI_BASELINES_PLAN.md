@@ -32,17 +32,22 @@ Login node runs no project Python: everything goes through `sbatch`.
 - B9 error analysis: decoders rarely add findings (~10% vs ~15% floors), miss ~60%;
   pneumothorax added 1.0% / missed 96%. Transformer identical -> not an SSM effect.
 
-**Next step.** B8: XrayCLIP-encoder retraining is QUEUED (jobs 2624239-2624256, train -> beam-3 eval
--> CheXbert, mLMamba + Transformer x seeds 42/43/44; train expected to start 2026-10-10). When done:
-1. `sacct -j $(seq -s, 2624239 2624256)` - all COMPLETED? (eval ~5 h each, 12 h limit)
-2. check each train log prints `Report image encoder: xrayclip`, decoder `Missing keys` ~0, and the
-   eval log prints `report image encoder = xrayclip` (encoder is resolved from run_metadata.json)
-3. bootstraps (`scripts/bootstrap_compare_h100.sh`, PER_LABEL=true), per seed s:
-   m3_xrayclip vs m3 (BiomedCLIP), m3_xrayclip vs transformer_xrayclip, m3_xrayclip vs floor_xrayclip
-   (dirs: `results/report_gen_{m3,transformer}_xrayclip_test_split_s{42,43,44}`,
-   `results/report_gen_m3_test_split_s*`, `results/isbi_floor_xrayclip_test_split`)
-4. rerun `scripts/isbi_reviewer_cpu.sh` with SKIP_STATS=true and the B8 systems added (error analysis)
-5. write results into FINDINGS.md + the paper; tick B8-B/B8-C.
+- B8 image encoder (done 2026-10-12): XrayCLIP lifts both decoders (mLMamba 14-micro/macro
+  .448/.272 -> .463/.294, Transformer .444/.269 -> .477/.303, all 3/3 seeds); XrayCLIP floor still
+  wins all CheXbert F1 vs mLMamba at 3/3; with XrayCLIP the Transformer beats mLMamba on 5-macro
+  3/3 and 14-/5-micro 2/3. mLMamba adds acute findings to fewer studies. Details: FINDINGS.md B8.
+
+- B10 published generators (done 2026-10-14): R2Gen-Mamba, R2Gen, R2GenCMN, CvT2DistilGPT2,
+  CXRMate-single-TF on our 2,663 studies. Findings-only protocol (n=1,946) with our findings part:
+  mLMamba loses everything to all five at 3/3 (our decoders leave findings empty in ~57% of
+  reports). Whole report vs findings ref: beats CvT2DistilGPT2/CXRMate/R2Gen; vs R2Gen-Mamba ahead
+  on CheXbert 2/3 (5-macro 3/3), behind on ROUGE-L/BLEU-4 3/3; level/behind R2GenCMN on macro.
+  Details: FINDINGS.md B10.
+
+**Next step.** All reviewer experiments (B7, B8, B9) are done. Write them into the paper (current
+file `ISBI Paper /Method and Evaluation V9.tex` in the main checkout) only when the user asks; also
+fix the V9 number errors listed in isbi_baselines_state.json["paper"]. B8 changes the story: the
+BiomedCLIP architecture parity does not carry over to XrayCLIP; say so, do not hide it.
 
 **Things to check / known traps.**
 - Never change a measured number in the paper (user asked twice; refused). Efficiency figure uses
@@ -173,10 +178,39 @@ cluster file for the user to read, only aggregate numbers leave it.
 ### B8 — Image encoder: does a chest X-ray encoder fix the clinical gap?
 
 - [x] **B8-A** `report_image_encoder` option (default `biomedclip`, unchanged) in ReportGenerationLightningModule, train_report_generation.py, the wrapper and the evaluation loader (encoder + its image size/normalisation read back from run_metadata.json). Tests: default path unchanged, HF patch grid shapes.
-- [ ] **B8-B** Stage 3 with the frozen stock XrayCLIP encoder (512 px, 1,025 patch tokens) for mLMamba and the Transformer, seeds 42/43/44, otherwise the published recipe.
-- [ ] **B8-C** Beam-3 decode on the test split, CheXbert, paired bootstraps against: the BiomedCLIP-encoder mLMamba (same seed), the XrayCLIP-encoder Transformer (same seed), and the XrayCLIP floor.
+- [x] **B8-B** Stage 3 with the frozen stock XrayCLIP encoder (512 px, 1,025 patch tokens) for mLMamba and the Transformer, seeds 42/43/44, otherwise the published recipe.
+- [x] **B8-C** Beam-3 decode on the test split, CheXbert, paired bootstraps against: the BiomedCLIP-encoder mLMamba (same seed), the XrayCLIP-encoder Transformer (same seed), and the XrayCLIP floor.
 
 ### B9 — Error analysis: hallucination or omission?
 
 - [x] **B9-A** Per finding, from the CheXbert label dumps: false-positive rate among reference-negative studies (hallucination) and false-negative rate among reference-positive studies (omission), mean positives per report, for mLMamba (3 seeds), Transformer (3 seeds), floors, and the B8 arms. Aggregate only.
 - [x] **B9-B** Qualitative file on the cluster (R6): for acute findings (pneumothorax, consolidation, pneumonia, edema, pleural effusion), a few hallucination and omission cases with study ids and texts, for the user to review and excerpt.
+
+### B10 — Published report generators on our test split
+
+Approved by the user 2026-10-14. Answers the reviewer: "no comparison with any published report-generation
+model (R2Gen, CvT2DistilGPT2, R2Gen-Mamba, CXRMate), not even on a findings-only protocol". Released
+checkpoints, each with its own preprocessing, tokenizer and released decoding settings, on the same 2,663
+studies and the same image per study (`test.parquet` column `image`, our 320x320 frontal JPEG). Code:
+`scripts/isbi_published_rrg.py` + `scripts/isbi_published_rrg_h100.sh` (+ `_setup_h100.sh` for the
+separate `external/.venv_rrg`: torch 2.3.1, transformers 4.41.2). Repos + weights on the cluster under
+`~/hybrid_isbi/external/<name>/` (never committed, `external/` in `.git/info/exclude`).
+
+| model | weights | preprocessing | tokenizer | decoding (released) | target |
+|---|---|---|---|---|---|
+| R2Gen-Mamba | Google Drive (README) | Resize 224x224, ImageNet norm | R2Gen word vocab, count>=10 (rebuilt, B10-A) | beam 2 (`test_mimic_cxr.sh`; paper says 3), max 100, trigram blocking | findings |
+| R2Gen | Google Drive (`data/r2gen.md`) | same | same | beam 2 (`test_mimic_cxr.sh`), max 100 | findings |
+| R2GenCMN | Google Drive (`data/r2gencmn.md`) | same | same | beam 3 (`test_mimic_cxr.sh`), max 100 | findings |
+| CvT2DistilGPT2 | CSIRO DAP, CC-BY-4.0, public | Resize 448, CenterCrop 384, ImageNet norm | DistilGPT2 BPE + [BOS]/[PAD] | beam 4, max 128 | findings |
+| CXRMate single-TF | HF `aehrc/cxrmate-single-tf`, Apache-2.0 | Resize 384, CenterCrop 384, ImageNet norm | its own (HF) | beam 4, max 256, [SEP] sections | findings + impression |
+
+Two protocols. (a) ours: refs = our "Findings: ... Impression: ..." text, raw hyps. (b) findings-only:
+studies whose reference has a non-empty findings section; refs = findings; hyps = generated findings
+(ours and CXRMate: the findings part); both sides normalised with R2Gen's `clean_report_mimic_cxr`.
+
+- [x] **B10-A** External repos + weights on the cluster; R2Gen vocabulary rebuilt from MIMIC (Chen et al.'s annotation file is access-restricted; checkpoints do not store the vocabulary) and its size checked against each checkpoint's embedding rows.
+- [x] **B10-B** Adapter + wrapper; smoke decode per model (`LIMIT`), then full decode of the 2,663 test studies into `results/published_<name>_test_split/`, row order checked against our refs.
+- [x] **B10-C** Protocol (b) dirs `results/<name>_findings_only/` for every published model, mLMamba s42/43/44 and Transformer s42/43/44; n stated.
+- [x] **B10-D** CheXbert (`score_chexbert_h100.sh`) + text metrics for every protocol (a) and (b) dir.
+- [x] **B10-E** Paired bootstraps (PER_LABEL=true) mLMamba s42/43/44 vs each published model under protocol (b).
+- [x] **B10-F** FINDINGS.md `## B10`: table, published numbers with exact source table, bootstrap verdicts.

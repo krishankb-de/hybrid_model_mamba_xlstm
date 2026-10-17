@@ -1,15 +1,13 @@
 {
   "plan": "ISBI_BASELINES_PLAN.md",
   "branch": "isbi_baselines",
-  "status": "B0-B7, B9 complete. B8 (XrayCLIP-encoder retraining, jobs 2624239-2624256) queued, train expected 2026-10-10.",
-  "current_phase": "B8",
-  "next_action": "Wait for jobs 2624239-2624256; then run the B8 checklist in ISBI_BASELINES_PLAN.md 'RESUME HERE' (verify encoder in logs, bootstraps vs m3/transformer_xrayclip/floor_xrayclip, rerun error analysis with SKIP_STATS=true, update FINDINGS.md and the paper V9).",
+  "status": "B10 complete 2026-10-14: published generators benchmarked (FINDINGS.md B10).",
+  "current_phase": "B10",
+  "next_action": "B10 done (FINDINGS.md B10). On user request: write B10 into the paper honestly (findings-only protocol with our findings part loses to all five published models; whole-report sensitivity is mixed vs R2Gen-Mamba/R2GenCMN), plus the earlier B7-B9 items and V9 number fixes.",
   "decisions": [
     "2026-10-04: user chose retrieval floors (not report generators) for the supervisor's foundation-model comparison."
   ],
-  "pending_jobs": {
-    "B8_train_eval_chexbert": "2624239-2624256 (m3 s42 39/40/41, s43 42/43/44, s44 45/46/47; transformer s42 48/49/50, s43 51/52/53, s44 54/55/56)"
-  },
+  "pending_jobs": [],
   "verified_facts": {
     "floor_code": "scripts/evaluate_report_generation.py::run_retrieval_baseline (line 604), stock BiomedCLIP via open_clip hf-hub",
     "floor_results": "results/retrieval_floor_test_split/{hyps,refs}.txt + chexbert_labels.json (cluster)",
@@ -45,7 +43,26 @@
     "B7-A: test report median 113 tokens (p95 214, 1.8% >256); 89.9% of test studies have priors (median 6); history tokens median 738, p95 3858, max 8037; context with history >1024 for 44.5%, >4096 4.6%, >8192 0%. 89% of reports match comparison words (broad regex, upper bound). B9: decoders omit, rarely hallucinate: overall halluc ~0.10 vs floors ~0.15, omission ~0.60 vs xrayclip floor 0.49; findings/report 2.1-2.4 vs ref 3.13. Pneumothorax halluc 1.0% / omit 95.6% (mLMamba), floors 4-6% / 79-81%. Transformer identical pattern -> not SSM-specific. Halluc concentrated in cardiomegaly 0.42, support devices 0.32.",
     "2026-10-08: 2026-10-08: decode bench 2624265: mLMamba step 6.5-7.4 ms flat over L=132..16384 (cache 0.022 GB/report). Transformer numbers INVALID (~240 ms/step): SDPA picked cuDNN backend, which rebuilds its plan on CPU each step as key length changes (profile 2624647). Fixed by pinning flash/efficient/math in AttentionBlock.step (forward untouched); old json moved to decode_cudnn_bug/; rerun prof 2624904 + decode 2624905. Prefill jobs 2624266/67 failed (shared inductor cache dir between concurrent jobs) -> rerun 2624648/2624649 with separate SCRATCH_ROOT, sequential.",
     "B7-C done: report (prefill+100 tok, beam 3): at 132 ctx Transformer 1.2-1.3x faster; at 1024 mLMamba 1.6-1.8x, 4096 2.2-2.8x, 16384 5.0-6.0x faster; decode cache 8x/27x/103x smaller. Fix verified: Transformer step 4.57 ms (prof 2624904).",
-    "2026-10-09: 2026-10-09: branch isbi_baselines pushed to origin (d430171); cluster ~/hybrid_isbi reset to origin/isbi_baselines (only CLAUDE.md differed; code identical). From now on sync the cluster with git pull, not rsync."
+    "2026-10-09: 2026-10-09: branch isbi_baselines pushed to origin (d430171); cluster ~/hybrid_isbi reset to origin/isbi_baselines (only CLAUDE.md differed; code identical). From now on sync the cluster with git pull, not rsync.",
+    "2026-10-11: B8: 6/6 xrayclip trains OK (enc=xrayclip, missing 0, 12k steps). transformer_xrayclip s42 eval+chexbert done (2624249/50): 14mi .491 14ma .309 5mi .549 5ma .458 RL .1991 B4 .0607 vs transformer biomedclip s42 .459/.277/RL .1936; floor_xrayclip .5095/.3631. m3 evals 2624240/43/46 running; tr s43/s44 evals pending.",
+    "2026-10-11: B8-C mLMamba arm done: bootstraps 2638560-66. xray vs biomed m3: text+14mi+14ma win 3/3, 5-label tie 3/3. vs floor_xrayclip: text win 3/3, all 4 CheXbert lose 3/3. vs transformer_xray s42: 8/9 tie, 5ma loss. FINDINGS.md B8 written. Pending: tr_xray s43/s44 evals 2624252/55, then 2 more bootstraps + error-analysis rerun.",
+    "2026-10-12: ticked B8-B",
+    "2026-10-12: ticked B8-C",
+    "2026-10-12: B8 complete: tr_xray 3 seeds .477/.303 RL .2005. trx vs tr: all CheXbert win 3/3. m3x vs trx: tr wins 5ma 3/3, 14mi+5mi 2/3, 14ma tie 3/3. errors b8 (2646473): m3x adds acute finding to 13.6-17.8% vs trx 18.9-22.8%, but fewer findings/report. FINDINGS.md updated. Next: paper text (not yet requested).",
+    "2026-10-12: B8-D (supervisor request 2026-10-12): MedSigLIP encoder arm submitted, same recipe as B8: m3 s42/43/44 train 2647202/05/08 (eval +1, chexbert +2), transformer 2647211/14/17. Dumps results/report_gen_{m3,transformer}_medsiglip_test_split_s4X. Report all encoders, no post-hoc encoder pick.",
+    "2026-10-13: B8-D: trains m3 s42/43/44 + tr s42 OK (enc medsiglip, missing 0, 12k). m3_medsiglip s42 eval+cx done: 14mi .469 14ma .290 5mi .518 5ma .430 RL .2002 B4 .0610 (xrayclip s42 .484/.305, biomed .466/.283). tr s43 training, rest queued.",
+    "2026-10-13: B8-D: all 6 medsiglip trains OK (tr s43/s44 2647214/17). ev_m3 s43 2647206 running; other evals est. 21 Oct (Priority) -> TimeLimit lowered: tr evals 2:30, ev_m3 s44 7:30 (measured 1:04 / 5:14).",
+    "2026-10-14: current_phase -> B10",
+    "B10-A: 5 repos+weights in ~/hybrid_isbi/external (Drive x3, CSIRO DAP CC-BY, HF Apache). Rebuilt Chen annotation reproduces 270,790/2,130/3,858 images exactly; vocab count>=10 per image = 4,335 = embedding rows-1 (4,336) of R2Gen, R2GenCMN and R2Gen-Mamba ckpts (job 2680085). venv external/.venv_rrg (job 2680073).",
+    "2026-10-14: B10: full decodes done for cxrmate_single_tf (2680132), r2gen (2680170), cvt2distilgpt2 (2680173), r2gencmn (2680240), 0 ref mismatches vs our refs; r2genmamba running (2680247). Protocol (b) n=1946 of 2663. Our decoders leave the findings section empty in 1,516 (mLMamba s42) / 1,537 (Transformer s42) of 2,663 hyps vs 717 empty refs, so a full-hypothesis sensitivity variant (_findings_only_fullhyp) is scored too.",
+    "B10-B: full decodes 2,663/2,663, 0 ref mismatches: cxrmate 2680132, r2gen 2680170, cvt2distilgpt2 2680173, r2gencmn 2680240, r2genmamba 2680247 (scan via mamba_ssm selective_scan_ref, no CUDA ext).",
+    "B10-C: protocol (b) n=1946; dirs via jobs 2680086 (ours), 2680111 (ours fullhyp), 2680243/2680244 (cxrmate), 2680267, 2680275.",
+    "B10-D: CheXbert 2680105-10 (ours b), 2680149-54 (ours b-full), 2680242/45/46 (cxrmate a/b/b-full), 2680264-66+2680274 (published a), 2680268-70+2680276 (published b); text metrics 2680310.",
+    "B10-E: 33 paired bootstraps 2680277-2680309 (15 protocol b, 15 b-full, 3 protocol a vs CXRMate) in cluster ~/hybrid_isbi/analysis/isbi_reviewer/b10/. (b): mLMamba LLL on all 7 metrics vs all 5 models.",
+    "B10-F: FINDINGS.md ## B10 written (table, published numbers with source tables, verdicts, caveats).",
+    "2026-10-14: current_phase -> B10",
+    "2026-10-15: B8-D MedSigLIP done (all 18 jobs). 3-seed means m3: 14mi .4685 14ma .2902 5mi .5133 5ma .4275 RL .2026; transformer: .4568/.2813/.4958/.4150 RL .2020. Bootstraps 2697678-86 (m3_msig vs tr_msig, vs m3 biomed, vs floor_medsiglip). B10 addendum (combined + impression-only) written to FINDINGS.md.",
+    "2026-10-17: B8-D MedSigLIP bootstraps 2697678-86: m3_msig vs tr_msig: CheXbert all 4 win at s43 only, tie s42/s44; text tie (BLEU-1 W s43, L s44). vs m3 biomedclip: text W 3/3, 14mi/14ma W 2/3 (tie s42). vs floor_medsiglip: text W 3/3, all CheXbert L 3/3."
   ],
   "phases": {
     "B0": {
@@ -231,18 +248,18 @@
     },
     "B8": {
       "title": "Image encoder: does a chest X-ray encoder fix the clinical gap?",
-      "status": "in_progress",
+      "status": "complete",
       "checkboxes": {
         "B8-A": {
           "done": true,
           "desc": "report_image_encoder option (default biomedclip, unchanged) in ReportGenerationLightningModule, train_report_generation.py, the wrapper and the evaluation lo..."
         },
         "B8-B": {
-          "done": false,
+          "done": true,
           "desc": "Stage 3 with the frozen stock XrayCLIP encoder (512 px, 1,025 patch tokens) for mLMamba and the Transformer, seeds 42/43/44, otherwise the published recipe."
         },
         "B8-C": {
-          "done": false,
+          "done": true,
           "desc": "Beam-3 decode on the test split, CheXbert, paired bootstraps against: the BiomedCLIP-encoder mLMamba (same seed), the XrayCLIP-encoder Transformer (same seed..."
         }
       },
@@ -264,6 +281,50 @@
       },
       "evidence": {},
       "verdict": null
+    },
+    "B10": {
+      "title": "Published report generators on our test split",
+      "status": "complete",
+      "checkboxes": {
+        "B10-A": {
+          "done": true,
+          "desc": "External repos + weights on the cluster; R2Gen vocabulary rebuilt from MIMIC (Chen et al.'s annotation file is access-restricted; checkpoints do not store th..."
+        },
+        "B10-B": {
+          "done": true,
+          "desc": "Adapter + wrapper; smoke decode per model (LIMIT), then full decode of the 2,663 test studies into results/published_<name>_test_split/, row order checked ag..."
+        },
+        "B10-C": {
+          "done": true,
+          "desc": "Protocol (b) dirs results/<name>_findings_only/ for every published model, mLMamba s42/43/44 and Transformer s42/43/44; n stated."
+        },
+        "B10-D": {
+          "done": true,
+          "desc": "CheXbert (score_chexbert_h100.sh) + text metrics for every protocol (a) and (b) dir."
+        },
+        "B10-E": {
+          "done": true,
+          "desc": "Paired bootstraps (PER_LABEL=true) mLMamba s42/43/44 vs each published model under protocol (b)."
+        },
+        "B10-F": {
+          "done": true,
+          "desc": "FINDINGS.md ## B10: table, published numbers with exact source table, bootstrap verdicts."
+        }
+      },
+      "evidence": {
+        "vocab_job": "2680085",
+        "setup_job": "2680073",
+        "cxrmate": "2680132",
+        "r2gen": "2680170",
+        "cvt2distilgpt2": "2680173",
+        "r2gencmn": "2680240",
+        "r2genmamba": "2680247",
+        "protocol_b_jobs": "2680086,2680111,2680243,2680244,2680267,2680275",
+        "chexbert_jobs": "2680105-2680110,2680149-2680154,2680242,2680245,2680246,2680264-2680266,2680268-2680270,2680274,2680276",
+        "text_job": "2680310",
+        "bootstrap_jobs": "2680277-2680309"
+      },
+      "verdict": null
     }
   },
   "phase_order": [
@@ -276,9 +337,10 @@
     "B6",
     "B7",
     "B8",
-    "B9"
+    "B9",
+    "B10"
   ],
-  "last_updated": "2026-10-09T18:45:21+02:00",
+  "last_updated": "2026-10-17T09:11:28+02:00",
   "paper": {
     "location": "main checkout: ISBI Paper /Method and Evaluation V9.tex (untracked; figs/ is DUA data)",
     "v9_errors_to_fix": [
