@@ -1,6 +1,8 @@
 #!/bin/bash
 # TEXTENC_PLAN.md T3-A/B: build the re-ranked retrieval index (train/validate/test) and the two
 # copy-the-top-1 floors from the Stage-1 checkpoint of textenc_stage1_h100.sh.
+# Control arm (published encoders): STAGE1_CKPT=<13D tower ckpt> TEXT_MODEL_CONFIG=hybrid_150m_v2
+#   RAG_DIR=results/textenc_rag_oldenc RAG_SPLITS=test
 #   TEXTENC_ROOT=$HOME/hybrid_textenc sbatch scripts/textenc_rag_index_h100.sh
 #SBATCH --partition=pot-hpi-aisc-batch
 #SBATCH --account=aisc
@@ -22,5 +24,6 @@ export HF_HOME="${SCRATCH_ROOT:-/sc/scratch/${USER}/hybrid_xmamba_h100}/.hf" HF_
 source "${VENV_ACTIVATE:-.venv/bin/activate}"
 echo "=== TEXTENC T3 index: ckpt=${STAGE1_CKPT} -> ${RAG_DIR} ==="; date; hostname
 python scripts/textenc_rag_index.py --stage1-ckpt "${STAGE1_CKPT}" --data "${TEXTENC_DATA}" \
-  --out "${RAG_DIR}" --candidates "${RAG_CANDIDATES:-50}" --k "${RAG_K:-3}"
+  --out "${RAG_DIR}" --candidates "${RAG_CANDIDATES:-50}" --k "${RAG_K:-3}" \
+  --model-config "${TEXT_MODEL_CONFIG:-hybrid_150m_m3_textenc}" --splits ${RAG_SPLITS:-train validate test}
 echo "=== END ==="; date

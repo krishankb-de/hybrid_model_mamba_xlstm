@@ -38,9 +38,32 @@ Paired bootstraps (1,000 resamples) for F-rr:
 - vs MedSigLIP floor: wins text, 14-micro, 5-micro, 5-macro; 14-macro tie.
 - vs mLMamba (published, each seed): wins all four CheXbert at 3/3 (14-micro +.045 to +.083,
   14-macro +.077 to +.101), BLEU-1 at 3/3; loses ROUGE-L and BLEU-4 at 3/3, exact-match-5 at 2/3.
-- vs BiomedCLIP floor: wins ROUGE-L, BLEU-1, BLEU-4 (CheXbert rerun 2708015 pending).
+- vs BiomedCLIP floor (stock, the published floor; rerun 2708015): wins all 9 metrics (14-micro +.082,
+  14-macro +.059, 5-micro +.083, 5-macro +.082, ROUGE-L +.013, BLEU-4 +.011).
 
 Reading: with only our own encoders (BiomedCLIP tower fine-tuned in Stage 1 + the attention-free
 report encoder), retrieval reaches the level of the best published chest X-ray encoder (XrayCLIP,
 frozen) and beats MedSigLIP. The generated reports (mLMamba) remain better on ROUGE-L/BLEU-4 and
 worse on CheXbert; T5 tests whether giving the decoder these re-ranked reports combines both.
+
+## T3-C Control: the same re-rank with the published (attention-pooling) encoders (2708031-36)
+
+Published 13D image tower + its Stage-1 text encoder (hybrid_150m_v2: Mamba-1 + mLSTM with
+AttentionPooling), same script, same top-50 / top-1 rule (re-rank changes top-1 for 97.0%).
+
+| copy-the-top-1 floor | ROUGE-L | BLEU-4 | 14-micro | 14-macro | 5-micro | 5-macro |
+|---|---|---|---|---|---|---|
+| published encoders, image only | .1731 | .0404 | .4671 | .3276 | .5284 | .4682 |
+| published encoders, re-ranked | .1792 | .0455 | .5075 | .3538 | .5616 | .5009 |
+| attention-free encoders, image only | .1704 | .0391 | .4648 | .3227 | .5242 | .4639 |
+| attention-free encoders, re-ranked | .1767 | .0440 | .5115 | .3599 | .5687 | .5103 |
+
+Bootstraps: published re-ranked vs published image-only wins all four CheXbert (+.026 to +.040)
+and text; attention-free vs published, re-ranked: all four CheXbert tie (+.004 to +.009, CIs span
+0), ROUGE-L -.0025 (published wins, CI upper bound -.0001), rest tie; image-only: all CheXbert tie,
+ROUGE-L -.0027 (published wins).
+
+Reading: the CheXbert gain comes from re-ranking with a Stage-1 text encoder, not from removing
+attention. The attention-free encoder does it as well as the attention-pooling one (level on every
+clinical metric; 0.003 lower ROUGE-L). Defensible claim: attention is not needed for this retrieval
+and re-ranking step; not: the attention-free encoder is better.

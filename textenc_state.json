@@ -34,7 +34,9 @@
     "T3/T4 code done (no shared-code edits): scripts/textenc_rag_index.py (+_h100.sh), hybrid_xmamba/training/rag_report_generation.py, scripts/textenc_train_rag.py (swaps module+loader, runs published main), scripts/textenc_eval_rag.py (sharded, cached beam, uncached check), textenc_rag_train_h100.sh runs a copy of the published wrapper with only the entrypoint line swapped, textenc_guard.sh. Decision: RAG decoders read the PUBLISHED 13D tower; the new Stage-1 tower+text encoder is used only for retrieval, so M-rag vs M-pub isolates the retrieved context. tests/test_textenc.py 34 pass (incl. RAG loss with empty context == published loss; cached==uncached with context prompt for mamba3+mlstm and attention). validate.sh exit 0.",
     "2026-10-14: Chain submitted from ~/hybrid_textenc: Stage1 2680042 -> index 2680062 -> floors CheXbert 2680063/64; m3 s42 2680065 train, 2680066 eval array, 2680067 merge, 2680068 CheXbert; transformer s42 2680069-72.",
     "T2: Stage1 2680042 done 1h56, 6000 steps, text-encoder init missing 0. Val retrieval (in-training protocol, N=1433) final: E-m3 i2t R@10 .305 t2i .299 vs published 13D tower (old hybrid + attention pooling, job 2502673) .316 / .307: within ~1pp (SE ~1.2pp) -> attention-free encoder matches. T3: index 2680062 (missing 0/0), rerank changes top-1 for 97.5% of test. Floors CheXbert (2680063/64): image-only (new tower) 14mi .4648 14ma .3227 5mi .5242 5ma .4639; re-ranked .5115/.3599/.5687/.5103 (XrayCLIP floor .5095/.3631/.5549/.4921). Bootstraps 2707990-96 submitted (analysis/ in ~/hybrid_textenc).",
-    "2026-10-17: T3-B bootstraps 2707990-96: F-rr vs floor_ii wins all CheXbert (+.037..+.047) + text; vs XrayCLIP floor tie except 5-macro/BLEU-1 win; vs MedSigLIP floor wins text+3 CheXbert, 14-macro tie; vs mLMamba s42-44 CheXbert win 3/3, ROUGE-L/BLEU-4 loss 3/3. BiomedCLIP-floor CheXbert rerun 2708015 (first run used a dir without labels). analysis/textenc/FINDINGS.md written."
+    "2026-10-17: T3-B bootstraps 2707990-96: F-rr vs floor_ii wins all CheXbert (+.037..+.047) + text; vs XrayCLIP floor tie except 5-macro/BLEU-1 win; vs MedSigLIP floor wins text+3 CheXbert, 14-macro tie; vs mLMamba s42-44 CheXbert win 3/3, ROUGE-L/BLEU-4 loss 3/3. BiomedCLIP-floor CheXbert rerun 2708015 (first run used a dir without labels). analysis/textenc/FINDINGS.md written.",
+    "2026-10-17: 2708015: F-rr vs stock BiomedCLIP floor wins all 9 metrics (14mi +.082, 14ma +.059). Old-encoder control chain 2708031-36 running (published 13D tower + hybrid_150m_v2 attention-pooling text encoder, RAG_DIR results/textenc_rag_oldenc).",
+    "2026-10-17: T3-C control 2708031-36: published encoders re-ranked .5075/.3538/.5616/.5009 (vs image-only .4671/.3276: win all CheXbert). Attention-free vs published re-ranked: CheXbert tie x4, ROUGE-L -.0025 (published). Gain = re-ranking, not attention-free design; encoder level with attention pooling."
   ],
   "phases": {
     "T0": {
@@ -200,5 +202,5 @@
     "T6",
     "T7"
   ],
-  "last_updated": "2026-10-17T09:37:01+02:00"
+  "last_updated": "2026-10-17T10:41:43+02:00"
 }

@@ -109,6 +109,7 @@ def load_stage1(ckpt_path: str, model_config: str, device: str):
     txt = {k[len("model."):]: v for k, v in state.items() if k.startswith("model.")}
     missing, unexpected = enc.load_state_dict(txt, strict=False)
     print(f"text encoder: missing {len(missing)}, unexpected {len(unexpected)}")
+    missing = [k for k in missing if not k.startswith("logit_")]   # loss temperature/bias only
     if missing:
         raise RuntimeError(f"text encoder keys missing from {ckpt_path}: {missing[:5]}")
     return visual.to(device).eval(), enc.to(device).eval()
