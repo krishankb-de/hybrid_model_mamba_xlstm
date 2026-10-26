@@ -26,10 +26,16 @@ case "${DECODER}" in
   *) echo "ERROR: unknown DECODER=${DECODER}"; exit 2 ;;
 esac
 export SEED="${SEED:-42}" NUM_GPUS=4 MAX_STEPS=12000 BATCH_SIZE=32 SAVE_TOP_K=0 AUX_LAMBDA=0.0 PREFIX_K=32
+# SMOKE=true: the same path for 20 steps on 1 GPU (submit with --gpus=1 --time=00:40:00), so a
+# broken entrypoint fails in minutes instead of after a multi-day queue for 4 GPUs.
+if [ "${SMOKE:-false}" = "true" ]; then
+  export NUM_GPUS=1 MAX_STEPS=20
+  SMOKE_SUFFIX=_smoke
+fi
 export DECODER_LR=1e-5 HEAD_LR=3e-4 GRAD_CLIP=0.5 VIT_LR=1e-6
 export IMAGE_ENCODER_CKPT="${PUBLISHED_OUTPUTS}/h100_kd_150m_v2_full_data_lr3e6/checkpoints/last.ckpt"
 export MIMIC_CACHE_DIR="${ROOT_REAL}/cache/mimic_cxr_cache"
-export EXPERIMENT="${EXPERIMENT:-textenc_rag_${DECODER}_k${RAG_K:-3}_s${SEED}}"
+export EXPERIMENT="${EXPERIMENT:-textenc_rag_${DECODER}_k${RAG_K:-3}_s${SEED}${SMOKE_SUFFIX:-}}"
 export TEXTENC_RAG_DIR="${TEXTENC_RAG_DIR:-${ROOT_REAL}/results/textenc_rag}"
 export TEXTENC_DATA RAG_K="${RAG_K:-3}" RAG_REPORT_TOKENS="${RAG_REPORT_TOKENS:-160}"
 for f in "${DECODER_CKPT}" "${IMAGE_ENCODER_CKPT}" "${TEXTENC_RAG_DIR}/rag_train.pt" "${TEXTENC_RAG_DIR}/rag_validate.pt"; do

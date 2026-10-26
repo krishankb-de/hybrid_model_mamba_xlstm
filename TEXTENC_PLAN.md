@@ -108,8 +108,8 @@ each retrieved report truncated to 160 tokens; loss only on the target report. C
 - [x] **T4-C** Wrapper `scripts/textenc_rag_train_h100.sh` / eval wrapper, `TEXTENC_ROOT` enforced.
 
 ### T5 — Train + evaluate M-rag and T-rag
-- [ ] **T5-A** Seed 42 for M-rag and T-rag (Stage 3 recipe unchanged: 12k steps, 4 GPUs). Health gate: finite loss, val loss in range.
-- [ ] **T5-B** Seeds 43/44 for both.
+- [x] **T5-A** Seed 42 for M-rag and T-rag (Stage 3 recipe unchanged: 12k steps, 4 GPUs). Health gate: finite loss, val loss in range.
+- [x] **T5-B** Seeds 43/44 for both.
 - [ ] **T5-C** Beam-3 test decode, CheXbert, paired bootstraps: M-rag vs M-pub (same seed), M-rag vs T-rag, M-rag vs floors; per-label F1; error analysis (B9 script).
 
 ### T6 — Efficiency in the real RAG pipeline

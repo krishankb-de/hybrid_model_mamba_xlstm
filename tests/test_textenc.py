@@ -443,3 +443,43 @@ def test_rag_train_wrapper_pins_the_published_stage3_recipe():
               'MIMIC_CACHE_DIR="${ROOT_REAL}/cache/mimic_cxr_cache"',
               'exec bash "${RUN_COPY}"']:
         assert s in sh, s
+
+
+def test_rag_entrypoint_composes_the_published_config(monkeypatch):
+    """Regression for jobs 2680065/2680069 ("Primary config module 'configs' not found"): the
+    published main must be re-decorated with the published settings and the ABSOLUTE configs
+    path, and that path must compose the published Stage-3 overrides. hydra.main's own argv
+    parser does not run on the laptop's Python 3.14, so the decorator is stubbed and the config
+    is composed with Hydra's compose API; the cluster smoke job runs the real path."""
+    import hydra
+    from hydra import compose, initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
+    import scripts.train_report_generation as trg
+    from scripts import textenc_train_rag as ttr
+
+    assert trg.main.__wrapped__.__name__ == "main"
+    calls = {}
+
+    def fake_main(**kw):
+        calls.update(kw)
+        def deco(task):
+            def run():
+                GlobalHydra.instance().clear()
+                with initialize_config_dir(config_dir=kw["config_path"], version_base=kw["version_base"]):
+                    cfg = compose(config_name=kw["config_name"],
+                                  overrides=["model=hybrid_150m_m3_rrg", "dataset=cxr_mimic_full",
+                                             "trainer=h100_multi_ddp", "seed=43"])
+                return task(cfg)
+            return run
+        return deco
+
+    monkeypatch.setattr(hydra, "main", fake_main)
+    seen = ttr.run_published_main(lambda cfg: (list(cfg.model.layer_pattern), cfg.seed, cfg.model.tfla_impl))
+    assert calls == {"version_base": None, "config_path": str(REPO_ROOT / "configs"), "config_name": "config"}
+    assert pathlib.Path(calls["config_path"]).is_absolute()
+    assert seen == (["mamba3"] * 4 + ["mlstm"] * 3 + ["mamba3"] * 5, 43, "exact")
+
+
+def test_rag_train_wrapper_smoke_mode_is_short():
+    sh = (REPO_ROOT / "scripts" / "textenc_rag_train_h100.sh").read_text()
+    assert 'if [ "${SMOKE:-false}" = "true" ]; then' in sh and "export NUM_GPUS=1 MAX_STEPS=20" in sh

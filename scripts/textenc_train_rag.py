@@ -80,6 +80,22 @@ def install(trg, rag_dir: Path, data_dir: Path, k: int, per_report_tokens: int):
     trg.ReportGenerationLightningModule = RAGReportGenerationLightningModule
 
 
+def run_published_main(task):
+    """Run the published main() body under the published @hydra.main settings.
+
+    The published decorator says config_path="../configs". Hydra resolves that relative to the
+    module that defines the function, and when train_report_generation is IMPORTED (as here,
+    not run as __main__) it resolves to the python package "configs", which does not exist:
+    jobs 2680065 / 2680069 failed with "Primary config module 'configs' not found". So the
+    undecorated function (task = trg.main.__wrapped__) is decorated again with the same
+    version_base and config_name and the absolute path of that same configs directory.
+    """
+    import hydra
+
+    return hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"),
+                      config_name="config")(task)()
+
+
 def main():
     import scripts.train_report_generation as trg
 
@@ -87,7 +103,7 @@ def main():
     data_dir = Path(os.environ["TEXTENC_DATA"])
     install(trg, rag_dir, data_dir, k=int(os.environ.get("RAG_K", 3)),
             per_report_tokens=int(os.environ.get("RAG_REPORT_TOKENS", 160)))
-    trg.main()
+    run_published_main(trg.main.__wrapped__)
 
 
 if __name__ == "__main__":
